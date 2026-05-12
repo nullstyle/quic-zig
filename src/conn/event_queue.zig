@@ -6,9 +6,10 @@
 //! types, capacity constants, and a small fixed-capacity `EventQueue(T, N)`
 //! container that backs each buffer.
 //!
-//! The current container uses a fixed array plus `copyForwards` shift on
-//! pop (O(n) per pop). FIXME(audit): switch to a true ring buffer; pop
-//! is the hot path for embedder event drains.
+//! The container is a true ring buffer keyed on `(read_idx, len)`; push and
+//! pop are O(1). `slice()` and `removeAt()` compact to a linear layout on
+//! demand (O(n) only when the ring has wrapped) so callers that iterate or
+//! mutate by index can keep using a contiguous view.
 
 const std = @import("std");
 
@@ -168,10 +169,11 @@ pub fn datagramEventFromPacket(packet: *const sent_packets_mod.SentPacket) ?Data
     };
 }
 
-/// Fixed-capacity FIFO of `T` with drop-oldest-on-overflow semantics and
-/// O(n) pop (`copyForwards` shift). Backs the per-connection event buffers
-/// surfaced via `Connection.pollEvent`. See module-level `FIXME(audit)`
-/// — pop should move to a true ring buffer.
+/// Fixed-capacity FIFO of `T` with drop-oldest-on-overflow semantics.
+/// Backs the per-connection event buffers surfaced via
+/// `Connection.pollEvent`. `push` and `pop` are O(1); `slice` and
+/// `removeAt` lazily compact when the ring has wrapped so that
+/// index-based iteration callers see a contiguous view.
 pub fn EventQueue(comptime T: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();
@@ -179,41 +181,40 @@ pub fn EventQueue(comptime T: type, comptime capacity: usize) type {
         pub const cap: usize = capacity;
 
         items: [capacity]T = undefined,
+        /// Physical index of the oldest live entry. Always 0 when `len == 0`.
+        read_idx: usize = 0,
         len: usize = 0,
 
         /// Append `value`, dropping the oldest entry first when the queue is full.
         pub fn push(self: *Self, value: T) void {
             if (self.len == capacity) {
-                std.mem.copyForwards(
-                    T,
-                    self.items[0 .. capacity - 1],
-                    self.items[1..capacity],
-                );
-                self.len -= 1;
+                // Drop oldest: overwrite items[read_idx] and advance.
+                // The new value lands at the slot just vacated, which
+                // is the logical tail under the rotated read_idx.
+                self.items[self.read_idx] = value;
+                self.read_idx = (self.read_idx + 1) % capacity;
+                return;
             }
-            self.items[self.len] = value;
+            const write_idx = (self.read_idx + self.len) % capacity;
+            self.items[write_idx] = value;
             self.len += 1;
         }
 
         /// Remove and return the oldest entry, or `null` when empty.
         pub fn pop(self: *Self) ?T {
             if (self.len == 0) return null;
-            const out = self.items[0];
-            if (self.len > 1) {
-                std.mem.copyForwards(
-                    T,
-                    self.items[0 .. self.len - 1],
-                    self.items[1..self.len],
-                );
-            }
+            const out = self.items[self.read_idx];
             self.len -= 1;
+            self.read_idx = if (self.len == 0) 0 else (self.read_idx + 1) % capacity;
             return out;
         }
 
-        /// Remove the entry at `index`, sliding the tail forward. Caller
-        /// must ensure `index < self.len`.
+        /// Remove the entry at logical index `index`, sliding the tail
+        /// forward. Caller must ensure `index < self.len`. Compacts the
+        /// ring first when wrapped so the shift is a simple memmove.
         pub fn removeAt(self: *Self, index: usize) void {
             std.debug.assert(index < self.len);
+            self.compact();
             if (index + 1 < self.len) {
                 std.mem.copyForwards(
                     T,
@@ -224,14 +225,20 @@ pub fn EventQueue(comptime T: type, comptime capacity: usize) type {
             self.len -= 1;
         }
 
-        /// Slice view of the live items; valid until the next push/pop/removeAt.
+        /// Contiguous slice view of the live items in queue order. Valid
+        /// until the next push/pop/removeAt. Compacts the ring on demand
+        /// when wrapped so the returned slice is always linear.
         pub fn slice(self: *Self) []T {
+            self.compact();
             return self.items[0..self.len];
         }
 
-        /// Const slice view of the live items.
-        pub fn constSlice(self: *const Self) []const T {
-            return self.items[0..self.len];
+        /// Restore the "items live in [0, len)" invariant. No-op when
+        /// the ring has not wrapped (read_idx already 0).
+        fn compact(self: *Self) void {
+            if (self.read_idx == 0) return;
+            std.mem.rotate(T, self.items[0..], self.read_idx);
+            self.read_idx = 0;
         }
     };
 }
@@ -270,7 +277,61 @@ test "EventQueue removeAt slides tail" {
     q.push(40);
     q.removeAt(1);
     try std.testing.expectEqual(@as(usize, 3), q.len);
-    try std.testing.expectEqual(@as(u32, 10), q.items[0]);
-    try std.testing.expectEqual(@as(u32, 30), q.items[1]);
-    try std.testing.expectEqual(@as(u32, 40), q.items[2]);
+    try std.testing.expectEqual(@as(?u32, 10), q.pop());
+    try std.testing.expectEqual(@as(?u32, 30), q.pop());
+    try std.testing.expectEqual(@as(?u32, 40), q.pop());
+}
+
+test "EventQueue preserves order across ring wrap" {
+    // Fill to capacity, pop two, push two more — the second batch wraps
+    // around the array. Drain and verify FIFO order is preserved.
+    var q: EventQueue(u32, 4) = .{};
+    q.push(1);
+    q.push(2);
+    q.push(3);
+    q.push(4);
+    try std.testing.expectEqual(@as(?u32, 1), q.pop());
+    try std.testing.expectEqual(@as(?u32, 2), q.pop());
+    q.push(5);
+    q.push(6);
+    try std.testing.expectEqual(@as(usize, 4), q.len);
+    try std.testing.expectEqual(@as(?u32, 3), q.pop());
+    try std.testing.expectEqual(@as(?u32, 4), q.pop());
+    try std.testing.expectEqual(@as(?u32, 5), q.pop());
+    try std.testing.expectEqual(@as(?u32, 6), q.pop());
+    try std.testing.expectEqual(@as(?u32, null), q.pop());
+}
+
+test "EventQueue drops oldest while wrapped" {
+    // Push past capacity from a wrapped state — overflow drop should
+    // still pick the logical oldest, not the physical first slot.
+    var q: EventQueue(u32, 4) = .{};
+    q.push(1);
+    q.push(2);
+    _ = q.pop(); // drops 1; read_idx=1
+    q.push(3);
+    q.push(4);
+    q.push(5); // ring now full and read_idx > 0
+    q.push(6); // overflow: oldest (2) should drop
+    try std.testing.expectEqual(@as(usize, 4), q.len);
+    try std.testing.expectEqual(@as(?u32, 3), q.pop());
+    try std.testing.expectEqual(@as(?u32, 4), q.pop());
+    try std.testing.expectEqual(@as(?u32, 5), q.pop());
+    try std.testing.expectEqual(@as(?u32, 6), q.pop());
+}
+
+test "EventQueue slice compacts after wrap" {
+    var q: EventQueue(u32, 4) = .{};
+    q.push(1);
+    q.push(2);
+    q.push(3);
+    _ = q.pop(); // drops 1
+    _ = q.pop(); // drops 2
+    q.push(4);
+    q.push(5); // ring now wraps: physical layout differs from logical
+    const s = q.slice();
+    try std.testing.expectEqual(@as(usize, 3), s.len);
+    try std.testing.expectEqual(@as(u32, 3), s[0]);
+    try std.testing.expectEqual(@as(u32, 4), s[1]);
+    try std.testing.expectEqual(@as(u32, 5), s[2]);
 }

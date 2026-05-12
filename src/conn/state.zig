@@ -3749,7 +3749,7 @@ pub const Connection = struct {
     }
 
     pub fn recordFlowBlockedEvent(self: *Connection, info: FlowBlockedInfo) void {
-        for (self.flow_blocked_events.constSlice()) |existing| {
+        for (self.flow_blocked_events.slice()) |existing| {
             if (existing.source == info.source and
                 existing.kind == info.kind and
                 existing.limit == info.limit and
