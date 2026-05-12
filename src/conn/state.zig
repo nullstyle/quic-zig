@@ -933,12 +933,25 @@ const ApplicationOpenResult = struct {
     slot: ApplicationReadKeySlot,
 };
 
-/// Fixed-size CRYPTO frame buffer per encryption level. 16 KiB fits
-/// a handshake comfortably, even with large cert chains.
-/// FIXME(audit): wire `SSL_quic_max_handshake_flight_len` so the
-/// bound is enforced by BoringSSL rather than the fixed array size.
+/// Default per-encryption-level CRYPTO inbox bound. BoringSSL's
+/// `SSL_quic_max_handshake_flight_len` returns this 16 KiB constant
+/// for the Initial and Application levels and as the floor for
+/// Handshake; see `ssl/ssl_lib.cc:SSL_quic_max_handshake_flight_len`.
+/// We size `CryptoBuffer.buf` to match that floor — small enough to
+/// fit four buffers per Connection on the stack budget, large enough
+/// for every flight that does not carry a peer certificate chain.
+///
+/// **Known gap**: at the Handshake level BoringSSL may raise the
+/// bound to `2 * max_cert_list` when the peer ships a large cert
+/// chain (clients can receive Certificate + CertificateRequest),
+/// which exceeds our fixed buffer. Wiring `SSL_quic_max_handshake_flight_len`
+/// through the boringssl-zig wrapper (it has no method binding today)
+/// would let us size per-level dynamically; until then, peers with
+/// >16 KiB Handshake flights surface as `error.InboxOverflow`.
+pub const crypto_buffer_default_len: usize = 16384;
+
 pub const CryptoBuffer = struct {
-    buf: [16384]u8 = undefined,
+    buf: [crypto_buffer_default_len]u8 = undefined,
     len: usize = 0,
 
     /// Append bytes BoringSSL produced via `add_handshake_data`.
