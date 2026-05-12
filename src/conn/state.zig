@@ -7074,11 +7074,11 @@ pub const Connection = struct {
                 .largest_acked = largest_acked,
                 .payload = pl_buf[0..pl_pos],
                 .keys = &keys,
-                // Pad client first-flight Initials to 1200 bytes
-                // (RFC 9000 §14). FIXME(audit): we over-pad on every
-                // client Initial here for simplicity; should be
-                // tightened to first-flight only.
-                .pad_to = if (self.role == .client) 1200 else 0,
+                // RFC 9000 §14.1: a client MUST pad UDP datagrams
+                // carrying ack-eliciting Initial packets to ≥1200
+                // bytes. Non-ack-eliciting Initials (e.g. ACK-only
+                // coalesced with a Handshake CRYPTO) need no pad here.
+                .pad_to = if (self.role == .client and ack_eliciting) 1200 else 0,
                 .quic_bit = quic_bit,
             }),
             .handshake => try long_packet_mod.sealHandshake(dst, .{
