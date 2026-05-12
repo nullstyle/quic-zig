@@ -75,6 +75,29 @@ pub const SentDatagram = struct {
     path_id: u32 = 0,
 };
 
+/// Routing handle for one STREAM-frame chunk on a sent packet:
+/// `stream_id` picks the SendStream out of `Connection.streams`,
+/// `stream_key` picks the chunk out of that stream's in-flight map.
+///
+/// QUIC stream IDs are 62-bit varints (RFC 9000 §16), so `maxInt(u64)`
+/// is unambiguously outside the valid range and serves as an
+/// "unoccupied" sentinel — letting us store the primary ref inline as
+/// a non-optional struct without the 8-byte Optional bookkeeping, so
+/// `SentPacket`'s footprint inside the 4096-slot tracker doesn't grow.
+pub const StreamRef = struct {
+    stream_id: u64,
+    stream_key: u64,
+
+    pub const empty: StreamRef = .{
+        .stream_id = std.math.maxInt(u64),
+        .stream_key = 0,
+    };
+
+    pub fn isEmpty(self: StreamRef) bool {
+        return self.stream_id == std.math.maxInt(u64);
+    }
+};
+
 /// Metadata for one packet the connection has put on the wire and
 /// is awaiting an ACK or loss outcome for.
 pub const SentPacket = struct {
@@ -97,15 +120,20 @@ pub const SentPacket = struct {
     /// DATAGRAM frames are not retransmitted by QUIC, but apps need
     /// ack/loss visibility to implement their own retry policy.
     datagram: ?SentDatagram = null,
-    /// Connection-local identifier used to route STREAM ACK/loss
-    /// notifications. Application packet numbers are per-path when
-    /// multipath is enabled, so a wire PN alone is not globally unique.
-    stream_key: ?u64 = null,
-    /// Additional STREAM keys when multiple STREAM frames are packed
-    /// into one QUIC packet. Allocated only for coalesced STREAM
-    /// packets; `stream_key` remains the first entry so the common
+    /// Routing handle for the first STREAM chunk on this packet. The
+    /// `stream_id` lets ACK/loss dispatch look up the owning SendStream
+    /// in O(1); `stream_key` then picks the chunk out of that stream's
+    /// in-flight map. Application PNs are per-path under multipath so
+    /// the wire PN alone is not globally unique — hence the side-table.
+    /// `StreamRef.empty` (stream_id = maxInt(u64)) means "no STREAM
+    /// frame on this packet"; using a sentinel instead of `?StreamRef`
+    /// keeps SentPacket compact inside the 4096-slot tracker.
+    stream_ref: StreamRef = StreamRef.empty,
+    /// Additional refs when multiple STREAM frames are packed into one
+    /// QUIC packet. Allocated only for coalesced STREAM packets; the
+    /// primary `stream_ref` is the first entry so the common
     /// single-frame case stays compact.
-    extra_stream_keys: std.ArrayList(u64) = .empty,
+    extra_stream_refs: std.ArrayList(StreamRef) = .empty,
     /// True when this Application-space packet was sent under 0-RTT
     /// keys. If TLS rejects early data, callers can requeue STREAM
     /// bytes without treating the packet as congestion loss.
@@ -130,48 +158,48 @@ pub const SentPacket = struct {
         try self.retransmit_frames.append(allocator, frame);
     }
 
-    /// Record a STREAM-frame routing key so ack/loss callbacks can
-    /// reach the right `SendStream`. Sets `stream_key` on the first
-    /// call, then appends to `extra_stream_keys`.
-    pub fn addStreamKey(self: *SentPacket, allocator: std.mem.Allocator, key: u64) Error!void {
-        if (self.stream_key == null) {
-            self.stream_key = key;
+    /// Record a STREAM-frame routing ref so ack/loss callbacks can
+    /// reach the right `SendStream` directly. Sets `stream_ref` on the
+    /// first call, then appends to `extra_stream_refs`.
+    pub fn addStreamRef(self: *SentPacket, allocator: std.mem.Allocator, ref: StreamRef) Error!void {
+        if (self.stream_ref.isEmpty()) {
+            self.stream_ref = ref;
             return;
         }
-        if (self.extra_stream_keys.items.len >= max_stream_keys_per_packet - 1) {
+        if (self.extra_stream_refs.items.len >= max_stream_keys_per_packet - 1) {
             return Error.TooManyStreamFrames;
         }
-        try self.extra_stream_keys.append(allocator, key);
+        try self.extra_stream_refs.append(allocator, ref);
     }
 
-    /// Iterator over every STREAM key carried by a `SentPacket`
-    /// (the primary `stream_key` first, then `extra_stream_keys`).
-    pub const StreamKeyIterator = struct {
+    /// Iterator over every STREAM ref carried by a `SentPacket`
+    /// (the primary `stream_ref` first, then `extra_stream_refs`).
+    pub const StreamRefIterator = struct {
         packet: *const SentPacket,
         index: usize = 0,
 
-        /// Yield the next STREAM key, or null when exhausted.
-        pub fn next(self: *StreamKeyIterator) ?u64 {
+        /// Yield the next StreamRef, or null when exhausted.
+        pub fn next(self: *StreamRefIterator) ?StreamRef {
             if (self.index == 0) {
                 self.index = 1;
-                if (self.packet.stream_key) |key| return key;
+                if (!self.packet.stream_ref.isEmpty()) return self.packet.stream_ref;
             }
             const extra_index = self.index - 1;
-            if (extra_index >= self.packet.extra_stream_keys.items.len) return null;
+            if (extra_index >= self.packet.extra_stream_refs.items.len) return null;
             self.index += 1;
-            return self.packet.extra_stream_keys.items[extra_index];
+            return self.packet.extra_stream_refs.items[extra_index];
         }
     };
 
-    /// Build an iterator over every STREAM key referenced by this packet.
-    pub fn streamKeys(self: *const SentPacket) StreamKeyIterator {
+    /// Build an iterator over every STREAM ref referenced by this packet.
+    pub fn streamRefs(self: *const SentPacket) StreamRefIterator {
         return .{ .packet = self };
     }
 
-    /// Release the heap-backed retransmit-frame and stream-key arrays.
+    /// Release the heap-backed retransmit-frame and stream-ref arrays.
     pub fn deinit(self: *SentPacket, allocator: std.mem.Allocator) void {
         self.retransmit_frames.deinit(allocator);
-        self.extra_stream_keys.deinit(allocator);
+        self.extra_stream_refs.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -189,7 +217,7 @@ pub const Error = error{
     TooManyInFlight,
     /// `addRetransmitFrame` exceeded `max_retransmit_frames`.
     TooManyRetransmittableFrames,
-    /// `addStreamKey` exceeded `max_stream_keys_per_packet`.
+    /// `addStreamRef` exceeded `max_stream_keys_per_packet`.
     TooManyStreamFrames,
 } || std.mem.Allocator.Error;
 
@@ -466,8 +494,8 @@ test "removeRangeWith transfers owned packet fields to callback" {
         .in_flight = true,
     };
     try packet.addRetransmitFrame(std.testing.allocator, .{ .max_data = .{ .maximum_data = 4096 } });
-    try packet.addStreamKey(std.testing.allocator, 42);
-    try packet.addStreamKey(std.testing.allocator, 43);
+    try packet.addStreamRef(std.testing.allocator, .{ .stream_id = 0, .stream_key = 42 });
+    try packet.addStreamRef(std.testing.allocator, .{ .stream_id = 4, .stream_key = 43 });
     try t.record(packet);
 
     t.removeRangeWith(0, 1, std.testing.allocator, deinitRemovedPacket);
@@ -537,7 +565,7 @@ test "SentPacket stores retransmittable control frames" {
     try std.testing.expect(p.retransmit_frames.items[1] == .path_challenge);
 }
 
-test "SentPacket stores multiple STREAM keys" {
+test "SentPacket stores multiple STREAM refs" {
     var p: SentPacket = .{
         .pn = 1,
         .sent_time_us = 10,
@@ -547,13 +575,26 @@ test "SentPacket stores multiple STREAM keys" {
     };
     defer p.deinit(std.testing.allocator);
 
-    try p.addStreamKey(std.testing.allocator, 11);
-    try p.addStreamKey(std.testing.allocator, 12);
-    try p.addStreamKey(std.testing.allocator, 13);
+    try p.addStreamRef(std.testing.allocator, .{ .stream_id = 0, .stream_key = 11 });
+    try p.addStreamRef(std.testing.allocator, .{ .stream_id = 4, .stream_key = 12 });
+    try p.addStreamRef(std.testing.allocator, .{ .stream_id = 8, .stream_key = 13 });
 
-    var it = p.streamKeys();
-    try std.testing.expectEqual(@as(?u64, 11), it.next());
-    try std.testing.expectEqual(@as(?u64, 12), it.next());
-    try std.testing.expectEqual(@as(?u64, 13), it.next());
-    try std.testing.expectEqual(@as(?u64, null), it.next());
+    var it = p.streamRefs();
+    try std.testing.expectEqual(@as(?StreamRef, .{ .stream_id = 0, .stream_key = 11 }), it.next());
+    try std.testing.expectEqual(@as(?StreamRef, .{ .stream_id = 4, .stream_key = 12 }), it.next());
+    try std.testing.expectEqual(@as(?StreamRef, .{ .stream_id = 8, .stream_key = 13 }), it.next());
+    try std.testing.expectEqual(@as(?StreamRef, null), it.next());
+}
+
+test "SentPacket.stream_ref defaults to empty sentinel" {
+    const p: SentPacket = .{
+        .pn = 1,
+        .sent_time_us = 10,
+        .bytes = 1200,
+        .ack_eliciting = false,
+        .in_flight = false,
+    };
+    try std.testing.expect(p.stream_ref.isEmpty());
+    var it = p.streamRefs();
+    try std.testing.expectEqual(@as(?StreamRef, null), it.next());
 }

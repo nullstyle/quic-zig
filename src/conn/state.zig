@@ -7142,7 +7142,10 @@ pub const Connection = struct {
         sent_packet.datagram = sent_datagram;
         if (lvl == .application) self.recordApplicationPacketProtected(&sent_packet);
         for (sent_chunks[0..sent_chunk_count]) |sc| {
-            try sent_packet.addStreamKey(self.allocator, sc.stream_key);
+            try sent_packet.addStreamRef(self.allocator, .{
+                .stream_id = sc.stream.id,
+                .stream_key = sc.stream_key,
+            });
         }
         if (sent_packet.ack_eliciting) {
             try sent_tracker.record(sent_packet);
@@ -8895,44 +8898,25 @@ pub const Connection = struct {
 
     pub fn handleApplicationAckOnPath( self: *Connection, path: *PathState, a: frame_types.Ack, now_us: u64, ) Error!void { return conn_recv_ack_handlers.handleApplicationAckOnPath(self, path, a, now_us); }
 
-    fn dispatchAckedToStreams(self: *Connection, pn: u64) Error!void {
-        var s_it = self.streams.iterator();
-        while (s_it.next()) |entry| {
-            // Snapshot the send-buffer length so we can release the
-            // matching budget when the ack advances the stream's
-            // contiguous-acked floor (RFC 9000 §3.1: bytes ≤ floor are
-            // dropped from the in-memory buffer).
-            const before = entry.value_ptr.*.send.bytes.items.len;
-            entry.value_ptr.*.send.onPacketAcked(pn) catch |e| switch (e) {
-                send_stream_mod.Error.UnknownPacket => {},
-                else => return e,
-            };
-            const after = entry.value_ptr.*.send.bytes.items.len;
-            if (after < before) self.releaseResidentBytes(before - after);
-        }
-    }
-
     pub fn dispatchAckedPacketToStreams(
         self: *Connection,
         packet: *const sent_packets_mod.SentPacket,
     ) Error!void {
-        var keys = packet.streamKeys();
-        while (keys.next()) |stream_key| {
-            try self.dispatchAckedToStreams(stream_key);
-        }
-    }
-
-    fn dispatchLostToStreams(self: *Connection, pn: u64) Error!bool {
-        var any = false;
-        var s_it = self.streams.iterator();
-        while (s_it.next()) |entry| {
-            entry.value_ptr.*.send.onPacketLost(pn) catch |e| switch (e) {
+        var refs = packet.streamRefs();
+        while (refs.next()) |ref| {
+            const s = self.streams.get(ref.stream_id) orelse continue;
+            // Snapshot the send-buffer length so we can release the
+            // matching budget when the ack advances the stream's
+            // contiguous-acked floor (RFC 9000 §3.1: bytes ≤ floor are
+            // dropped from the in-memory buffer).
+            const before = s.send.bytes.items.len;
+            s.send.onPacketAcked(ref.stream_key) catch |e| switch (e) {
                 send_stream_mod.Error.UnknownPacket => continue,
                 else => return e,
             };
-            any = true;
+            const after = s.send.bytes.items.len;
+            if (after < before) self.releaseResidentBytes(before - after);
         }
-        return any;
     }
 
     fn dispatchLostPacketToStreams(
@@ -8940,9 +8924,14 @@ pub const Connection = struct {
         packet: *const sent_packets_mod.SentPacket,
     ) Error!bool {
         var any = false;
-        var keys = packet.streamKeys();
-        while (keys.next()) |stream_key| {
-            any = (try self.dispatchLostToStreams(stream_key)) or any;
+        var refs = packet.streamRefs();
+        while (refs.next()) |ref| {
+            const s = self.streams.get(ref.stream_id) orelse continue;
+            s.send.onPacketLost(ref.stream_key) catch |e| switch (e) {
+                send_stream_mod.Error.UnknownPacket => continue,
+                else => return e,
+            };
+            any = true;
         }
         return any;
     }

@@ -1039,7 +1039,7 @@ test "PTO requeues application stream data and arms a probe" {
         .bytes = 100,
         .ack_eliciting = true,
         .in_flight = true,
-        .stream_key = 4,
+        .stream_ref = .{ .stream_id = s.id, .stream_key = 4 },
     });
 
     try conn.tick(conn.ptoDurationForLevel(.application));
@@ -3413,10 +3413,10 @@ test "pollLevel coalesces multiple STREAM frames with distinct loss keys" {
 
     const sent = conn.sentForLevel(.application);
     try std.testing.expectEqual(@as(u32, 1), sent.count);
-    var keys = sent.packets[0].streamKeys();
-    var key_count: usize = 0;
-    while (keys.next()) |_| key_count += 1;
-    try std.testing.expectEqual(@as(usize, 3), key_count);
+    var refs = sent.packets[0].streamRefs();
+    var ref_count: usize = 0;
+    while (refs.next()) |_| ref_count += 1;
+    try std.testing.expectEqual(@as(usize, 3), ref_count);
     try std.testing.expectEqual(@as(u32, 1), s0.send.in_flight.count());
     try std.testing.expectEqual(@as(u32, 1), s1.send.in_flight.count());
     try std.testing.expectEqual(@as(u32, 1), s2.send.in_flight.count());
@@ -4611,9 +4611,11 @@ test "STREAM send tracking survives duplicate application PNs across paths" {
 
     try std.testing.expectEqual(@as(u64, 0), conn.primaryPath().sent.packets[0].pn);
     try std.testing.expectEqual(@as(u64, 0), path.sent.packets[0].pn);
-    const primary_stream_key = conn.primaryPath().sent.packets[0].stream_key orelse unreachable;
-    const path_stream_key = path.sent.packets[0].stream_key orelse unreachable;
-    try std.testing.expect(primary_stream_key != path_stream_key);
+    const primary_stream_ref = conn.primaryPath().sent.packets[0].stream_ref;
+    const path_stream_ref = path.sent.packets[0].stream_ref;
+    try std.testing.expect(!primary_stream_ref.isEmpty());
+    try std.testing.expect(!path_stream_ref.isEmpty());
+    try std.testing.expect(primary_stream_ref.stream_key != path_stream_ref.stream_key);
     try std.testing.expectEqual(@as(u32, 2), stream.send.in_flight.count());
 }
 

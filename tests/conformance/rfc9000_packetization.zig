@@ -293,10 +293,10 @@ test "MUST track HANDSHAKE_DONE on the retransmit-frame union [RFC9000 §13.3 Ta
 test "MUST associate STREAM keys with the carrying packet for ack/loss routing [RFC9000 §13.3 Table 3]" {
     // RFC 9000 §13.3 Table 3 lists STREAM data as "Yes". STREAM bytes
     // are tracked by the per-stream `SendStream`, but the
-    // `SentPacket` still records the stream key so ack/loss callbacks
-    // route to the right half-stream. Coalesced STREAM frames stack
-    // multiple keys onto one packet — verify the iterator surfaces
-    // every key in insertion order.
+    // `SentPacket` still records each chunk's stream ref so ack/loss
+    // callbacks route to the right half-stream. Coalesced STREAM frames
+    // stack multiple refs onto one packet — verify the iterator surfaces
+    // every ref in insertion order.
     var p: sent_packets.SentPacket = .{
         .pn = 5,
         .sent_time_us = 0,
@@ -306,15 +306,16 @@ test "MUST associate STREAM keys with the carrying packet for ack/loss routing [
     };
     defer p.deinit(std.testing.allocator);
 
-    try p.addStreamKey(std.testing.allocator, 11);
-    try p.addStreamKey(std.testing.allocator, 12);
-    try p.addStreamKey(std.testing.allocator, 13);
+    const StreamRef = sent_packets.StreamRef;
+    try p.addStreamRef(std.testing.allocator, .{ .stream_id = 0, .stream_key = 11 });
+    try p.addStreamRef(std.testing.allocator, .{ .stream_id = 4, .stream_key = 12 });
+    try p.addStreamRef(std.testing.allocator, .{ .stream_id = 8, .stream_key = 13 });
 
-    var it = p.streamKeys();
-    try std.testing.expectEqual(@as(?u64, 11), it.next());
-    try std.testing.expectEqual(@as(?u64, 12), it.next());
-    try std.testing.expectEqual(@as(?u64, 13), it.next());
-    try std.testing.expectEqual(@as(?u64, null), it.next());
+    var it = p.streamRefs();
+    try std.testing.expectEqual(@as(?StreamRef, .{ .stream_id = 0, .stream_key = 11 }), it.next());
+    try std.testing.expectEqual(@as(?StreamRef, .{ .stream_id = 4, .stream_key = 12 }), it.next());
+    try std.testing.expectEqual(@as(?StreamRef, .{ .stream_id = 8, .stream_key = 13 }), it.next());
+    try std.testing.expectEqual(@as(?StreamRef, null), it.next());
 }
 
 test "NORMATIVE PADDING and PING are absent from the retransmit-frame union [RFC9000 §13.3 Table 3]" {

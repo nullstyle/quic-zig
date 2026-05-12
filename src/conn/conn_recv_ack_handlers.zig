@@ -169,11 +169,9 @@ pub fn handleAckAtLevel(
     now_us: u64,
 ) Error!void {
     // Walk ACK ranges and notify each PN at this level to:
-    //   1. every open SendStream (application level only),
+    //   1. the SendStream(s) named on the packet (application level
+    //      only) — routed in O(1) per ref via the per-packet stream_id,
     //   2. the per-level SentPacketTracker.
-    //
-    // FIXME(audit): O(streams × PNs) per ACK — a per-PN side-table
-    // would make this O(1).
     const pn_space = self.pnSpaceForLevel(lvl);
     const sent = self.sentForLevel(lvl);
     // The path that owns 1-RTT in-flight bookkeeping. For Initial /
