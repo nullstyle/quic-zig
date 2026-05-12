@@ -356,11 +356,10 @@ fn foldToken(token: *const [8]u8) u64 {
 }
 
 fn testAddress(seed: u8) path_mod.Address {
-    var addr: path_mod.Address = .{};
-    for (&addr.bytes, 0..) |*b, idx| {
-        b.* = seed +% @as(u8, @intCast(idx));
-    }
-    return addr;
+    return .{ .ipv4 = .{
+        .addr = .{ seed, seed +% 1, seed +% 2, seed +% 3 },
+        .port = @as(u16, seed +% 4) << 8 | @as(u16, seed +% 5),
+    } };
 }
 
 test "flow_control_credit_update helper preserves flow invariants" {

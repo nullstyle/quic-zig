@@ -86,7 +86,7 @@ pub fn feedAndExpectClose(
 
     // Feed it. Use a stable address so the source-rate-limit gate
     // doesn't fire across consecutive tests in the same suite.
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0xfe) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xfe), .port = 0 } };
     _ = try server.feed(pkt[0..n], addr, 1_000);
 
     // The reserved-bits / forbidden-frame / DATAGRAM gates fire inside
@@ -125,7 +125,7 @@ pub fn feedInitial(
         .reserved_bits = 0,
     });
 
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0xfe) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xfe), .port = 0 } };
     _ = try server.feed(pkt[0..n], addr, 1_000);
 }
 

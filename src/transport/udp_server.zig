@@ -549,52 +549,25 @@ pub fn monotonicNowUs(io: std.Io, start: std.Io.Timestamp) u64 {
     return @intCast(delta);
 }
 
-/// Project a `std.Io.net.IpAddress` into quic_zig's bag-of-bytes
-/// `path.Address` layout. Also reused by `runUdpClient`.
+/// Project a `std.Io.net.IpAddress` into quic_zig's tagged-union
+/// `path.Address`. The variants line up one-to-one, so this is a
+/// straight copy. Also reused by `runUdpClient`.
 pub fn ipAddressToPathAddress(addr: Net.IpAddress) Address {
-    var out: Address = .{};
-    switch (addr) {
-        .ip4 => |ip4| {
-            out.bytes[0] = 4;
-            @memcpy(out.bytes[1..5], &ip4.bytes);
-            std.mem.writeInt(u16, out.bytes[5..7], ip4.port, .big);
-        },
-        .ip6 => |ip6| {
-            out.bytes[0] = 6;
-            @memcpy(out.bytes[1..17], &ip6.bytes);
-            std.mem.writeInt(u16, out.bytes[17..19], ip6.port, .big);
-            out.bytes[19] = @truncate(ip6.flow >> 16);
-            out.bytes[20] = @truncate(ip6.flow >> 8);
-            out.bytes[21] = @truncate(ip6.flow);
-        },
-    }
-    return out;
+    return switch (addr) {
+        .ip4 => |ip4| .{ .ipv4 = .{ .addr = ip4.bytes, .port = ip4.port } },
+        .ip6 => |ip6| .{ .ipv6 = .{ .addr = ip6.bytes, .port = ip6.port, .flow = ip6.flow } },
+    };
 }
 
-/// Inverse projection: turn a quic_zig `path.Address` back into a
-/// `std.Io.net.IpAddress` for the outgoing `Socket.send` call.
-/// Returns `null` for a zero-initialized / unrecognized tag — the
-/// loop treats that as "no usable destination" and skips the send.
+/// Inverse projection. Returns `null` for `.unspecified` — the loop
+/// treats that as "no usable destination" and skips the send.
 /// Also reused by `runUdpClient`.
 pub fn pathAddressToIpAddress(addr: Address) ?Net.IpAddress {
-    switch (addr.bytes[0]) {
-        4 => {
-            var ip4_bytes: [4]u8 = undefined;
-            @memcpy(&ip4_bytes, addr.bytes[1..5]);
-            const port = std.mem.readInt(u16, addr.bytes[5..7], .big);
-            return .{ .ip4 = .{ .bytes = ip4_bytes, .port = port } };
-        },
-        6 => {
-            var ip6_bytes: [16]u8 = undefined;
-            @memcpy(&ip6_bytes, addr.bytes[1..17]);
-            const port = std.mem.readInt(u16, addr.bytes[17..19], .big);
-            const flow: u32 = (@as(u32, addr.bytes[19]) << 16) |
-                (@as(u32, addr.bytes[20]) << 8) |
-                @as(u32, addr.bytes[21]);
-            return .{ .ip6 = .{ .bytes = ip6_bytes, .port = port, .flow = flow } };
-        },
-        else => return null,
-    }
+    return switch (addr) {
+        .unspecified => null,
+        .ipv4 => |v| .{ .ip4 = .{ .bytes = v.addr, .port = v.port } },
+        .ipv6 => |v| .{ .ip6 = .{ .bytes = v.addr, .port = v.port, .flow = v.flow } },
+    };
 }
 
 // ---- Tests --------------------------------------------------------------
@@ -621,7 +594,7 @@ test "ipAddressToPathAddress / pathAddressToIpAddress round-trip IPv4" {
         .port = 4433,
     } };
     const pa = ipAddressToPathAddress(v4);
-    try testing.expectEqual(@as(u8, 4), pa.bytes[0]);
+    try testing.expect(pa == .ipv4);
 
     const back = pathAddressToIpAddress(pa).?;
     try testing.expect(back == .ip4);
@@ -636,7 +609,7 @@ test "ipAddressToPathAddress / pathAddressToIpAddress round-trip IPv6" {
         .flow = 0xabcdef,
     } };
     const pa = ipAddressToPathAddress(v6);
-    try testing.expectEqual(@as(u8, 6), pa.bytes[0]);
+    try testing.expect(pa == .ipv6);
 
     const back = pathAddressToIpAddress(pa).?;
     try testing.expect(back == .ip6);
@@ -645,8 +618,8 @@ test "ipAddressToPathAddress / pathAddressToIpAddress round-trip IPv6" {
     try testing.expectEqualSlices(u8, &v6.ip6.bytes, &back.ip6.bytes);
 }
 
-test "pathAddressToIpAddress returns null for empty address" {
-    const empty: Address = .{};
+test "pathAddressToIpAddress returns null for unspecified address" {
+    const empty: Address = .unspecified;
     try testing.expect(pathAddressToIpAddress(empty) == null);
 }
 

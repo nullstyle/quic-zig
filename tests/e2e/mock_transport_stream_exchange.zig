@@ -314,14 +314,14 @@ fn configurePrimaryCids(client: *quic_zig.Connection, server: *quic_zig.Connecti
 fn openSecondPath(client: *quic_zig.Connection, server: *quic_zig.Connection) !u32 {
     const Cid = quic_zig.conn.path.ConnectionId;
     const client_path_id = try client.openPath(
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         Cid.fromSlice(&ClientPath1Cid),
         Cid.fromSlice(&ServerPath1Cid),
     );
     const server_path_id = try server.openPath(
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         Cid.fromSlice(&ServerPath1Cid),
         Cid.fromSlice(&ClientPath1Cid),
     );
@@ -991,9 +991,9 @@ test "single-path NAT rebinding survives loss and reordering" {
 
     var net = RebindingNet.init(
         allocator,
-        .{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) },
-        .{ .bytes = .{ 10, 0, 0, 2 } ++ @as([18]u8, @splat(0)) },
-        .{ .bytes = .{ 10, 0, 0, 99 } ++ @as([18]u8, @splat(0)) },
+        .{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .addr = .{ 10, 0, 0, 2 }, .port = 0 } },
+        .{ .ipv4 = .{ .addr = .{ 10, 0, 0, 99 }, .port = 0 } },
     );
     defer net.deinit();
 

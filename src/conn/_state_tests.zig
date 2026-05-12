@@ -1228,7 +1228,7 @@ test "requestPathPing queues application PING on non-primary path" {
     try installTestApplicationWriteSecret(&conn);
     markTestMultipathNegotiated(&conn, 1);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
 
     try conn.requestPathPing(path_id);
@@ -1620,7 +1620,7 @@ test "PathSet API exposes path lifecycle and application recovery state" {
     const after_send = conn.pathStats(0).?;
     try std.testing.expectEqual(@as(u64, 1200), after_send.bytes_in_flight);
 
-    const id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{1}), ConnectionId.fromSlice(&.{2}));
+    const id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{1}), ConnectionId.fromSlice(&.{2}));
     try std.testing.expectEqual(@as(u32, 1), id);
     try std.testing.expect(conn.setActivePath(id));
     try std.testing.expectEqual(id, conn.activePathId());
@@ -1642,7 +1642,7 @@ test "abandoned paths keep recovery until three largest PTOs elapse" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
     const path = conn.paths.get(path_id).?;
     try path.sent.record(.{
         .pn = 0,
@@ -1684,7 +1684,7 @@ test "retiring paths retain peer CIDs and emit PATH_ACK during drain" {
     try installTestApplicationWriteSecret(&conn);
     markTestMultipathNegotiated(&conn, 1);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
     const path = conn.paths.get(path_id).?;
     path.app_pn_space.recordReceived(9, 1_000);
@@ -1740,7 +1740,7 @@ test "PATH_ACK routes ACK processing to the indicated application path" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{1}), ConnectionId.fromSlice(&.{2}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{1}), ConnectionId.fromSlice(&.{2}));
     const path = conn.paths.get(path_id).?;
     try path.sent.record(.{
         .pn = 0,
@@ -1985,7 +1985,7 @@ test "application packet limit counts across paths before proactive key update" 
     });
     markTestMultipathNegotiated(&conn, 1);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
 
     var packet_buf: [default_mtu]u8 = undefined;
@@ -2019,7 +2019,7 @@ test "non-zero path ACK clears local key update gate" {
 
     try installTestApplicationWriteSecret(&conn);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
     try conn.requestKeyUpdate(1_000_000);
 
@@ -3302,7 +3302,7 @@ test "pollLevel emits PATH_ACK for non-zero application path ACKs" {
 
     try installTestApplicationWriteSecret(&conn);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
     const path = conn.paths.get(path_id).?;
     path.app_pn_space.recordReceived(9, 1_000);
@@ -3431,7 +3431,7 @@ test "pollDatagram can select a non-zero application path" {
 
     try installTestApplicationWriteSecret(&conn);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{ .bytes = .{ 1, 2, 3, 4 } ++ @as([18]u8, @splat(0)) }, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.{ .ipv4 = .{ .addr = .{ 1, 2, 3, 4 }, .port = 0 } }, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
     try std.testing.expect(conn.setActivePath(path_id));
     try conn.queuePathStatus(path_id, true, 1);
@@ -3454,7 +3454,7 @@ test "multipath-negotiated non-zero path packets use draft-21 nonce" {
     try installTestApplicationWriteSecret(&conn);
     markTestMultipathNegotiated(&conn, 1);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
     const path = conn.paths.get(path_id).?;
     path.app_pn_space.recordReceived(9, 1_000);
@@ -3493,7 +3493,7 @@ test "incoming short packets are routed by local CID before multipath nonce open
     try installTestApplicationReadSecret(&conn);
     markTestMultipathNegotiated(&conn, 1);
     try conn.setLocalScid(&.{0xa0});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     const path = conn.paths.get(path_id).?;
 
     var payload: [16]u8 = undefined;
@@ -3528,8 +3528,8 @@ test "authenticated NAT rebinding starts validation and resets recovery after re
     // the gate so the test stays focused on the validation flow.
     conn.test_only_force_handshake_for_migration = true;
     try conn.setLocalScid(&.{0xa0});
-    const old_addr = Address{ .bytes = .{ 1, 2, 3, 4 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 1, 2, 3, 4 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.rtt.smoothed_rtt_us = 50_000;
@@ -3609,8 +3609,8 @@ test "client peer-address rebind: pollDatagram exposes the new server tuple afte
     conn.test_only_force_handshake_for_migration = true;
     try conn.setLocalScid(&.{0xa0});
     try conn.setPeerDcid(&.{0xaa});
-    const old_addr = Address{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 7, 7, 7, 7 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 7, 7, 7, 7 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
 
@@ -3663,8 +3663,8 @@ test "unvalidated rebound path obeys anti-amplification before polling" {
 
     try installTestApplicationWriteSecret(&conn);
     try conn.setPeerDcid(&.{0xaa});
-    const old_addr = Address{ .bytes = .{ 1, 1, 1, 1 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 2, 2, 2, 2 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 1, 1, 1, 1 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 2, 2, 2, 2 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     try conn.handlePeerAddressChange(path, new_addr, 1, 1_000_000);
@@ -3761,8 +3761,8 @@ test "failed NAT rebinding validation rolls back to the previous address" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    const old_addr = Address{ .bytes = .{ 3, 3, 3, 3 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 4, 4, 4, 4 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 3, 3, 3, 3 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 4, 4, 4, 4 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.markValidated();
@@ -3808,8 +3808,8 @@ test "old address packets during pending rebinding do not lift new path anti-amp
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    const old_addr = Address{ .bytes = .{ 7, 7, 7, 7 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 8, 8, 8, 8 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 7, 7, 7, 7 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 8, 8, 8, 8 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.markValidated();
@@ -3836,8 +3836,8 @@ test "PATH_RESPONSE during pending rebinding is sent to the challenge address" {
 
     try installTestApplicationWriteSecret(&conn);
     try conn.setPeerDcid(&.{0xaa});
-    const old_addr = Address{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 1, 0, 1, 0 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 1, 0, 1, 0 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.markValidated();
@@ -3891,8 +3891,8 @@ test "peer-initiated migration emits PATH_CHALLENGE as the first frame even with
     try conn.setLocalScid(&.{0xc1});
     conn.test_only_force_handshake_for_migration = true;
 
-    const old_addr = Address{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 10, 0, 0, 2 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 2 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.markValidated();
@@ -3984,7 +3984,7 @@ test "non-migration polls do not pad short-header datagrams to 1200 bytes" {
     try conn.setPeerDcid(&.{0xaa});
     try conn.setLocalScid(&.{0xc1});
 
-    const peer_addr = Address{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) };
+    const peer_addr = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(peer_addr);
     path.path.markValidated();
@@ -4011,7 +4011,7 @@ test "queued path CIDs participate in incoming short-header routing and retireme
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     try conn.queuePathNewConnectionId(path_id, 1, 0, &.{0xc2}, @splat(0));
 
     const bytes = [_]u8{ 0x40, 0xc2, 0, 0, 0, 0 } ++ @as([16]u8, @splat(0));
@@ -4058,10 +4058,10 @@ test "openPath respects peer MAX_PATH_ID when multipath is negotiated" {
     defer conn.deinit();
 
     markTestMultipathNegotiated(&conn, 1);
-    _ = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    _ = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try std.testing.expectError(
         Error.PathLimitExceeded,
-        conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc2}), ConnectionId.fromSlice(&.{0xd2})),
+        conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc2}), ConnectionId.fromSlice(&.{0xd2})),
     );
     try std.testing.expectEqual(@as(?u32, 1), conn.pending_frames.paths_blocked);
 }
@@ -4076,18 +4076,18 @@ test "openPath requires common path id capacity and CIDs when multipath is negot
     markTestMultipathNegotiated(&conn, 1);
     try std.testing.expectError(
         Error.ConnectionIdRequired,
-        conn.openPath(.{}, .{}, ConnectionId{}, ConnectionId.fromSlice(&.{0xd1})),
+        conn.openPath(.unspecified, .unspecified, ConnectionId{}, ConnectionId.fromSlice(&.{0xd1})),
     );
     try std.testing.expectError(
         Error.ConnectionIdRequired,
-        conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId{}),
+        conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId{}),
     );
 
     conn.peer_max_path_id = 2;
-    _ = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    _ = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try std.testing.expectError(
         Error.PathLimitExceeded,
-        conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc2}), ConnectionId.fromSlice(&.{0xd2})),
+        conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc2}), ConnectionId.fromSlice(&.{0xd2})),
     );
 }
 
@@ -4099,10 +4099,10 @@ test "local CID issuance rejects reuse across paths and sequences" {
     defer conn.deinit();
 
     markTestMultipathNegotiated(&conn, 2);
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try std.testing.expectError(
         Error.ConnectionIdAlreadyInUse,
-        conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd2})),
+        conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd2})),
     );
     try std.testing.expect(conn.paths.get(2) == null);
     try std.testing.expectEqual(@as(u32, 2), conn.paths.next_path_id);
@@ -4242,7 +4242,7 @@ test "PATH_NEW_CONNECTION_ID rejects sequence reuse with different cid" {
     defer conn.deinit();
 
     markTestMultipathNegotiated(&conn, 1);
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try conn.handlePathNewConnectionId(.{
         .path_id = path_id,
         .sequence_number = 0,
@@ -4301,7 +4301,7 @@ test "PATH_CIDS_BLOCKED cannot skip local cid sequence numbers" {
     defer conn.deinit();
 
     markTestMultipathNegotiated(&conn, 1);
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     conn.handlePathCidsBlocked(.{ .path_id = path_id, .next_sequence_number = 2 });
     try std.testing.expect(conn.lifecycle.pending_close != null);
     try std.testing.expectEqual(transport_error_protocol_violation, conn.lifecycle.pending_close.?.error_code);
@@ -4319,7 +4319,7 @@ test "PATH_CIDS_BLOCKED can be surfaced and replenished within peer active cid l
         .initial_max_path_id = 1,
         .active_connection_id_limit = 3,
     };
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
 
     conn.handlePathCidsBlocked(.{ .path_id = path_id, .next_sequence_number = 1 });
     const blocked = conn.pendingPathCidsBlocked().?;
@@ -4397,7 +4397,7 @@ test "PATH_RETIRE_CONNECTION_ID drops pending advertisements and allows replenis
         .initial_max_path_id = 1,
         .active_connection_id_limit = 3,
     };
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     _ = try conn.replenishPathConnectionIds(path_id, &.{
         .{ .connection_id = &.{0xc2}, .stateless_reset_token = @splat(0xc2) },
         .{ .connection_id = &.{0xc3}, .stateless_reset_token = @splat(0xc3) },
@@ -4520,7 +4520,7 @@ test "peer cid registration enforces active cid limit per path" {
 
     markTestMultipathNegotiated(&conn, 1);
     conn.local_transport_params.active_connection_id_limit = 2;
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try conn.handlePathNewConnectionId(.{
         .path_id = path_id,
         .sequence_number = 0,
@@ -4554,7 +4554,7 @@ test "retire_prior_to retires peer cids only on the indicated path" {
     defer conn.deinit();
 
     markTestMultipathNegotiated(&conn, 1);
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try conn.handleNewConnectionId(.{
         .sequence_number = 0,
         .retire_prior_to = 0,
@@ -4597,7 +4597,7 @@ test "STREAM send tracking survives duplicate application PNs across paths" {
 
     try installTestApplicationWriteSecret(&conn);
     try conn.setPeerDcid(&.{0xaa});
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
     const path = conn.paths.get(path_id).?;
     const stream = try conn.openBidi(0);
@@ -4627,7 +4627,7 @@ test "timer deadline reports non-zero application path ACK delay" {
     defer conn.deinit();
 
     try conn.setTransportParams(.{ .max_ack_delay_ms = 10 });
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
     const path = conn.paths.get(path_id).?;
     path.app_pn_space.recordReceived(7, 1000);
 
@@ -4645,7 +4645,7 @@ test "PTO requeues retransmittable controls on non-zero application path" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    const path_id = try conn.openPath(.{}, .{}, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
     const path = conn.paths.get(path_id).?;
     var packet: sent_packets_mod.SentPacket = .{
         .pn = 0,
@@ -5004,8 +5004,8 @@ test "migration callback: allow lets path validation start as usual" {
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
 
-    const old_addr = Address{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 10, 0, 0, 2 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 2 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.markValidated();
@@ -5052,8 +5052,8 @@ test "migration callback: deny skips PATH_CHALLENGE and keeps the old 4-tuple li
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
 
-    const old_addr = Address{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 192, 168, 9, 9 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 192, 168, 9, 9 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.markValidated();
@@ -5112,8 +5112,8 @@ test "migration callback: no callback installed preserves prior migration behavi
     // succeeds without one, identically.
     try std.testing.expect(conn.migration_callback == null);
 
-    const old_addr = Address{ .bytes = .{ 7, 7, 7, 7 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 8, 8, 8, 8 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 7, 7, 7, 7 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 8, 8, 8, 8 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     path.path.markValidated();
@@ -5146,8 +5146,8 @@ test "pre-handshake migration: peer-address change is dropped, no PATH_CHALLENGE
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
 
-    const old_addr = Address{ .bytes = .{ 1, 1, 1, 1 } ++ @as([18]u8, @splat(0)) };
-    const new_addr = Address{ .bytes = .{ 2, 2, 2, 2 } ++ @as([18]u8, @splat(0)) };
+    const old_addr = Address{ .ipv4 = .{ .addr = .{ 1, 1, 1, 1 }, .port = 0 } };
+    const new_addr = Address{ .ipv4 = .{ .addr = .{ 2, 2, 2, 2 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(old_addr);
     const orig_bytes_received = path.path.bytes_received;
@@ -5188,9 +5188,9 @@ test "post-handshake migration: PATH_CHALLENGE rate-limit blocks rapid-fire prob
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
 
-    const addr_a = Address{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) };
-    const addr_b = Address{ .bytes = .{ 10, 0, 0, 2 } ++ @as([18]u8, @splat(0)) };
-    const addr_c = Address{ .bytes = .{ 10, 0, 0, 3 } ++ @as([18]u8, @splat(0)) };
+    const addr_a = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } };
+    const addr_b = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 2 }, .port = 0 } };
+    const addr_c = Address{ .ipv4 = .{ .addr = .{ 10, 0, 0, 3 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(addr_a);
     path.path.markValidated();
@@ -5256,9 +5256,9 @@ test "client active migration: rotates DCID, queues PATH_CHALLENGE, snapshots ro
 
     try conn.setLocalScid(&.{0xa0});
     try conn.setPeerDcid(&.{0xb0});
-    const server_addr = Address{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) };
-    const old_local = Address{ .bytes = .{ 1, 2, 3, 4 } ++ @as([18]u8, @splat(0)) };
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const server_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
+    const old_local = Address{ .ipv4 = .{ .addr = .{ 1, 2, 3, 4 }, .port = 0 } };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(server_addr);
     path.setLocalAddress(old_local);
@@ -5314,7 +5314,7 @@ test "client active migration: refuses without a fresh peer CID" {
     // peer_dcid is registered as sequence 0; consumeFreshPeerCidForMigration
     // skips the current cid, leaving no candidate.
 
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
 
@@ -5354,7 +5354,7 @@ test "client active migration: refuses before handshake completion" {
     const fresh_cid = ConnectionId.fromSlice(&.{0xc1});
     try conn.registerPeerCidForTesting(1, 0, fresh_cid, @splat(0));
 
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
         error.PathLimitExceeded,
         conn.beginClientActiveMigration(new_local, 1_000_000),
@@ -5369,7 +5369,7 @@ test "client active migration: server-role connection is rejected" {
     var conn = try Connection.initServer(allocator, ctx);
     defer conn.deinit();
 
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
         error.NotClientContext,
         conn.beginClientActiveMigration(new_local, 1_000_000),
@@ -5388,7 +5388,7 @@ test "client active migration: PATH_RESPONSE clears migration state and resets r
     try conn.setPeerDcid(&.{0xb0});
 
     const path = conn.primaryPath();
-    path.setPeerAddress(.{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) });
+    path.setPeerAddress(.{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } });
     path.path.markValidated();
     path.path.rtt.smoothed_rtt_us = 50_000;
     path.path.cc.cwnd = 30_000;
@@ -5396,7 +5396,7 @@ test "client active migration: PATH_RESPONSE clears migration state and resets r
     const fresh_cid = ConnectionId.fromSlice(&.{0xc2});
     try conn.registerPeerCidForTesting(1, 0, fresh_cid, @splat(0));
 
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try conn.beginClientActiveMigration(new_local, 1_000_000);
     try std.testing.expect(path.pending_migration_reset);
     try std.testing.expectEqual(.pending, path.path.validator.status);
@@ -5442,9 +5442,9 @@ test "noteServerLocalAddressChanged: queues PATH_CHALLENGE and arms validator on
     // bypass the real TLS handshake using the test-only override.
     conn.test_only_force_handshake_for_migration = true;
 
-    const peer_addr = Address{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) };
-    const old_local = Address{ .bytes = .{ 1, 2, 3, 4 } ++ @as([18]u8, @splat(0)) };
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const peer_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
+    const old_local = Address{ .ipv4 = .{ .addr = .{ 1, 2, 3, 4 }, .port = 0 } };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(peer_addr);
     path.setLocalAddress(old_local);
@@ -5492,7 +5492,7 @@ test "noteServerLocalAddressChanged: refuses before handshake completion" {
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
 
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
         error.PathLimitExceeded,
         conn.noteServerLocalAddressChanged(new_local, 1_000_000),
@@ -5521,7 +5521,7 @@ test "noteServerLocalAddressChanged: rejects when no preferred_address advertise
     // Deliberately leave local_transport_params.preferred_address null.
     conn.test_only_force_handshake_for_migration = true;
 
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
         error.PreferredAddressNotAdvertised,
         conn.noteServerLocalAddressChanged(new_local, 1_000_000),
@@ -5536,7 +5536,7 @@ test "noteServerLocalAddressChanged: client-role connection is rejected" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
         error.NotServerContext,
         conn.noteServerLocalAddressChanged(new_local, 1_000_000),
@@ -5553,8 +5553,8 @@ test "noteServerLocalAddressChanged: idempotent on the same local address" {
     conn.local_transport_params.preferred_address = testServerPreferredAddress();
     conn.test_only_force_handshake_for_migration = true;
 
-    const peer_addr = Address{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) };
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const peer_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(peer_addr);
     path.path.markValidated();
@@ -5582,9 +5582,9 @@ test "noteServerLocalAddressChanged: refuses while a different migration is pend
     conn.local_transport_params.preferred_address = testServerPreferredAddress();
     conn.test_only_force_handshake_for_migration = true;
 
-    const peer_addr = Address{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) };
-    const local_a = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
-    const local_b = Address{ .bytes = .{ 5, 6, 7, 9 } ++ @as([18]u8, @splat(0)) };
+    const peer_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
+    const local_a = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
+    const local_b = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 9 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(peer_addr);
     path.path.markValidated();
@@ -5622,8 +5622,8 @@ test "noteServerLocalAddressChanged: PATH_CHALLENGE-first emit on the freshly-mi
     try conn.setPeerDcid(&.{ 0xaa, 0xbb });
     try conn.setLocalScid(&.{0xcc});
 
-    const peer_addr = Address{ .bytes = .{ 9, 9, 9, 9 } ++ @as([18]u8, @splat(0)) };
-    const new_local = Address{ .bytes = .{ 5, 6, 7, 8 } ++ @as([18]u8, @splat(0)) };
+    const peer_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
+    const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     const path = conn.primaryPath();
     path.setPeerAddress(peer_addr);
     path.path.markValidated();
@@ -5955,10 +5955,10 @@ fn fuzzConnMigrationImpl(_: void, smith: *std.testing.Smith) anyerror!void {
     // simple to assert (the rollback path also draws from this set,
     // since the rollback snapshot was previously written from here).
     const candidates: [4]Address = .{
-        .{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) },
-        .{ .bytes = .{ 10, 0, 0, 2 } ++ @as([18]u8, @splat(0)) },
-        .{ .bytes = .{ 10, 0, 0, 3 } ++ @as([18]u8, @splat(0)) },
-        .{ .bytes = .{ 10, 0, 0, 4 } ++ @as([18]u8, @splat(0)) },
+        .{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } },
+        .{ .ipv4 = .{ .addr = .{ 10, 0, 0, 2 }, .port = 0 } },
+        .{ .ipv4 = .{ .addr = .{ 10, 0, 0, 3 }, .port = 0 } },
+        .{ .ipv4 = .{ .addr = .{ 10, 0, 0, 4 }, .port = 0 } },
     };
 
     const path = conn.primaryPath();
@@ -6321,7 +6321,7 @@ fn fuzzConnPathChallenge(_: void, smith: *std.testing.Smith) anyerror!void {
     defer conn.deinit();
 
     const path = conn.primaryPath();
-    path.setPeerAddress(.{ .bytes = .{ 10, 0, 0, 1 } ++ @as([18]u8, @splat(0)) });
+    path.setPeerAddress(.{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } });
     const pending_token: [8]u8 = .{ 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7 };
     path.path.validator.beginChallenge(pending_token, 1_000_000, 1_000_000);
     conn.current_incoming_path_id = 0;

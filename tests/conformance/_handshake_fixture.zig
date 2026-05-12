@@ -127,7 +127,7 @@ pub const HandshakePair = struct {
         return .{
             .server = server,
             .client = client,
-            .peer_addr = .{ .bytes = @splat(0xab) },
+            .peer_addr = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } },
             .now_us = 0,
             .rx_buf = undefined,
         };

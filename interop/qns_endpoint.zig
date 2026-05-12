@@ -2506,68 +2506,43 @@ fn netAddressEql(a: Net.IpAddress, b: Net.IpAddress) bool {
 fn sockaddrFromHandle(handle: std.posix.socket_t) quic_zig.conn.path.Address {
     var sa: std.posix.sockaddr.storage = undefined;
     var sa_len: std.posix.socklen_t = @sizeOf(@TypeOf(sa));
-    if (std.c.getsockname(handle, @ptrCast(&sa), &sa_len) != 0) return .{};
-    var out: quic_zig.conn.path.Address = .{};
+    if (std.c.getsockname(handle, @ptrCast(&sa), &sa_len) != 0) return .unspecified;
     if (sa.family == std.posix.AF.INET) {
         const v4: *const std.posix.sockaddr.in = @ptrCast(@alignCast(&sa));
-        out.bytes[0] = 4;
         const ip_bytes: [4]u8 = @bitCast(v4.addr);
-        @memcpy(out.bytes[1..5], &ip_bytes);
-        std.mem.writeInt(u16, out.bytes[5..7], std.mem.bigToNative(u16, v4.port), .big);
+        return .{ .ipv4 = .{
+            .addr = ip_bytes,
+            .port = std.mem.bigToNative(u16, v4.port),
+        } };
     } else if (sa.family == std.posix.AF.INET6) {
         const v6: *const std.posix.sockaddr.in6 = @ptrCast(@alignCast(&sa));
-        out.bytes[0] = 6;
-        @memcpy(out.bytes[1..17], &v6.addr);
-        std.mem.writeInt(u16, out.bytes[17..19], std.mem.bigToNative(u16, v6.port), .big);
+        return .{ .ipv6 = .{
+            .addr = v6.addr,
+            .port = std.mem.bigToNative(u16, v6.port),
+        } };
     }
-    return out;
+    return .unspecified;
 }
 
 fn netAddressToPathAddress(addr: Net.IpAddress) quic_zig.conn.path.Address {
-    var out: quic_zig.conn.path.Address = .{};
-    switch (addr) {
-        .ip4 => |ip4| {
-            out.bytes[0] = 4;
-            @memcpy(out.bytes[1..5], &ip4.bytes);
-            std.mem.writeInt(u16, out.bytes[5..7], ip4.port, .big);
-        },
-        .ip6 => |ip6| {
-            out.bytes[0] = 6;
-            @memcpy(out.bytes[1..17], &ip6.bytes);
-            std.mem.writeInt(u16, out.bytes[17..19], ip6.port, .big);
-            out.bytes[19] = @truncate(ip6.flow >> 16);
-            out.bytes[20] = @truncate(ip6.flow >> 8);
-            out.bytes[21] = @truncate(ip6.flow);
-        },
-    }
-    return out;
+    return switch (addr) {
+        .ip4 => |ip4| .{ .ipv4 = .{ .addr = ip4.bytes, .port = ip4.port } },
+        .ip6 => |ip6| .{ .ipv6 = .{ .addr = ip6.bytes, .port = ip6.port, .flow = ip6.flow } },
+    };
 }
 
-/// Inverse of `netAddressToPathAddress`. Returns `null` for the
-/// zero-tag default (a `path.Address` that the core never set), so
-/// callers can fall back to a default destination — typically the
-/// connection's original target address. Mirrors the helper that
-/// lives in `src/transport/udp_server.zig` for `runUdpClient`.
+/// Inverse of `netAddressToPathAddress`. Returns `null` for an
+/// `.unspecified` Address (the core never set one), so callers can
+/// fall back to a default destination — typically the connection's
+/// original target address. Mirrors the helper that lives in
+/// `src/transport/udp_server.zig` for `runUdpClient`.
 fn pathAddressToNetAddress(addr: ?quic_zig.conn.path.Address) ?Net.IpAddress {
     const a = addr orelse return null;
-    switch (a.bytes[0]) {
-        4 => {
-            var ip4_bytes: [4]u8 = undefined;
-            @memcpy(&ip4_bytes, a.bytes[1..5]);
-            const port = std.mem.readInt(u16, a.bytes[5..7], .big);
-            return .{ .ip4 = .{ .bytes = ip4_bytes, .port = port } };
-        },
-        6 => {
-            var ip6_bytes: [16]u8 = undefined;
-            @memcpy(&ip6_bytes, a.bytes[1..17]);
-            const port = std.mem.readInt(u16, a.bytes[17..19], .big);
-            const flow: u32 = (@as(u32, a.bytes[19]) << 16) |
-                (@as(u32, a.bytes[20]) << 8) |
-                @as(u32, a.bytes[21]);
-            return .{ .ip6 = .{ .bytes = ip6_bytes, .port = port, .flow = flow } };
-        },
-        else => return null,
-    }
+    return switch (a) {
+        .unspecified => null,
+        .ipv4 => |v| .{ .ip4 = .{ .bytes = v.addr, .port = v.port } },
+        .ipv6 => |v| .{ .ip6 = .{ .bytes = v.addr, .port = v.port, .flow = v.flow } },
+    };
 }
 
 fn writeVersionNegotiation(
@@ -2948,12 +2923,14 @@ fn retryAddressContext(dst: []u8, peer: Net.IpAddress) []const u8 {
 /// token bytes verbatim.
 fn newToken(peer: Net.IpAddress, now_us: u64) !quic_zig.conn.NewTokenBlob {
     const addr = netAddressToPathAddress(peer);
+    var addr_buf: [quic_zig.conn.path.Address.context_max_len]u8 = undefined;
+    const addr_ctx = addr.writeContext(&addr_buf);
     var token: quic_zig.conn.NewTokenBlob = undefined;
     _ = try quic_zig.conn.new_token.mint(&token, .{
         .key = &new_token_key,
         .now_us = now_us,
         .lifetime_us = new_token_lifetime_us,
-        .client_address = &addr.bytes,
+        .client_address = addr_ctx,
     });
     return token;
 }
@@ -2968,10 +2945,12 @@ fn newTokenValidationResult(
     token: []const u8,
 ) quic_zig.conn.NewTokenValidationResult {
     const addr = netAddressToPathAddress(peer);
+    var addr_buf: [quic_zig.conn.path.Address.context_max_len]u8 = undefined;
+    const addr_ctx = addr.writeContext(&addr_buf);
     return quic_zig.conn.new_token.validate(token, .{
         .key = &new_token_key,
         .now_us = now_us,
-        .client_address = &addr.bytes,
+        .client_address = addr_ctx,
     });
 }
 
@@ -3197,12 +3176,14 @@ test "NEW_TOKEN endpoint validation accepts a fresh token, rejects expired, reje
     // v1-only validator (NEW_TOKEN binds the version inside the AEAD
     // plaintext, not the on-wire format).
     const addr = netAddressToPathAddress(peer);
+    var v2_addr_buf: [quic_zig.conn.path.Address.context_max_len]u8 = undefined;
+    const v2_addr_ctx = addr.writeContext(&v2_addr_buf);
     var v2_token: quic_zig.conn.NewTokenBlob = undefined;
     _ = try quic_zig.conn.new_token.mint(&v2_token, .{
         .key = &new_token_key,
         .now_us = 1_000_000,
         .lifetime_us = new_token_lifetime_us,
-        .client_address = &addr.bytes,
+        .client_address = v2_addr_ctx,
         .quic_version = 0x6b3343cf,
     });
     try std.testing.expectEqual(

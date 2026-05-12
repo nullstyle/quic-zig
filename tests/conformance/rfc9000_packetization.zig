@@ -361,7 +361,7 @@ test "MUST server discards v1 Initial UDP datagrams smaller than 1200 bytes [RFC
     // Long-header Initial with QUIC v1 version, but the UDP datagram
     // payload is 7 bytes — well below the 1200-byte floor.
     var tiny_v1_initial = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x01, 0, 0 };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x01) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x01), .port = 0 } };
     const outcome = try srv.feed(&tiny_v1_initial, addr, 1_000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.dropped, outcome);
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
@@ -384,7 +384,7 @@ test "MUST NOT §14 size gate fire on a non-v1 long-header datagram [RFC9000 §1
     // Same shape as the v1 fixture above but with a non-v1 version.
     // dcid_len=4 then 4 dcid bytes, scid_len=4 then 4 scid bytes.
     var tiny_unsupported_version = [_]u8{ 0xc0, 0xde, 0xad, 0xbe, 0xef, 4, 0xa, 0xb, 0xc, 0xd, 4, 0x1, 0x2, 0x3, 0x4 };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x02) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x02), .port = 0 } };
     const outcome = try srv.feed(&tiny_unsupported_version, addr, 2_000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.version_negotiated, outcome);
 

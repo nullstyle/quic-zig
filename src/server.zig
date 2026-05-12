@@ -3301,7 +3301,7 @@ pub const Server = struct {
         if (!slot.conn.handshakeDone()) return;
         const addr = from orelse return;
 
-        var addr_buf: [22]u8 = undefined;
+        var addr_buf: [Address.context_max_len]u8 = undefined;
         const ctx = addressContext(&addr_buf, addr);
         var token: new_token_mod.Token = undefined;
         _ = new_token_mod.mint(&token, .{
@@ -3395,7 +3395,7 @@ pub const Server = struct {
         // and would re-handshake gracefully on a Retry).
         if (token != null and token.?.len > 0) {
             if (new_token_key) |nt_key| {
-                var addr_buf: [22]u8 = undefined;
+                var addr_buf: [Address.context_max_len]u8 = undefined;
                 const ctx = addressContext(&addr_buf, addr);
                 const result = new_token_mod.validate(token.?, .{
                     .key = nt_key,
@@ -3442,7 +3442,7 @@ pub const Server = struct {
         // we minted. The SCID binding ties the token to a specific
         // Retry round-trip — a token minted for some other peer
         // can't be replayed here even if the source IP collides.
-        var addr_buf: [22]u8 = undefined;
+        var addr_buf: [Address.context_max_len]u8 = undefined;
         const ctx = addressContext(&addr_buf, addr);
         const result = retry_token_mod.validate(token.?, .{
             .key = key_ptr,
@@ -3499,7 +3499,7 @@ pub const Server = struct {
         const retry_scid_len = self.local_cid_len;
         try self.mintLocalScid(retry_scid[0..retry_scid_len]);
 
-        var addr_buf: [22]u8 = undefined;
+        var addr_buf: [Address.context_max_len]u8 = undefined;
         const ctx = addressContext(&addr_buf, addr);
         var token: retry_token_mod.Token = undefined;
         _ = retry_token_mod.mint(&token, .{
@@ -3691,7 +3691,7 @@ pub const Server = struct {
         var snap: RateLimitSnapshot = .{
             .table_size = self.source_rate_table.count(),
             .cumulative_rejections = self.feeds_rate_limited,
-            .top_offenders = @splat(.{ .addr = .{}, .recent_count = 0, .window_start_us = 0 }),
+            .top_offenders = @splat(.{ .addr = .unspecified, .recent_count = 0, .window_start_us = 0 }),
             .top_offender_count = 0,
         };
 
@@ -3896,16 +3896,13 @@ fn antiReplayEarlyDataTrampoline(
 }
 
 /// Canonicalize an `Address` into the byte string the Retry-token
-/// HMAC binds against. The current `Address` type is a fixed 22-byte
-/// blob, so the canonical form is just the full 22 bytes — both
-/// peers are using the same in-memory shape, and any zero-padding is
-/// part of the binding. This stays stable under future Address
-/// extensions: as long as `Address.eql` is byte-equality on
-/// `Address.bytes`, the HMAC binding remains tight.
+/// HMAC binds against. Delegates to `Address.writeContext`, which
+/// produces a length-tagged form (family byte + variant fields in
+/// network byte order). The binding stays tight as long as both
+/// peers project the same client tuple into the same canonical
+/// bytes.
 fn addressContext(dst: []u8, addr: Address) []const u8 {
-    std.debug.assert(dst.len >= addr.bytes.len);
-    @memcpy(dst[0..addr.bytes.len], &addr.bytes);
-    return dst[0..addr.bytes.len];
+    return addr.writeContext(dst);
 }
 
 // -- tests --------------------------------------------------------------

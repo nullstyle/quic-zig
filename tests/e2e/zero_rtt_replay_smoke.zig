@@ -155,7 +155,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     //   pumping until the post-handshake NST flight lands and the
     //   client has captured a ticket. --
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     try cli.conn.advance();
 
     var step: u32 = 0;
@@ -294,7 +294,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     try cli.conn.advance();
 
     var step: u32 = 0;

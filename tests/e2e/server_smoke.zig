@@ -104,7 +104,7 @@ test "Server.feed drops QUIC v1 Initial datagrams below the 1200-byte minimum (R
     // 9000 §14 the server MUST discard it. The drop fires *before*
     // any Connection state is allocated, so no slot is created.
     var tiny_v1_initial = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x01, 0, 0 };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x01) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x01), .port = 0 } };
     const outcome = try srv.feed(&tiny_v1_initial, addr, 1_000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.dropped, outcome);
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
@@ -166,7 +166,7 @@ test "Server source rate limiter trips after the configured cap" {
     // (21) exceeds the QUIC max of 20. The rate limiter still ticks
     // for each call.
     var initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0xab) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
 
     // First three from this source: each consumes a token, openSlot
     // fails internally, returns generic .dropped.
@@ -183,7 +183,7 @@ test "Server source rate limiter trips after the configured cap" {
     );
 
     // Different source: still has its own budget.
-    const other_addr = quic_zig.conn.path.Address{ .bytes = @splat(0xcd) };
+    const other_addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.dropped,
         try srv.feed(&initial, other_addr, 5),
@@ -221,7 +221,7 @@ test "Server.feed with unsupported version queues a Version Negotiation packet" 
         0xb0, 0xb1, 0xb2, 0xb3, // SCID
         0x00, 0x00, 0x00, // padding
     };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x77) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
 
     const outcome = try srv.feed(&bytes, addr, 1000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.version_negotiated, outcome);
@@ -305,7 +305,7 @@ test "Server VN per-source rate limiter caps VN responses (hardening guide §4.4
         0xb0, 0xb1, 0xb2, 0xb3,
         0x00, 0x00, 0x00,
     };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x77) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
 
     // First three probes from this source: each earns a VN response.
     for (0..3) |i| {
@@ -322,7 +322,7 @@ test "Server VN per-source rate limiter caps VN responses (hardening guide §4.4
     );
 
     // Different source from cleared address space: gets its own budget.
-    const other_addr = quic_zig.conn.path.Address{ .bytes = @splat(0x88) };
+    const other_addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x88), .port = 0 } };
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.version_negotiated,
         try srv.feed(&probe, other_addr, 5),
@@ -370,7 +370,7 @@ test "Server VN rate limit and Initial rate limit use independent counters" {
     };
     var v1_initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
 
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x99) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x99), .port = 0 } };
 
     // Two VN probes — both earn responses, VN budget consumed.
     try std.testing.expectEqual(
@@ -494,7 +494,7 @@ test "Server.feed with retry_token_key issues a Retry then drops a malformed ech
     pos += 1;
     initial[pos] = 0xff; // payload byte (irrelevant)
 
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x42) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     const outcome1 = try srv.feed(&initial, addr, 1_000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.retry_sent, outcome1);
     try std.testing.expectEqual(@as(usize, 1), srv.statelessResponseCount());
@@ -595,7 +595,7 @@ test "Server.feed Retry happy-path: client echoes a valid token and a slot opens
     const n1 = (try client.conn.poll(&initial1, 1_000)) orelse
         return error.NoInitialEmitted;
 
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x42) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
 
     // Step 2: feed Initial #1 to the server. Should trigger Retry.
     const outcome1 = try srv.feed(initial1[0..n1], addr, 1_000);
@@ -702,7 +702,7 @@ test "Server.feed Retry rejects an echoed token whose lifetime has elapsed" {
     const n1 = (try client.conn.poll(&initial1, 1_000)) orelse
         return error.NoInitialEmitted;
 
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x42) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.retry_sent,
         try srv.feed(initial1[0..n1], addr, 1_000),
@@ -780,7 +780,7 @@ test "Slot.slot_id is stable across feeds for the same connection" {
     });
     defer client.deinit();
 
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x42) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     const slot = try acceptOneSlot(&srv, &client, addr, 1_000);
     const first_id = slot.slot_id;
 
@@ -833,9 +833,9 @@ test "Slot.slot_id is monotonic and unique across multiple accepts" {
     });
     defer client_c.deinit();
 
-    const addr_a = quic_zig.conn.path.Address{ .bytes = @splat(0xa0) };
-    const addr_b = quic_zig.conn.path.Address{ .bytes = @splat(0xb0) };
-    const addr_c = quic_zig.conn.path.Address{ .bytes = @splat(0xc0) };
+    const addr_a = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xa0), .port = 0 } };
+    const addr_b = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xb0), .port = 0 } };
+    const addr_c = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xc0), .port = 0 } };
 
     const slot_a = try acceptOneSlot(&srv, &client_a, addr_a, 1_000);
     const id_a = slot_a.slot_id;
@@ -873,7 +873,7 @@ test "Slot.setTraceContext round-trips and defaults are null" {
     });
     defer client.deinit();
 
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x42) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     const slot = try acceptOneSlot(&srv, &client, addr, 1_000);
 
     // Defaults: a freshly accepted slot has no trace metadata
@@ -983,7 +983,7 @@ test "Server.replaceTlsContext while a slot is live drains the old context and r
     const n1 = (try client1.conn.poll(&initial_buf1, 1_000)) orelse
         return error.NoInitialEmitted;
 
-    const addr1 = quic_zig.conn.path.Address{ .bytes = @splat(0x11) };
+    const addr1 = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x11), .port = 0 } };
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.accepted,
         try srv.feed(initial_buf1[0..n1], addr1, 1_000),
@@ -1020,7 +1020,7 @@ test "Server.replaceTlsContext while a slot is live drains the old context and r
     const n2 = (try client2.conn.poll(&initial_buf2, 2_000)) orelse
         return error.NoInitialEmitted;
 
-    const addr2 = quic_zig.conn.path.Address{ .bytes = @splat(0x22) };
+    const addr2 = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x22), .port = 0 } };
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.accepted,
         try srv.feed(initial_buf2[0..n2], addr2, 2_000),
@@ -1109,7 +1109,7 @@ test "Server.deinit after replaceTlsContext cleans up unreaped draining contexts
     var initial_buf: [2048]u8 = undefined;
     const n = (try client.conn.poll(&initial_buf, 1_000)) orelse
         return error.NoInitialEmitted;
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x42) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.accepted,
         try srv.feed(initial_buf[0..n], addr, 1_000),
@@ -1173,7 +1173,7 @@ test "Server log_callback fires for table_full" {
     defer srv.deinit();
 
     var bytes = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 0, 0 });
-    const peer = quic_zig.conn.path.Address{ .bytes = @splat(0x55) };
+    const peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x55), .port = 0 } };
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.table_full,
         try srv.feed(&bytes, peer, 0),
@@ -1211,7 +1211,7 @@ test "Server log_callback fires for rate_limited and version_negotiated" {
         0x04, 0xb0, 0xb1, 0xb2, 0xb3,
         0x00,
     };
-    const vn_peer = quic_zig.conn.path.Address{ .bytes = @splat(0x77) };
+    const vn_peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
     _ = try srv.feed(&vn_bytes, vn_peer, 1000);
 
     // Rate-limit: long-header v1 Initial that fails openSlot but
@@ -1219,7 +1219,7 @@ test "Server log_callback fires for rate_limited and version_negotiated" {
     // return InvalidConfig (DCID > 20). The first two attempts get .dropped
     // (each consuming a token); the third is rate-limited.
     var initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
-    const rl_peer = quic_zig.conn.path.Address{ .bytes = @splat(0xab) };
+    const rl_peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     _ = try srv.feed(&initial, rl_peer, 0);
     _ = try srv.feed(&initial, rl_peer, 1);
     try std.testing.expectEqual(
@@ -1280,12 +1280,12 @@ test "Server metricsSnapshot tracks counters across feed outcomes" {
         0x04, 0xb0, 0xb1, 0xb2, 0xb3,
         0x00,
     };
-    const vn_peer = quic_zig.conn.path.Address{ .bytes = @splat(0x77) };
+    const vn_peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
     _ = try srv.feed(&vn_bytes, vn_peer, 100);
 
     // Rate-limit hit. Two attempts at the cap, then over.
     var initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
-    const rl_peer = quic_zig.conn.path.Address{ .bytes = @splat(0xab) };
+    const rl_peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     _ = try srv.feed(&initial, rl_peer, 0);
     _ = try srv.feed(&initial, rl_peer, 1);
     _ = try srv.feed(&initial, rl_peer, 2);
@@ -1314,8 +1314,8 @@ test "Server rateLimitSnapshot reports top offender after cap is hit" {
     defer srv.deinit();
 
     var initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
-    const heavy_peer = quic_zig.conn.path.Address{ .bytes = @splat(0xaa) };
-    const light_peer = quic_zig.conn.path.Address{ .bytes = @splat(0x11) };
+    const heavy_peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xaa), .port = 0 } };
+    const light_peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x11), .port = 0 } };
 
     // Heavy peer: 3 attempts then 1 rate-limited (count stays at cap=3).
     for (0..3) |i| _ = try srv.feed(&initial, heavy_peer, @intCast(i));
@@ -1358,9 +1358,9 @@ test "Server metricsSnapshot stateless_queue_high_water is sticky across drains"
         0x00,
     };
     const peers = [_]quic_zig.conn.path.Address{
-        .{ .bytes = @splat(0x01) },
-        .{ .bytes = @splat(0x02) },
-        .{ .bytes = @splat(0x03) },
+        .{ .ipv4 = .{ .addr = @splat(0x01), .port = 0 } },
+        .{ .ipv4 = .{ .addr = @splat(0x02), .port = 0 } },
+        .{ .ipv4 = .{ .addr = @splat(0x03), .port = 0 } },
     };
     for (peers) |p| _ = try srv.feed(&vn_bytes, p, 0);
 
@@ -1509,7 +1509,7 @@ test "Server listener rate limit drops datagrams past cap" {
     // .dropped *because of the rate limit* — surfaced via the new
     // `feeds_listener_rate_limited` counter.
     var junk = [_]u8{ 0x40, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x10) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x10), .port = 0 } };
 
     // First three: passes the listener gate (each then drops because
     // the bytes don't parse as a valid Initial).
@@ -1542,7 +1542,7 @@ test "Server listener rate limit window resets after elapsed" {
     defer srv.deinit();
 
     var junk = [_]u8{ 0x40, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x20) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x20), .port = 0 } };
 
     // First window: fill it (2 calls), then over-cap at the 3rd.
     _ = try srv.feed(&junk, addr, 0);
@@ -1574,7 +1574,7 @@ test "Server listener rate limit is null-by-default" {
     defer srv.deinit();
 
     var junk = [_]u8{ 0x40, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x30) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x30), .port = 0 } };
 
     // Flood with 100 datagrams; none should hit the listener limit.
     for (0..100) |i| {
@@ -1623,7 +1623,7 @@ test "Server log rate limiter drops events past cap from one source" {
     defer srv.deinit();
 
     var initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x40) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x40), .port = 0 } };
 
     // Each call from the same source emits exactly one log event:
     //   call 1: openSlot fails internally → `.dropped` (no log)
@@ -1669,8 +1669,8 @@ test "Server log rate limiter is per-source (different sources get fresh budgets
     defer srv.deinit();
 
     var initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
-    const peer_a = quic_zig.conn.path.Address{ .bytes = @splat(0x51) };
-    const peer_b = quic_zig.conn.path.Address{ .bytes = @splat(0x52) };
+    const peer_a = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x51), .port = 0 } };
+    const peer_b = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x52), .port = 0 } };
 
     // Each peer sees: call 1 → drop with no log, call 2+ → first
     // call past the Initial cap fires one log, subsequent are
@@ -1710,7 +1710,7 @@ test "Server log rate limit window resets after elapsed" {
     defer srv.deinit();
 
     var initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
-    const peer = quic_zig.conn.path.Address{ .bytes = @splat(0x60) };
+    const peer = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x60), .port = 0 } };
 
     // Burn the cap inside the first window.
     for (0..5) |i| _ = try srv.feed(&initial, peer, @intCast(i));
@@ -1793,7 +1793,7 @@ test "Server listener byte rate limit drops datagrams past byte cap" {
     // *first*, before any of those.
     var buf: [800]u8 = @splat(0);
     buf[0] = 0x40;
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x40) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x40), .port = 0 } };
 
     // First 800-byte feed: bytes_in_window = 800 ≤ 1500. Pass.
     _ = try srv.feed(&buf, addr, 0);
@@ -1827,7 +1827,7 @@ test "Server listener byte and packet caps are independently enforced" {
         defer srv.deinit();
 
         var one: [1]u8 = .{0x40};
-        const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x50) };
+        const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x50), .port = 0 } };
 
         // 1000 single-byte feeds — total 1000 bytes, well under 1500.
         for (0..1000) |i| {
@@ -1854,7 +1854,7 @@ test "Server listener byte and packet caps are independently enforced" {
         defer srv.deinit();
 
         var one: [1]u8 = .{0x40};
-        const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x60) };
+        const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x60), .port = 0 } };
 
         _ = try srv.feed(&one, addr, 0);
         _ = try srv.feed(&one, addr, 1);
@@ -1887,7 +1887,7 @@ test "Server listener byte rate limit window resets after elapsed" {
 
     var buf: [800]u8 = @splat(0);
     buf[0] = 0x40;
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0x70) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x70), .port = 0 } };
 
     // First window: two 800-byte feeds → bytes_in_window=1600 > 1500
     // on the second. Counter bumps to 1 here.
@@ -1944,7 +1944,7 @@ test "Server per-source bandwidth shaper drops datagrams when bucket is empty" {
 
     var buf: [2000]u8 = @splat(0);
     buf[0] = 0x40;
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0xa1) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xa1), .port = 0 } };
 
     // First 2000-byte datagram at t=0: bucket starts full at 4096
     // tokens, debit drops it to ~2096. Pass.
@@ -1982,7 +1982,7 @@ test "Server per-source bandwidth shaper refills on idle" {
 
     var buf: [2000]u8 = @splat(0);
     buf[0] = 0x40;
-    const addr = quic_zig.conn.path.Address{ .bytes = @splat(0xa2) };
+    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xa2), .port = 0 } };
 
     // Drain the bucket quickly: three 2000-byte datagrams at
     // t=0/1/2 us. Total charge = 6000 bytes vs starting bucket of
@@ -2018,8 +2018,8 @@ test "Server per-source bandwidth shaper is per-source" {
 
     var buf: [2000]u8 = @splat(0);
     buf[0] = 0x40;
-    const peer_a = quic_zig.conn.path.Address{ .bytes = @splat(0xb1) };
-    const peer_b = quic_zig.conn.path.Address{ .bytes = @splat(0xb2) };
+    const peer_a = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xb1), .port = 0 } };
+    const peer_b = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0xb2), .port = 0 } };
 
     // Drain peer_a's bucket: three 2000-byte datagrams at t=0/1/2.
     // Third trips the gate.
@@ -2135,7 +2135,7 @@ test "Server.Config.preferred_address: openSlotFromInitial mints seq-1 alt-CID a
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     try cli.conn.advance();
 
     // Pump a few rounds so the Server-side slot is at least allocated;
@@ -2206,7 +2206,7 @@ test "Server.Config.preferred_address: client sees the parameter on a completed 
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xcd) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
     try cli.conn.advance();
 
     // Run the handshake to completion. Same shape as the
@@ -2449,9 +2449,9 @@ test "Connection.noteServerLocalAddressChanged: PATH_CHALLENGE leads first packe
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
-    const old_local: quic_zig.conn.path.Address = .{ .bytes = @splat(0x10) };
-    const new_local: quic_zig.conn.path.Address = .{ .bytes = @splat(0x20) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
+    const old_local: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x10), .port = 0 } };
+    const new_local: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x20), .port = 0 } };
     try cli.conn.advance();
 
     // Drive the handshake to completion under the original 4-tuple.

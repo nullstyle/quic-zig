@@ -66,7 +66,7 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
 
     try cli.conn.advance();
 

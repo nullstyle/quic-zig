@@ -347,8 +347,7 @@ test "pending_frames: PATH_RESPONSE token round-trip" {
     defer q.deinit(std.testing.allocator);
 
     const token: [8]u8 = .{ 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe };
-    var addr: Address = .{};
-    addr.bytes[0] = 0x7f; // 127.0.0.1 placeholder
+    const addr: Address = .{ .ipv4 = .{ .addr = .{ 127, 0, 0, 1 }, .port = 0 } };
 
     q.path_response = token;
     q.path_response_path_id = 3;

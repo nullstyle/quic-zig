@@ -583,7 +583,7 @@ test "MUST close with CRYPTO_ERROR + no_application_protocol (0x178) on ALPN mis
     try client.conn.advance();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     var iter: u32 = 0;
     while (iter < 32) : (iter += 1) {
         const now_us: u64 = @as(u64, iter) * 1_000;
@@ -701,7 +701,7 @@ test "MUST validate the server certificate chain at the client [RFC9001 §4.7 ¶
     // proof that BoringSSL's chain check ran and failed.
     var rx: [4096]u8 = undefined;
     var iter: u32 = 0;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     var saw_rejection = false;
     pump: while (iter < 32) : (iter += 1) {
         const now_us: u64 = @as(u64, iter) * 1_000;

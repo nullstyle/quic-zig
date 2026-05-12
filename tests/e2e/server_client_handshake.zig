@@ -90,7 +90,7 @@ test "Server <-> Client: full handshake completes through Server.feed" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
 
     // Kick the client so the very first Initial is in its outbox.
     // `Client.connect` deliberately leaves this to the embedder so
@@ -160,7 +160,7 @@ test "Server <-> Client: NEW_CONNECTION_ID rotates routing key in cid_table" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xcd) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
     try cli.conn.advance();
 
     // Phase 1: get the handshake done. Same loop as the first test.
@@ -293,7 +293,7 @@ test "Server <-> Client: handshake completes via Retry round-trip" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xef) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xef), .port = 0 } };
     try cli.conn.advance();
 
     // Phase 1: client emits Initial #1. Server queues a Retry.
@@ -412,7 +412,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // doesn't matter for `peerAddressChangeCandidate`'s `Address.eql`
     // check, only that old/new compare unequal byte-for-byte.
     const old_peer_addr: quic_zig.conn.path.Address = .{
-        .bytes = .{ 4, 10, 0, 0, 1, 0x10, 0x00 } ++ @as([15]u8, @splat(0)),
+        .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0x1000 },
     };
     try cli.conn.advance();
 
@@ -461,7 +461,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // with a brand-new peer address. The packet bytes are unchanged
     // — only the `from` tuple rotates.
     const new_peer_addr: quic_zig.conn.path.Address = .{
-        .bytes = .{ 4, 192, 0, 2, 99, 0xab, 0xcd } ++ @as([15]u8, @splat(0)),
+        .ipv4 = .{ .addr = .{ 192, 0, 2, 99 }, .port = 0xabcd },
     };
     try std.testing.expect(!quic_zig.conn.path.Address.eql(old_peer_addr, new_peer_addr));
 
@@ -579,10 +579,10 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
 
     var rx: [4096]u8 = undefined;
     const old_peer_addr: quic_zig.conn.path.Address = .{
-        .bytes = .{ 4, 10, 0, 0, 1, 0x10, 0x00 } ++ @as([15]u8, @splat(0)),
+        .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0x1000 },
     };
     const new_peer_addr: quic_zig.conn.path.Address = .{
-        .bytes = .{ 4, 192, 0, 2, 99, 0xab, 0xcd } ++ @as([15]u8, @splat(0)),
+        .ipv4 = .{ .addr = .{ 192, 0, 2, 99 }, .port = 0xabcd },
     };
     try std.testing.expect(!quic_zig.conn.path.Address.eql(old_peer_addr, new_peer_addr));
 

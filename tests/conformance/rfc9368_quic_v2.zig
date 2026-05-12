@@ -343,7 +343,7 @@ test "server with v1+v2 accepts a v2 Initial without VN [RFC9368 §6]" {
     const scid: [4]u8 = .{ 0xa, 0xb, 0xc, 0xd };
     var pkt = try buildV2InitialDatagram(&dcid, &scid);
 
-    const addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xee) };
+    const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
     const out = try srv.feed(&pkt, addr, 1_000_000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.accepted, out);
     try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
@@ -373,7 +373,7 @@ test "server with only v1 emits VN listing v1 for a v2 Initial [RFC9368 §6]" {
     bytes[10] = 0; // scid_len
     @memset(bytes[11..], 0);
 
-    const addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0x42) };
+    const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     const out = try srv.feed(&bytes, addr, 1_000_000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.version_negotiated, out);
     try std.testing.expectEqual(@as(usize, 1), srv.statelessResponseCount());
@@ -402,7 +402,7 @@ test "server VN body mirrors Config.versions when configured for both [RFC9368 �
     bytes[10] = 0;
     @memset(bytes[11..], 0);
 
-    const addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0x99) };
+    const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x99), .port = 0 } };
     const out = try srv.feed(&bytes, addr, 1_000_000);
     try std.testing.expectEqual(quic_zig.Server.FeedOutcome.version_negotiated, out);
     const vn = srv.drainStatelessResponse() orelse return error.UnexpectedNullVn;

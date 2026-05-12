@@ -701,8 +701,8 @@ test "MUST cap an unvalidated server's allowance at 3x bytes received [RFC9000 �
     // amount of data it has received." The Path's per-path counter
     // hard-codes the 3x ratio.
     var p = path_mod.Path.init(
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         path_mod.ConnectionId.fromSlice(&.{ 1, 2, 3 }),
         path_mod.ConnectionId.fromSlice(&.{ 9, 9, 9 }),
         .{ .max_datagram_size = 1200 },
@@ -716,8 +716,8 @@ test "MUST NOT permit a fourth datagram-equivalent send on a 1200-byte unvalidat
     // received datagram, the budget is spent. A subsequent send
     // would push `bytes_sent > 3 * bytes_received`; allowance is 0.
     var p = path_mod.Path.init(
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         path_mod.ConnectionId.fromSlice(&.{ 1, 2, 3 }),
         path_mod.ConnectionId.fromSlice(&.{ 9, 9, 9 }),
         .{ .max_datagram_size = 1200 },
@@ -735,8 +735,8 @@ test "MUST lift the anti-amp cap once the path is validated [RFC9000 §8.1 ¶?]"
     // upstream send loop never short-circuits on anti-amp post-
     // validation.
     var p = path_mod.Path.init(
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         path_mod.ConnectionId.fromSlice(&.{1}),
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{},
@@ -827,8 +827,8 @@ test "MUST drop the validation status of a path when migration begins [RFC9000 �
     // the new peer address.
     var ps = path_mod.PathState.init(
         0,
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         path_mod.ConnectionId.fromSlice(&.{1}),
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
@@ -836,7 +836,7 @@ test "MUST drop the validation status of a path when migration begins [RFC9000 �
     ps.path.markValidated();
     try std.testing.expect(ps.path.isValidated());
 
-    const new_addr: path_mod.Address = .{ .bytes = @splat(0xee) };
+    const new_addr: path_mod.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
     ps.beginMigration(new_addr, 1200);
 
     try std.testing.expect(!ps.path.isValidated());
@@ -849,8 +849,8 @@ test "MUST zero the per-path anti-amp byte counters on migration [RFC9000 §9.3 
     // fit the 3x cap), but anything that came before is wiped.
     var ps = path_mod.PathState.init(
         0,
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         path_mod.ConnectionId.fromSlice(&.{1}),
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
@@ -861,7 +861,7 @@ test "MUST zero the per-path anti-amp byte counters on migration [RFC9000 §9.3 
     try std.testing.expectEqual(@as(u64, 50_000), ps.path.bytes_received);
     try std.testing.expectEqual(@as(u64, 40_000), ps.path.bytes_sent);
 
-    const new_addr: path_mod.Address = .{ .bytes = @splat(0xee) };
+    const new_addr: path_mod.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
     ps.beginMigration(new_addr, 1200);
 
     // After migration: bytes_sent zeroed; bytes_received reflects only
@@ -881,8 +881,8 @@ test "MUST reset per-path RTT and congestion controller after migration [RFC9000
     const fresh_rtt = path_mod.RttEstimator{};
     var ps = path_mod.PathState.init(
         0,
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         path_mod.ConnectionId.fromSlice(&.{1}),
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
@@ -921,8 +921,8 @@ test "MAY roll back a failed migration to the prior 4-tuple [RFC9000 §9.4 ¶?]"
     // and validation status.
     var ps = path_mod.PathState.init(
         0,
-        .{ .bytes = @splat(0xaa) },
-        .{},
+        .{ .ipv4 = .{ .addr = @splat(0xaa), .port = 0 } },
+        .unspecified,
         path_mod.ConnectionId.fromSlice(&.{1}),
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
@@ -931,7 +931,7 @@ test "MAY roll back a failed migration to the prior 4-tuple [RFC9000 §9.4 ¶?]"
     ps.path.markValidated();
     const original_addr = ps.path.peer_addr;
 
-    const new_addr: path_mod.Address = .{ .bytes = @splat(0xbb) };
+    const new_addr: path_mod.Address = .{ .ipv4 = .{ .addr = @splat(0xbb), .port = 0 } };
     ps.beginMigration(new_addr, 1200);
     try std.testing.expect(!ps.path.isValidated());
     try std.testing.expect(!path_mod.Address.eql(ps.path.peer_addr, original_addr));
@@ -1025,7 +1025,7 @@ test "MUST reject a peer migration attempt before the handshake confirms [RFC900
     // Round 3 (the test): client polls a Handshake-level packet
     // (Finished). Feed it FROM A DIFFERENT `from` address.
     const now2: u64 = 3_000;
-    const migration_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xcd) };
+    const migration_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
     try std.testing.expect(!quic_zig.conn.path.Address.eql(migration_addr, pair.peer_addr));
 
     var fed_any = false;

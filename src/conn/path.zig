@@ -70,16 +70,68 @@ pub const ConnectionId = struct {
     }
 };
 
-/// Path-tuple address. Holds enough bytes for an IPv6 sockaddr
-/// (16-byte address + 2-byte port + 4-byte scope/flow). FIXME(audit):
-/// migrate to `std.net.Address` once the transport layer is ready
-/// to round-trip scope/flow through it.
-pub const Address = struct {
-    bytes: [22]u8 = @splat(0),
+/// Path-tuple address — the IP/port (plus IPv6 flow label) half of
+/// the 4-tuple that identifies a QUIC path. Mirrors the variant
+/// structure of `std.Io.net.IpAddress` so the transport boundary
+/// can round-trip with a one-to-one variant match instead of the
+/// bag-of-bytes serialization the previous representation needed.
+pub const Address = union(enum) {
+    /// Default for freshly-created paths: no peer/local address known yet.
+    unspecified,
+    ipv4: Ipv4,
+    ipv6: Ipv6,
 
-    /// Byte-wise equality (full 22-byte buffer, including padding).
+    pub const Ipv4 = struct {
+        addr: [4]u8,
+        port: u16,
+    };
+
+    pub const Ipv6 = struct {
+        addr: [16]u8,
+        port: u16,
+        /// 20-bit IPv6 flow label (RFC 6437); upper bits are reserved
+        /// and not transmitted. Held as u32 to match
+        /// `std.Io.net.Ip6Address.flow`.
+        flow: u32 = 0,
+    };
+
+    /// Stable byte-serialization for the Retry-token HMAC binding. The
+    /// caller supplies a buffer; we write a leading family tag plus
+    /// the variant fields in network byte order. The returned slice
+    /// alias of `dst` carries exactly the bytes written.
+    pub fn writeContext(self: Address, dst: []u8) []const u8 {
+        std.debug.assert(dst.len >= context_max_len);
+        switch (self) {
+            .unspecified => {
+                dst[0] = 0;
+                return dst[0..1];
+            },
+            .ipv4 => |v| {
+                dst[0] = 4;
+                @memcpy(dst[1..5], &v.addr);
+                std.mem.writeInt(u16, dst[5..7], v.port, .big);
+                return dst[0..7];
+            },
+            .ipv6 => |v| {
+                dst[0] = 6;
+                @memcpy(dst[1..17], &v.addr);
+                std.mem.writeInt(u16, dst[17..19], v.port, .big);
+                std.mem.writeInt(u32, dst[19..23], v.flow, .big);
+                return dst[0..23];
+            },
+        }
+    }
+
+    /// Maximum length writeContext can produce — IPv6 (1+16+2+4 = 23 bytes).
+    pub const context_max_len: usize = 23;
+
     pub fn eql(a: Address, b: Address) bool {
-        return std.mem.eql(u8, &a.bytes, &b.bytes);
+        if (@as(std.meta.Tag(Address), a) != @as(std.meta.Tag(Address), b)) return false;
+        return switch (a) {
+            .unspecified => true,
+            .ipv4 => |va| std.mem.eql(u8, &va.addr, &b.ipv4.addr) and va.port == b.ipv4.port,
+            .ipv6 => |va| std.mem.eql(u8, &va.addr, &b.ipv6.addr) and va.port == b.ipv6.port and va.flow == b.ipv6.flow,
+        };
     }
 };
 
@@ -819,7 +871,7 @@ pub const PathSet = struct {
         cc_cfg: congestion_mod.Config,
     ) !void {
         if (self.paths.items.len != 0) return;
-        var p = PathState.init(0, .{}, .{}, .{}, .{}, cc_cfg);
+        var p = PathState.init(0, .unspecified, .unspecified, .{}, .{}, cc_cfg);
         p.path.state = .active;
         try self.paths.append(allocator, p);
     }
@@ -990,8 +1042,8 @@ fn testCid(s: []const u8) ConnectionId {
 
 test "anti-amp: unvalidated server can send 3x what it received" {
     var p = Path.init(
-        .{},
-        .{},
+        .unspecified,
+        .unspecified,
         testCid(&.{ 1, 2, 3 }),
         testCid(&.{ 9, 9, 9 }),
         .{ .max_datagram_size = 1200 },
@@ -1006,7 +1058,7 @@ test "anti-amp: unvalidated server can send 3x what it received" {
 }
 
 test "anti-amp: validated path has unlimited allowance" {
-    var p = Path.init(.{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var p = Path.init(.unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     p.onDatagramReceived(100);
     p.onDatagramSent(1_000_000);
     try testing.expectEqual(@as(u64, 0), p.antiAmpAllowance());
@@ -1015,14 +1067,14 @@ test "anti-amp: validated path has unlimited allowance" {
 }
 
 test "datagram lifecycle moves path from fresh -> active" {
-    var p = Path.init(.{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var p = Path.init(.unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     try testing.expectEqual(State.fresh, p.state);
     p.onDatagramReceived(800);
     try testing.expectEqual(State.active, p.state);
 }
 
 test "validator integration: PATH_CHALLENGE -> PATH_RESPONSE validates the path" {
-    var p = Path.init(.{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var p = Path.init(.unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     p.onDatagramReceived(1200); // some incoming
     try testing.expect(!p.isValidated());
 
@@ -1044,7 +1096,7 @@ test "ConnectionId equality and slice" {
 }
 
 test "retire and fail transitions" {
-    var p = Path.init(.{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var p = Path.init(.unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     p.onDatagramReceived(1);
     try testing.expectEqual(State.active, p.state);
     p.retire();
@@ -1073,7 +1125,7 @@ test "PathSet opens and abandons additional paths" {
     defer set.deinit(testing.allocator);
     try set.ensurePrimary(testing.allocator, .{ .max_datagram_size = 1200 });
 
-    const id = try set.openPath(testing.allocator, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    const id = try set.openPath(testing.allocator, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     try testing.expectEqual(@as(u32, 1), id);
     try testing.expect(set.setActive(id));
     try testing.expectEqual(id, set.active().id);
@@ -1085,7 +1137,7 @@ test "PathSet opens and abandons additional paths" {
 // -- RFC 8899 DPLPMTUD inline state-machine tests -----------------
 
 test "DPLPMTUD: pmtudInit configures floor and search state" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{
         .initial_mtu = 1200,
         .max_mtu = 1452,
@@ -1100,14 +1152,14 @@ test "DPLPMTUD: pmtudInit configures floor and search state" {
 }
 
 test "DPLPMTUD: enable=false leaves state disabled" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .enable = false });
     try testing.expectEqual(PmtudState.disabled, ps.pmtu_state);
     try testing.expect(!ps.pmtudIsSearching());
 }
 
 test "DPLPMTUD: pmtudNextProbeSize advances by probe_step until ceiling" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1280, .probe_step = 50 });
     try testing.expectEqual(@as(?u16, 1250), ps.pmtudNextProbeSize(50, 1280));
     ps.pmtu = 1250;
@@ -1115,7 +1167,7 @@ test "DPLPMTUD: pmtudNextProbeSize advances by probe_step until ceiling" {
 }
 
 test "DPLPMTUD: probe ack lifts pmtu and resets fail counter" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1452, .probe_step = 64 });
     ps.pmtudOnProbeSent(7, 1264);
     ps.pmtu_fail_count = 2; // pretend we'd had earlier losses
@@ -1127,7 +1179,7 @@ test "DPLPMTUD: probe ack lifts pmtu and resets fail counter" {
 }
 
 test "DPLPMTUD: probe ack flips to search_complete at the ceiling" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1300, .probe_step = 64 });
     ps.pmtudOnProbeSent(11, 1264);
     _ = ps.pmtudOnProbeAcked(64, 1300);
@@ -1137,7 +1189,7 @@ test "DPLPMTUD: probe ack flips to search_complete at the ceiling" {
 }
 
 test "DPLPMTUD: probe loss bumps fail_count, threshold records upper bound" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1500, .probe_step = 50, .probe_threshold = 3 });
 
     // Loss 1, 2: just bump counter.
@@ -1162,7 +1214,7 @@ test "DPLPMTUD: probe loss bumps fail_count, threshold records upper bound" {
 }
 
 test "DPLPMTUD: probe loss at floor with bound at floor → search_complete" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1500, .probe_step = 100, .probe_threshold = 1 });
     // First loss with threshold=1: record bound and check the
     // search_complete branch when bound <= pmtu. Probed size 1200 is
@@ -1174,7 +1226,7 @@ test "DPLPMTUD: probe loss at floor with bound at floor → search_complete" {
 }
 
 test "DPLPMTUD: black-hole detection halves pmtu after probe_threshold regular losses" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1452, .probe_step = 64, .probe_threshold = 3 });
     // Pretend pmtu was lifted to 1400 via prior probes.
     ps.pmtu = 1400;
@@ -1190,7 +1242,7 @@ test "DPLPMTUD: black-hole detection halves pmtu after probe_threshold regular l
 }
 
 test "DPLPMTUD: a regular ack resets the consecutive-loss counter" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{});
     ps.pmtu = 1300;
     _ = ps.pmtudOnRegularLost(3, 1200);
@@ -1204,7 +1256,7 @@ test "DPLPMTUD: a regular ack resets the consecutive-loss counter" {
 }
 
 test "DPLPMTUD: disabled state never enters black-hole detection" {
-    var ps = PathState.init(0, .{}, .{}, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
     ps.pmtudInit(.{ .enable = false });
     try testing.expect(!ps.pmtudOnRegularLost(1, 1200));
     try testing.expect(!ps.pmtudOnRegularLost(1, 1200));

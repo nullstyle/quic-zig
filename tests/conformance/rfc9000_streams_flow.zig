@@ -695,7 +695,7 @@ test "MUST switch to a freshly-issued peer CID after migration [RFC9000 §5.1.2 
     // packet (a PING) from a DIFFERENT source address. The fixture's
     // injection helper uses the live application keys, so AEAD
     // passes and recordAuthenticatedDatagramAddress fires.
-    pair.peer_addr = .{ .bytes = @splat(0x77) };
+    pair.peer_addr = .{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
     const ping = [_]u8{0x01};
     _ = try pair.injectFrameAtServer(&ping);
 

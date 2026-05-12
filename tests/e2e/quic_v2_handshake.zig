@@ -114,7 +114,7 @@ test "v2 handshake completes on both sides [RFC9368 §3]" {
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0x21) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x21), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
@@ -155,7 +155,7 @@ test "v1 handshake regression: still completes after v2 plumbing landed" {
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0x42) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(QUIC_V1, cli.conn.version);
@@ -186,7 +186,7 @@ test "v1+v2 server with a v1 client: server accepts v1 directly [RFC9368 §6]" {
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0x55) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x55), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(QUIC_V1, srv.iterator()[0].conn.version);
@@ -218,7 +218,7 @@ test "v2-only server with a v1-only client emits a VN listing v2 [RFC9368 §6]" 
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0x77) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
     try cli.conn.advance();
 
     // Pump exactly one client→server datagram and inspect what the
@@ -274,7 +274,7 @@ test "v1+v2 client advertises version_information transport parameter [RFC9368 �
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0x88) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x88), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
 
@@ -331,7 +331,7 @@ test "[v2,v1] server upgrades a v1-wire ClientHello that lists v2 [RFC9368 §6]"
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
 
@@ -518,7 +518,7 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
         .pad_to = 1200,
     });
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xee) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
 
     // Feed Initial #1: the slot opens, but since the CH is fragmented
     // the single-shot pre-parse fails and a `pending_upgrade` is
@@ -572,7 +572,7 @@ test "[v2,v1] server with v1-only client commits to v1, no upgrade [RFC9368 §6]
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xcd) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(QUIC_V1, cli.conn.version);

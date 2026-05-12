@@ -106,7 +106,7 @@ test "Server emits NEW_TOKEN to handshake-confirmed client" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xaa) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xaa), .port = 0 } };
     try cli.conn.advance();
 
     var step: u32 = 0;
@@ -166,7 +166,7 @@ test "Client with stored NEW_TOKEN skips Retry on next connection" {
         defer cli.deinit();
 
         var rx: [4096]u8 = undefined;
-        const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+        const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
         try cli.conn.advance();
 
         var step: u32 = 0;
@@ -212,7 +212,7 @@ test "Client with stored NEW_TOKEN skips Retry on next connection" {
     var rx: [4096]u8 = undefined;
     // SAME peer address as Phase 1 — NEW_TOKEN binds to the
     // address; a different `peer_addr` would invalidate the token.
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xab) };
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     try cli2.conn.advance();
 
     // Pump exactly one client→server datagram (the first Initial)
@@ -247,15 +247,15 @@ test "Server rejects expired NEW_TOKEN and falls through to Retry" {
 
     // Mint an obviously-expired NEW_TOKEN by setting the issue
     // timestamp far in the past with a tiny lifetime.
-    const peer_addr: quic_zig.conn.path.Address = .{ .bytes = @splat(0xcd) };
-    var addr_buf: [22]u8 = undefined;
-    @memcpy(&addr_buf, &peer_addr.bytes);
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
+    var addr_buf: [quic_zig.conn.path.Address.context_max_len]u8 = undefined;
+    const addr_ctx = peer_addr.writeContext(&addr_buf);
     var token: quic_zig.conn.NewTokenBlob = undefined;
     _ = try quic_zig.conn.new_token.mint(&token, .{
         .key = &new_token_key,
         .now_us = 1_000_000,
         .lifetime_us = 1, // expires effectively immediately
-        .client_address = &addr_buf,
+        .client_address = addr_ctx,
     });
 
     var srv = try quic_zig.Server.init(.{

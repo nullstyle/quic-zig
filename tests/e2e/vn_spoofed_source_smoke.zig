@@ -103,15 +103,18 @@ test "VN-flood across spoofed sources: per-source table tracks each address inde
     const source_count: usize = 200;
     var source_idx: usize = 0;
     while (source_idx < source_count) : (source_idx += 1) {
-        // Address bytes: top byte rotates 0x00..0xFF, lower bytes
-        // give a stable pattern so each address is distinct without
-        // colliding under the underlying `Address.eql` rule (which
-        // compares the full 22-byte buffer).
-        var addr_bytes: [22]u8 = @splat(0);
-        addr_bytes[0] = @intCast(source_idx & 0xff);
-        addr_bytes[1] = @intCast((source_idx >> 8) & 0xff);
-        addr_bytes[2] = 0x42;
-        const addr: quic_zig.conn.path.Address = .{ .bytes = addr_bytes };
+        // Address bytes: top byte rotates 0x00..0xFF, next byte spans
+        // the upper byte of source_idx so each address is distinct
+        // under `Address.eql`'s per-variant comparison.
+        const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{
+            .addr = .{
+                @intCast(source_idx & 0xff),
+                @intCast((source_idx >> 8) & 0xff),
+                0x42,
+                0,
+            },
+            .port = 0,
+        } };
         // `now_us` ticks forward by 1 µs per probe. Far below the
         // 1-second window, so all 200 probes land in the same window
         // (and the per-source counter rolls forward without resetting).
@@ -239,11 +242,15 @@ test "VN-flood: 65th distinct source triggers the first global eviction (§4.4 /
     // Probe from 64 distinct sources. Queue grows by 1 each time.
     var i: usize = 0;
     while (i < 64) : (i += 1) {
-        var addr_bytes: [22]u8 = @splat(0);
-        addr_bytes[0] = @intCast(i & 0xff);
-        addr_bytes[1] = @intCast((i >> 8) & 0xff);
-        addr_bytes[2] = 0x77;
-        const addr: quic_zig.conn.path.Address = .{ .bytes = addr_bytes };
+        const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{
+            .addr = .{
+                @intCast(i & 0xff),
+                @intCast((i >> 8) & 0xff),
+                0x77,
+                0,
+            },
+            .port = 0,
+        } };
         try std.testing.expectEqual(
             quic_zig.Server.FeedOutcome.version_negotiated,
             try srv.feed(&probe, addr, @intCast(i)),
@@ -260,11 +267,10 @@ test "VN-flood: 65th distinct source triggers the first global eviction (§4.4 /
 
     // 65th probe from a distinct address. Queue stays at 64 (one
     // VN evicted to make room). Eviction counter goes to 1.
-    var addr_bytes_65: [22]u8 = @splat(0);
-    addr_bytes_65[0] = 0x65;
-    addr_bytes_65[1] = 0x65;
-    addr_bytes_65[2] = 0x77;
-    const addr_65: quic_zig.conn.path.Address = .{ .bytes = addr_bytes_65 };
+    const addr_65: quic_zig.conn.path.Address = .{ .ipv4 = .{
+        .addr = .{ 0x65, 0x65, 0x77, 0 },
+        .port = 0,
+    } };
     var probe_65 = buildVnProbe();
     try std.testing.expectEqual(
         quic_zig.Server.FeedOutcome.version_negotiated,
