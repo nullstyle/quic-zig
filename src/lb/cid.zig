@@ -144,14 +144,6 @@ pub const Factory = struct {
         var f: Factory = .{ .cfg = cfg };
         if (cfg.key) |key| {
             f.aes = Aes128.init(&key) catch return Error.AesKeyInvalid;
-            // FIXME(audit): errdefer body is a no-op; remove?
-            errdefer if (f.aes) |*a| {
-                _ = a;
-                // BoringSSL's AES_KEY is opaque key-schedule state.
-                // We can't `secureZero` through the wrapper, but on
-                // this errdefer path we're about to drop the whole
-                // `Factory` — the key bytes never escape.
-            };
             f.nonce_counter = NonceCounter.initRandom(cfg.nonce_len) catch return Error.RandFailure;
         }
         return f;
