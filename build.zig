@@ -164,7 +164,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_interop_tool_tests.step);
 
     const run_interop_tool = b.addRunArtifact(interop_tool_exe);
-    if (b.args) |args| run_interop_tool.addArgs(args);
+    run_interop_tool.addPassthruArgs();
     const external_interop_step = b.step("external-interop", "Run the external QUIC interop gate helper");
     external_interop_step.dependOn(&run_interop_tool.step);
 
@@ -210,7 +210,7 @@ pub fn build(b: *std.Build) void {
         .root_module = bench_mod,
     });
     const run_bench = b.addRunArtifact(bench_exe);
-    if (b.args) |args| run_bench.addArgs(args);
+    run_bench.addPassthruArgs();
     const bench_step = b.step("bench", "Run quic_zig microbenchmarks");
     bench_step.dependOn(&run_bench.step);
 
@@ -322,7 +322,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{t.filter},
         });
         const run_tst = b.addRunArtifact(tst);
-        if (b.args) |args| run_tst.addArgs(args);
+        run_tst.addPassthruArgs();
         fuzz_step.dependOn(&run_tst.step);
     }
 }

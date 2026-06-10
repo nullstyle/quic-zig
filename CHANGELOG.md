@@ -9,6 +9,12 @@ changes.
 
 ### Changed
 
+- Updated to Zig `0.17.0-dev.813+2153f8143` (configure/maker build
+  split): forwarded `zig build ... -- <args>` now use
+  `Step.Run.addPassthruArgs()` instead of the removed `b.args`, and
+  `minimum_zig_version` reflects the verified master build.
+- Bumped `boringssl_zig` to 0.6.1 for the same Zig master
+  compatibility fixes.
 - Reworked the public README and usage docs around stable embedding,
   interop, benchmark, and conformance workflows.
 - Removed tracked investigation/status notes that duplicated local

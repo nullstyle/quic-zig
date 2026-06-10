@@ -1617,7 +1617,7 @@ fn runClient(
     defer tickets.deinit();
     try client_tls.setNewSessionCallback(captureSessionTicket, &tickets);
 
-    const server_name_z = try allocator.dupeZ(u8, opts.server_name);
+    const server_name_z = try allocator.dupeSentinel(u8, opts.server_name, 0);
     defer allocator.free(server_name_z);
 
     const mode = clientMode(opts.testcase);

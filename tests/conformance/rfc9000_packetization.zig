@@ -325,10 +325,10 @@ test "NORMATIVE PADDING and PING are absent from the retransmit-frame union [RFC
     // `ping` variant; we mirror that here as a compile-time tag-list
     // inspection so a future addition of either tag would have to
     // delete this test.
-    const tags = std.meta.fields(sent_packets.RetransmitFrame);
-    inline for (tags) |t| {
-        try std.testing.expect(!std.mem.eql(u8, t.name, "padding"));
-        try std.testing.expect(!std.mem.eql(u8, t.name, "ping"));
+    const tags = comptime std.meta.fieldNames(sent_packets.RetransmitFrame);
+    inline for (tags) |name| {
+        try std.testing.expect(!std.mem.eql(u8, name, "padding"));
+        try std.testing.expect(!std.mem.eql(u8, name, "ping"));
     }
 }
 
@@ -486,12 +486,14 @@ test "MUST round-trip CRYPTO_ERROR codes in the 0x0100..0x01ff range [RFC9000 §
     // Pick three samples spanning the range.
     const samples = [_]u64{ 0x0100, 0x0150, 0x01ff };
     for (samples) |code| {
-        const f: frame.Frame = .{ .connection_close = .{
-            .is_transport = true,
-            .error_code = code,
-            .frame_type = 0x06, // CRYPTO frame
-            .reason_phrase = "tls alert",
-        } };
+        const f: frame.Frame = .{
+            .connection_close = .{
+                .is_transport = true,
+                .error_code = code,
+                .frame_type = 0x06, // CRYPTO frame
+                .reason_phrase = "tls alert",
+            },
+        };
         var buf: [128]u8 = undefined;
         const written = try frame.encode(&buf, f);
         const decoded = try frame.decode(buf[0..written]);

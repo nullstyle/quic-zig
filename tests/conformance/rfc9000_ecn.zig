@@ -151,13 +151,13 @@ test "NORMATIVE Connection.ecn_enabled defaults to true [RFC9000 §13.4]" {
     // the default by reading the declared field default off the
     // `Connection` type via Zig's reflection — no TLS context
     // required.
-    const fields = @typeInfo(quic_zig.Connection).@"struct".fields;
+    const info = @typeInfo(quic_zig.Connection).@"struct";
     comptime var found = false;
     comptime var default: bool = false;
-    inline for (fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, "ecn_enabled")) {
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, FieldType, attrs| {
+        if (comptime std.mem.eql(u8, name, "ecn_enabled")) {
             found = true;
-            default = comptime f.defaultValue() orelse
+            default = comptime attrs.defaultValue(FieldType) orelse
                 @compileError("ecn_enabled has no default value");
         }
     }

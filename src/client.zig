@@ -305,7 +305,7 @@ pub const Client = struct {
         // string; copy under the caller's allocator. Ownership stays
         // with us until either `Connection.bind` consumes it (after
         // which we can free it) or we hit an early errdefer.
-        const server_name_z = config.allocator.dupeZ(u8, config.server_name) catch
+        const server_name_z = config.allocator.dupeSentinel(u8, config.server_name, 0) catch
             return Error.OutOfMemory;
         defer config.allocator.free(server_name_z);
 
