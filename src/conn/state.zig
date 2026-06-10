@@ -2573,7 +2573,7 @@ pub const Connection = struct {
         }
         self.primaryPath().path.local_cid = self.local_scid;
         self.local_scid_set = true;
-        try _internal.rememberLocalCid(self,0, 0, 0, self.local_scid, @splat(0));
+        try _internal.rememberLocalCid(self, 0, 0, 0, self.local_scid, @splat(0));
     }
 
     /// Length of the local SCID — also the length of the DCID the
@@ -2675,7 +2675,7 @@ pub const Connection = struct {
     /// the embedder issues on `path_id`. Useful when minting CIDs
     /// outside of `replenishConnectionIds`.
     pub fn nextLocalConnectionIdSequence(self: *const Connection, path_id: u32) u64 {
-        return _internal.nextLocalCidSequence(self,path_id);
+        return _internal.nextLocalCidSequence(self, path_id);
     }
 
     /// Number of currently-active local SCIDs across all paths
@@ -3806,7 +3806,7 @@ pub const Connection = struct {
             .active_count = self.localCidActiveCountForPath(path_id),
             .active_limit = self.peerActiveConnectionIdLimitUsize(),
             .issue_budget = self.localConnectionIdIssueBudget(path_id),
-            .next_sequence_number = _internal.nextLocalCidSequence(self,path_id),
+            .next_sequence_number = _internal.nextLocalCidSequence(self, path_id),
             .blocked_next_sequence_number = blocked_next_sequence_number,
         };
     }
@@ -4102,9 +4102,9 @@ pub const Connection = struct {
         stateless_reset_token: [16]u8,
     ) Error!void {
         if (cid.len > path_mod.max_cid_len) return Error.DcidTooLong;
-        try _internal.ensureCanIssueLocalCid(self,0, sequence_number, retire_prior_to, cid.len);
+        try _internal.ensureCanIssueLocalCid(self, 0, sequence_number, retire_prior_to, cid.len);
         const local_cid = ConnectionId.fromSlice(cid);
-        try _internal.ensureLocalCidAvailable(self,0, sequence_number, local_cid);
+        try _internal.ensureLocalCidAvailable(self, 0, sequence_number, local_cid);
         for (self.pending_frames.new_connection_ids.items) |item| {
             if (item.sequence_number == sequence_number) {
                 if (!std.mem.eql(u8, item.connection_id.slice(), cid)) return Error.ConnectionIdAlreadyInUse;
@@ -4113,14 +4113,14 @@ pub const Connection = struct {
         }
         var connection_id: frame_types.ConnId = .{ .len = @intCast(cid.len) };
         @memcpy(connection_id.bytes[0..cid.len], cid);
-        try _internal.rememberLocalCid(self,0, sequence_number, retire_prior_to, local_cid, stateless_reset_token);
+        try _internal.rememberLocalCid(self, 0, sequence_number, retire_prior_to, local_cid, stateless_reset_token);
         try self.pending_frames.new_connection_ids.append(self.allocator, .{
             .sequence_number = sequence_number,
             .retire_prior_to = retire_prior_to,
             .connection_id = connection_id,
             .stateless_reset_token = stateless_reset_token,
         });
-        _internal.refreshConnectionIdEventsForPath(self,0);
+        _internal.refreshConnectionIdEventsForPath(self, 0);
     }
 
     /// Queue a RETIRE_CONNECTION_ID frame asking the peer to drop a
@@ -4351,8 +4351,8 @@ pub const Connection = struct {
             }
             if (path_id > self.local_max_path_id) return Error.PathLimitExceeded;
             if (local_cid.len == 0 or peer_cid.len == 0) return Error.ConnectionIdRequired;
-            try _internal.ensureCanIssueLocalCid(self,path_id, 0, 0, local_cid.len);
-            try _internal.ensureLocalCidAvailable(self,path_id, 0, local_cid);
+            try _internal.ensureCanIssueLocalCid(self, path_id, 0, 0, local_cid.len);
+            try _internal.ensureLocalCidAvailable(self, path_id, 0, local_cid);
         }
         const opened_path_id = try self.paths.openPath(
             self.allocator,
@@ -4366,7 +4366,7 @@ pub const Connection = struct {
         if (self.paths.get(opened_path_id)) |new_path| {
             new_path.pmtudInit(self.pmtud_config);
         }
-        try _internal.rememberLocalCid(self,opened_path_id, 0, 0, local_cid, @splat(0));
+        try _internal.rememberLocalCid(self, opened_path_id, 0, 0, local_cid, @splat(0));
         return opened_path_id;
     }
 
@@ -4518,7 +4518,7 @@ pub const Connection = struct {
         path_id: u32,
         provisions: []const ConnectionIdProvision,
     ) Error!usize {
-        try _internal.ensureCanIssueCidForPathId(self,path_id);
+        try _internal.ensureCanIssueCidForPathId(self, path_id);
         return self.replenishLocalConnectionIds(path_id, provisions);
     }
 
@@ -4531,7 +4531,7 @@ pub const Connection = struct {
         if (self.pendingPathCidsBlocked()) |blocked| {
             if (blocked.path_id == path_id) {
                 var seq = blocked.next_sequence_number;
-                const next = _internal.nextLocalCidSequence(self,path_id);
+                const next = _internal.nextLocalCidSequence(self, path_id);
                 while (seq < next) : (seq += 1) {
                     const issued = self.localCidForSequence(path_id, seq) orelse continue;
                     if (path_id == 0) {
@@ -4557,7 +4557,7 @@ pub const Connection = struct {
 
         for (provisions) |provision| {
             if (self.localConnectionIdIssueBudget(path_id) == 0) break;
-            const sequence_number = _internal.nextLocalCidSequence(self,path_id);
+            const sequence_number = _internal.nextLocalCidSequence(self, path_id);
             if (path_id == 0) {
                 try self.queueNewConnectionId(
                     sequence_number,
@@ -4579,7 +4579,7 @@ pub const Connection = struct {
 
         if (queued > 0) {
             path_frame_queue.clearSatisfiedPathCidsBlocked(self, path_id);
-            _internal.refreshConnectionIdEventsForPath(self,path_id);
+            _internal.refreshConnectionIdEventsForPath(self, path_id);
         }
         return queued;
     }
@@ -7481,9 +7481,7 @@ pub const Connection = struct {
     /// closing-state-only "scan for peer CONNECTION_CLOSE, otherwise
     /// flag attribution" tail.
     pub fn closingAttributionOnly(self: *const Connection) bool {
-        return self.lifecycle.closing_deadline_us != null
-            and self.lifecycle.pending_close == null
-            and self.lifecycle.draining_deadline_us == null;
+        return self.lifecycle.closing_deadline_us != null and self.lifecycle.pending_close == null and self.lifecycle.draining_deadline_us == null;
     }
 
     /// Decide whether the per-datagram packet loop should bail out
@@ -7940,9 +7938,21 @@ pub const Connection = struct {
         return false;
     }
 
-    pub fn handleVersionNegotiation( self: *Connection, bytes: []u8, now_us: u64, ) usize { return conn_recv_packet_handlers.handleVersionNegotiation(self, bytes, now_us); }
+    pub fn handleVersionNegotiation(
+        self: *Connection,
+        bytes: []u8,
+        now_us: u64,
+    ) usize {
+        return conn_recv_packet_handlers.handleVersionNegotiation(self, bytes, now_us);
+    }
 
-    pub fn handleShort( self: *Connection, bytes: []u8, now_us: u64, ) Error!usize { return conn_recv_packet_handlers.handleShort(self, bytes, now_us); }
+    pub fn handleShort(
+        self: *Connection,
+        bytes: []u8,
+        now_us: u64,
+    ) Error!usize {
+        return conn_recv_packet_handlers.handleShort(self, bytes, now_us);
+    }
 
     pub fn countFrames(payload: []const u8) u32 {
         var count: u32 = 0;
@@ -8017,13 +8027,37 @@ pub const Connection = struct {
         return .{ .opened = opened, .slot = slot };
     }
 
-    pub fn handleInitial( self: *Connection, bytes: []u8, now_us: u64, ) Error!usize { return conn_recv_packet_handlers.handleInitial(self, bytes, now_us); }
+    pub fn handleInitial(
+        self: *Connection,
+        bytes: []u8,
+        now_us: u64,
+    ) Error!usize {
+        return conn_recv_packet_handlers.handleInitial(self, bytes, now_us);
+    }
 
-    pub fn handleRetry( self: *Connection, bytes: []u8, now_us: u64, ) Error!usize { return conn_recv_packet_handlers.handleRetry(self, bytes, now_us); }
+    pub fn handleRetry(
+        self: *Connection,
+        bytes: []u8,
+        now_us: u64,
+    ) Error!usize {
+        return conn_recv_packet_handlers.handleRetry(self, bytes, now_us);
+    }
 
-    pub fn handleZeroRtt( self: *Connection, bytes: []u8, now_us: u64, ) Error!usize { return conn_recv_packet_handlers.handleZeroRtt(self, bytes, now_us); }
+    pub fn handleZeroRtt(
+        self: *Connection,
+        bytes: []u8,
+        now_us: u64,
+    ) Error!usize {
+        return conn_recv_packet_handlers.handleZeroRtt(self, bytes, now_us);
+    }
 
-    pub fn handleHandshake( self: *Connection, bytes: []u8, now_us: u64, ) Error!usize { return conn_recv_packet_handlers.handleHandshake(self, bytes, now_us); }
+    pub fn handleHandshake(
+        self: *Connection,
+        bytes: []u8,
+        now_us: u64,
+    ) Error!usize {
+        return conn_recv_packet_handlers.handleHandshake(self, bytes, now_us);
+    }
 
     pub fn dispatchFrames(
         self: *Connection,
@@ -8332,7 +8366,7 @@ pub const Connection = struct {
             .paths_blocked => |pb| self.pathIdAllowedByLocalLimit(pb.maximum_path_id),
             .path_cids_blocked => |pcb| blk: {
                 if (!self.pathIdAllowedByLocalLimit(pcb.path_id)) break :blk false;
-                const next = _internal.nextLocalCidSequence(self,pcb.path_id);
+                const next = _internal.nextLocalCidSequence(self, pcb.path_id);
                 if (pcb.next_sequence_number > next) {
                     self.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
                     break :blk false;
@@ -8467,7 +8501,12 @@ pub const Connection = struct {
         }
     }
 
-    pub fn handleNewConnectionId( self: *Connection, nc: frame_types.NewConnectionId, ) Error!void { return conn_recv_cid_token_handlers.handleNewConnectionId(self, nc); }
+    pub fn handleNewConnectionId(
+        self: *Connection,
+        nc: frame_types.NewConnectionId,
+    ) Error!void {
+        return conn_recv_cid_token_handlers.handleNewConnectionId(self, nc);
+    }
 
     /// Returns true (and increments the per-cycle counter) when the
     /// cumulative ACK range count for this `handle` cycle would exceed
@@ -8482,7 +8521,12 @@ pub const Connection = struct {
         return false;
     }
 
-    pub fn handleRetireConnectionId( self: *Connection, rc: frame_types.RetireConnectionId, ) void { return conn_recv_cid_token_handlers.handleRetireConnectionId(self, rc); }
+    pub fn handleRetireConnectionId(
+        self: *Connection,
+        rc: frame_types.RetireConnectionId,
+    ) void {
+        return conn_recv_cid_token_handlers.handleRetireConnectionId(self, rc);
+    }
 
     /// RFC 9000 §19.7 — server-issued NEW_TOKEN. The frame is only
     /// legal at application encryption level (filtered upstream by
@@ -8490,25 +8534,63 @@ pub const Connection = struct {
     /// NEW_TOKEN; if a peer-acting-as-server sends it to us we
     /// raise PROTOCOL_VIOLATION. Clients hand the borrowed slice
     /// straight to the embedder callback if one is installed.
-    pub fn handleNewToken(self: *Connection, nt: frame_types.NewToken) void { return conn_recv_cid_token_handlers.handleNewToken(self, nt); }
+    pub fn handleNewToken(self: *Connection, nt: frame_types.NewToken) void {
+        return conn_recv_cid_token_handlers.handleNewToken(self, nt);
+    }
 
-    pub fn pathAckToAck(pa: frame_types.PathAck) frame_types.Ack { return conn_recv_multipath_handlers.pathAckToAck(pa); }
+    pub fn pathAckToAck(pa: frame_types.PathAck) frame_types.Ack {
+        return conn_recv_multipath_handlers.pathAckToAck(pa);
+    }
 
-    pub fn handlePathAck( self: *Connection, pa: frame_types.PathAck, now_us: u64, ) Error!void { return conn_recv_multipath_handlers.handlePathAck(self, pa, now_us); }
+    pub fn handlePathAck(
+        self: *Connection,
+        pa: frame_types.PathAck,
+        now_us: u64,
+    ) Error!void {
+        return conn_recv_multipath_handlers.handlePathAck(self, pa, now_us);
+    }
 
-    pub fn handlePathAbandon( self: *Connection, pa: frame_types.PathAbandon, now_us: u64, ) void { return conn_recv_multipath_handlers.handlePathAbandon(self, pa, now_us); }
+    pub fn handlePathAbandon(
+        self: *Connection,
+        pa: frame_types.PathAbandon,
+        now_us: u64,
+    ) void {
+        return conn_recv_multipath_handlers.handlePathAbandon(self, pa, now_us);
+    }
 
-    pub fn handlePathStatus( self: *Connection, ps: frame_types.PathStatus, available: bool, ) void { return conn_recv_multipath_handlers.handlePathStatus(self, ps, available); }
+    pub fn handlePathStatus(
+        self: *Connection,
+        ps: frame_types.PathStatus,
+        available: bool,
+    ) void {
+        return conn_recv_multipath_handlers.handlePathStatus(self, ps, available);
+    }
 
-    pub fn handlePathNewConnectionId( self: *Connection, nc: frame_types.PathNewConnectionId, ) Error!void { return conn_recv_multipath_handlers.handlePathNewConnectionId(self, nc); }
+    pub fn handlePathNewConnectionId(
+        self: *Connection,
+        nc: frame_types.PathNewConnectionId,
+    ) Error!void {
+        return conn_recv_multipath_handlers.handlePathNewConnectionId(self, nc);
+    }
 
-    pub fn handlePathRetireConnectionId( self: *Connection, rc: frame_types.PathRetireConnectionId, ) void { return conn_recv_multipath_handlers.handlePathRetireConnectionId(self, rc); }
+    pub fn handlePathRetireConnectionId(
+        self: *Connection,
+        rc: frame_types.PathRetireConnectionId,
+    ) void {
+        return conn_recv_multipath_handlers.handlePathRetireConnectionId(self, rc);
+    }
 
-    pub fn handleMaxPathId(self: *Connection, mp: frame_types.MaxPathId) void { return conn_recv_multipath_handlers.handleMaxPathId(self, mp); }
+    pub fn handleMaxPathId(self: *Connection, mp: frame_types.MaxPathId) void {
+        return conn_recv_multipath_handlers.handleMaxPathId(self, mp);
+    }
 
-    pub fn handlePathsBlocked(self: *Connection, pb: frame_types.PathsBlocked) void { return conn_recv_multipath_handlers.handlePathsBlocked(self, pb); }
+    pub fn handlePathsBlocked(self: *Connection, pb: frame_types.PathsBlocked) void {
+        return conn_recv_multipath_handlers.handlePathsBlocked(self, pb);
+    }
 
-    pub fn handlePathCidsBlocked(self: *Connection, pcb: frame_types.PathCidsBlocked) void { return conn_recv_multipath_handlers.handlePathCidsBlocked(self, pcb); }
+    pub fn handlePathCidsBlocked(self: *Connection, pcb: frame_types.PathCidsBlocked) void {
+        return conn_recv_multipath_handlers.handlePathCidsBlocked(self, pcb);
+    }
 
     /// Handle a received ALTERNATIVE_V4_ADDRESS frame
     /// (draft-munizaga-quic-alternative-server-address-00 §6).
@@ -8569,7 +8651,12 @@ pub const Connection = struct {
         return self.highest_alternative_address_sequence_seen;
     }
 
-    pub fn handleStopSending( self: *Connection, ss: frame_types.StopSending, ) Error!void { return conn_recv_stream_control_handlers.handleStopSending(self, ss); }
+    pub fn handleStopSending(
+        self: *Connection,
+        ss: frame_types.StopSending,
+    ) Error!void {
+        return conn_recv_stream_control_handlers.handleStopSending(self, ss);
+    }
 
     pub fn handleMaxData(self: *Connection, md: frame_types.MaxData) void {
         return conn_recv_flow_handlers.handleMaxData(self, md);
@@ -8905,11 +8992,27 @@ pub const Connection = struct {
         }
     }
 
-    pub fn handleResetStream(self: *Connection, rs: frame_types.ResetStream) Error!void { return conn_recv_stream_control_handlers.handleResetStream(self, rs); }
+    pub fn handleResetStream(self: *Connection, rs: frame_types.ResetStream) Error!void {
+        return conn_recv_stream_control_handlers.handleResetStream(self, rs);
+    }
 
-    pub fn handleAckAtLevel( self: *Connection, lvl: EncryptionLevel, a: frame_types.Ack, now_us: u64, ) Error!void { return conn_recv_ack_handlers.handleAckAtLevel(self, lvl, a, now_us); }
+    pub fn handleAckAtLevel(
+        self: *Connection,
+        lvl: EncryptionLevel,
+        a: frame_types.Ack,
+        now_us: u64,
+    ) Error!void {
+        return conn_recv_ack_handlers.handleAckAtLevel(self, lvl, a, now_us);
+    }
 
-    pub fn handleApplicationAckOnPath( self: *Connection, path: *PathState, a: frame_types.Ack, now_us: u64, ) Error!void { return conn_recv_ack_handlers.handleApplicationAckOnPath(self, path, a, now_us); }
+    pub fn handleApplicationAckOnPath(
+        self: *Connection,
+        path: *PathState,
+        a: frame_types.Ack,
+        now_us: u64,
+    ) Error!void {
+        return conn_recv_ack_handlers.handleApplicationAckOnPath(self, path, a, now_us);
+    }
 
     pub fn dispatchAckedPacketToStreams(
         self: *Connection,
@@ -9013,7 +9116,12 @@ pub const Connection = struct {
         }
     }
 
-    pub fn dispatchLostControlFrames( self: *Connection, packet: *const sent_packets_mod.SentPacket, ) Error!bool { return conn_recv_ack_handlers.dispatchLostControlFrames(self, packet); }
+    pub fn dispatchLostControlFrames(
+        self: *Connection,
+        packet: *const sent_packets_mod.SentPacket,
+    ) Error!bool {
+        return conn_recv_ack_handlers.dispatchLostControlFrames(self, packet);
+    }
 
     pub fn dispatchLostControlFramesOnPath(
         self: *Connection,

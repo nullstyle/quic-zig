@@ -105,7 +105,7 @@ pub fn handlePathsBlocked(self: *Connection, pb: frame_types.PathsBlocked) void 
 
 pub fn handlePathCidsBlocked(self: *Connection, pcb: frame_types.PathCidsBlocked) void {
     if (!self.pathIdAllowedByLocalLimit(pcb.path_id)) return;
-    const next = _internal.nextLocalCidSequence(self,pcb.path_id);
+    const next = _internal.nextLocalCidSequence(self, pcb.path_id);
     if (pcb.next_sequence_number > next) {
         self.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
         return;

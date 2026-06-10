@@ -4059,7 +4059,7 @@ test "buildPreferredAddressParam round-trips through Params codec" {
         .ipv4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = 4433 },
         .ipv6 = .{ .bytes = .{
             0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 1,
+            0,    0,    0,    0,    0, 0, 0, 1,
         }, .port = 4434, .flow = 0 },
     };
     const cid: [8]u8 = .{ 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe };

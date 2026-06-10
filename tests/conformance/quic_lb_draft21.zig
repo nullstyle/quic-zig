@@ -719,7 +719,7 @@ test "MUST reject installLbConfig with mismatched cidLength [server rotation]" {
         .transport_params = handshake_fixture.defaultParams(),
         .quic_lb = .{
             .config_id = 0,
-            .server_id = try lb.ServerId.fromSlice(&.{ 0xaa }),
+            .server_id = try lb.ServerId.fromSlice(&.{0xaa}),
             .nonce_len = 6, // cidLength = 8
         },
     });

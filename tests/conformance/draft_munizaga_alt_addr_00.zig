@@ -262,7 +262,7 @@ test "NORMATIVE flag byte's low 6 bits are unused (encoder zeroes them; decoder 
         0x9d, 0x58, 0x45, 0xe2, // type varint
         0b1000_1010, // Preferred=1, Retire=0, junk in unused
         0x00, // status seq = 0
-        192, 0,    2, 1, 0x11, 0x51, // ipv4 + port
+        192, 0, 2, 1, 0x11, 0x51, // ipv4 + port
     };
     const d = try frame.decode(&dec_input);
     try std.testing.expect(d.frame == .alternative_v4_address);

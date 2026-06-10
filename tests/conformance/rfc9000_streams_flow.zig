@@ -136,13 +136,15 @@ test "MUST reject a peer-initiated stream whose initiator bit conflicts with pee
     // is omitted (offset implicitly 0); LEN flag is set so the data
     // length is explicit. Type byte: 0x08 | LEN(0x02) = 0x0a.
     var buf: [32]u8 = undefined;
-    const n = try frame.encode(&buf, .{ .stream = .{
-        .stream_id = 1, // server-initiated bidi from the client → forbidden
-        .data = "x",
-        .has_offset = false,
-        .has_length = true,
-        .fin = false,
-    } });
+    const n = try frame.encode(&buf, .{
+        .stream = .{
+            .stream_id = 1, // server-initiated bidi from the client → forbidden
+            .data = "x",
+            .has_offset = false,
+            .has_length = true,
+            .fin = false,
+        },
+    });
 
     const close_event = try pair.injectFrameAtServer(buf[0..n]);
     const ev = close_event orelse return error.TestExpectedClose;
@@ -352,14 +354,16 @@ test "MUST emit a FLOW_CONTROL_ERROR CONNECTION_CLOSE on connection-data overflo
     try pair.driveToHandshakeConfirmed();
 
     var buf: [32]u8 = undefined;
-    const n = try frame.encode(&buf, .{ .stream = .{
-        .stream_id = 0, // client-initiated bidi — natural for this direction
-        .offset = 1 << 21,
-        .data = "x",
-        .has_offset = true,
-        .has_length = true,
-        .fin = false,
-    } });
+    const n = try frame.encode(&buf, .{
+        .stream = .{
+            .stream_id = 0, // client-initiated bidi — natural for this direction
+            .offset = 1 << 21,
+            .data = "x",
+            .has_offset = true,
+            .has_length = true,
+            .fin = false,
+        },
+    });
 
     const close_event = try pair.injectFrameAtServer(buf[0..n]);
     const ev = close_event orelse return error.TestExpectedClose;
@@ -566,13 +570,15 @@ test "MUST emit STREAM_LIMIT_ERROR CONNECTION_CLOSE when peer opens above the lo
     try pair.driveToHandshakeConfirmed();
 
     var buf: [32]u8 = undefined;
-    const n = try frame.encode(&buf, .{ .stream = .{
-        .stream_id = 400, // 101st client-bidi — one past the local limit of 100
-        .data = "x",
-        .has_offset = false,
-        .has_length = true,
-        .fin = false,
-    } });
+    const n = try frame.encode(&buf, .{
+        .stream = .{
+            .stream_id = 400, // 101st client-bidi — one past the local limit of 100
+            .data = "x",
+            .has_offset = false,
+            .has_length = true,
+            .fin = false,
+        },
+    });
 
     const close_event = try pair.injectFrameAtServer(buf[0..n]);
     const ev = close_event orelse return error.TestExpectedClose;
@@ -631,9 +637,9 @@ test "MUST honour active_connection_id_limit when issuing NEW_CONNECTION_ID [RFC
             .connection_id = &cid_bufs[i],
             .stateless_reset_token = .{
                 @as(u8, @intCast(i)), 0xa1, 0xa2, 0xa3,
-                0xa4,                  0xa5, 0xa6, 0xa7,
-                0xa8,                  0xa9, 0xaa, 0xab,
-                0xac,                  0xad, 0xae, 0xaf,
+                0xa4,                 0xa5, 0xa6, 0xa7,
+                0xa8,                 0xa9, 0xaa, 0xab,
+                0xac,                 0xad, 0xae, 0xaf,
             },
         };
     }

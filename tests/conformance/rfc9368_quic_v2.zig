@@ -268,7 +268,9 @@ test "version_information rejects mis-sized wire payload [RFC9368 §5 ¶3]" {
     const malformed = [_]u8{
         0x40, 0x11, // id = 0x11 (varint, 2-byte form)
         0x03, // len = 3
-        0xaa, 0xbb, 0xcc,
+        0xaa,
+        0xbb,
+        0xcc,
     };
     try std.testing.expectError(transport_params_mod.Error.InvalidValue, TransportParams.decode(&malformed));
 

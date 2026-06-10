@@ -164,17 +164,19 @@ test "MUST allow encoder to clear the QUIC Bit on a long-header packet [RFC9287 
     // gate on the receive side, modeled at the conn layer).
     const dcid = try header.ConnId.fromSlice(&.{ 1, 2, 3, 4 });
     const scid = try header.ConnId.fromSlice(&.{ 5, 6, 7, 8 });
-    const h: header.Header = .{ .initial = .{
-        .version = 0x00000001,
-        .dcid = dcid,
-        .scid = scid,
-        .token = &.{},
-        .pn_length = .one,
-        .pn_truncated = 0x00,
-        .payload_length = 17, // 1 PN byte + 16 tag bytes
-        .reserved_bits = 0,
-        .quic_bit = 0,
-    } };
+    const h: header.Header = .{
+        .initial = .{
+            .version = 0x00000001,
+            .dcid = dcid,
+            .scid = scid,
+            .token = &.{},
+            .pn_length = .one,
+            .pn_truncated = 0x00,
+            .payload_length = 17, // 1 PN byte + 16 tag bytes
+            .reserved_bits = 0,
+            .quic_bit = 0,
+        },
+    };
     var buf: [64]u8 = undefined;
     const n = try header.encode(&buf, h);
 
@@ -268,16 +270,18 @@ test "MUST decode a packet whose QUIC Bit is 1 (default) [RFC9287 §3]" {
     // The default — and what every QUIC v1 peer without grease
     // support emits — is QUIC Bit = 1. Confirm parse round-trips.
     const dcid = try header.ConnId.fromSlice(&.{ 0xde, 0xad });
-    const h: header.Header = .{ .initial = .{
-        .version = 1,
-        .dcid = dcid,
-        .scid = dcid,
-        .token = &.{},
-        .pn_length = .one,
-        .pn_truncated = 0,
-        .payload_length = 17,
-        .quic_bit = 1, // explicit
-    } };
+    const h: header.Header = .{
+        .initial = .{
+            .version = 1,
+            .dcid = dcid,
+            .scid = dcid,
+            .token = &.{},
+            .pn_length = .one,
+            .pn_truncated = 0,
+            .payload_length = 17,
+            .quic_bit = 1, // explicit
+        },
+    };
     var buf: [64]u8 = undefined;
     const n = try header.encode(&buf, h);
     // First byte: form=1, QUIC=1, type=Initial(0), reserved=0,

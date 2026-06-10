@@ -579,14 +579,16 @@ test "round-trip: ALTERNATIVE_V6_ADDRESS with status_sequence > single-byte vari
         0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
     };
-    const f: Frame = .{ .alternative_v6_address = .{
-        .preferred = true,
-        .retire = false,
-        // 0x4001 forces a 2-byte varint encoding for the sequence number.
-        .status_sequence_number = 0x4001,
-        .address = ipv6,
-        .port = 8443,
-    } };
+    const f: Frame = .{
+        .alternative_v6_address = .{
+            .preferred = true,
+            .retire = false,
+            // 0x4001 forces a 2-byte varint encoding for the sequence number.
+            .status_sequence_number = 0x4001,
+            .address = ipv6,
+            .port = 8443,
+        },
+    };
     const d = try roundTrip(f);
     try std.testing.expect(d.frame == .alternative_v6_address);
     const got = d.frame.alternative_v6_address;

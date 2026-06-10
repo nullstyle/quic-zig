@@ -703,11 +703,10 @@ test "parse: RFC 9001 §A.2 unprotected client Initial header" {
 test "encode/parse: round-trip RFC 9001 §A.2 client Initial header" {
     const original = [_]u8{
         0xc3, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08,
-        0x00,
-        0x00,
-        0x44, 0x9e,
-        0x00, 0x00, 0x00, 0x02,
+        0x08, 0x83, 0x94, 0xc8, 0xf0,
+        0x3e, 0x51, 0x57, 0x08, 0x00,
+        0x00, 0x44, 0x9e, 0x00, 0x00,
+        0x00, 0x02,
     };
     const parsed = try parse(&original, 0);
 
@@ -917,7 +916,7 @@ test "parse rejects truncated PN in short header" {
 test "Header.dcid accessor returns the right CID for each variant" {
     const cid1 = try ConnId.fromSlice(&[_]u8{ 0x01, 0x02 });
     const cid2 = try ConnId.fromSlice(&[_]u8{ 0x03, 0x04 });
-    const cid3 = try ConnId.fromSlice(&[_]u8{ 0x05 });
+    const cid3 = try ConnId.fromSlice(&[_]u8{0x05});
 
     const i: Header = .{ .initial = .{
         .version = 1,
@@ -1104,19 +1103,21 @@ fn fuzzHeaderRoundTrip(_: void, smith: *std.testing.Smith) anyerror!void {
     const reserved_bits: u2 = @intCast(smith.valueRangeAtMost(u8, 0, 3));
 
     const header: Header = switch (smith.valueRangeAtMost(u8, 0, 5)) {
-        0 => .{ .initial = .{
-            .version = 1,
-            .dcid = dcid,
-            .scid = scid,
-            .token = token,
-            .pn_length = pn_length,
-            .pn_truncated = pn_truncated,
-            // payload_length is the on-wire Length field; minimum is
-            // PN bytes plus an AEAD tag (16). Anything plausible is
-            // fine — encode just writes it as a varint.
-            .payload_length = 16 + @as(u64, pn_length.bytes()),
-            .reserved_bits = reserved_bits,
-        } },
+        0 => .{
+            .initial = .{
+                .version = 1,
+                .dcid = dcid,
+                .scid = scid,
+                .token = token,
+                .pn_length = pn_length,
+                .pn_truncated = pn_truncated,
+                // payload_length is the on-wire Length field; minimum is
+                // PN bytes plus an AEAD tag (16). Anything plausible is
+                // fine — encode just writes it as a varint.
+                .payload_length = 16 + @as(u64, pn_length.bytes()),
+                .reserved_bits = reserved_bits,
+            },
+        },
         1 => .{ .zero_rtt = .{
             .version = 1,
             .dcid = dcid,

@@ -186,7 +186,7 @@ test "Iterator: rejects gap that would underflow next range" {
     // largest=10, first_range=2 → range [8..10]. Then gap=10 means
     // next_largest = 8 - 10 - 2 → underflow.
     var ranges_buf: [4]u8 = undefined;
-    const len = try writeRanges(&ranges_buf, &.{ .{ .gap = 10, .length = 0 } });
+    const len = try writeRanges(&ranges_buf, &.{.{ .gap = 10, .length = 0 }});
     var it = Iterator{
         .largest_acked = 10,
         .first_range = 2,

@@ -298,12 +298,23 @@ test "Server VN per-source rate limiter caps VN responses (hardening guide §4.4
     // fire here.
     var probe = [_]u8{
         0xc0,
-        0xde, 0xad, 0xbe, 0xef,
+        0xde,
+        0xad,
+        0xbe,
+        0xef,
         0x04,
-        0xa0, 0xa1, 0xa2, 0xa3,
+        0xa0,
+        0xa1,
+        0xa2,
+        0xa3,
         0x04,
-        0xb0, 0xb1, 0xb2, 0xb3,
-        0x00, 0x00, 0x00,
+        0xb0,
+        0xb1,
+        0xb2,
+        0xb3,
+        0x00,
+        0x00,
+        0x00,
     };
     const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
 
@@ -361,12 +372,23 @@ test "Server VN rate limit and Initial rate limit use independent counters" {
 
     var vn_probe = [_]u8{
         0xc0,
-        0xde, 0xad, 0xbe, 0xef,
+        0xde,
+        0xad,
+        0xbe,
+        0xef,
         0x04,
-        0xa0, 0xa1, 0xa2, 0xa3,
+        0xa0,
+        0xa1,
+        0xa2,
+        0xa3,
         0x04,
-        0xb0, 0xb1, 0xb2, 0xb3,
-        0x00, 0x00, 0x00,
+        0xb0,
+        0xb1,
+        0xb2,
+        0xb3,
+        0x00,
+        0x00,
+        0x00,
     };
     var v1_initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
 
@@ -425,11 +447,20 @@ test "Server.feed without `from` drops unsupported-version packets" {
 
     var bytes = [_]u8{
         0xc0,
-        0xde, 0xad, 0xbe, 0xef,
+        0xde,
+        0xad,
+        0xbe,
+        0xef,
         0x04,
-        0xa0, 0xa1, 0xa2, 0xa3,
+        0xa0,
+        0xa1,
+        0xa2,
+        0xa3,
         0x04,
-        0xb0, 0xb1, 0xb2, 0xb3,
+        0xb0,
+        0xb1,
+        0xb2,
+        0xb3,
         0x00,
     };
 
@@ -2120,7 +2151,7 @@ test "Server.Config.preferred_address: openSlotFromInitial mints seq-1 alt-CID a
             .ipv4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = 4444 },
             .ipv6 = .{ .bytes = .{
                 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 1,
+                0,    0,    0,    0,    0, 0, 0, 1,
             }, .port = 4445, .flow = 0 },
         },
     });
@@ -2346,7 +2377,7 @@ test "Connection.acceptInitial: qns code path preserves preferred_address throug
         .ipv4_port = 444,
         .ipv6_address = .{
             0xfd, 0x00, 0xca, 0xfe, 0xca, 0xfe, 0x01, 0x00,
-            0, 0, 0, 0, 0, 0, 0x01, 0x00,
+            0,    0,    0,    0,    0,    0,    0x01, 0x00,
         },
         .ipv6_port = 444,
         .connection_id = quic_zig.conn.path.ConnectionId.fromSlice(&alt_cid),

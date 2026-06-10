@@ -369,7 +369,9 @@ test "MUST NOT accept a truncated CRYPTO whose Length exceeds remaining bytes [R
         0x06, // CRYPTO
         0x00, // offset = 0
         0x0a, // length = 10 — but only 3 data bytes follow
-        0x01, 0x02, 0x03,
+        0x01,
+        0x02,
+        0x03,
     };
     try std.testing.expectError(DecodeError.InsufficientBytes, decode(&bytes));
 }
@@ -497,7 +499,11 @@ test "NORMATIVE STREAM without LEN runs to the end of the slice [RFC9000 §19.8 
     const wire = [_]u8{
         0x08, // STREAM, no flags
         0x04, // stream_id = 4
-        0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xaa,
+        0xbb,
+        0xcc,
+        0xdd,
+        0xee,
     };
     const d = try decode(&wire);
     try std.testing.expect(d.frame == .stream);
@@ -783,12 +789,14 @@ test "MUST NOT accept NEW_CONNECTION_ID with retire_prior_to > sequence_number [
     const cid_bytes = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
     const reset: [16]u8 = @splat(0xc1);
     var buf: [64]u8 = undefined;
-    const n = try encode(&buf, .{ .new_connection_id = .{
-        .sequence_number = 5,
-        .retire_prior_to = 6, // > sequence_number — illegal
-        .connection_id = try types.ConnId.fromSlice(&cid_bytes),
-        .stateless_reset_token = reset,
-    } });
+    const n = try encode(&buf, .{
+        .new_connection_id = .{
+            .sequence_number = 5,
+            .retire_prior_to = 6, // > sequence_number — illegal
+            .connection_id = try types.ConnId.fromSlice(&cid_bytes),
+            .stateless_reset_token = reset,
+        },
+    });
 
     const close_event = try pair.injectFrameAtServer(buf[0..n]);
     const ev = close_event orelse return error.NoCloseEventEmitted;
@@ -926,12 +934,14 @@ test "MUST NOT accept a truncated PATH_RESPONSE (<8 data bytes) [RFC9000 §19.18
 test "NORMATIVE CONNECTION_CLOSE 0x1c carries error_code, frame_type, reason [RFC9000 §19.19 ¶?]" {
     // §19.19: type 0x1c is the transport-layer variant — carries
     // Error Code, Frame Type, Reason Phrase Length, Reason Phrase.
-    const f: types.Frame = .{ .connection_close = .{
-        .is_transport = true,
-        .error_code = 0x01, // INTERNAL_ERROR
-        .frame_type = 0x06, // CRYPTO
-        .reason_phrase = "TLS handshake failed",
-    } };
+    const f: types.Frame = .{
+        .connection_close = .{
+            .is_transport = true,
+            .error_code = 0x01, // INTERNAL_ERROR
+            .frame_type = 0x06, // CRYPTO
+            .reason_phrase = "TLS handshake failed",
+        },
+    };
     var buf: [64]u8 = undefined;
     const n = try encode(&buf, f);
     try std.testing.expectEqual(@as(u8, 0x1c), buf[0]);
@@ -1060,7 +1070,9 @@ test "MUST NOT accept a STREAM whose declared Length runs past the input [RFC900
         0x0a, // STREAM | LEN
         0x04, // stream_id = 4
         0x0a, // length = 10
-        0x01, 0x02, 0x03,
+        0x01,
+        0x02,
+        0x03,
     };
     try std.testing.expectError(DecodeError.InsufficientBytes, decode(&bytes));
 }
@@ -1070,7 +1082,10 @@ test "MUST NOT accept a NEW_TOKEN whose declared Length runs past the input [RFC
     const bytes = [_]u8{
         0x07, // NEW_TOKEN
         0x14, // length = 20
-        0xaa, 0xbb, 0xcc, 0xdd,
+        0xaa,
+        0xbb,
+        0xcc,
+        0xdd,
     };
     try std.testing.expectError(DecodeError.InsufficientBytes, decode(&bytes));
 }

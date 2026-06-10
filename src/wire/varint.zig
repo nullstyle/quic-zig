@@ -219,11 +219,10 @@ test "encodeFixed rejects value too large for length" {
 
 test "round-trip across length boundaries" {
     const cases = [_]u64{
-        0,                 1,                 62,        63,
-        64,                65,                16382,     16383,
-        16384,             16385,             (1 << 30) - 1,
-        1 << 30,           (1 << 30) + 1,     (1 << 62) - 2,
-        max_value,
+        0,             1,             62,            63,
+        64,            65,            16382,         16383,
+        16384,         16385,         (1 << 30) - 1, 1 << 30,
+        (1 << 30) + 1, (1 << 62) - 2, max_value,
     };
     for (cases) |v| {
         var buf: [max_len]u8 = undefined;
