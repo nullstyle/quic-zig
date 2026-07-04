@@ -231,8 +231,10 @@ pub const RetryTokenKey = conn.RetryTokenKey;
 /// or malformed.
 pub const RetryTokenValidationResult = conn.RetryTokenValidationResult;
 
+/// The library version, single-sourced from `build.zig.zon` via the
+/// `build_options` module so it can never drift from the package manifest.
 pub fn version() []const u8 {
-    return "0.2.0";
+    return @import("build_options").version;
 }
 
 test {
@@ -252,7 +254,10 @@ test "phase 0: builds and links against boringssl-zig" {
     const digest = try boringssl.crypto.hash.Sha256.hash("quic_zig");
     try std.testing.expectEqual(@as(usize, 32), digest.len);
 
-    try std.testing.expectEqualStrings("0.2.0", version());
+    // Single-sourced from build.zig.zon; assert it is populated and
+    // well-formed rather than pinning a literal that must be bumped twice.
+    const v = version();
+    try std.testing.expect(v.len > 0 and std.mem.indexOfScalar(u8, v, '.') != null);
     try std.testing.expectEqual(@as(u32, 1), QUIC_VERSION_1);
     try std.testing.expectEqual(@as(u32, 0x6b3343cf), QUIC_VERSION_2);
 }

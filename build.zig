@@ -37,6 +37,13 @@ pub fn build(b: *std.Build) void {
     });
     quic_zig_mod.addImport("boringssl", boringssl_mod);
 
+    // Single-source the library version from build.zig.zon so `version()`
+    // can't drift from the package manifest (it silently did: 0.2.0 vs 0.3.0).
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    const build_options_mod = build_options.createModule();
+    quic_zig_mod.addImport("build_options", build_options_mod);
+
     const test_step = b.step("test", "Run quic_zig tests");
 
     const unit_tests = b.addTest(.{ .root_module = quic_zig_mod });
@@ -196,6 +203,7 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
     });
     bench_quic_zig_mod.addImport("boringssl", bench_boringssl_mod);
+    bench_quic_zig_mod.addImport("build_options", build_options_mod);
 
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("bench/main.zig"),
