@@ -231,7 +231,34 @@ switch (quic_zig.StreamType.fromId(id)) {
 
 `openNextBidi` / `openNextUni` pick the id automatically and return
 `Error.StreamLimitExceeded` when the peer's limit is reached without
-consuming the id (a later retry reuses it).
+consuming the id (a later retry reuses it). When a layer must know the id
+*before* opening — e.g. to run a GOAWAY / stream-limit gate keyed on it —
+`peekNextBidi()` / `peekNextUni()` return the id the matching `openNext*`
+would use next, without consuming it:
+
+```zig
+const id = conn.peekNextBidi();
+if (!localGoawayGate(id)) return error.RequestBlocked;
+const s = try conn.openNextBidi();   // reuses the peeked id
+```
+
+To observe stream completion and backpressure without reaching into the
+stream internals — which the transport's stream GC reclaims the moment a
+stream goes terminal — use the connection-level accessors:
+
+- `streamReadFin(id, dst)` reads like `streamRead` but also returns whether
+  the peer's FIN has been seen, captured inline with the read that drains
+  the stream (so you never have to re-inspect a soon-reaped stream).
+- `streamRecvState(id)` reports `fin_seen` / `reset_seen` / `terminal`,
+  distinguishing a clean FIN from an abortive RESET, or `null` once the
+  stream has been reaped or was never opened.
+- `streamSendStats(id)` snapshots `written` / `acked` / `buffered` /
+  `has_pending` for write backpressure, or `null` for a reaped stream.
+
+For RFC 9221 DATAGRAMs, `maxDatagramPayload()` returns the largest payload
+`sendDatagram` will currently accept — PMTU-aware and bounded by the peer's
+`max_datagram_frame_size` — so a caller can size buffers up front instead of
+probing for `Error.DatagramTooLarge`.
 
 `Connection.phase()` reports a coarse `quic_zig.ConnectionPhase` —
 `initial` → `handshake` → `established`, or `closing` / `draining` /

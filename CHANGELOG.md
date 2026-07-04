@@ -7,6 +7,56 @@ changes.
 
 ## [Unreleased]
 
+Downstream-driven follow-up to 0.4.0: additive, reap-robust public
+accessors and re-exports so an HTTP/3-class embedder can observe the
+transport's FIN / stream-id / datagram-size / send-stats / event-payload
+truth without reaching into internal modules or reimplementing bookkeeping
+the transport already owns. All changes are additive — no breaking upgrade
+actions.
+
+### Added
+
+- Top-level re-exports for the types carried through `ConnectionEvent`
+  (`DatagramSendEvent`, `FlowBlockedInfo` / `FlowBlockedKind` /
+  `FlowBlockedSource`, `ConnectionIdReplenishInfo`) plus `path.Address`
+  (the peer-address type used by `handle` / `pollDatagram`), so an embedder
+  can name the payloads it destructures out of `ConnectionEvent` without
+  reaching into `conn.*` / `conn.state.*` / `conn.path.*`.
+- `Connection.peekNextBidi` / `peekNextUni`: return the id `openNextBidi` /
+  `openNextUni` would use next, without consuming it or advancing the
+  counter — so an embedder can run a stream-limit / GOAWAY gate keyed on
+  the id *before* opening, then open.
+- `Connection.streamSendStats(id)` → `StreamSendStats { written, acked,
+  buffered, has_pending }`: a send-half backpressure snapshot that doesn't
+  reach through `stream(id).?.send` into `SendStream`. Returns `null` for a
+  stream not in the live table (never opened or already reaped).
+- `Connection.streamReadFin(id, dst)` → `StreamReadResult { n, fin }`: like
+  `streamRead` but reports the peer's FIN inline with the read that drains
+  it, so an embedder detects end-of-stream without inspecting the receive
+  half (which the stream GC reaps the moment it goes terminal).
+  `streamRead` keeps its `Error!usize` signature.
+- `Connection.streamRecvState(id)` → `?StreamRecvState { fin_seen,
+  reset_seen, terminal }`: a non-consuming recv-half query that
+  distinguishes a clean FIN from an abortive RESET (which
+  `recvFullyTerminated` collapses) and returns `null` for a reaped/unknown
+  stream — no `*Stream` to keep valid across a reap.
+- `Connection.maxDatagramPayload()`: the current maximum RFC 9221 DATAGRAM
+  payload, now public and PMTU-aware. It tracks the active path's validated
+  PMTU (grows on a validated larger path, shrinks after a black-hole)
+  rather than the static 1200-byte floor, still bounded by the peer's
+  `max_datagram_frame_size`. Behavior at the 1200-byte floor is unchanged,
+  and RFC 9221 §5 no-fragmentation is preserved by the existing send-time
+  build guard.
+
+### Changed
+
+- The QUIC interop endpoint now accepts the `ecn` testcase — it was missing
+  from `run_endpoint.sh`'s allow-list (so the runner's `ecn` cell hit the
+  catch-all `exit 127`) despite the endpoint always marking ECT(0) on
+  egress and parsing the TOS cmsg on ingress. The QNS Docker image and the
+  external-interop tool now pin Zig `0.17.0-dev.1158` to match
+  `build.zig.zon` instead of the stale `dev.269`.
+
 ## [0.4.0] - 2026-07-04
 
 Downstream-enablement release: transport-layer primitives an HTTP/3-class
