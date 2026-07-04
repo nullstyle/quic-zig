@@ -41,12 +41,12 @@ modes:
   against its seed `.corpus` (and a default input). This is part of the CI
   gate (`.github/workflows/test.yml`), so a seed that panics or trips a
   safety check fails the build like any other test.
-- **Deep, coverage-guided (Linux).** CI runs `zig build test --fuzz=$ITERS`
-  weekly on Linux (`.github/workflows/fuzz.yml`). To sweep every site in
-  parallel locally, use `just fuzz` (or `scripts/fuzz-parallel.sh [ITERS]
-  [JOBS]`, or `mise run fuzz`), which runs each site as its own
-  `zig build fuzz-<label> --fuzz=N` process. A single site on its own:
-  `zig build fuzz-open-1rtt --fuzz=1M`.
+- **Deep, coverage-guided (Linux).** Run `zig build test --fuzz=$ITERS`
+  (`just fuzz` / `mise run fuzz`), which is exactly what CI runs weekly on
+  Linux (`.github/workflows/fuzz.yml`). The fuzzer rotates across every
+  `std.testing.fuzz` site in the unfiltered test binary. It is
+  single-instance (see caveats), so it saturates one core; give it a large
+  `$ITERS` and let it run.
 
 ### Regression corpus
 
@@ -63,15 +63,18 @@ harness itself).
 
 ### Toolchain caveats
 
-- Do not use `zig build fuzz -j<N>` (the aggregate step): it multiplexes N
-  sites through one build-runner fuzz coordinator, which aborts ("reached
-  unreachable code") on both Linux and macOS — an upstream limitation
-  (ziglang/zig#25352, hard-coded `n_instances = 1`). The per-site
-  `fuzz-<label>` steps and the `scripts/fuzz-parallel.sh` driver sidestep
-  it by giving each site its own single-instance coordinator process
-  (matching `zig build test --fuzz`).
-- On macOS the `std.testing.fuzz` coverage-guided runtime aborts even
-  single-instance (reproduced with a trivial standalone test on
+- **Only the unfiltered binary can be fuzzed.** On 0.17.0-dev.1158, a test
+  binary built with a filter (`addTest(.filters = ...)`) aborts the
+  build-runner with "reached unreachable code" as soon as it runs under
+  `--fuzz`, while the unfiltered `zig build test --fuzz` runs cleanly
+  (confirmed on Linux: unfiltered exits 0 with 750k+ runs; a single
+  filtered site exits 1 on the same tree). So there is deliberately no
+  per-site or `-j<N>` parallel fuzz step — those all rely on filtered
+  binaries. Deep fuzzing is single-instance (n_instances = 1;
+  ziglang/zig#25352) until upstream fixes filtered-binary fuzzing or lifts
+  the instance cap.
+- On macOS the `std.testing.fuzz` coverage-guided runtime aborts even the
+  unfiltered binary (reproduced with a trivial standalone test on
   0.17.0-dev.1158 — a platform gap, not a target bug). Deep-fuzz on Linux
   or a Linux container; the smoke run works everywhere.
 

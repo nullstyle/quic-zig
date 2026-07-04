@@ -24,10 +24,10 @@ check-tools:
 test:
     zig build test
 
-# Deep coverage-guided fuzzing: every site in its own process (Linux).
-# Args: ITERS (per-site budget, default 1M), JOBS (default CPU count).
-fuzz iters="1M" jobs="":
-    ./scripts/fuzz-parallel.sh {{iters}} {{jobs}}
+# Deep coverage-guided fuzzing (single-instance; Linux). ITERS = input budget.
+# The fuzzer rotates across all sites in the unfiltered test binary.
+fuzz iters="1M":
+    zig build test --fuzz={{iters}}
 
 clean:
     rm -rf .zig-cache zig-out
