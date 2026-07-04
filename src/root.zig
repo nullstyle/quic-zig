@@ -141,6 +141,12 @@ pub const ConnectionEvent = conn.ConnectionEvent;
 /// so embedders (e.g. an HTTP/3 layer) needn't hand-roll stream-id bit math.
 pub const StreamType = conn.StreamType;
 
+/// Coarse connection lifecycle phase surfaced by `Connection.phase`:
+/// initial / handshake / established / closing / draining / closed. Lets an
+/// embedder gate stream creation and shutdown without inferring the epoch
+/// from `handshakeDone` / `closeState`.
+pub const ConnectionPhase = conn.ConnectionPhase;
+
 /// One received `ALTERNATIVE_V4/V6_ADDRESS` update surfaced via
 /// `Connection.pollEvent` (draft-munizaga-quic-alternative-server-address-00 §6).
 pub const AlternativeServerAddressEvent = conn.AlternativeServerAddressEvent;

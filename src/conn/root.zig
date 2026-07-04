@@ -85,6 +85,8 @@ pub const LifecycleState = lifecycle.LifecycleState;
 pub const ConnectionEvent = state.ConnectionEvent;
 /// (initiator, directionality) class in a stream id's low two bits (§2.1).
 pub const StreamType = state.StreamType;
+/// Coarse lifecycle phase: initial/handshake/established/closing/draining/closed.
+pub const ConnectionPhase = state.ConnectionPhase;
 /// One received ALTERNATIVE_V4/V6_ADDRESS update
 /// (draft-munizaga-quic-alternative-server-address-00 §6).
 pub const AlternativeServerAddressEvent = state.AlternativeServerAddressEvent;

@@ -474,6 +474,26 @@ pub const StreamType = enum(u2) {
     }
 };
 
+/// Coarse connection lifecycle phase for embedder state machines (e.g. an
+/// HTTP/3 layer gating stream creation and shutdown). Composes the
+/// handshake epoch with the RFC 9000 §10 close states so embedders don't
+/// have to infer them from `handshakeDone()` / `closeState()` / `haveSecret`
+/// by hand. See `Connection.phase`.
+pub const ConnectionPhase = enum {
+    /// Only Initial keys installed — still in the Initial exchange.
+    initial,
+    /// Handshake keys installed; TLS handshake not yet complete.
+    handshake,
+    /// 1-RTT (application) keys installed — the application-data phase.
+    established,
+    /// Local CONNECTION_CLOSE sent; draining output (RFC 9000 §10.2.1).
+    closing,
+    /// Peer CONNECTION_CLOSE received / stateless reset; draining (§10.2.2).
+    draining,
+    /// Terminal: fully closed, no further packets flow.
+    closed,
+};
+
 /// Tagged-union of all connection-level events the embedder polls via `nextEvent`.
 /// Each variant carries enough context for the embedder to react without re-querying
 /// Connection state.
@@ -7784,6 +7804,24 @@ pub const Connection = struct {
     /// Current public shutdown state.
     pub fn closeState(self: *const Connection) CloseState {
         return self.lifecycle.state();
+    }
+
+    /// The coarse `ConnectionPhase`. A non-open close state (closing /
+    /// draining / closed) always wins; otherwise the handshake epoch is
+    /// reported from the highest installed write keys: application →
+    /// `.established`, handshake → `.handshake`, else `.initial`. Composes
+    /// `closeState()` with `haveSecret()` so embedders (notably an HTTP/3
+    /// layer) needn't infer the epoch themselves.
+    pub fn phase(self: *const Connection) ConnectionPhase {
+        switch (self.closeState()) {
+            .closing => return .closing,
+            .draining => return .draining,
+            .closed => return .closed,
+            .open => {},
+        }
+        if (self.haveSecret(.application, .write)) return .established;
+        if (self.haveSecret(.handshake, .write)) return .handshake;
+        return .initial;
     }
 
     /// True after we've sent or received CONNECTION_CLOSE, received a

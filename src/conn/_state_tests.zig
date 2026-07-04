@@ -21,6 +21,7 @@ const Connection = state.Connection;
 const ConnectionCloseInfo = state.ConnectionCloseInfo;
 const ConnectionEvent = state.ConnectionEvent;
 const StreamType = state.StreamType;
+const ConnectionPhase = state.ConnectionPhase;
 const ConnectionId = state.ConnectionId;
 const ConnectionIdProvision = state.ConnectionIdProvision;
 const ConnectionIdReplenishInfo = state.ConnectionIdReplenishInfo;
@@ -2738,6 +2739,22 @@ test "openNextBidi surfaces StreamLimitExceeded without consuming the id" {
     // Not consumed: after the peer raises the limit the next open reuses index 0.
     conn.peer_max_streams_bidi = 1;
     try std.testing.expectEqual(@as(u64, 0), (try conn.openNextBidi()).id);
+}
+
+test "phase() reports initial before keys and closing after close()" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    // Fresh connection: no handshake/application keys yet.
+    try std.testing.expectEqual(ConnectionPhase.initial, conn.phase());
+
+    // A non-open close state wins over the handshake epoch.
+    conn.close(true, 0x1, "bye");
+    try std.testing.expectEqual(CloseState.closing, conn.closeState());
+    try std.testing.expectEqual(ConnectionPhase.closing, conn.phase());
 }
 
 test "send-side STREAM emission is capped by flow-control allowance" {
