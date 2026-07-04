@@ -957,6 +957,124 @@ test "client streams 16 KiB to server with 10% simulated loss" {
     try std.testing.expect(ss.recv.fin_seen);
 }
 
+test "loss recovery: a dropped 1-RTT packet is retransmitted and cwnd shrinks (L12)" {
+    // End-to-end pin for the Connection-level loss → retransmit →
+    // congestion-response chain that the module unit tests only exercise
+    // against hand-built primitives. We drop exactly one client→server
+    // 1-RTT data packet, then assert (a) all data still arrives (the lost
+    // frames were retransmitted) and (b) the client's congestion window
+    // drops below its value at drop time (NewReno reacted to the loss).
+    const allocator = std.testing.allocator;
+
+    var server_tls: boringssl.tls.Context = undefined;
+    var client_tls: boringssl.tls.Context = undefined;
+    try buildContexts(&server_tls, &client_tls);
+    defer server_tls.deinit();
+    defer client_tls.deinit();
+
+    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
+    defer client.deinit();
+    var server = try quic_zig.Connection.initServer(allocator, server_tls);
+    defer server.deinit();
+
+    try client.bind();
+    try server.bind();
+    client.peer = &server;
+    server.peer = &client;
+
+    const tp: quic_zig.tls.TransportParams = .{
+        .initial_max_data = 1 << 22,
+        .initial_max_stream_data_bidi_local = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_streams_bidi = 16,
+    };
+    try client.setTransportParams(tp);
+    try server.setTransportParams(tp);
+
+    try handshake(allocator, &client, &server);
+
+    try client.setPeerDcid(&ServerCid);
+    try client.setLocalScid(&ClientCid);
+    try server.setPeerDcid(&ClientCid);
+    try server.setLocalScid(&ServerCid);
+
+    const total: usize = 32 * 1024;
+    var data: [total]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(0x105);
+    prng.random().bytes(&data);
+
+    _ = try client.openBidi(0);
+    _ = try client.streamWrite(0, &data);
+    try client.streamFinish(0);
+
+    var pkt: [2048]u8 = undefined;
+    var rbuf: [4096]u8 = undefined;
+    var consumed: usize = 0;
+    var now_us: u64 = 1_000_000;
+    var iters: u32 = 0;
+
+    // Drop the 4th client→server 1-RTT data packet (early, while cwnd is
+    // near the initial window, so the post-loss halving is clearly below
+    // the drop-time value). Its data + subsequent acks let the client
+    // declare it lost via the packet threshold.
+    const drop_at: u32 = 4;
+    var client_pkts: u32 = 0;
+    var dropped = false;
+    var cwnd_at_drop: u64 = 0;
+    var min_cwnd_after_drop: u64 = std.math.maxInt(u64);
+
+    while (consumed < total) : (iters += 1) {
+        try std.testing.expect(iters < 500_000);
+
+        try client.tick(now_us);
+        try server.tick(now_us);
+
+        if (try client.poll(&pkt, now_us)) |n| {
+            client_pkts += 1;
+            if (!dropped and client_pkts == drop_at) {
+                dropped = true;
+                cwnd_at_drop = client.congestionWindow();
+                // Drop: do not deliver this packet to the server.
+            } else {
+                try server.handle(pkt[0..n], null, now_us);
+            }
+        }
+        if (dropped) {
+            const cw = client.congestionWindow();
+            if (cw < min_cwnd_after_drop) min_cwnd_after_drop = cw;
+        }
+        if (try server.poll(&pkt, now_us)) |n| {
+            try client.handle(pkt[0..n], null, now_us);
+        }
+
+        while (true) {
+            const got = try server.streamRead(0, &rbuf);
+            if (got == 0) break;
+            try std.testing.expectEqualSlices(u8, data[consumed .. consumed + got], rbuf[0..got]);
+            consumed += got;
+        }
+
+        now_us += 1_000;
+    }
+
+    // (a) Retransmission: every byte arrived despite the dropped packet,
+    // and the FIN was acknowledged.
+    try std.testing.expectEqual(total, consumed);
+    const cs = client.stream(0).?;
+    try std.testing.expectEqual(@as(u64, total), cs.send.ackedFloor());
+    try std.testing.expect(cs.send.fin_acked);
+    const ss = server.stream(0).?;
+    try std.testing.expect(ss.recv.fin_seen);
+
+    // (b) Congestion response: we really dropped a packet, and the client
+    // reduced cwnd below its drop-time value in reaction to the loss —
+    // while staying above zero (NewReno floors at min_window).
+    try std.testing.expect(dropped);
+    try std.testing.expect(cwnd_at_drop > 0);
+    try std.testing.expect(min_cwnd_after_drop < cwnd_at_drop);
+    try std.testing.expect(min_cwnd_after_drop > 0);
+}
+
 test "single-path NAT rebinding survives loss and reordering" {
     const allocator = std.testing.allocator;
 

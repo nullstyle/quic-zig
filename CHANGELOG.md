@@ -9,6 +9,12 @@ changes.
 
 ### Added
 
+- End-to-end loss-recovery test: drops one 1-RTT data packet through the
+  mock transport and asserts the lost frames are retransmitted (all data
+  + FIN still arrive) and the client's congestion window shrinks below its
+  drop-time value — exercising the Connection-level loss → retransmit →
+  NewReno response chain that was previously only unit-tested against
+  hand-built primitives.
 - Coverage-guided fuzz targets for the remaining untrusted-facing
   crypto/parse paths: the QUIC-LB CID decoder (`lb-decode`), the 1-RTT
   decrypt entry point (`open-1rtt`), and Initial key derivation
