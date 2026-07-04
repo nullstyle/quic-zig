@@ -281,3 +281,64 @@ test "decode: rejects too-short input" {
     var short: [4]u8 = .{ 0, 0, 0, 0 };
     try testing.expectError(Error.CidTooShort, decode(&short, cfg));
 }
+
+// -- fuzz harness --------------------------------------------------------
+//
+// The QUIC-LB decoder parses fully attacker-controlled Destination
+// Connection ID bytes (config-driven length math + Feistel/AES/nonce
+// crypto). All length arithmetic derives from the trusted `cfg`, which
+// `validate()` gates, and the attacker `cid` bytes never index anything
+// — but this target is regression insurance that the property holds:
+// across a matrix of valid configs (plaintext, single-pass AES,
+// four-pass Feistel) and arbitrary CID bytes of any length 0..20,
+// `decode` returns a value or a typed `Error` and never panics or reads
+// out of bounds. On success the decoded field lengths must match `cfg`.
+test "fuzz: lb decode never panics across CID lengths and configs" {
+    try std.testing.fuzz({}, fuzzLbDecode, .{
+        .corpus = &.{
+            "\x00", // pick config 0, empty CID → CidTooShort
+            "\x01\x40\xde\xad\xbe\xef\x11\x22\x33\x44", // single-pass-ish bytes
+            "\x02\x00\x31\x44\x1a\x9c\x69\xc2\x75", // four-pass-ish bytes
+            "\x00\xe0\xff\xff\xff\xff\xff\xff\xff\xff\xff", // config_id 0b111 unroutable path
+        },
+    });
+}
+
+fn fuzzLbDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    const key: [16]u8 = @splat(0x5a);
+    const configs = [_]LbConfig{
+        // §5.5 plaintext: server_id(4) + nonce(6) = combined 10.
+        .{
+            .config_id = 4,
+            .server_id = ServerId.fromSlice(&[_]u8{ 1, 2, 3, 4 }) catch unreachable,
+            .nonce_len = 6,
+        },
+        // §5.4.1 single-pass AES: server_id(8) + nonce(8) = combined 16.
+        .{
+            .config_id = 0,
+            .server_id = ServerId.fromSlice(&[_]u8{ 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa }) catch unreachable,
+            .nonce_len = 8,
+            .key = key,
+        },
+        // §5.4.2 four-pass Feistel: server_id(3) + nonce(4) = combined 7.
+        .{
+            .config_id = 1,
+            .server_id = ServerId.fromSlice(&[_]u8{ 9, 8, 7 }) catch unreachable,
+            .nonce_len = 4,
+            .key = key,
+        },
+    };
+    const cfg = configs[smith.valueRangeAtMost(u8, 0, configs.len - 1)];
+
+    var cid_buf: [20]u8 = undefined;
+    const cid_len = smith.slice(&cid_buf);
+    const cid = cid_buf[0..cid_len];
+
+    // Any typed Error is acceptable; the property is "no panic / no OOB".
+    const decoded = decode(cid, cfg) catch return;
+
+    // On success the decoded identity lengths must mirror the config.
+    try std.testing.expectEqual(@as(usize, cfg.server_id.len), @as(usize, decoded.server_id.len));
+    try std.testing.expectEqual(@as(usize, cfg.nonce_len), @as(usize, decoded.nonce.len));
+    try std.testing.expect(decoded.config_id != config_mod.unroutable_config_id);
+}

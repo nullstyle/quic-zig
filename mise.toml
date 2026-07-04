@@ -16,6 +16,10 @@ description = "Run the quic-zig Zig test suite"
 run = "zig build test"
 
 [tasks.fuzz]
+# NOTE: under zig 0.17.0-dev.1158 the std.testing.fuzz runtime aborts with
+# "reached unreachable code" for every fuzz site (a toolchain regression,
+# not a target bug — the one-shot smoke run under `zig build test` is fine).
+# Re-verify deep fuzzing once the toolchain moves past that regression.
 description = "Run coverage-guided fuzzing in parallel (one binary per fuzz site)"
 run = "zig build fuzz --fuzz=10M -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
 

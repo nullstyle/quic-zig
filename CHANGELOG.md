@@ -7,6 +7,16 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- Coverage-guided fuzz targets for the remaining untrusted-facing
+  crypto/parse paths: the QUIC-LB CID decoder (`lb-decode`), the 1-RTT
+  decrypt entry point (`open-1rtt`), and Initial key derivation
+  (`initial-derive`). Validated via the `zig build test` smoke run. Deep
+  `zig build fuzz` (coverage-guided) currently aborts under an unrelated
+  `std.testing.fuzz` runtime regression in Zig `0.17.0-dev.1158` that
+  affects every fuzz target, new and pre-existing alike.
+
 ### Security
 
 - The server per-source Initial-flood limiter is now on by default

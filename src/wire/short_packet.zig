@@ -940,3 +940,44 @@ test "round-trip across many PNs and payload sizes" {
         try testing.expectEqualSlices(u8, buf[0..len], opened.payload);
     }
 }
+
+// -- fuzz harness --------------------------------------------------------
+//
+// open1Rtt is the 1-RTT decrypt entry point: it strips header protection
+// and AEAD-opens ciphertext straight from an attacker-controlled UDP
+// datagram. The packet-protection keys are fixed (ours); the peer
+// controls every byte of `src` and, via the protected first byte, the
+// on-wire PN length. This target asserts open1Rtt returns a plaintext or
+// a typed Error and never panics / reads out of bounds across arbitrary
+// ciphertext, locally-configured DCID lengths, and largest-received PNs.
+test "fuzz: open1Rtt never panics on arbitrary ciphertext" {
+    try std.testing.fuzz({}, fuzzOpen1Rtt, .{
+        .corpus = &.{
+            "",
+            "\x40",
+            "\x40\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        },
+    });
+}
+
+fn fuzzOpen1Rtt(_: void, smith: *std.testing.Smith) anyerror!void {
+    const secret: [32]u8 = @splat(0x2b);
+    const keys = derivePacketKeys(.aes128_gcm_sha256, &secret) catch return;
+
+    var src_buf: [256]u8 = undefined;
+    const src_len = smith.slice(&src_buf);
+    const src = src_buf[0..src_len];
+    const dcid_len: u8 = smith.valueRangeAtMost(u8, 0, 20);
+    // `largest_received` is always an internally-tracked, previously
+    // decoded PN, so it is bounded to the QUIC varint range (2^62-1).
+    // Masking matches the packet_number decoder's contract; feeding a
+    // full u64 would exercise an input the caller can never produce.
+    const largest_received = smith.value(u64) & packet_number_mod.max_value;
+
+    var pt_dst: [256]u8 = undefined;
+    _ = open1Rtt(&pt_dst, src, .{
+        .dcid_len = dcid_len,
+        .keys = &keys,
+        .largest_received = largest_received,
+    }) catch return;
+}

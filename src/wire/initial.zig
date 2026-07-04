@@ -301,3 +301,32 @@ test "hkdfExpandLabel rejects oversized label" {
         hkdfExpandLabel(&dst, &secret, &huge_label, ""),
     );
 }
+
+// -- fuzz harness --------------------------------------------------------
+//
+// Initial keys are derived from the client's Destination Connection ID,
+// which is entirely attacker-chosen on a server's first flight (RFC 9001
+// §5.2). This target asserts the derivation never panics for any DCID —
+// empty, typical, or over-length — across the v1 and v2 salts plus an
+// unknown version (which falls back to v1). It returns Keys or a typed
+// Error, never a trap.
+test "fuzz: initial secret derivation never panics on arbitrary DCID" {
+    try std.testing.fuzz({}, fuzzInitialDerive, .{
+        .corpus = &.{
+            "",
+            "\x00",
+            "\x83\x94\xc8\xf0\x3e\x51\x57\x08", // RFC 9001 §A.1 DCID
+            "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff",
+        },
+    });
+}
+
+fn fuzzInitialDerive(_: void, smith: *std.testing.Smith) anyerror!void {
+    var dcid_buf: [64]u8 = undefined;
+    const dcid_len = smith.slice(&dcid_buf);
+    const dcid = dcid_buf[0..dcid_len];
+    const is_server = (smith.value(u8) & 1) == 1;
+    const versions = [_]u32{ 0x00000001, 0x6b3343cf, 0xdeadbeef };
+    const version = versions[smith.valueRangeAtMost(u8, 0, versions.len - 1)];
+    _ = deriveInitialKeysFor(version, dcid, is_server) catch return;
+}
