@@ -219,6 +219,9 @@ The detailed configuration guide is [EMBEDDING.md](EMBEDDING.md).
 
 - [EMBEDDING.md](EMBEDDING.md): server, client, raw `Connection`, and
   production configuration.
+- [docs/API_STABILITY.md](docs/API_STABILITY.md): which surfaces are
+  stable vs evolving vs internal, the `ConnectionEvent` forward-compat
+  contract, and the draft-extension sunset path.
 - [interop/README.md](interop/README.md): QUIC interop-runner endpoint
   and wrapper commands.
 - [tests/conformance/README.md](tests/conformance/README.md):

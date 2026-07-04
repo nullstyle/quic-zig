@@ -206,6 +206,51 @@ while (server.drainStatelessResponse()) |resp| {
 }
 ```
 
+## Stream Conventions, Lifecycle, and Shutdown
+
+For layers that build their own framing on top of the transport (HTTP/3,
+WebTransport, custom protocols), a few helpers remove common boilerplate.
+
+Stream ids encode `(initiator, direction)` in their low two bits (RFC 9000
+§2.1). Rather than compute them by hand, classify with
+`quic_zig.StreamType.fromId(id)` and open the next local-initiated stream
+with the role-aware helpers:
+
+```zig
+// e.g. an HTTP/3 endpoint's control + QPACK encoder/decoder streams:
+const control = try conn.openNextUni();   // next local unidirectional id
+const qpack_enc = try conn.openNextUni();
+const qpack_dec = try conn.openNextUni();
+
+// classify a peer-initiated stream seen via streamIterator:
+switch (quic_zig.StreamType.fromId(id)) {
+    .client_bidi, .server_bidi => {},
+    .client_uni, .server_uni => {},
+}
+```
+
+`openNextBidi` / `openNextUni` pick the id automatically and return
+`Error.StreamLimitExceeded` when the peer's limit is reached without
+consuming the id (a later retry reuses it).
+
+`Connection.phase()` reports a coarse `quic_zig.ConnectionPhase` —
+`initial` → `handshake` → `established`, or `closing` / `draining` /
+`closed` — so an embedder can gate its own state machine without inferring
+the epoch from `handshakeDone` and `closeState`.
+
+For orderly shutdown, `Connection.beginGracefulShutdown()` refuses new
+local stream opens (`Error.ShuttingDown`) and stops granting MAX_STREAMS
+credit so the peer quiesces new-stream creation, while in-flight streams
+drain to completion. QUIC has no GOAWAY frame, so this is the transport
+building block a higher layer pairs with its own GOAWAY signal. The
+connection stays open until you call `close`:
+
+```zig
+conn.beginGracefulShutdown();     // stop taking new streams
+// ... let existing streams finish, or apply a shutdown deadline ...
+conn.close(true, 0x0, "done");    // then close for real
+```
+
 ## Required Configuration
 
 Set these deliberately for any deployed server:

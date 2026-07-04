@@ -7,6 +7,39 @@ changes.
 
 ## [Unreleased]
 
+Downstream-enablement work: transport-layer primitives an HTTP/3-class
+layer needs on day one, so it binds against a stable, ergonomic surface
+instead of reimplementing stream-id math and shutdown logic.
+
+### Added
+
+- `quic_zig.StreamType` (`client_bidi` / `server_bidi` / `client_uni` /
+  `server_uni`) with `fromId`, `streamId(index)`, and
+  `isBidi`/`isUni`/`initiatedBy*` helpers, plus role-aware
+  `Connection.openNextBidi` / `openNextUni` (and `localStreamType`) that
+  choose the next local-initiated id automatically — so an embedder needn't
+  hand-roll the RFC 9000 §2.1 low-two-bit encoding for the HTTP/3 control
+  stream (3) and QPACK streams (4, 5). On `StreamLimitExceeded` the id is
+  not consumed, so a retry after the peer raises the limit reuses it.
+- `Connection.phase()` returning `quic_zig.ConnectionPhase`
+  (`initial` / `handshake` / `established` / `closing` / `draining` /
+  `closed`), composing the handshake epoch with the existing RFC 9000 §10
+  close states so embedders can gate stream creation and shutdown without
+  inferring the epoch from `handshakeDone` / `closeState` / `haveSecret`.
+- `Connection.beginGracefulShutdown()` / `gracefulShutdownActive()`: an
+  orderly-shutdown primitive (a transport-level GOAWAY substitute — QUIC
+  has no GOAWAY frame). While active, new local stream opens are refused
+  with the new `Error.ShuttingDown` and no further MAX_STREAMS credit is
+  granted, so the peer's stream limit freezes and both sides quiesce
+  new-stream creation while in-flight streams drain to completion. The
+  connection stays open until the embedder calls `close`.
+
+### Fixed
+
+- `version()` returned a hardcoded `"0.2.0"` while the package manifest
+  declared `0.3.0`. It is now single-sourced from `build.zig.zon` through a
+  `build_options` module, so it can never drift from the manifest again.
+
 ## [0.3.0] - 2026-07-03
 
 Hardening release from a full security & robustness review: closes a
