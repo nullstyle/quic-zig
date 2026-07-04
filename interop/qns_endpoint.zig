@@ -231,6 +231,10 @@ const ServerOptions = struct {
     keylog_file: ?[]const u8 = null,
     qlog_dir: ?[]const u8 = null,
     retry: bool = false,
+    /// The runner's TESTCASE (read from env; the runner does not pass
+    /// `-testcase` to the server side). Drives server-role behavior that
+    /// keys off the testcase, currently the `keyupdate` initiation.
+    testcase: []const u8 = "",
     /// Optional alt-port literal (e.g. `"[::]:444"`) — only the
     /// PORT is consumed. When set, the server builds a
     /// `quic_zig.PreferredAddressConfig` whose v4/v6 addresses come
@@ -640,6 +644,10 @@ const ServerConn = struct {
     peer: Net.IpAddress,
     transport_params_set: bool = false,
     retry_sent: bool = false,
+    /// Latches once the server has initiated its RFC 9001 §6 application
+    /// key update for TESTCASE=keyupdate (mirrors the client-side latch in
+    /// runClientConnection). At most one server-initiated update per conn.
+    key_update_done: bool = false,
     retry_original_dcid: quic_zig.conn.path.ConnectionId = .{},
     retry_source_cid: [server_cid_len]u8,
     initial_server_cid: [server_cid_len]u8,
@@ -892,6 +900,7 @@ pub fn main(init: std.process.Init) !void {
         // directly. Any unrelated value (or unset) leaves
         // `opts.versions` at its v1-only default.
         if (init.environ_map.get("TESTCASE")) |testcase| {
+            opts.testcase = testcase;
             opts.versions = serverVersionsForTestcase(testcase);
         }
         while (args.next()) |arg| {
@@ -1046,6 +1055,12 @@ fn runServer(
     var qlog_sink: ?QlogSink = null;
     if (opts.qlog_dir) |dir| qlog_sink = try QlogSink.init(io, dir, "server");
     defer if (qlog_sink) |*sink| sink.deinit();
+
+    // RFC 9001 §6: for TESTCASE=keyupdate the server also initiates one
+    // application key update per connection once the handshake is confirmed,
+    // so the runner observes key_phase=1 packets from the server side too —
+    // not just the client's (mirrors the client path in runClientConnection).
+    const request_key_update = std.mem.eql(u8, opts.testcase, "keyupdate");
 
     // Bind the main listening socket, plus optional alt-listener
     // socket(s) for `preferred_address` advertise. The
@@ -1255,6 +1270,20 @@ fn runServer(
             if (sc.conn.handshakeDone()) {
                 try queueServerConnectionIds(&sc.conn, &sc.next_cid_seq, endpoint_server_cid_desired_last_seq, sc);
                 maybeIssueNewToken(sc, now_us);
+                // Server-initiated key update for TESTCASE=keyupdate. Fire
+                // once per connection after the handshake confirms; a
+                // KeyUpdateBlocked (prior update still pending / cooldown)
+                // just retries next tick.
+                if (request_key_update and !sc.key_update_done) {
+                    sc.conn.requestKeyUpdate(now_us) catch |err| switch (err) {
+                        error.KeyUpdateBlocked => {},
+                        else => return err,
+                    };
+                    if (sc.conn.keyUpdateStatus().write_key_phase) {
+                        sc.key_update_done = true;
+                        std.debug.print("quic_zig qns server initiated key update\n", .{});
+                    }
+                }
             }
             try sc.app.process(&sc.conn);
             // Stalled-peer keepalive (`server × quiche × multiplexing`

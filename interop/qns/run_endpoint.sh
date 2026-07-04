@@ -19,9 +19,11 @@ case "${TESTCASE:-}" in
     #                       `qns_endpoint.zig:921` — same TESTCASE
     #                       value, the wrapper hands the runner's
     #                       ROLE choice back to the binary.
-    #   - keyupdate        → currently client-side only via
-    #                       `ClientConnectionOptions.request_key_update`;
-    #                       server-side latch is a known gap.
+    #   - keyupdate        → initiated from whichever role quic-zig plays:
+    #                       the client via `ClientConnectionOptions.
+    #                       request_key_update`, and the server via a
+    #                       per-connection `ServerConn.key_update_done`
+    #                       latch (both derive from TESTCASE=keyupdate).
     ;;
   preferredaddress|http3)
     # preferredaddress: deliberately not wired — the runner's
