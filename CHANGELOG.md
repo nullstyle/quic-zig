@@ -19,9 +19,10 @@ changes.
   crypto/parse paths: the QUIC-LB CID decoder (`lb-decode`), the 1-RTT
   decrypt entry point (`open-1rtt`), and Initial key derivation
   (`initial-derive`). Validated via the `zig build test` smoke run. Deep
-  `zig build fuzz` (coverage-guided) currently aborts under an unrelated
-  `std.testing.fuzz` runtime regression in Zig `0.17.0-dev.1158` that
-  affects every fuzz target, new and pre-existing alike.
+  coverage-guided `zig build fuzz` aborts with "reached unreachable code"
+  on macOS — a `std.testing.fuzz` fuzzer-runtime platform gap that
+  reproduces with a trivial standalone fuzz test and affects every fuzz
+  target — so run deep fuzzing on Linux, as CI does.
 
 ### Security
 

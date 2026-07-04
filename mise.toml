@@ -16,10 +16,12 @@ description = "Run the quic-zig Zig test suite"
 run = "zig build test"
 
 [tasks.fuzz]
-# NOTE: under zig 0.17.0-dev.1158 the std.testing.fuzz runtime aborts with
-# "reached unreachable code" for every fuzz site (a toolchain regression,
-# not a target bug — the one-shot smoke run under `zig build test` is fine).
-# Re-verify deep fuzzing once the toolchain moves past that regression.
+# NOTE: Zig's std.testing.fuzz coverage-guided runtime aborts with
+# "reached unreachable code" on macOS (reproduced with a trivial
+# standalone fuzz test on zig 0.17.0-dev.1158 — a fuzzer-runtime platform
+# gap, not a target bug). Run deep fuzzing on Linux, as CI does
+# (.github/workflows/fuzz.yml, ubuntu-latest). The one-shot smoke run of
+# every fuzz site under `zig build test` works on all platforms.
 description = "Run coverage-guided fuzzing in parallel (one binary per fuzz site)"
 run = "zig build fuzz --fuzz=10M -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
 
