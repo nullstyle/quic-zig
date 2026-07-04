@@ -258,6 +258,15 @@ pub const PathStats = conn.PathStats;
 /// `Connection.streamSendStats` — the send-backpressure query surface.
 pub const StreamSendStats = conn.StreamSendStats;
 
+/// Bytes-read + FIN-seen result of `Connection.streamReadFin`, which
+/// surfaces end-of-stream inline with the read that drains it.
+pub const StreamReadResult = conn.StreamReadResult;
+
+/// Read-only recv-half status (FIN seen / RESET seen / terminal) from
+/// `Connection.streamRecvState` — a reap-robust, FIN-vs-RESET-aware
+/// alternative to holding a stream pointer and reading `RecvStream`.
+pub const StreamRecvState = conn.StreamRecvState;
+
 /// Application-data scheduling policy across multiple validated
 /// paths (primary, round-robin, lowest-RTT-cwnd).
 pub const Scheduler = conn.Scheduler;

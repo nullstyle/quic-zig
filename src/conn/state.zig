@@ -611,6 +611,31 @@ pub const StreamSendStats = struct {
     has_pending: bool,
 };
 
+/// Result of `Connection.streamReadFin`: the bytes read, plus whether the
+/// peer's FIN has been observed for the stream.
+pub const StreamReadResult = struct {
+    /// Bytes copied into the caller's buffer (0 when empty or drained).
+    n: usize,
+    /// True once a STREAM frame carrying the FIN bit has been accepted for
+    /// this stream — no more data will arrive. Surfaced inline with the read
+    /// that drains the final bytes, so a caller need not inspect the receive
+    /// half separately (which the stream GC reaps the moment it goes terminal).
+    fin: bool,
+};
+
+/// Read-only recv-half status of a stream, from `Connection.streamRecvState`.
+pub const StreamRecvState = struct {
+    /// A STREAM frame with the FIN bit has been accepted (clean end).
+    fin_seen: bool,
+    /// A RESET_STREAM has been received (abortive end) — the counterpart to
+    /// `fin_seen` that `recvFullyTerminated` otherwise collapses together.
+    reset_seen: bool,
+    /// The receive half has structurally terminated: FIN drained to EOF or a
+    /// RESET was received, so no further peer bytes will be delivered
+    /// (RFC 9000 §3.2).
+    terminal: bool,
+};
+
 const PendingRecvDatagram = pending_frames_mod.PendingRecvDatagram;
 const PendingSendDatagram = pending_frames_mod.PendingSendDatagram;
 
@@ -3796,6 +3821,21 @@ pub const Connection = struct {
         };
     }
 
+    /// Read-only recv-half status of stream `id`: whether the peer's FIN or
+    /// RESET_STREAM has been seen, and whether the receive side has reached a
+    /// terminal state (RFC 9000 §3.2). Returns `null` if the stream is not in
+    /// the live table (never opened, or already reaped). Unlike
+    /// `recvFullyTerminated`, it distinguishes a clean FIN from an abortive
+    /// RESET, and holds no `*Stream` the caller must keep valid across a reap.
+    pub fn streamRecvState(self: *const Connection, id: u64) ?StreamRecvState {
+        const s = self.streams.get(id) orelse return null;
+        return .{
+            .fin_seen = s.recv.fin_seen,
+            .reset_seen = s.recv.reset != null,
+            .terminal = s.recvFullyTerminated(),
+        };
+    }
+
     /// Convenience: write `data` to the send half of stream `id`.
     pub fn streamWrite(self: *Connection, id: u64, data: []const u8) Error!usize {
         const s = self.streams.get(id) orelse return Error.StreamNotFound;
@@ -3856,6 +3896,20 @@ pub const Connection = struct {
         }
         self.maybeReturnPeerStreamCredit(s);
         return n;
+    }
+
+    /// Like `streamRead`, but also reports whether the peer's FIN has been
+    /// seen — so a caller captures end-of-stream inline with the last read
+    /// rather than inspecting the receive half separately, which the stream
+    /// GC reaps the moment the recv side goes terminal. Prefer this over
+    /// `streamRead` when you need to detect clean stream completion.
+    pub fn streamReadFin(self: *Connection, id: u64, dst: []u8) Error!StreamReadResult {
+        const n = try self.streamRead(id, dst);
+        // `streamRead` already returned `StreamNotFound` if the stream was
+        // absent, and reaping (`gcClosedStreams`) runs only in `tick`, so the
+        // stream is still live here; the `else` is a defensive dead branch.
+        const fin = if (self.streams.get(id)) |s| s.recv.fin_seen else false;
+        return .{ .n = n, .fin = fin };
     }
 
     /// Whether the receive side of `id` has seen any STREAM bytes in

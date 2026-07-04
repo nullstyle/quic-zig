@@ -78,6 +78,8 @@ const Session = state.Session;
 const StopSendingItem = state.StopSendingItem;
 const Stream = state.Stream;
 const StreamSendStats = state.StreamSendStats;
+const StreamReadResult = state.StreamReadResult;
+const StreamRecvState = state.StreamRecvState;
 const Suite = state.Suite;
 const TimerDeadline = state.TimerDeadline;
 const TimerKind = state.TimerKind;
@@ -193,6 +195,72 @@ test "streamSendStats snapshots the send half; null for missing streams" {
 
     // A never-opened higher id is still null, not a resurrected zero-stat stream.
     try std.testing.expectEqual(@as(?StreamSendStats, null), conn.streamSendStats(400));
+}
+
+test "streamReadFin reports FIN inline with the last read; streamRecvState tracks it" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    try conn.setTransportParams(.{
+        .initial_max_data = 64,
+        .initial_max_stream_data_bidi_local = 64,
+        .initial_max_stream_data_bidi_remote = 64,
+        .initial_max_streams_bidi = max_streams_per_connection,
+    });
+
+    // Unknown stream → null recv-state (the same "gone" signal a reaped
+    // stream gives, so a downstream needn't hold a *Stream across a reap).
+    try std.testing.expectEqual(@as(?StreamRecvState, null), conn.streamRecvState(0));
+
+    _ = try conn.openBidi(0);
+
+    // Peer sends 3 bytes, no FIN yet.
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = "abc", .has_length = true, .fin = false });
+    {
+        const rs = conn.streamRecvState(0).?;
+        try std.testing.expect(!rs.fin_seen and !rs.reset_seen and !rs.terminal);
+    }
+    var buf: [8]u8 = undefined;
+    {
+        const r = try conn.streamReadFin(0, &buf); // drains 3 bytes, FIN not seen yet
+        try std.testing.expectEqual(@as(usize, 3), r.n);
+        try std.testing.expect(!r.fin);
+    }
+
+    // Peer sends 2 more bytes WITH the FIN bit.
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 3, .data = "de", .has_length = true, .fin = true });
+    {
+        const r = try conn.streamReadFin(0, &buf); // the last read carries FIN inline
+        try std.testing.expectEqual(@as(usize, 2), r.n);
+        try std.testing.expect(r.fin);
+    }
+    {
+        const rs = conn.streamRecvState(0).?;
+        try std.testing.expect(rs.fin_seen and !rs.reset_seen and rs.terminal);
+    }
+}
+
+test "streamRecvState distinguishes a peer RESET from a clean FIN" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    try conn.setTransportParams(.{
+        .initial_max_data = 64,
+        .initial_max_stream_data_bidi_local = 64,
+        .initial_max_stream_data_bidi_remote = 64,
+        .initial_max_streams_bidi = max_streams_per_connection,
+    });
+    _ = try conn.openBidi(0);
+
+    try conn.handleResetStream(.{ .stream_id = 0, .application_error_code = 7, .final_size = 0 });
+    const rs = conn.streamRecvState(0).?;
+    // RESET is terminal but is NOT a clean FIN — the distinction
+    // `recvFullyTerminated` collapses.
+    try std.testing.expect(!rs.fin_seen and rs.reset_seen and rs.terminal);
 }
 
 test "local close is exposed as sticky and pollable event" {

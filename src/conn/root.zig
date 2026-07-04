@@ -170,6 +170,10 @@ pub const PathValidator = path_validator.PathValidator;
 pub const SendStream = send_stream.SendStream;
 /// Read-only snapshot of a stream's send half from `Connection.streamSendStats`.
 pub const StreamSendStats = state.StreamSendStats;
+/// Bytes-read + FIN-seen result of `Connection.streamReadFin`.
+pub const StreamReadResult = state.StreamReadResult;
+/// Read-only recv-half status from `Connection.streamRecvState`.
+pub const StreamRecvState = state.StreamRecvState;
 /// Receive-side half-stream (re-export).
 pub const RecvStream = recv_stream.RecvStream;
 /// A QUIC path endpoint address (IPv4/IPv6/unspecified), the peer-address
