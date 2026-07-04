@@ -1,7 +1,10 @@
 const std = @import("std");
 
 const default_image = "quic-zig-qns:local";
-const default_zig_version = "0.17.0-dev.269+ebff43698";
+// Keep in step with `build.zig.zon`'s `minimum_zig_version` and the QNS
+// `Dockerfile` ARG; a drift here builds the interop image with a different
+// compiler than `zig build` uses.
+const default_zig_version = "0.17.0-dev.1158+1d1193aa7";
 const default_runner_python = "3.12";
 const default_wireshark_image = "quic-zig-interop-wireshark:local";
 
@@ -122,7 +125,7 @@ fn usage() void {
     std.debug.print(
         \\usage:
         \\  zig build external-interop -- preflight [--image quic-zig-qns:local] [--dry-run]
-        \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version 0.17.0-dev.269+ebff43698] [--dry-run]
+        \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version 0.17.0-dev.1158+1d1193aa7] [--dry-run]
         \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
         \\
     , .{});

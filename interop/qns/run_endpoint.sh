@@ -4,7 +4,7 @@ set -eu
 /setup.sh
 
 case "${TESTCASE:-}" in
-  ""|handshake|transfer|longrtt|chacha20|multiplexing|retry|resumption|zerortt|keyupdate|blackhole|handshakeloss|transferloss|handshakecorruption|transfercorruption|multiconnect|connectionmigration|amplificationlimit|ipv6|rebind-addr|rebind-port|crosstraffic|versionnegotiation|goodput|throughput|v2)
+  ""|handshake|transfer|longrtt|chacha20|multiplexing|retry|resumption|zerortt|keyupdate|blackhole|handshakeloss|transferloss|handshakecorruption|transfercorruption|multiconnect|connectionmigration|amplificationlimit|ipv6|rebind-addr|rebind-port|crosstraffic|ecn|versionnegotiation|goodput|throughput|v2)
     # Most testcase names are runner-side hints (the runner injects
     # the named network simulator profile and validates outcomes
     # from the qlog / pcap); the qns endpoint's behaviour is
@@ -24,6 +24,9 @@ case "${TESTCASE:-}" in
     #                       request_key_update`, and the server via a
     #                       per-connection `ServerConn.key_update_done`
     #                       latch (both derive from TESTCASE=keyupdate).
+    # `ecn` needs no routing: the endpoint always sets ECT(0) on egress and
+    # parses the TOS cmsg on ingress (`enableServerEcn`), so ECN validation
+    # is exercised generically — it was simply missing from this accept list.
     ;;
   preferredaddress|http3)
     # preferredaddress: deliberately not wired — the runner's

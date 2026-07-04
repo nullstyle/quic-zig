@@ -3,9 +3,12 @@ FROM martenseemann/quic-network-simulator-endpoint:latest AS build
 ARG TARGETPLATFORM
 # Pinned to a 0.17.0-dev master tarball because mise.toml tracks Zig master
 # and HEAD uses 0.17-only forms; tagged 0.16.0 is no longer ABI-compatible.
+# Keep this in step with `build.zig.zon`'s `minimum_zig_version` — a stale
+# pin here builds the image with a different compiler than `zig build`, so
+# a locally-green tree can produce a red or unrepresentative interop image.
 # Dev tarballs live under /builds/ (no per-version subdirectory), unlike
 # tagged releases which are served from /download/<version>/.
-ARG ZIG_VERSION=0.17.0-dev.269+ebff43698
+ARG ZIG_VERSION=0.17.0-dev.1158+1d1193aa7
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils cmake ninja-build clang git python3 perl \
