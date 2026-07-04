@@ -102,6 +102,10 @@ pub const FlowBlockedInfo = state.FlowBlockedInfo;
 pub const FlowBlockedKind = state.FlowBlockedKind;
 /// Whether the local or remote side is the limit holder.
 pub const FlowBlockedSource = state.FlowBlockedSource;
+/// Payload of the `connection_ids_needed` `ConnectionEvent`: the path
+/// id and the CID-blocking sequence number when a connection is short
+/// on usable peer-issued connection IDs.
+pub const ConnectionIdReplenishInfo = state.ConnectionIdReplenishInfo;
 /// Limits configuring the 1-RTT key-update policy.
 pub const ApplicationKeyUpdateLimits = state.ApplicationKeyUpdateLimits;
 /// Outcome of a key-update attempt (initiated, blocked, completed).
@@ -166,6 +170,9 @@ pub const PathValidator = path_validator.PathValidator;
 pub const SendStream = send_stream.SendStream;
 /// Receive-side half-stream (re-export).
 pub const RecvStream = recv_stream.RecvStream;
+/// A QUIC path endpoint address (IPv4/IPv6/unspecified), the peer-address
+/// type carried by `Connection.handle` / `pollDatagram`.
+pub const Address = path.Address;
 /// One QUIC path (4-tuple + CIDs + anti-amp + validator + CC).
 pub const Path = path.Path;
 /// Collection of paths per connection plus scheduling cursor.

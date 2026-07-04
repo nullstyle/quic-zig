@@ -114,6 +114,12 @@ pub const OutgoingDatagram = conn.OutgoingDatagram;
 /// whether it arrived in 0-RTT.
 pub const IncomingDatagram = conn.IncomingDatagram;
 
+/// A QUIC path endpoint address (IPv4 / IPv6 / unspecified) — the
+/// peer-address type carried into `Connection.handle` and out of
+/// `Connection.pollDatagram`. Re-exported so embedders needn't reach
+/// into `conn.path` to name the address they already pass around.
+pub const Address = conn.Address;
+
 /// Whether a `CloseEvent` came from a transport-level error or an
 /// application-level error (`CONNECTION_CLOSE` frame type 0x1c vs.
 /// 0x1d).
@@ -135,6 +141,35 @@ pub const CloseState = conn.CloseState;
 /// Polled connection-level event: close, flow-blocked, CIDs needed,
 /// or DATAGRAM ack/loss notifications.
 pub const ConnectionEvent = conn.ConnectionEvent;
+
+// --- `ConnectionEvent` payload types ---------------------------------
+// The types carried inside the (already public) `ConnectionEvent` union,
+// re-exported at the top level so an embedder can name the payload it
+// destructures without reaching into `conn.*` / `conn.state.*`.
+
+/// Payload of `ConnectionEvent.datagram_acked` / `.datagram_lost`: the
+/// connection-local DATAGRAM id whose delivery was acknowledged or lost
+/// (RFC 9221), as produced by `sendDatagramTracked`.
+pub const DatagramSendEvent = conn.DatagramSendEvent;
+
+/// Payload of `ConnectionEvent.flow_blocked`: which flow-control limit
+/// was hit, whether the local or remote side holds it, the limit value,
+/// and (for stream-data) which stream tripped it.
+pub const FlowBlockedInfo = conn.FlowBlockedInfo;
+
+/// Which flow-control axis a `FlowBlockedInfo` refers to: connection
+/// `data`, per-stream `stream_data`, or `streams` count (RFC 9000 §4).
+pub const FlowBlockedKind = conn.FlowBlockedKind;
+
+/// Whether a `FlowBlockedInfo` reflects the local side being blocked or
+/// the peer reporting itself blocked.
+pub const FlowBlockedSource = conn.FlowBlockedSource;
+
+/// Payload of `ConnectionEvent.connection_ids_needed`: the path id and
+/// CID-blocking sequence number when a connection is short on usable
+/// peer-issued connection IDs (RFC 9000 §5.1).
+pub const ConnectionIdReplenishInfo = conn.ConnectionIdReplenishInfo;
+// ---------------------------------------------------------------------
 
 /// The (initiator, directionality) class encoded in a stream id's low two
 /// bits (RFC 9000 §2.1), plus `openNextBidi`/`openNextUni` on `Connection`,
@@ -271,4 +306,19 @@ test "phase 0: builds and links against boringssl-zig" {
     try std.testing.expect(v.len > 0 and std.mem.indexOfScalar(u8, v, '.') != null);
     try std.testing.expectEqual(@as(u32, 1), QUIC_VERSION_1);
     try std.testing.expectEqual(@as(u32, 0x6b3343cf), QUIC_VERSION_2);
+}
+
+test "public re-exports: ConnectionEvent payloads + Address resolve at the top level" {
+    // These aliases exist so an embedder (e.g. an HTTP/3 layer) can name the
+    // types it destructures out of the public `ConnectionEvent` — and the
+    // peer `Address` it passes to `handle` / gets from `pollDatagram` —
+    // without reaching into `conn.*` / `conn.state.*` / `conn.path.*`. A name
+    // collision or unresolved alias fails the build here; the identity checks
+    // catch silent drift if a future edit repoints one of them.
+    try std.testing.expect(@sizeOf(Address) > 0);
+    try std.testing.expect(FlowBlockedInfo == std.meta.fieldInfo(ConnectionEvent, .flow_blocked).type);
+    try std.testing.expect(ConnectionIdReplenishInfo == std.meta.fieldInfo(ConnectionEvent, .connection_ids_needed).type);
+    try std.testing.expect(DatagramSendEvent == std.meta.fieldInfo(ConnectionEvent, .datagram_acked).type);
+    try std.testing.expect(FlowBlockedKind == std.meta.fieldInfo(FlowBlockedInfo, .kind).type);
+    try std.testing.expect(FlowBlockedSource == std.meta.fieldInfo(FlowBlockedInfo, .source).type);
 }
