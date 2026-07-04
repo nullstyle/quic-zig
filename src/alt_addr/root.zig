@@ -103,11 +103,16 @@ pub fn recommendedMigrationDelayMs(
     max_ms: u64,
 ) boringssl.crypto.rand.Error!u64 {
     if (max_ms <= min_ms) return min_ms;
-    const range = max_ms - min_ms + 1;
     var draw: [8]u8 = undefined;
     try boringssl.crypto.rand.fillBytes(&draw);
     const r = std.mem.readInt(u64, &draw, .little);
-    return min_ms + (r % range);
+    // `span` is safe (max_ms > min_ms here). When the requested window
+    // spans the whole u64 (min_ms == 0, max_ms == maxInt), `span + 1`
+    // would overflow — panicking in ReleaseSafe or wrapping to a
+    // modulo-by-zero — so draw directly over the full range instead.
+    const span = max_ms - min_ms;
+    if (span == std.math.maxInt(u64)) return r;
+    return min_ms + (r % (span + 1));
 }
 
 test "recommendedMigrationDelayMs returns min_ms when range collapses" {
@@ -115,6 +120,17 @@ test "recommendedMigrationDelayMs returns min_ms when range collapses" {
     // Misordered range: prefer fail-soft over panic so embedders can
     // pass user-supplied configuration through without a clamp.
     try std.testing.expectEqual(@as(u64, 50), try recommendedMigrationDelayMs(50, 10));
+}
+
+test "recommendedMigrationDelayMs does not overflow on a full-u64 range (L7)" {
+    // Regression: `max_ms - min_ms + 1` overflowed when the span equals
+    // maxInt(u64), panicking in ReleaseSafe. Reaching the line after the
+    // call at all proves no trap occurred.
+    _ = try recommendedMigrationDelayMs(0, std.math.maxInt(u64));
+    // A near-full span still exercises the modulo path and must stay in
+    // bounds — a meaningful (non-tautological) upper-bound check.
+    const near = try recommendedMigrationDelayMs(0, std.math.maxInt(u64) - 1);
+    try std.testing.expect(near <= std.math.maxInt(u64) - 1);
 }
 
 test "recommendedMigrationDelayMs returns a value inside the requested range" {

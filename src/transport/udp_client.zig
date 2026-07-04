@@ -35,11 +35,14 @@
 //!
 //! Embedder cooperation
 //! --------------------
-//! The loop owns ONLY the UDP socket. Application-level work
-//! (opening streams, writing data, reading received data, polling
-//! events) runs on a separate thread that calls into
-//! `client.conn` directly. Same threading model as `runUdpServer`;
-//! the API-awkwardness note in `EMBEDDING.md` covers it.
+//! The loop owns ONLY the UDP socket, and calls into `client.conn`
+//! from the loop thread. `Connection` is single-threaded with no
+//! internal locking, so application-level work (opening streams,
+//! writing data, reading received data, polling events) must be
+//! serialized with the loop — same thread, or behind the embedder's
+//! own mutex; never a second thread touching `client.conn`
+//! concurrently. Same model as `runUdpServer`; the API-awkwardness
+//! note in `EMBEDDING.md` covers it.
 
 const std = @import("std");
 
@@ -162,10 +165,16 @@ pub const RunError = error{
 /// shutdown flag is observed true (and the grace window expires or
 /// the connection drains, whichever comes first).
 ///
-/// Per-tick application work (opening streams, writing data,
-/// reading received data, polling events) runs on a separate
-/// thread that drives `client.conn` directly. Same threading model
-/// as `runUdpServer`.
+/// Threading: `runUdpClient` owns the receive/poll/tick loop and calls
+/// into `client.conn` from this thread. `Connection` is single-threaded
+/// with no internal locking, so any application work that also touches
+/// `client.conn` (opening streams, writing data, reading received data,
+/// polling events) MUST be serialized with this loop — do it on the same
+/// thread (e.g. from a callback the loop invokes) or guard every
+/// `Connection` access with your own mutex. Do NOT drive `client.conn`
+/// from another thread concurrently with this loop. Same threading model
+/// as `runUdpServer`. Embedders that want application logic interleaved
+/// on one thread should use the raw `Connection` cycle in EMBEDDING.md.
 pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) RunError!void {
     if (options.rx_buffer_bytes == 0 or options.tx_buffer_bytes == 0) {
         return error.InvalidBufferSize;

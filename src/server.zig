@@ -2739,6 +2739,14 @@ pub const Server = struct {
         for (snapshot) |cid| {
             if (containsConnectionId(slot.tracked_cids[0..slot.tracked_cid_count], cid)) continue;
             const gop = try self.cid_table.getOrPut(self.allocator, cidKeyFromConnectionId(cid));
+            if (gop.found_existing and gop.value_ptr.* != slot) {
+                // CID collision with a different live slot (astronomically
+                // unlikely given CID entropy). Do not hijack its routing
+                // or claim the CID: overwriting would silently steal the
+                // other slot's traffic, and reaping either slot would then
+                // un-route the survivor. Leave the existing owner intact.
+                continue;
+            }
             gop.value_ptr.* = slot;
             // invariant: snapshot ≤ max_tracked_cids_per_slot, so
             // we always have room.
@@ -2751,11 +2759,21 @@ pub const Server = struct {
     /// Remove every routing entry owned by `slot` from `cid_table`.
     /// Called from `reap` after the slot is observed `.closed`.
     fn dropAllCidsFromTable(self: *Server, slot: *Slot) void {
-        _ = self.cid_table.remove(cidKeyFromConnectionId(slot.initial_dcid));
+        self.removeCidIfOwnedBy(slot.initial_dcid, slot);
         for (slot.tracked_cids[0..slot.tracked_cid_count]) |cid| {
-            _ = self.cid_table.remove(cidKeyFromConnectionId(cid));
+            self.removeCidIfOwnedBy(cid, slot);
         }
         slot.tracked_cid_count = 0;
+    }
+
+    /// Remove a CID's routing entry only if it still points at `slot`.
+    /// Guards against a CID collision (see `resyncSlotCids`) causing a
+    /// reaped slot to un-route a CID another live slot now owns.
+    fn removeCidIfOwnedBy(self: *Server, cid: ConnectionId, slot: *Slot) void {
+        const key = cidKeyFromConnectionId(cid);
+        if (self.cid_table.getPtr(key)) |vp| {
+            if (vp.* == slot) _ = self.cid_table.remove(key);
+        }
     }
 
     /// Token-bucket gate for per-source Initial acceptance. Returns
@@ -3338,6 +3356,12 @@ pub const Server = struct {
             .now_us = now_us,
             .lifetime_us = self.new_token_lifetime_us,
             .client_address = ctx,
+            // Bind the connection's negotiated version. Validation on a
+            // returning Initial checks against that Initial's wire
+            // version; for a single-version deployment both are v1, so
+            // this is a no-op there and provides real cross-version
+            // separation once a v2-capable server is configured.
+            .quic_version = slot.conn.version,
         }) catch {
             // Mint can only fail on a BoringSSL CSPRNG hiccup here: the
             // output buffer is fixed-size, and `new_token.max_address_len`
@@ -3432,6 +3456,7 @@ pub const Server = struct {
                     .key = nt_key,
                     .now_us = now_us,
                     .client_address = ctx,
+                    .quic_version = ids.version,
                 });
                 if (result == .valid) return .new_token_skip;
                 // Fall through to Retry validation on malformed,
@@ -3481,6 +3506,10 @@ pub const Server = struct {
             .client_address = ctx,
             .original_dcid = state.original_dcid.slice(),
             .retry_scid = state.retry_scid[0..state.retry_scid_len],
+            // Bind the inbound Initial's wire version; the peer echoes
+            // the same version on the follow-up Initial the Retry token
+            // rides in, so mint and validate stay consistent.
+            .quic_version = ids.version,
         });
         if (result != .valid) return .drop;
 
@@ -3540,6 +3569,9 @@ pub const Server = struct {
             .client_address = ctx,
             .original_dcid = ids.dcid,
             .retry_scid = retry_scid[0..retry_scid_len],
+            // Bind the inbound Initial's wire version (see the matching
+            // validate call). v1 for the default single-version server.
+            .quic_version = ids.version,
         }) catch return error.RetryEncodeFailed;
 
         var entry: StatelessResponse = .{ .dst = addr, .len = 0, .kind = .retry };

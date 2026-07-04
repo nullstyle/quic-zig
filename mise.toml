@@ -1,4 +1,8 @@
 [tools]
+# Zig 0.17 is unreleased, so we track master. Last build verified green
+# (test + ReleaseSafe + conformance): 0.17.0-dev.1158+1d1193aa7, which is
+# the floor recorded in build.zig.zon `minimum_zig_version`. Bump both
+# together after re-verifying against a newer master.
 zig = "master"
 just = "1.49.0"
 python = "3.12.13"

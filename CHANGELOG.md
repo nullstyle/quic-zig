@@ -43,8 +43,25 @@ changes.
 - Bound the out-of-order CRYPTO reassembly queue by fragment count (not
   just byte volume) to stop a tiny-fragment flood from driving the
   O(n²) drain into CPU exhaustion.
+- `alt_addr.recommendedMigrationDelayMs` no longer overflows (a
+  ReleaseSafe panic) when the requested delay window spans the whole
+  `u64` range; it now draws over the full range instead.
+- Retry and NEW_TOKEN now bind the connection's negotiated / the inbound
+  Initial's QUIC version instead of a hardcoded v1, restoring real
+  cross-version token separation for v2-capable servers. No behavior
+  change for the default single-version (v1) server.
+- Server `cid_table` collision handling: `resyncSlotCids` no longer
+  overwrites a CID routed to a different live slot, and slot reaping only
+  removes routing entries it still owns — so an (astronomically unlikely)
+  CID collision can no longer silently re-route or un-route a peer.
 
 ### Changed
+
+- Documented the `runUdpClient` / `runUdpServer` threading contract:
+  `Connection` is single-threaded with no internal locking, so all
+  access (loop and application work) must be serialized onto one thread.
+- Bumped `minimum_zig_version` to the verified `0.17.0-dev.1158+1d1193aa7`
+  and recorded the last-verified master build in `mise.toml`.
 
 - Updated to Zig `0.17.0-dev.813+2153f8143` (configure/maker build
   split): forwarded `zig build ... -- <args>` now use

@@ -3293,6 +3293,13 @@ pub const Connection = struct {
     }
 
     pub fn initialSendStreamLimit(self: *const Connection, id: u64) u64 {
+        // NOTE: before the peer's transport parameters are cached this
+        // returns maxInt (no per-stream cap). Seeding 0 here would be
+        // safer, but it breaks 0-RTT: early data is sent before the
+        // server's params arrive and must be bounded by the *remembered*
+        // session params instead. Wiring those in is the correct fix
+        // (tracked separately); the maxInt window is a client's own
+        // send-limit, not a peer-exploitable surface.
         const params = self.cached_peer_transport_params orelse return std.math.maxInt(u64);
         if (streamIsUni(id)) {
             if (!self.streamInitiatedByLocal(id)) return 0;
