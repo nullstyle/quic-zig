@@ -3358,6 +3358,22 @@ pub const Connection = struct {
         return self.openUni(self.localStreamType(true).streamId(self.local_opened_streams_uni));
     }
 
+    /// The stream id `openNextBidi` would use next, without opening anything
+    /// or advancing the counter. Lets an embedder learn the id up front — e.g.
+    /// to run an HTTP/3 GOAWAY / stream-limit gate keyed on the id *before*
+    /// committing to the open, then call `openNextBidi`. The returned id is
+    /// only valid until the next successful local bidi open on this
+    /// connection (`openNextBidi` or an `openBidi` at or above this id).
+    pub fn peekNextBidi(self: *const Connection) u64 {
+        return self.localStreamType(false).streamId(self.local_opened_streams_bidi);
+    }
+
+    /// The stream id `openNextUni` would use next, without opening anything or
+    /// advancing the counter. Same validity caveat as `peekNextBidi`.
+    pub fn peekNextUni(self: *const Connection) u64 {
+        return self.localStreamType(true).streamId(self.local_opened_streams_uni);
+    }
+
     fn openStream(self: *Connection, id: u64) Error!*Stream {
         if (self.streams.contains(id)) return Error.StreamAlreadyOpen;
         const ptr = try self.allocator.create(Stream);

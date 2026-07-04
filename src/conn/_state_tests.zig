@@ -2741,6 +2741,45 @@ test "openNextBidi surfaces StreamLimitExceeded without consuming the id" {
     try std.testing.expectEqual(@as(u64, 0), (try conn.openNextBidi()).id);
 }
 
+test "peekNextBidi / peekNextUni return the next id without consuming it" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    conn.peer_max_streams_bidi = 100;
+    conn.peer_max_streams_uni = 100;
+
+    // Peek is idempotent — it never advances the counter.
+    try std.testing.expectEqual(@as(u64, 0), conn.peekNextBidi());
+    try std.testing.expectEqual(@as(u64, 0), conn.peekNextBidi());
+    try std.testing.expectEqual(@as(u64, 2), conn.peekNextUni());
+    try std.testing.expectEqual(@as(u64, 2), conn.peekNextUni());
+
+    // The peeked id is exactly what the matching openNext* then consumes,
+    // and the peek advances only once the open succeeds.
+    try std.testing.expectEqual(conn.peekNextBidi(), (try conn.openNextBidi()).id);
+    try std.testing.expectEqual(@as(u64, 4), conn.peekNextBidi());
+    try std.testing.expectEqual(conn.peekNextUni(), (try conn.openNextUni()).id);
+    try std.testing.expectEqual(@as(u64, 6), conn.peekNextUni());
+}
+
+test "peekNextBidi returns the id a limit-blocked retry will reuse" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    conn.peer_max_streams_bidi = 0;
+
+    // A limit-blocked open doesn't consume the id, so peek still points at it
+    // — this is the GOAWAY-gate-then-open sequence a downstream relies on.
+    try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextBidi());
+    try std.testing.expectEqual(@as(u64, 0), conn.peekNextBidi());
+    conn.peer_max_streams_bidi = 1;
+    try std.testing.expectEqual(conn.peekNextBidi(), (try conn.openNextBidi()).id);
+}
+
 test "beginGracefulShutdown refuses local opens but stays open" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
