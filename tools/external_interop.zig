@@ -720,12 +720,21 @@ fn runCommand(io: std.Io, argv: []const []const u8, cwd: []const u8, dry_run: bo
 }
 
 fn runAndRequireZero(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]const u8) !void {
-    const result = try std.process.run(allocator, io, .{
+    const result = std.process.run(allocator, io, .{
         .argv = argv,
         .cwd = if (cwd) |path| .{ .path = path } else .inherit,
         .stdout_limit = .limited(16 * 1024),
         .stderr_limit = .limited(16 * 1024),
-    });
+    }) catch |err| {
+        // The executable couldn't even be spawned (most commonly it isn't
+        // installed or isn't on PATH). Report it cleanly and exit — a
+        // preflight exists to surface missing prerequisites, not to
+        // stack-trace on them.
+        std.debug.print("could not run: ", .{});
+        printCommand(argv);
+        std.debug.print("  ({s}) — is '{s}' installed and on PATH?\n", .{ @errorName(err), argv[0] });
+        std.process.exit(1);
+    };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
@@ -735,7 +744,7 @@ fn runAndRequireZero(allocator: std.mem.Allocator, io: std.Io, argv: []const []c
     std.debug.print("command failed: ", .{});
     printCommand(argv);
     if (result.stderr.len > 0) std.debug.print("{s}\n", .{result.stderr});
-    return error.CommandFailed;
+    std.process.exit(1);
 }
 
 fn printCommand(argv: []const []const u8) void {
