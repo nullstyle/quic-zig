@@ -58,6 +58,7 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

@@ -208,6 +208,7 @@ test "MUST NOT initiate a new connection in response to a Version Negotiation pa
 
     const protos = [_][]const u8{"hq-test"};
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

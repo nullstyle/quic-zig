@@ -179,6 +179,15 @@ Application code still drives streams, DATAGRAMs, and events through
 `client.conn`. Embedders that want a single-threaded application loop can
 use the raw `Connection` cycle described in [EMBEDDING.md](EMBEDDING.md).
 
+`Client.connect` verifies the server certificate against the system
+trust store by default. To talk to a server with a self-signed or
+otherwise untrusted certificate (test and interop setups), set
+`insecure_skip_verify = true` — this disables impersonation protection,
+so never enable it against untrusted networks. Pinning a private CA for
+a wrapper-built context is not yet supplied; build your own
+`tls_context_override` for that (a non-null `ca_pem` is rejected rather
+than silently ignored).
+
 ## Production Checklist
 
 Before exposing a server to arbitrary peers:

@@ -3310,13 +3310,15 @@ pub const Server = struct {
             .lifetime_us = self.new_token_lifetime_us,
             .client_address = ctx,
         }) catch {
-            // Mint failure is not peer-reachable in practice (output
-            // buffer is fixed-size, address is fixed-size, the only
-            // realistic failure is a BoringSSL CSPRNG hiccup). Skip
-            // issuance for this slot; the slot stays usable, and
-            // future Initials from the same address will fall
-            // through to the Retry gate as if NEW_TOKEN was never
-            // issued.
+            // Mint can only fail on a BoringSSL CSPRNG hiccup here: the
+            // output buffer is fixed-size, and `new_token.max_address_len`
+            // is comptime-coupled to `Address.context_max_len`, so the
+            // address context (IPv6 included) can no longer exceed the
+            // field cap — the ContextTooLong path that silently denied
+            // every IPv6 peer a NEW_TOKEN is closed. Skip issuance for
+            // this slot; the slot stays usable, and future Initials from
+            // the same address fall through to the Retry gate as if
+            // NEW_TOKEN was never issued.
             return;
         };
 

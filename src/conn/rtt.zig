@@ -75,9 +75,14 @@ pub const RttEstimator = struct {
         }
 
         // Adjust the sample by ack_delay, but only if doing so
-        // wouldn't make the result < min_rtt.
+        // wouldn't make the result < min_rtt. The add is saturating:
+        // a peer-controlled ack_delay (unclamped before the handshake
+        // is confirmed) can be up to ~2^62, and `min_rtt + ack_delay`
+        // would otherwise overflow u64 and panic in ReleaseSafe. When
+        // it saturates, the guard is simply false and we keep the raw
+        // sample — the correct outcome for an implausible ack_delay.
         var adjusted_rtt = latest_rtt_us_in;
-        if (latest_rtt_us_in >= self.min_rtt_us + ack_delay) {
+        if (latest_rtt_us_in >= self.min_rtt_us +| ack_delay) {
             adjusted_rtt = latest_rtt_us_in - ack_delay;
         }
 
@@ -159,6 +164,21 @@ test "ack_delay clamped to max_ack_delay post-handshake" {
     // adjusted = 100 - 25 = 75
     // smoothed = (50*7 + 75)/8 = (350 + 75)/8 = 53.125
     try std.testing.expectEqual(@as(u64, 53_125), r.smoothed_rtt_us);
+}
+
+test "pre-handshake ack_delay near u64 max does not overflow min_rtt + ack_delay" {
+    // Regression: before the saturating add, a peer-controlled ack_delay
+    // (unclamped while handshake_confirmed=false) that pushed
+    // `min_rtt + ack_delay` past u64 panicked in ReleaseSafe. Now the
+    // guard saturates and the raw sample is kept.
+    var r: RttEstimator = .{};
+    r.update(100 * ms, 0, false, 25 * ms); // min_rtt = 100ms
+    const huge = std.math.maxInt(u64) - 3;
+    // handshake_confirmed=false → no clamp; the add must saturate, not trap.
+    r.update(130 * ms, huge, false, 25 * ms);
+    // 130ms < min_rtt +| huge (== maxInt) → guard false → adjusted = raw sample.
+    // smoothed = (100ms*7 + 130ms)/8 = 830ms/8 = 103.75ms.
+    try std.testing.expectEqual(@as(u64, 103_750), r.smoothed_rtt_us);
 }
 
 test "PTO formula" {

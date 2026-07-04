@@ -143,6 +143,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     try client_ctx.setNewSessionCallback(TicketSink.cb, &sink);
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -285,6 +286,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
     try client_ctx.setNewSessionCallback(TicketSink.cb, &sink);
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

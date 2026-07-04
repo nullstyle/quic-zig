@@ -401,6 +401,7 @@ test "MUST pad the client first-flight Initial UDP datagram to >= 1200 bytes [RF
     // bytes when the embedder hands it to the socket.
     const protos = [_][]const u8{"hq-test"};
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,

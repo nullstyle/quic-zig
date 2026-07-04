@@ -50,6 +50,11 @@ pub fn run(
 ) !void {
     const protos = [_][]const u8{"h3"};
 
+    // DEMO ONLY: this mints a fresh Retry key on every start, which
+    // invalidates every outstanding Retry/NEW_TOKEN across a restart
+    // (see "Persist keys across restarts" below). A real deployment
+    // loads this key from durable storage and only generates+stores it
+    // on first run.
     var retry_key: quic_zig.RetryTokenKey = undefined;
     std.crypto.random.bytes(&retry_key);
 
@@ -138,6 +143,14 @@ packets, and ticks timers until the connection closes or the shutdown
 flag flips. If you need DNS resolution, fixed source tuples, custom
 packet pacing, or single-threaded application logic, use the raw
 connection cycle below.
+
+The wrapper-built TLS context verifies the server certificate against
+the system trust store by default. For self-signed or test peers, set
+`.insecure_skip_verify = true` in the `Client.connect` config — it turns
+off impersonation protection, so keep it out of production. Pinning a
+private CA to the wrapper-built context is not yet supported (a non-null
+`ca_pem` is rejected, not silently ignored); supply a fully configured
+`tls_context_override` to verify against your own roots.
 
 ## Raw Connection Cycle
 

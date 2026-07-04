@@ -117,6 +117,7 @@ pub const HandshakePair = struct {
         errdefer server.deinit();
 
         var client = try quic_zig.Client.connect(.{
+            .insecure_skip_verify = true, // self-signed test cert
             .allocator = allocator,
             .server_name = "localhost",
             .alpn_protocols = default_alpn,

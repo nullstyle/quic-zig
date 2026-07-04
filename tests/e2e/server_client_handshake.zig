@@ -82,6 +82,7 @@ test "Server <-> Client: full handshake completes through Server.feed" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -152,6 +153,7 @@ test "Server <-> Client: NEW_CONNECTION_ID rotates routing key in cid_table" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -285,6 +287,7 @@ test "Server <-> Client: handshake completes via Retry round-trip" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -398,6 +401,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -570,6 +574,7 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

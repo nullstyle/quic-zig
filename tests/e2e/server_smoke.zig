@@ -611,6 +611,7 @@ test "Server.feed Retry happy-path: client echoes a valid token and a slot opens
     defer srv.deinit();
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -720,6 +721,7 @@ test "Server.feed Retry rejects an echoed token whose lifetime has elapsed" {
     defer srv.deinit();
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -804,6 +806,7 @@ test "Slot.slot_id is stable across feeds for the same connection" {
     defer srv.deinit();
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -841,6 +844,7 @@ test "Slot.slot_id is monotonic and unique across multiple accepts" {
     defer srv.deinit();
 
     var client_a = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -849,6 +853,7 @@ test "Slot.slot_id is monotonic and unique across multiple accepts" {
     defer client_a.deinit();
 
     var client_b = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -857,6 +862,7 @@ test "Slot.slot_id is monotonic and unique across multiple accepts" {
     defer client_b.deinit();
 
     var client_c = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -897,6 +903,7 @@ test "Slot.setTraceContext round-trips and defaults are null" {
     defer srv.deinit();
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -1002,6 +1009,7 @@ test "Server.replaceTlsContext while a slot is live drains the old context and r
 
     // -- step 1: open slot #1 against the original context --
     var client1 = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -1039,6 +1047,7 @@ test "Server.replaceTlsContext while a slot is live drains the old context and r
 
     // -- step 3: open slot #2 against the new context --
     var client2 = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -1129,6 +1138,7 @@ test "Server.deinit after replaceTlsContext cleans up unreaped draining contexts
     });
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -2158,6 +2168,7 @@ test "Server.Config.preferred_address: openSlotFromInitial mints seq-1 alt-CID a
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -2229,6 +2240,7 @@ test "Server.Config.preferred_address: client sees the parameter on a completed 
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -2472,6 +2484,7 @@ test "Connection.noteServerLocalAddressChanged: PATH_CHALLENGE leads first packe
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

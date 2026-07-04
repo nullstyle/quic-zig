@@ -20,6 +20,7 @@ test "Client.connect succeeds and yields a tickable Connection" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -44,6 +45,7 @@ test "Client.connect drives the first Initial out via poll" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -68,6 +70,7 @@ test "Client.connect drives the first Initial out via poll" {
 test "Client.connect rejects empty SNI" {
     const protos = [_][]const u8{"hq-test"};
     try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "",
         .alpn_protocols = &protos,
@@ -75,8 +78,24 @@ test "Client.connect rejects empty SNI" {
     }));
 }
 
+test "Client.connect rejects a ca_pem it cannot honor (no silent system-store downgrade)" {
+    // H2: a non-null ca_pem for the auto-built context is not wired
+    // into BoringSSL. It must be rejected, not silently ignored while
+    // verification falls back to the system store — otherwise an
+    // embedder believes they pinned a CA they did not.
+    const protos = [_][]const u8{"hq-test"};
+    try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .ca_pem = "-----BEGIN CERTIFICATE-----\nnot-real\n-----END CERTIFICATE-----\n",
+    }));
+}
+
 test "Client.connect rejects empty ALPN" {
     try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &.{},
@@ -89,6 +108,7 @@ test "Client.connect rejects invalid CID lengths" {
 
     // initial_dcid_len < 8 violates RFC 9000 §7.2.
     try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -98,6 +118,7 @@ test "Client.connect rejects invalid CID lengths" {
 
     // initial_dcid_len > 20 violates RFC 9000 §17.2.
     try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -109,6 +130,7 @@ test "Client.connect rejects invalid CID lengths" {
     // wrapper rejects it because `Client.connect` follows the QNS
     // canonical pattern of CID-based routing.
     try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -118,6 +140,7 @@ test "Client.connect rejects invalid CID lengths" {
 
     // local_cid_len > 20 violates RFC 9000.
     try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,
@@ -135,6 +158,7 @@ test "Client.connect honours transport params (ISCID is auto-filled)" {
     params.initial_source_connection_id = .{};
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,

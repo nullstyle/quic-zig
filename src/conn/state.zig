@@ -303,6 +303,15 @@ pub const max_pending_datagram_bytes: usize = 64 * 1024;
 
 /// Bounded reassembly budgets for peer-controlled CRYPTO gaps.
 pub const max_pending_crypto_bytes_per_level: usize = 64 * 1024;
+/// Maximum number of out-of-order CRYPTO fragments buffered per level.
+/// The byte cap alone does not bound the *fragment count*: a peer could
+/// flood tens of thousands of 1-byte out-of-order fragments (all within
+/// the byte budget), and `drainPendingCrypto`'s linear-scan-and-remove
+/// loop is O(n²) in the fragment count — a CPU-exhaustion vector. A
+/// legitimate handshake flight fragments into at most a handful of
+/// packets per level, so this cap is generous; overflow is a peer
+/// protocol violation. Mirrors `max_pending_datagram_count`.
+pub const max_pending_crypto_fragments_per_level: usize = 128;
 /// Largest gap (in bytes) we will tolerate between in-order CRYPTO data and a
 /// future fragment before treating the peer's stream as malicious.
 pub const max_crypto_reassembly_gap: u64 = 64 * 1024;
@@ -8069,7 +8078,21 @@ pub const Connection = struct {
             std.debug.print("[frames lvl={s} payload_len={d}] ", .{ @tagName(lvl), payload.len });
         }
         var it = frame_mod.iter(payload);
-        while (try it.next()) |f| {
+        while (true) {
+            const maybe_frame = it.next() catch {
+                // RFC 9000 §12.4: a frame that cannot be parsed — unknown
+                // type, truncated, or otherwise malformed — is a peer
+                // protocol violation that MUST be closed with
+                // FRAME_ENCODING_ERROR. Convert the decode error into a
+                // connection close here rather than letting it escape
+                // dispatchFrames: otherwise a single malformed frame from
+                // an authenticated peer propagates out as a fatal error,
+                // tearing down the whole transport loop (client) or being
+                // mislabeled as INTERNAL_ERROR (server).
+                self.close(true, transport_error_frame_encoding, "malformed frame");
+                return;
+            };
+            const f = maybe_frame orelse break;
             if (debugFrames() != null) {
                 switch (f) {
                     .crypto => |cr| std.debug.print("CRYPTO(off={d},len={d}) ", .{ cr.offset, cr.data.len }),
@@ -8775,6 +8798,13 @@ pub const Connection = struct {
                 self.crypto_pending_bytes[idx] > max_pending_crypto_bytes_per_level - eff_data.len)
             {
                 self.close(true, transport_error_protocol_violation, "crypto reassembly exceeds limit");
+                return;
+            }
+            // Bound the fragment *count*, not just the byte volume: an
+            // unbounded count of tiny fragments turns drainPendingCrypto's
+            // O(n²) scan into a CPU-exhaustion vector (see the constant).
+            if (self.crypto_pending[idx].items.len >= max_pending_crypto_fragments_per_level) {
+                self.close(true, transport_error_protocol_violation, "crypto reassembly fragment count exceeds limit");
                 return;
             }
             // Hardening guide §3.5 / §8: reserve from the global

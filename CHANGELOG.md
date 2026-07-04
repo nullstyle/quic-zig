@@ -7,6 +7,35 @@ changes.
 
 ## [Unreleased]
 
+### Security
+
+- Client TLS is now secure by default: `Client.connect` verifies the
+  server certificate against the system trust store unless the new
+  `Client.Config.insecure_skip_verify` opt-out is set. The previous
+  default performed no verification. A non-null `ca_pem` (not yet wired
+  into the auto-built context) is now rejected with `InvalidConfig`
+  rather than silently downgrading to system-store verification.
+
+### Fixed
+
+- Prevent a remote-triggerable panic in `RttEstimator.update`: a
+  peer-controlled ACK `ack_delay` (unclamped before handshake
+  confirmation) could overflow `min_rtt + ack_delay` in ReleaseSafe.
+  The ACK-delay scaling now saturates and the estimator uses a
+  saturating add.
+- Restore Retry / NEW_TOKEN issuance for IPv6 peers: the token address
+  cap (22) was smaller than a full IPv6 address context (23), so every
+  IPv6 client was denied a token. The cap now tracks
+  `path.Address.context_max_len` and is guarded by a comptime assert.
+- Convert frame-decode errors (unknown type, truncation) into a
+  FRAME_ENCODING_ERROR connection close at the dispatch boundary instead
+  of propagating them out — a single malformed frame from an
+  authenticated peer no longer tears down the transport loop, and the
+  server no longer mislabels the close as INTERNAL_ERROR.
+- Bound the out-of-order CRYPTO reassembly queue by fragment count (not
+  just byte volume) to stop a tiny-fragment flood from driving the
+  O(n²) drain into CPU exhaustion.
+
 ### Changed
 
 - Updated to Zig `0.17.0-dev.813+2153f8143` (configure/maker build

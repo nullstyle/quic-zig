@@ -106,6 +106,7 @@ test "v2 handshake completes on both sides [RFC9368 §3]" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -147,6 +148,7 @@ test "v1 handshake regression: still completes after v2 plumbing landed" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -178,6 +180,7 @@ test "v1+v2 server with a v1 client: server accepts v1 directly [RFC9368 §6]" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -208,6 +211,7 @@ test "v2-only server with a v1-only client emits a VN listing v2 [RFC9368 §6]" 
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -265,6 +269,7 @@ test "v1+v2 client advertises version_information transport parameter [RFC9368 �
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -322,6 +327,7 @@ test "[v2,v1] server upgrades a v1-wire ClientHello that lists v2 [RFC9368 §6]"
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -562,6 +568,7 @@ test "[v2,v1] server with v1-only client commits to v1, no upgrade [RFC9368 §6]
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

@@ -96,6 +96,7 @@ test "Server emits NEW_TOKEN to handshake-confirmed client" {
 
     var capture: TokenCapture = .{};
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -156,6 +157,7 @@ test "Client with stored NEW_TOKEN skips Retry on next connection" {
 
         var capture: TokenCapture = .{};
         var cli = try quic_zig.Client.connect(.{
+            .insecure_skip_verify = true, // self-signed test cert
             .allocator = allocator,
             .server_name = "localhost",
             .alpn_protocols = &protos,
@@ -201,6 +203,7 @@ test "Client with stored NEW_TOKEN skips Retry on next connection" {
     defer srv2.deinit();
 
     var cli2 = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -270,6 +273,7 @@ test "Server rejects expired NEW_TOKEN and falls through to Retry" {
     defer srv.deinit();
 
     var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

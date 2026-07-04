@@ -53,9 +53,12 @@ pub const nonce_len: usize = AesGcm256.nonce_len;
 /// AEAD authentication tag length in bytes (16, GCM standard).
 pub const tag_len: usize = AesGcm256.tag_len;
 
-/// Maximum address length the format can carry. Matches
-/// `path.Address.bytes`.
-pub const max_address_len: usize = 22;
+/// Maximum address length the format can carry. Tracks
+/// `path.Address.context_max_len` so the token can always bind a full
+/// client address context — including IPv6 (23 bytes). A stale
+/// literal here (22) previously made `mint` reject every IPv6 peer,
+/// silently disabling NEW_TOKEN issuance for the whole address family.
+pub const max_address_len: usize = path.Address.context_max_len;
 
 /// Plaintext layout overhead: 4 (version) + 8 (issued) + 8 (expires)
 /// + 1 length prefix byte for the address slot.
@@ -73,6 +76,11 @@ const plaintext_len: usize = max_token_len - nonce_len - tag_len;
 
 comptime {
     std.debug.assert(plaintext_len >= plaintext_fixed_overhead);
+    // Couple the address-field cap to the real Address context size so
+    // a future Address change can't silently shrink token capacity and
+    // reintroduce the IPv6 NEW_TOKEN regression.
+    std.debug.assert(max_address_len >= path.Address.context_max_len);
+    std.debug.assert(path.Address.context_max_len <= max_bound_total);
 }
 
 /// Maximum address-field length that fits the fixed plaintext budget.
@@ -306,6 +314,32 @@ test "NEW_TOKEN validates with matching address version and time" {
         .key = &testing_key,
         .now_us = 2_000_000,
         .client_address = "ip4:127.0.0.1:4242",
+    }));
+}
+
+test "NEW_TOKEN binds a full IPv6 address context (regression: 23-byte context)" {
+    // Regression: max_address_len (22) < IPv6 writeContext output (23)
+    // made mint reject every IPv6 peer, silently disabling NEW_TOKEN.
+    var addr_buf: [path.Address.context_max_len]u8 = undefined;
+    const ipv6: path.Address = .{ .ipv6 = .{
+        .addr = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .port = 4433,
+        .flow = 0xABCDE,
+    } };
+    const ctx = ipv6.writeContext(&addr_buf);
+    try std.testing.expectEqual(@as(usize, 23), ctx.len);
+
+    const token = try minted(.{
+        .key = &testing_key,
+        .now_us = 1_000_000,
+        .lifetime_us = 24 * 3600 * 1_000_000,
+        .client_address = ctx,
+    });
+
+    try std.testing.expectEqual(ValidationResult.valid, validate(&token, .{
+        .key = &testing_key,
+        .now_us = 2_000_000,
+        .client_address = ctx,
     }));
 }
 

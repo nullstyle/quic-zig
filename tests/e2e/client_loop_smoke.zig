@@ -55,6 +55,7 @@ test "runUdpClient rejects a malformed target literal" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
         .alpn_protocols = &protos,
@@ -77,6 +78,7 @@ test "runUdpClient rejects a malformed bind literal" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
         .alpn_protocols = &protos,
@@ -96,6 +98,7 @@ test "runUdpClient rejects zero-byte buffers" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
         .alpn_protocols = &protos,
@@ -131,6 +134,7 @@ test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
         .alpn_protocols = &protos,

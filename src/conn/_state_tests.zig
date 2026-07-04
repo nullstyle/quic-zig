@@ -110,6 +110,7 @@ const max_initial_connection_receive_window = state.max_initial_connection_recei
 const max_initial_stream_receive_window = state.max_initial_stream_receive_window;
 const max_outbound_datagram_payload_size = state.max_outbound_datagram_payload_size;
 const max_pending_crypto_bytes_per_level = state.max_pending_crypto_bytes_per_level;
+const max_pending_crypto_fragments_per_level = state.max_pending_crypto_fragments_per_level;
 const max_pending_datagram_bytes = state.max_pending_datagram_bytes;
 const max_pending_datagram_count = state.max_pending_datagram_count;
 const max_recv_plaintext = state.max_recv_plaintext;
@@ -857,6 +858,47 @@ test "CRYPTO reassembly: out-of-order fragments delivered in order" {
     try std.testing.expectEqualSlices(u8, "AAAAAAAAAAA", conn.inbox[idx].buf[0..11]);
     for (conn.inbox[idx].buf[11..69]) |b| try std.testing.expectEqual(@as(u8, 'M'), b);
     try std.testing.expectEqualSlices(u8, "BBBBBBBB", conn.inbox[idx].buf[69..77]);
+}
+
+test "CRYPTO reassembly: out-of-order fragment count is bounded (M1: O(n^2) drain guard)" {
+    // A peer can flood tiny out-of-order CRYPTO fragments that all fit
+    // the byte budget; without a fragment-count cap, drainPendingCrypto's
+    // O(n^2) scan becomes a CPU-exhaustion vector. Feeding one past the
+    // cap must close with PROTOCOL_VIOLATION, not keep buffering.
+    const allocator = std.testing.allocator;
+    const boringssl_tls = boringssl.tls;
+    var ctx = try boringssl_tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    const lvl: EncryptionLevel = .initial;
+    const idx = lvl.idx();
+
+    // Feed exactly `cap` one-byte out-of-order fragments at distinct
+    // offsets (offset 0 stays a gap so nothing drains). Each buffers.
+    var i: u64 = 0;
+    while (i < max_pending_crypto_fragments_per_level) : (i += 1) {
+        const one = [_]u8{@intCast(i & 0xff)};
+        try conn.handleCrypto(lvl, .{ .offset = i + 1, .data = &one });
+    }
+    try std.testing.expectEqual(
+        max_pending_crypto_fragments_per_level,
+        conn.crypto_pending[idx].items.len,
+    );
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+
+    // One more out-of-order fragment trips the count cap and closes.
+    const extra = [_]u8{0xff};
+    try conn.handleCrypto(lvl, .{ .offset = 100_000, .data = &extra });
+    try std.testing.expectEqual(CloseState.closing, conn.closeState());
+    const ce = conn.closeEvent() orelse return error.NoCloseEvent;
+    try std.testing.expectEqual(transport_error_protocol_violation, ce.error_code);
+    // The flood did not grow the pending list past the cap.
+    try std.testing.expectEqual(
+        max_pending_crypto_fragments_per_level,
+        conn.crypto_pending[idx].items.len,
+    );
 }
 
 test "CRYPTO reassembly: duplicate fragment is silently ignored" {
@@ -5746,10 +5788,11 @@ fn fuzzConnHandleCryptoImpl(_: void, smith: *std.testing.Smith) anyerror!void {
         const before_recv_off = conn.crypto_recv_offset[idx];
 
         conn.dispatchFrames(lvl, frame_buf[0..payload_len], 1_000_000) catch |err| switch (err) {
-            // `dispatchFrames` propagates frame-iter decode errors and
-            // a few other Connection errors — they are expected on
-            // malformed input. We continue feeding frames; the
-            // invariants below still apply.
+            // `dispatchFrames` converts frame-decode errors into a
+            // FRAME_ENCODING_ERROR close rather than propagating them;
+            // only Connection-level faults (e.g. OOM) still escape. We
+            // tolerate non-OOM escapes and keep feeding; the invariants
+            // below still apply.
             error.OutOfMemory => return err,
             else => {},
         };

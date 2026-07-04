@@ -83,13 +83,23 @@ const ConfigImpl = struct {
     /// or keylog wiring (see the QNS endpoint).
     tls_context_override: ?boringssl.tls.Context = null,
 
-    /// Optional CA bundle (PEM) for verifying the server's
-    /// certificate. When null, the client skips verification —
-    /// matches the QNS interop posture (RFC 9001 §4.1.1 explicitly
-    /// permits self-signed peers in test setups). For production,
-    /// supply either a CA bundle here or build your own
-    /// `tls_context_override` with `verify = .system`.
+    /// Optional CA bundle (PEM) for verifying the server's certificate
+    /// against a specific set of roots. NOT YET wired into the
+    /// auto-built context: a non-null value is rejected with
+    /// `error.InvalidConfig` rather than silently ignored. (It
+    /// previously flipped verification to the system trust store while
+    /// discarding these bytes — so an embedder pinning a private CA got
+    /// system-store verification instead, the worst of both.) To pin a
+    /// private CA today, build your own `tls_context_override`.
     ca_pem: ?[]const u8 = null,
+
+    /// Skip server-certificate verification entirely (`verify = .none`).
+    /// Off by default: the auto-built client context verifies against
+    /// the system trust store. Only enable this for test/interop setups
+    /// with self-signed peers (RFC 9001 §4.1.1 permits them). It
+    /// disables protection against server impersonation, so never set
+    /// it for a client that talks to an untrusted network.
+    insecure_skip_verify: bool = false,
 
     /// If non-null, the freshly-built `Connection` is wired up to
     /// this qlog callback for per-connection security/lifecycle
@@ -251,6 +261,15 @@ pub const Client = struct {
         if (config.alpn_protocols.len == 0) return Error.InvalidConfig;
         if (config.initial_dcid_len < 8 or config.initial_dcid_len > 20) return Error.InvalidConfig;
         if (config.local_cid_len == 0 or config.local_cid_len > 20) return Error.InvalidConfig;
+        // A CA bundle for the auto-built context is not yet wired into
+        // BoringSSL (loading PEM-from-memory as trust roots needs an API
+        // we don't surface here). Reject it rather than silently verify
+        // against the system store while discarding the caller's roots —
+        // that would make an embedder believe they pinned a CA they did
+        // not. Pin a private CA via `tls_context_override` instead.
+        if (config.tls_context_override == null and config.ca_pem != null) {
+            return Error.InvalidConfig;
+        }
         // The version drives the Initial-key salt + HKDF labels
         // (RFC 9001 §5.2 v1 / RFC 9368 §3.3.1 v2) — only the wire
         // versions this implementation knows how to derive keys for
@@ -269,19 +288,13 @@ pub const Client = struct {
         if (config.tls_context_override) |ctx| {
             tls_ctx = ctx;
         } else {
-            const verify: boringssl.tls.VerifyMode = blk: {
-                // QNS interop and most embedders run with `verify =
-                // .none`; surfacing a CA bundle requires writing a
-                // temp file and pointing BoringSSL at it. We don't
-                // do that here — the caller can drop in a
-                // pre-configured `tls_context_override` if they need
-                // PEM-from-memory verification. Setting `ca_pem` on
-                // a wrapper-built context is reserved for future
-                // work; for now we surface it as InvalidConfig so
-                // callers don't silently get unverified connections.
-                if (config.ca_pem != null) break :blk .system;
-                break :blk .none;
-            };
+            // Secure by default: verify against the system trust store
+            // unless the embedder explicitly opts out with
+            // `insecure_skip_verify` (test/interop posture). `ca_pem` is
+            // rejected up front in the validation block above, so it can
+            // no longer silently downgrade to system-store verification.
+            const verify: boringssl.tls.VerifyMode =
+                if (config.insecure_skip_verify) .none else .system;
             // Only enable early-data on the auto-built TLS context
             // when the embedder actually plans to use it (i.e. they
             // supplied a 0-RTT session ticket). This is the §5.2 /

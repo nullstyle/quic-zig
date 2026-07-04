@@ -574,6 +574,7 @@ test "MUST close with CRYPTO_ERROR + no_application_protocol (0x178) on ALPN mis
     defer srv.deinit();
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &client_protos,
@@ -680,6 +681,7 @@ test "MUST validate the server certificate chain at the client [RFC9001 §4.7 ¶
     defer tls_ctx.deinit();
 
     var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

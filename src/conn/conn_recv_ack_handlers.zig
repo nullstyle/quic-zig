@@ -16,6 +16,19 @@ const sent_packets_mod = state_mod.sent_packets_mod;
 const pn_space_mod = state_mod.pn_space_mod;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
 
+/// Scale a peer-reported ACK Delay (a varint, 0..2^62-1) by the peer's
+/// `ack_delay_exponent`. RFC 9000 §18.2 permits an exponent up to 20,
+/// so the product can exceed `u64`. Saturate instead of letting the
+/// shift wrap: a wrapped value could silently deflate our RTT sample,
+/// and — before `RttEstimator.update` guards its add — a large value
+/// overflowed `min_rtt + ack_delay` and panicked in ReleaseSafe.
+fn scaledAckDelayUs(raw: u64, exponent: u6) u64 {
+    if (exponent == 0) return raw;
+    const max: u64 = std.math.maxInt(u64);
+    if (raw > (max >> exponent)) return max;
+    return raw << exponent;
+}
+
 /// Validate the ECN counts trailer of a peer ACK frame against the
 /// rules in RFC 9000 §13.4.2:
 ///
@@ -254,7 +267,7 @@ pub fn handleAckAtLevel(
     }
     if (largest_acked_send_time_us) |sent_time_us| {
         if (largest_acked_ack_eliciting and now_us >= sent_time_us) {
-            const ack_delay_us = a.ack_delay << self.peerAckDelayExponent();
+            const ack_delay_us = scaledAckDelayUs(a.ack_delay, self.peerAckDelayExponent());
             self.rttForLevel(lvl).update(
                 now_us - sent_time_us,
                 ack_delay_us,
@@ -365,7 +378,7 @@ pub fn handleApplicationAckOnPath(
     if (any_regular_acked) path.pmtudOnRegularAcked();
     if (largest_acked_send_time_us) |sent_time_us| {
         if (largest_acked_ack_eliciting and now_us >= sent_time_us) {
-            const ack_delay_us = a.ack_delay << self.peerAckDelayExponent();
+            const ack_delay_us = scaledAckDelayUs(a.ack_delay, self.peerAckDelayExponent());
             path.path.rtt.update(
                 now_us - sent_time_us,
                 ack_delay_us,

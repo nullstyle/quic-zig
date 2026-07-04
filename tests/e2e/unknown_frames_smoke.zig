@@ -5,11 +5,11 @@
 //! CPU-spin on the drain loop. The frame-level decoder rejects the
 //! first unknown type byte with `error.UnknownFrameType` (RFC 9000
 //! §12.4 — frames with type values not assigned in §19 are a
-//! FRAME_ENCODING_ERROR), and `Connection.dispatchFrames` propagates
-//! that error straight back to `Connection.handle`, so the cost of
-//! processing a thousand-byte all-unknown-frames payload is one
-//! varint decode + one switch-default, regardless of how long the
-//! payload is.
+//! FRAME_ENCODING_ERROR), and `Connection.dispatchFrames` converts
+//! that decode error into a FRAME_ENCODING_ERROR connection close, so
+//! the cost of processing a thousand-byte all-unknown-frames payload
+//! is one varint decode + one switch-default, regardless of how long
+//! the payload is.
 //!
 //! What this file pins:
 //!
@@ -17,14 +17,14 @@
 //!      have application keys), we hand-seal a 1-RTT packet whose
 //!      decrypted payload is ~1000 single-byte unknown-type varints
 //!      (`0x21`, RFC 9000 §19 unallocated).
-//!   2. Feeding that packet through `server.handle` returns
-//!      `error.UnknownFrameType` — surfaced from `frame.decode` at
-//!      the very first byte. This is the §11.2 #14 wire-level pin:
-//!      the reject is constant-cost and surfaces *before* the
-//!      drain loop ever observes the rest of the payload.
-//!   3. The server has not been pushed into any zombie state — the
-//!      `closeState` is unchanged from its post-handshake baseline,
-//!      and a follow-up `poll` succeeds (no infinite loop, no panic).
+//!   2. Feeding that packet through `server.handle` succeeds (no error
+//!      escapes) but transitions the connection into a closing state
+//!      carrying FRAME_ENCODING_ERROR (0x07) — the decode fails on the
+//!      very first byte, so the reject is constant-cost and fires
+//!      *before* the drain loop observes the rest of the payload.
+//!   3. The server is not pushed into any zombie state or CPU spin —
+//!      it is cleanly closing, and a follow-up `poll` (which emits the
+//!      CONNECTION_CLOSE) succeeds with no infinite loop or panic.
 //!
 //! Frame type byte choice: `0x21` is a single-byte QUIC varint
 //! (top 2 bits `00`, value `0x21 = 33`) that is not allocated to any
@@ -203,26 +203,25 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
     //       -> frame.iter(payload).next()
     //         -> decode(payload[0..]) at byte 0x21
     //           -> Error.UnknownFrameType
+    //             -> dispatchFrames catches it -> close(FRAME_ENCODING_ERROR)
     //
-    // The error propagates back to `handle` via `try` on the iterator
-    // and on `dispatchFrames` itself. `handle` returns the error to
-    // us — it does NOT auto-close the connection here, but the next
-    // iteration of the embedder's loop typically would. The
-    // load-bearing assertion is that the error surfaces *promptly*
-    // (after the FIRST byte of the payload, not after walking all
-    // 1000 bytes).
+    // `dispatchFrames` converts the decode error into a connection
+    // close (RFC 9000 §12.4) instead of letting it escape, so `handle`
+    // returns *successfully* — a single malformed frame from an
+    // authenticated peer can no longer tear down the embedder's loop.
+    // The load-bearing property is unchanged: the reject fires after
+    // the FIRST byte of the payload, not after walking all 1000 bytes.
     const before_recv_pn = if (server.paths.get(0)) |sp|
         sp.app_pn_space.received.largest
     else
         null;
-    const result = server.handle(packet_buf[0..packet_len], null, now_us);
-    try std.testing.expectError(error.UnknownFrameType, result);
+    try server.handle(packet_buf[0..packet_len], null, now_us);
 
     // The server's app PN tracker should have recorded the packet's
-    // PN before the frame-level error fired (frames are dispatched
+    // PN before the frame-level reject fired (frames are dispatched
     // *after* the PN is recorded — see
     // `recordApplicationReceivedPacket` upstream of `dispatchFrames`
-    // in `handleOnePacket`). This pins that the error is at the
+    // in `handleOnePacket`). This pins that the reject is at the
     // frame layer, not the AEAD/PN layer.
     const after_recv_pn = if (server.paths.get(0)) |sp|
         sp.app_pn_space.received.largest
@@ -233,13 +232,17 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
         try std.testing.expect(after_recv_pn.? > prev);
     }
 
-    // The server is NOT in a closed/draining state — the embedder
-    // sees the error and decides what to do. The next `poll` works
-    // (no infinite loop, no panic).
-    try std.testing.expectEqual(baseline_close, server.closeState());
+    // The connection is now cleanly CLOSING with a locally-originated
+    // FRAME_ENCODING_ERROR (0x07) — not the post-handshake baseline,
+    // and not a zombie/open state.
+    try std.testing.expect(baseline_close == .open);
+    try std.testing.expectEqual(quic_zig.CloseState.closing, server.closeState());
+    const ce = server.closeEvent() orelse return error.NoCloseEvent;
+    try std.testing.expectEqual(@as(u64, 0x07), ce.error_code);
+
+    // A follow-up `poll` (which emits the CONNECTION_CLOSE) succeeds
+    // with no infinite loop or panic; the connection stays closing.
     var poll_buf: [2048]u8 = undefined;
     _ = try server.poll(&poll_buf, now_us + 1_000);
-    // closeState still .open — the error was reported, not promoted
-    // to a CONNECTION_CLOSE.
-    try std.testing.expectEqual(baseline_close, server.closeState());
+    try std.testing.expectEqual(quic_zig.CloseState.closing, server.closeState());
 }

@@ -32,11 +32,11 @@
 //!
 //!     addr_len + odcid_len + scid_len <= 45  bytes  (= 68 - 23)
 //!
-//! With server.zig's 22-byte address slot and the default 8-byte
-//! server SCID that leaves up to 15 bytes for the peer's original
-//! DCID — comfortably above the 8-byte typical and the 8-byte
-//! interop convention. Peers presenting unusually long initial
-//! DCIDs (>15 bytes when paired with the default SCID length) cause
+//! With the 23-byte address context (full IPv6) and the default
+//! 8-byte server SCID that leaves up to 14 bytes for the peer's
+//! original DCID — comfortably above the 8-byte typical and the
+//! 8-byte interop convention. Peers presenting unusually long initial
+//! DCIDs (>14 bytes when paired with the default SCID length) cause
 //! `mint` to return `Error.OutputTooSmall`; the server then drops
 //! the Initial rather than minting a Retry. Operators that want
 //! full 20-byte CID coverage should bump `max_token_len`.
@@ -55,14 +55,17 @@ pub const nonce_len: usize = AesGcm256.nonce_len;
 /// AEAD authentication tag length in bytes (16, GCM standard).
 pub const tag_len: usize = AesGcm256.tag_len;
 
-/// Maximum address length the format can carry. Matches
-/// `path.Address.bytes`.
-pub const max_address_len: usize = 22;
+/// Maximum address length the format can carry. Tracks
+/// `path.Address.context_max_len` so the token can always bind a full
+/// client address context — including IPv6 (tag + 16 addr + port +
+/// flow = 23 bytes). A stale literal here (22) previously rejected
+/// every IPv6 peer's Retry, since `writeContext` emits 23 bytes.
+pub const max_address_len: usize = path.Address.context_max_len;
 
 /// Maximum CID length the format can carry. Matches the QUIC v1
 /// limit (`path.max_cid_len = 20`). Note the per-call sum cap
 /// described in this module's preamble — both CIDs at full 20
-/// bytes plus a 22-byte address overflows the fixed plaintext
+/// bytes plus a 23-byte address overflows the fixed plaintext
 /// budget and `mint` will return `Error.OutputTooSmall`.
 pub const max_cid_len: usize = path.max_cid_len;
 
@@ -84,6 +87,12 @@ const plaintext_len: usize = max_token_len - nonce_len - tag_len;
 comptime {
     // Guard against accidental misalignment of the tuned constants.
     std.debug.assert(plaintext_len >= plaintext_fixed_overhead);
+    // The plaintext budget must accommodate a full IPv6 address
+    // context plus two default (8-byte) CIDs, or IPv6 Retry breaks
+    // again. This couples the budget to `path.Address.context_max_len`
+    // so a future Address change can't silently shrink token capacity.
+    std.debug.assert(max_address_len >= path.Address.context_max_len);
+    std.debug.assert(path.Address.context_max_len + 8 + 8 <= max_bound_total);
 }
 
 /// Maximum sum of the three bound-field lengths that fits in the
@@ -362,6 +371,38 @@ test "Retry token validates with matching address CIDs version and time" {
         .client_address = "ip4:127.0.0.1:4242",
         .original_dcid = &.{ 1, 2, 3, 4 },
         .retry_scid = &.{ 0xc1, 0x5e, 0x71, 0x9d },
+    }));
+}
+
+test "Retry token binds a full IPv6 address context (regression: 23-byte context)" {
+    // Regression for the constant drift that made `max_address_len` (22)
+    // smaller than a real IPv6 `writeContext` output (23), which caused
+    // mint to return ContextTooLong for every IPv6 peer and the server
+    // to drop the Initial. Use the real 23-byte context, not a literal.
+    var addr_buf: [path.Address.context_max_len]u8 = undefined;
+    const ipv6: path.Address = .{ .ipv6 = .{
+        .addr = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .port = 4433,
+        .flow = 0xABCDE,
+    } };
+    const ctx = ipv6.writeContext(&addr_buf);
+    try std.testing.expectEqual(@as(usize, 23), ctx.len);
+
+    const token = try minted(.{
+        .key = &testing_key,
+        .now_us = 1_000_000,
+        .lifetime_us = 5_000_000,
+        .client_address = ctx,
+        .original_dcid = &.{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .retry_scid = &.{ 0xc1, 0x5e, 0x71, 0x9d, 0xaa, 0xbb, 0xcc, 0xdd },
+    });
+
+    try std.testing.expectEqual(ValidationResult.valid, validate(&token, .{
+        .key = &testing_key,
+        .now_us = 2_000_000,
+        .client_address = ctx,
+        .original_dcid = &.{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .retry_scid = &.{ 0xc1, 0x5e, 0x71, 0x9d, 0xaa, 0xbb, 0xcc, 0xdd },
     }));
 }
 
