@@ -7,9 +7,17 @@ changes.
 
 ## [Unreleased]
 
-Downstream-enablement work: transport-layer primitives an HTTP/3-class
+## [0.4.0] - 2026-07-04
+
+Downstream-enablement release: transport-layer primitives an HTTP/3-class
 layer needs on day one, so it binds against a stable, ergonomic surface
-instead of reimplementing stream-id math and shutdown logic.
+instead of reimplementing stream-id math and shutdown logic, plus 1.0
+API-stability documentation and toolchain fixes.
+
+All changes are additive — no breaking upgrade actions are required. One
+note: `Connection.Error` gains a `ShuttingDown` variant; per the new
+stability contract (see `docs/API_STABILITY.md`), handle the error set with
+an `else` branch so added variants don't break an exhaustive switch.
 
 ### Added
 
@@ -33,6 +41,26 @@ instead of reimplementing stream-id math and shutdown logic.
   granted, so the peer's stream limit freezes and both sides quiesce
   new-stream creation while in-flight streams drain to completion. The
   connection stays open until the embedder calls `close`.
+
+### Changed
+
+- Documented API stability tiers in `docs/API_STABILITY.md`: which surfaces
+  are stable (1.0 semver target) vs evolving vs internal, the
+  `ConnectionEvent` forward-compatibility contract, and the sunset path for
+  the draft-based extensions (QUIC-LB draft-21, alt-addr draft-00).
+- Added `docs/stream-priority-design.md`, a design spike for a future
+  RFC 9218 (urgency + incremental) stream-priority API — deliberately not
+  implemented yet, pending a downstream consumer to validate the ordering.
+- The QUIC interop endpoint now initiates an RFC 9001 §6 key update from the
+  server role too (previously client-only), so the `keyupdate` testcase
+  exercises both directions.
+- Fuzzing workflow: removed the filtered-binary parallel fuzz steps
+  (`zig build fuzz` and the per-site targets). On the pinned Zig
+  (`0.17.0-dev.1158`) a filtered test binary aborts the build-runner under
+  `--fuzz`; deep coverage-guided fuzzing is now the unfiltered
+  `zig build test --fuzz`, matching CI. The committed regression corpus
+  (inline `.corpus` seeds, run by every `zig build test`) and the workflow
+  are documented in `CONTRIBUTING.md`.
 
 ### Fixed
 
