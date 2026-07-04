@@ -433,6 +433,47 @@ pub const CloseEvent = lifecycle_mod.CloseEvent;
 /// for tests that want to assert on it directly.
 pub const LifecycleState = lifecycle_mod.LifecycleState;
 
+/// The (initiator, directionality) class encoded in the low two bits of a
+/// stream id (RFC 9000 §2.1): bit 0 is the initiator (0 = client, 1 =
+/// server), bit 1 is directionality (0 = bidirectional, 1 = unidirectional).
+/// Provided so embedders (notably an HTTP/3 layer classifying the control
+/// stream and QPACK encoder/decoder streams) don't hand-roll the bit math.
+pub const StreamType = enum(u2) {
+    client_bidi = 0b00,
+    server_bidi = 0b01,
+    client_uni = 0b10,
+    server_uni = 0b11,
+
+    /// The stream type encoded in the low two bits of `id` (RFC 9000 §2.1).
+    pub fn fromId(id: u64) StreamType {
+        return @enumFromInt(@as(u2, @truncate(id)));
+    }
+
+    /// Compose the stream id for this type at 0-based per-type sequence
+    /// `index`: `id = (index << 2) | type`. Asserts `index` fits the
+    /// 62-bit stream-id space.
+    pub fn streamId(self: StreamType, index: u64) u64 {
+        std.debug.assert(index <= (std.math.maxInt(u64) >> 2));
+        return (index << 2) | @intFromEnum(self);
+    }
+
+    pub fn isBidi(self: StreamType) bool {
+        return (@intFromEnum(self) & 0b10) == 0;
+    }
+
+    pub fn isUni(self: StreamType) bool {
+        return !self.isBidi();
+    }
+
+    pub fn initiatedByClient(self: StreamType) bool {
+        return (@intFromEnum(self) & 0b01) == 0;
+    }
+
+    pub fn initiatedByServer(self: StreamType) bool {
+        return !self.initiatedByClient();
+    }
+};
+
 /// Tagged-union of all connection-level events the embedder polls via `nextEvent`.
 /// Each variant carries enough context for the embedder to react without re-querying
 /// Connection state.
@@ -3257,6 +3298,32 @@ pub const Connection = struct {
         if (self.streams.contains(id)) return Error.StreamAlreadyOpen;
         try self.recordLocalStreamOpen(id);
         return try self.openStream(id);
+    }
+
+    /// The `StreamType` this endpoint uses when it initiates a stream of the
+    /// given directionality — client-{bidi,uni} for a client, server-{...}
+    /// for a server.
+    pub fn localStreamType(self: *const Connection, uni: bool) StreamType {
+        return switch (self.role) {
+            .client => if (uni) .client_uni else .client_bidi,
+            .server => if (uni) .server_uni else .server_bidi,
+        };
+    }
+
+    /// Open the next bidirectional stream initiated by this endpoint,
+    /// choosing the id automatically (no manual RFC 9000 §2.1 bit math).
+    /// Returns `StreamLimitExceeded` if the peer's bidi stream limit is
+    /// reached; the id is not consumed in that case, so a later retry after
+    /// the peer raises the limit reuses it.
+    pub fn openNextBidi(self: *Connection) Error!*Stream {
+        return self.openBidi(self.localStreamType(false).streamId(self.local_opened_streams_bidi));
+    }
+
+    /// Open the next unidirectional stream initiated by this endpoint —
+    /// e.g. an HTTP/3 control or QPACK encoder/decoder stream — choosing the
+    /// id automatically. Same limit/retry semantics as `openNextBidi`.
+    pub fn openNextUni(self: *Connection) Error!*Stream {
+        return self.openUni(self.localStreamType(true).streamId(self.local_opened_streams_uni));
     }
 
     fn openStream(self: *Connection, id: u64) Error!*Stream {

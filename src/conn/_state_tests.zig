@@ -20,6 +20,7 @@ const CloseState = state.CloseState;
 const Connection = state.Connection;
 const ConnectionCloseInfo = state.ConnectionCloseInfo;
 const ConnectionEvent = state.ConnectionEvent;
+const StreamType = state.StreamType;
 const ConnectionId = state.ConnectionId;
 const ConnectionIdProvision = state.ConnectionIdProvision;
 const ConnectionIdReplenishInfo = state.ConnectionIdReplenishInfo;
@@ -2658,6 +2659,85 @@ test "MAX_DATA MAX_STREAM_DATA and MAX_STREAMS raise send-side limits" {
     conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 16 });
     try std.testing.expectEqual(@as(u64, 32), conn.peer_max_data);
     try std.testing.expectEqual(@as(u64, 16), conn.stream(0).?.send_max_data);
+}
+
+// -- StreamType + openNext* convenience openers (RFC 9000 §2.1) ---------
+// HTTP/3 (and any embedder) classifies streams and opens its control /
+// QPACK streams by the low-two-bit id encoding; these helpers remove the
+// hand-rolled bit math from the downstream layer.
+
+test "StreamType encodes RFC 9000 §2.1 low-two-bit stream classes" {
+    try std.testing.expectEqual(StreamType.client_bidi, StreamType.fromId(0));
+    try std.testing.expectEqual(StreamType.server_bidi, StreamType.fromId(1));
+    try std.testing.expectEqual(StreamType.client_uni, StreamType.fromId(2));
+    try std.testing.expectEqual(StreamType.server_uni, StreamType.fromId(3));
+    // High-index ids classify by their low two bits only.
+    try std.testing.expectEqual(StreamType.client_bidi, StreamType.fromId(400));
+    try std.testing.expectEqual(StreamType.server_uni, StreamType.fromId(403));
+
+    // id composition round-trips through fromId, and the index survives.
+    inline for (.{
+        StreamType.client_bidi,
+        StreamType.server_bidi,
+        StreamType.client_uni,
+        StreamType.server_uni,
+    }) |t| {
+        const id = t.streamId(7);
+        try std.testing.expectEqual(t, StreamType.fromId(id));
+        try std.testing.expectEqual(@as(u64, 7), Connection.streamIndex(id));
+    }
+
+    try std.testing.expect(StreamType.client_bidi.isBidi() and !StreamType.client_bidi.isUni());
+    try std.testing.expect(StreamType.server_uni.isUni() and StreamType.server_uni.initiatedByServer());
+    try std.testing.expect(StreamType.client_uni.initiatedByClient());
+}
+
+test "openNextBidi / openNextUni choose client-initiated ids automatically" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    conn.peer_max_streams_bidi = 100;
+    conn.peer_max_streams_uni = 100;
+
+    try std.testing.expectEqual(@as(u64, 0), (try conn.openNextBidi()).id);
+    try std.testing.expectEqual(@as(u64, 4), (try conn.openNextBidi()).id);
+
+    const first_uni = try conn.openNextUni();
+    try std.testing.expectEqual(@as(u64, 2), first_uni.id);
+    try std.testing.expectEqual(@as(u64, 6), (try conn.openNextUni()).id);
+    try std.testing.expectEqual(StreamType.client_uni, StreamType.fromId(first_uni.id));
+    try std.testing.expectEqual(StreamType.client_bidi, conn.localStreamType(false));
+}
+
+test "openNext* choose server-initiated ids for a server" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initServer(allocator, ctx);
+    defer conn.deinit();
+    conn.peer_max_streams_bidi = 100;
+    conn.peer_max_streams_uni = 100;
+
+    try std.testing.expectEqual(@as(u64, 1), (try conn.openNextBidi()).id);
+    try std.testing.expectEqual(@as(u64, 5), (try conn.openNextBidi()).id);
+    try std.testing.expectEqual(@as(u64, 3), (try conn.openNextUni()).id);
+    try std.testing.expectEqual(StreamType.server_uni, conn.localStreamType(true));
+}
+
+test "openNextBidi surfaces StreamLimitExceeded without consuming the id" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    conn.peer_max_streams_bidi = 0;
+
+    try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextBidi());
+    // Not consumed: after the peer raises the limit the next open reuses index 0.
+    conn.peer_max_streams_bidi = 1;
+    try std.testing.expectEqual(@as(u64, 0), (try conn.openNextBidi()).id);
 }
 
 test "send-side STREAM emission is capped by flow-control allowance" {

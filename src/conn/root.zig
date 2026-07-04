@@ -83,6 +83,8 @@ pub const CloseState = lifecycle.CloseState;
 pub const LifecycleState = lifecycle.LifecycleState;
 /// Tagged event surfaced from `Connection.poll`.
 pub const ConnectionEvent = state.ConnectionEvent;
+/// (initiator, directionality) class in a stream id's low two bits (§2.1).
+pub const StreamType = state.StreamType;
 /// One received ALTERNATIVE_V4/V6_ADDRESS update
 /// (draft-munizaga-quic-alternative-server-address-00 §6).
 pub const AlternativeServerAddressEvent = state.AlternativeServerAddressEvent;

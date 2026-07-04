@@ -136,6 +136,11 @@ pub const CloseState = conn.CloseState;
 /// or DATAGRAM ack/loss notifications.
 pub const ConnectionEvent = conn.ConnectionEvent;
 
+/// The (initiator, directionality) class encoded in a stream id's low two
+/// bits (RFC 9000 §2.1), plus `openNextBidi`/`openNextUni` on `Connection`,
+/// so embedders (e.g. an HTTP/3 layer) needn't hand-roll stream-id bit math.
+pub const StreamType = conn.StreamType;
+
 /// One received `ALTERNATIVE_V4/V6_ADDRESS` update surfaced via
 /// `Connection.pollEvent` (draft-munizaga-quic-alternative-server-address-00 §6).
 pub const AlternativeServerAddressEvent = conn.AlternativeServerAddressEvent;
