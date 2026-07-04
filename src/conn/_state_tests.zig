@@ -2316,6 +2316,36 @@ test "sendDatagram enforces peer support and bounded queue" {
     try std.testing.expectError(Error.DatagramQueueFull, conn.sendDatagram("x"));
 }
 
+test "maxDatagramPayload tracks the live PMTU and the peer frame-size cap" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    // Peer hasn't enabled DATAGRAM yet.
+    conn.cached_peer_transport_params = .{ .max_datagram_frame_size = 0 };
+    try std.testing.expectError(Error.DatagramUnavailable, conn.maxDatagramPayload());
+
+    // With a generous peer cap the payload is bounded by the path MTU; at the
+    // 1200-byte floor that is the historical default_mtu - 9 = 1191, so the
+    // floor behavior is unchanged.
+    conn.cached_peer_transport_params = .{ .max_datagram_frame_size = 65535 };
+    try std.testing.expectEqual(@as(usize, default_mtu - 9), try conn.maxDatagramPayload());
+
+    // A validated larger PMTU grows the budget one-for-one...
+    conn.activePath().pmtu = 1500;
+    try std.testing.expectEqual(@as(usize, 1500 - 9), try conn.maxDatagramPayload());
+    // ...and a PMTU black-hole shrinks it below the floor.
+    conn.activePath().pmtu = 1000;
+    try std.testing.expectEqual(@as(usize, 1000 - 9), try conn.maxDatagramPayload());
+
+    // The peer's max_datagram_frame_size still caps it under a big PMTU.
+    conn.activePath().pmtu = 1500;
+    conn.cached_peer_transport_params = .{ .max_datagram_frame_size = 200 };
+    try std.testing.expectEqual(@as(usize, 200), try conn.maxDatagramPayload());
+}
+
 test "tracked DATAGRAM emits ack event when packet is acknowledged" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

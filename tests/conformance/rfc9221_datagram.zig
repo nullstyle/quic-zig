@@ -255,7 +255,7 @@ test "MUST NOT emit a DATAGRAM whose encoded size exceeds the encode buffer [RFC
     // payload + header. RFC 9221 §4 ¶7 then layers an additional
     // sender-side check ("MUST NOT send DATAGRAMs larger than peer's
     // max_datagram_frame_size") on top of this — that policy lives
-    // in `Connection.maxOutboundDatagramPayload` (verified at the
+    // in `Connection.maxDatagramPayload` (verified at the
     // connection-suite layer; here we lock down the codec floor).
     const f: Frame = .{ .datagram = .{
         .data = "way-too-big-for-buffer",
@@ -313,7 +313,7 @@ test "MUST close with PROTOCOL_VIOLATION on a DATAGRAM larger than max_datagram_
 
 test "MUST NOT send a DATAGRAM exceeding the peer's advertised max_datagram_frame_size [RFC9221 §4 ¶7]" {
     // Sender-side mirror: RFC 9221 §4 ¶7. quic_zig enforces this in
-    // `Connection.maxOutboundDatagramPayload` — `sendDatagram`
+    // `Connection.maxDatagramPayload` — `sendDatagram`
     // returns `Error.DatagramTooLarge` up front when the application
     // payload exceeds the cached peer transport parameter, before
     // any frame ever hits the wire.

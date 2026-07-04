@@ -4291,7 +4291,7 @@ pub const Connection = struct {
     /// echoed in `datagram_acked` / `datagram_lost` events. QUIC never
     /// retransmits DATAGRAM frames; this id is only for app retry policy.
     pub fn sendDatagramTracked(self: *Connection, payload: []const u8) Error!u64 {
-        const max_payload = try self.maxOutboundDatagramPayload();
+        const max_payload = try self.maxDatagramPayload();
         if (payload.len > max_payload) return Error.DatagramTooLarge;
         if (self.pending_frames.send_datagrams.items.len >= max_pending_datagram_count) {
             return Error.DatagramQueueFull;
@@ -4315,11 +4315,32 @@ pub const Connection = struct {
         return id;
     }
 
-    fn maxOutboundDatagramPayload(self: *const Connection) Error!usize {
-        var limit: usize = max_outbound_datagram_payload_size;
+    /// The largest RFC 9221 DATAGRAM payload (in bytes) that `sendDatagram`
+    /// / `sendDatagramTracked` will accept right now.
+    ///
+    /// It tracks the live path: it grows as DPLPMTUD validates a larger PMTU
+    /// and shrinks after a PMTU black-hole, and is further bounded by the
+    /// peer's `max_datagram_frame_size` transport parameter once the handshake
+    /// supplies it. Returns `Error.DatagramUnavailable` when the peer did not
+    /// enable DATAGRAM (advertised `max_datagram_frame_size == 0`).
+    ///
+    /// The value is a snapshot — a later black-hole event can lower it and
+    /// `sendDatagram` re-validates at send time — so treat it as "safe to send
+    /// now," not a standing guarantee. RFC 9221 §5 forbids fragmenting a
+    /// DATAGRAM; the send path only emits one that fits the current packet, so
+    /// a payload sized to this value is carried whole.
+    pub fn maxDatagramPayload(self: *const Connection) Error!usize {
+        // Room a 1-RTT packet + DATAGRAM frame need around the payload. The
+        // reserve matches the historical `default_mtu`-derived ceiling at the
+        // 1200-byte floor, so behavior there is unchanged and only the
+        // PMTU-scaling is new; the send-time build guard enforces exact fit.
+        const packet_reserve: usize = default_mtu - max_outbound_datagram_payload_size;
+        // Grow/shrink with the active path's PMTU, but never past the
+        // plaintext buffer the send path builds a packet into.
+        var limit: usize = @min(self.pmtu() -| packet_reserve, max_recv_plaintext);
         if (self.cached_peer_transport_params) |params| {
             if (params.max_datagram_frame_size == 0) return Error.DatagramUnavailable;
-            limit = @min(limit, @as(usize, @intCast(@min(params.max_datagram_frame_size, max_outbound_datagram_payload_size))));
+            limit = @min(limit, @as(usize, @intCast(params.max_datagram_frame_size)));
         }
         return limit;
     }
