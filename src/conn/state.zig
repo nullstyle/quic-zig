@@ -1419,6 +1419,16 @@ pub const Connection = struct {
     peer_reaped_bits_uni: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
     /// Decoded peer parameters once BoringSSL exposes them.
     cached_peer_transport_params: ?TransportParams = null,
+    /// The peer's transport parameters as REMEMBERED from a prior
+    /// connection, supplied by the embedder for a 0-RTT resumption
+    /// (BoringSSL does not carry peer transport params across resumption,
+    /// and they can't be recovered from the one-way early-data context
+    /// digest). Used only to bound early-data (0-RTT) sends *before* the
+    /// real `cached_peer_transport_params` arrive on this connection. RFC
+    /// 9001 §4.6.1 guarantees the server MUST NOT lower these on
+    /// resumption, so seeding limits from them can only under-grant vs
+    /// the real params, never over-grant.
+    remembered_peer_transport_params: ?TransportParams = null,
     /// The peer's transport-parameter stateless reset token is bound
     /// to its initial source CID. Register it once; later peer DCID
     /// rotation is driven by NEW_CONNECTION_ID metadata.
@@ -3312,14 +3322,21 @@ pub const Connection = struct {
     }
 
     pub fn initialSendStreamLimit(self: *const Connection, id: u64) u64 {
-        // NOTE: before the peer's transport parameters are cached this
-        // returns maxInt (no per-stream cap). Seeding 0 here would be
-        // safer, but it breaks 0-RTT: early data is sent before the
-        // server's params arrive and must be bounded by the *remembered*
-        // session params instead. Wiring those in is the correct fix
-        // (tracked separately); the maxInt window is a client's own
-        // send-limit, not a peer-exploitable surface.
-        const params = self.cached_peer_transport_params orelse return std.math.maxInt(u64);
+        // Prefer the real cached peer params; before they arrive, bound
+        // early-data (0-RTT) sends by the embedder-supplied remembered
+        // session params. With neither available, only a 0-RTT send
+        // window is legitimate at all: grant the (client-self-limited)
+        // unbounded window when early-data write keys are present, and
+        // nothing otherwise — a non-0-RTT connection never sends
+        // application stream data before its params are cached.
+        // applyPeerFlowTransportParams later @max-raises each stream's
+        // send_max_data to the true limit once the real params land.
+        const params = self.cached_peer_transport_params orelse
+            self.remembered_peer_transport_params orelse
+            {
+                if (self.haveSecret(.early_data, .write)) return std.math.maxInt(u64);
+                return 0;
+            };
         if (streamIsUni(id)) {
             if (!self.streamInitiatedByLocal(id)) return 0;
             return params.initial_max_stream_data_uni;
@@ -3328,6 +3345,22 @@ pub const Connection = struct {
             return params.initial_max_stream_data_bidi_remote;
         }
         return params.initial_max_stream_data_bidi_local;
+    }
+
+    /// Install the peer's transport parameters remembered from a prior
+    /// connection, for a 0-RTT resumption. Bounds early-data (0-RTT)
+    /// sends before the real peer params arrive — per-stream (via
+    /// `initialSendStreamLimit`) and connection-level (by tightening
+    /// `peer_max_data`). No-op-ish once the real params are cached:
+    /// `applyPeerFlowTransportParams` overwrites `peer_max_data` and
+    /// `@max`-raises each stream's window to the true (>= remembered)
+    /// limits. Intended to be called at connection setup by the client
+    /// wrapper when it also installs the resumption session ticket.
+    pub fn setRememberedPeerTransportParams(self: *Connection, params: TransportParams) void {
+        self.remembered_peer_transport_params = params;
+        if (self.cached_peer_transport_params == null) {
+            self.peer_max_data = @min(self.peer_max_data, params.initial_max_data);
+        }
     }
 
     fn recordLocalStreamOpen(self: *Connection, id: u64) Error!void {

@@ -121,6 +121,17 @@ const ConfigImpl = struct {
     /// per the §5.2 / §12 hardening posture.
     session_ticket: ?[]const u8 = null,
 
+    /// The server's transport parameters as observed on the connection
+    /// that ISSUED `session_ticket`, persisted by the embedder alongside
+    /// the ticket. BoringSSL does not carry peer transport params across
+    /// resumption, so without this the client cannot bound its 0-RTT
+    /// sends by the resumed session's limits. When set (together with
+    /// `session_ticket`), early-data stream/connection send windows are
+    /// bounded by these remembered values until the server's real params
+    /// arrive; RFC 9001 §4.6.1 guarantees the server MUST NOT lower them
+    /// on resumption. Ignored when `session_ticket` is null.
+    resumption_peer_transport_params: ?TransportParams = null,
+
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
     /// hardening guide §9 / §12 — internal parser-error strings reveal
@@ -372,6 +383,13 @@ pub const Client = struct {
             defer session.deinit();
             try conn_ptr.setSession(session);
             conn_ptr.setEarlyDataEnabled(true);
+            // Bound 0-RTT sends by the resumed session's remembered peer
+            // params (BoringSSL doesn't remember them for us). Absent
+            // them, early data keeps the pre-existing client-self-limited
+            // window until the server's real params arrive.
+            if (config.resumption_peer_transport_params) |remembered| {
+                conn_ptr.setRememberedPeerTransportParams(remembered);
+            }
         }
 
         try conn_ptr.bind();

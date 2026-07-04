@@ -3443,6 +3443,15 @@ test "pollLevel coalesces multiple STREAM frames with distinct loss keys" {
     try conn.setPeerDcid(&.{0xaa});
     try std.testing.expect(conn.markPathValidated(0));
 
+    // This test emits 1-RTT stream data without a handshake, so the real
+    // peer params never arrive; supply remembered limits so the streams
+    // have a non-zero send window (previously implicit via the pre-params
+    // maxInt default, which is now 0 without any known peer params).
+    conn.setRememberedPeerTransportParams(.{
+        .initial_max_data = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+    });
+
     const s0 = try conn.openBidi(0);
     const s1 = try conn.openBidi(4);
     const s2 = try conn.openBidi(8);
@@ -4639,6 +4648,12 @@ test "STREAM send tracking survives duplicate application PNs across paths" {
 
     try installTestApplicationWriteSecret(&conn);
     try conn.setPeerDcid(&.{0xaa});
+    // See the companion test above: no handshake here, so seed a peer
+    // send window so 1-RTT stream data can be emitted.
+    conn.setRememberedPeerTransportParams(.{
+        .initial_max_data = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+    });
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
     const path = conn.paths.get(path_id).?;
@@ -7776,6 +7791,33 @@ test "gcClosedStreams: a reaped peer stream is not resurrected by a replayed fra
         .has_length = true,
     });
     try std.testing.expect(conn.streams.get(sid2) != null);
+}
+
+test "initialSendStreamLimit: remembered 0-RTT params bound the pre-params send window (L6)" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    // A plain (non-0-RTT) client with no params and no early-data keys
+    // grants no pre-params send window (previously an unbounded maxInt).
+    try std.testing.expectEqual(@as(u64, 0), conn.initialSendStreamLimit(0));
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), conn.peer_max_data);
+
+    // Install remembered peer params (a 0-RTT resumption): pre-params
+    // windows are now bounded by them, per-stream and connection-level.
+    conn.setRememberedPeerTransportParams(.{
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_remote = 2048,
+        .initial_max_stream_data_uni = 512,
+    });
+    // Client-initiated bidi stream 0 → remembered bidi_remote limit.
+    try std.testing.expectEqual(@as(u64, 2048), conn.initialSendStreamLimit(0));
+    // Client-initiated uni stream (id 2) → remembered uni limit.
+    try std.testing.expectEqual(@as(u64, 512), conn.initialSendStreamLimit(2));
+    // Connection-level send window tightened from maxInt to the remembered value.
+    try std.testing.expectEqual(@as(u64, 4096), conn.peer_max_data);
 }
 
 test "gcClosedStreams batch cap rolls surplus to the next tick" {

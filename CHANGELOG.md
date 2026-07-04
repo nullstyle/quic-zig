@@ -81,6 +81,13 @@ changes.
   reset state). Uses a bounded per-direction contiguous "reaped" watermark
   that correctly distinguishes reaped streams from implicitly-opened,
   never-yet-used lower-numbered streams.
+- Bound the pre-transport-parameters per-stream send window. It previously
+  defaulted to `maxInt` before the peer's parameters were known; it is now
+  bounded by embedder-supplied remembered session parameters during a
+  0-RTT resumption (new `Client.Config.resumption_peer_transport_params`
+  and `Connection.setRememberedPeerTransportParams`), and is 0 for a plain
+  connection (which never sends application data before its parameters
+  arrive). 0-RTT without remembered parameters keeps its prior behavior.
 
 ### Changed
 
