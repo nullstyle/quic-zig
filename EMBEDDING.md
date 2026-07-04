@@ -213,16 +213,21 @@ Set these deliberately for any deployed server:
 - `tls_cert_pem` and `tls_key_pem`: PEM leaf certificate chain and
   matching private key.
 - `alpn_protocols`: required by QUIC. For HTTP/3, pass `&.{"h3"}`.
-- `transport_params.max_idle_timeout_ms`: the default `0` means no idle
-  timeout.
+- `transport_params.max_idle_timeout_ms`: `Server.init` substitutes a
+  safe 30s timeout when this is left at `0`; set it explicitly to match
+  your deployment, or set `Server.Config.allow_no_idle_timeout = true` to
+  genuinely run with no idle timer.
 - `transport_params.initial_max_*`: stream and connection flow-control
   limits for your application workload.
 - `max_concurrent_connections`: slot-table cap.
 - `max_connection_memory`: aggregate per-connection cap for peer-driven
   buffers.
-- `max_initials_per_source_per_window`, `max_vn_per_source_per_window`,
-  `max_datagrams_per_window`, and `max_bytes_per_window`: tune to your
-  deployment envelope.
+- `max_initials_per_source_per_window` (on by default at 32) and
+  `max_vn_per_source_per_window` (on by default at 8): per-source Initial
+  and Version-Negotiation flood limiters; set to `null` to disable, e.g.
+  behind a trusted front-end that already polices source rate.
+  `max_datagrams_per_window` and `max_bytes_per_window` are off by
+  default — tune to your deployment envelope.
 - `retry_token_key`: enables stateless Retry before allocating a
   connection slot.
 - `new_token_key`: enables NEW_TOKEN issuance for returning clients.
@@ -254,6 +259,16 @@ defer resumed.deinit();
 try conn.setSession(resumed);
 conn.setEarlyDataEnabled(true);
 ```
+
+On a resuming client, also supply the server's transport parameters as
+observed on the ticket-issuing connection, so early-data sends are bounded
+by the resumed session's flow-control limits. BoringSSL does not carry
+peer transport parameters across resumption, so persist them alongside the
+ticket and feed them back: with the wrapper set
+`Client.Config.resumption_peer_transport_params`, or on a raw `Connection`
+call `conn.setRememberedPeerTransportParams(...)` next to `setSession`.
+Without them, early-data streams keep an unbounded (client-self-limited)
+send window until the server's real parameters arrive.
 
 ## Diagnostics
 

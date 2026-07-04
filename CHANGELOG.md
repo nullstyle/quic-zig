@@ -7,6 +7,29 @@ changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-03
+
+Hardening release from a full security & robustness review: closes a
+remote-crash DoS and a set of untrusted-input / DoS / correctness issues,
+and flips several server and client defaults to be secure by default.
+
+**Upgrade notes — behavior changes that may require action:**
+
+- **Client TLS now verifies by default.** `Client.connect` verifies the
+  server certificate against the system trust store. Clients talking to
+  self-signed or test peers must now set
+  `Client.Config.insecure_skip_verify = true`. A non-null `ca_pem` is
+  rejected with `InvalidConfig` (it was previously ignored); pin a private
+  CA with a fully configured `tls_context_override`.
+- **Server idle timeout defaults to 30s.** `Server.init` substitutes
+  `Server.default_server_idle_timeout_ms` when
+  `transport_params.max_idle_timeout_ms` is `0`; set
+  `Server.Config.allow_no_idle_timeout = true` to keep no idle timer.
+- **Per-source Initial-flood limiter is on** at 32/window
+  (`Server.Config.max_initials_per_source_per_window`); set it to `null`
+  to disable (enforcement is a no-op for unattributed `from == null`
+  datagrams).
+
 ### Added
 
 - End-to-end loss-recovery test: drops one 1-RTT data packet through the
