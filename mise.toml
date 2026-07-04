@@ -16,19 +16,15 @@ description = "Run the quic-zig Zig test suite"
 run = "zig build test"
 
 [tasks.fuzz]
-# CAVEAT: this parallel step (`zig build fuzz -j<N>`, one binary per site)
-# currently aborts under the Zig fuzz coordinator with "reached unreachable
-# code" on BOTH Linux and macOS — an upstream limitation
-# (ziglang/zig#25352, hard-coded n_instances = 1). The working deep-fuzz
-# path, and what CI runs (.github/workflows/fuzz.yml, ubuntu-latest), is the
-# single-instance runner:
-#     zig build test --fuzz=1M --test-filter "fuzz: open1Rtt"
-# On macOS the std.testing.fuzz runtime aborts even single-instance (a
-# platform gap, reproduced with a trivial standalone test on
-# 0.17.0-dev.1158). The one-shot fuzz-smoke run under `zig build test` works
-# everywhere. See CONTRIBUTING.md "Fuzzing".
-description = "Coverage-guided fuzzing (parallel; see note — currently blocked upstream)"
-run = "zig build fuzz --fuzz=10M -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+# Deep coverage-guided fuzzing, every site in its own single-instance
+# process (Linux). Avoids `zig build fuzz -j<N>`, which multiplexes N sites
+# through one build-runner fuzz coordinator and aborts upstream
+# ("reached unreachable code"; ziglang/zig#25352) on both Linux and macOS.
+# The per-process topology matches `zig build test --fuzz`, which is what CI
+# runs (.github/workflows/fuzz.yml, ubuntu-latest). On macOS the fuzz
+# runtime aborts regardless — run this on Linux. See CONTRIBUTING.md.
+description = "Deep coverage-guided fuzzing, one process per site (Linux)"
+run = "./scripts/fuzz-parallel.sh"
 
 [tasks.qns-endpoint]
 description = "Build the QNS endpoint binary"

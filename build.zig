@@ -321,9 +321,17 @@ pub fn build(b: *std.Build) void {
         .{ .label = "conn-close-pre-handshake", .filter = "fuzz: Connection CONNECTION_CLOSE pre-handshake envelope invariants" },
     };
 
+    // Aggregate step: depends on every fuzz site under one build runner.
+    // CAVEAT: `zig build fuzz -j<N>` multiplexes N fuzz sites through a
+    // single fuzz coordinator, which aborts upstream ("reached unreachable
+    // code"; ziglang/zig#25352, hard-coded n_instances = 1) on both Linux
+    // and macOS. For deep parallel fuzzing, drive the per-site `fuzz-<label>`
+    // steps below as separate processes instead — see scripts/fuzz-parallel.sh
+    // (`mise run fuzz` / `just fuzz`), which matches the single-instance
+    // topology of `zig build test --fuzz` that CI relies on.
     const fuzz_step = b.step(
         "fuzz",
-        "Run each std.testing.fuzz site in its own binary so -j<N> parallelises limit-mode fuzzing",
+        "All fuzz sites under one runner (see note: -jN aborts upstream; prefer scripts/fuzz-parallel.sh)",
     );
 
     for (fuzz_targets) |t| {
@@ -335,5 +343,16 @@ pub fn build(b: *std.Build) void {
         const run_tst = b.addRunArtifact(tst);
         run_tst.addPassthruArgs();
         fuzz_step.dependOn(&run_tst.step);
+
+        // Per-site top-level step. Running `zig build fuzz-<label> --fuzz=N`
+        // gives that one site its own build-runner/fuzz-coordinator process,
+        // matching the proven single-instance path; the driver script runs
+        // these across processes for real parallelism without the -jN
+        // single-coordinator multiplexing.
+        const per_site = b.step(
+            b.fmt("fuzz-{s}", .{t.label}),
+            b.fmt("Fuzz one site in its own process: {s}", .{t.filter}),
+        );
+        per_site.dependOn(&run_tst.step);
     }
 }

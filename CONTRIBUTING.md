@@ -42,9 +42,11 @@ modes:
   gate (`.github/workflows/test.yml`), so a seed that panics or trips a
   safety check fails the build like any other test.
 - **Deep, coverage-guided (Linux).** CI runs `zig build test --fuzz=$ITERS`
-  weekly on Linux (`.github/workflows/fuzz.yml`). Run it locally the same
-  way, optionally narrowing to one site:
-  `zig build test --fuzz=1M --test-filter "fuzz: open1Rtt"`.
+  weekly on Linux (`.github/workflows/fuzz.yml`). To sweep every site in
+  parallel locally, use `just fuzz` (or `scripts/fuzz-parallel.sh [ITERS]
+  [JOBS]`, or `mise run fuzz`), which runs each site as its own
+  `zig build fuzz-<label> --fuzz=N` process. A single site on its own:
+  `zig build fuzz-open-1rtt --fuzz=1M`.
 
 ### Regression corpus
 
@@ -61,12 +63,13 @@ harness itself).
 
 ### Toolchain caveats
 
-- The parallel breadth step `zig build fuzz -j<N>` (one binary per site)
-  currently aborts under the Zig fuzz coordinator ("reached unreachable
-  code") on both Linux and macOS — an upstream limitation
-  (ziglang/zig#25352, hard-coded `n_instances = 1`). Use the
-  single-instance `zig build test --fuzz` path above for deep runs until it
-  is resolved.
+- Do not use `zig build fuzz -j<N>` (the aggregate step): it multiplexes N
+  sites through one build-runner fuzz coordinator, which aborts ("reached
+  unreachable code") on both Linux and macOS — an upstream limitation
+  (ziglang/zig#25352, hard-coded `n_instances = 1`). The per-site
+  `fuzz-<label>` steps and the `scripts/fuzz-parallel.sh` driver sidestep
+  it by giving each site its own single-instance coordinator process
+  (matching `zig build test --fuzz`).
 - On macOS the `std.testing.fuzz` coverage-guided runtime aborts even
   single-instance (reproduced with a trivial standalone test on
   0.17.0-dev.1158 — a platform gap, not a target bug). Deep-fuzz on Linux

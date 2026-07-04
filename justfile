@@ -24,9 +24,10 @@ check-tools:
 test:
     zig build test
 
-# Run coverage-guided fuzzing in parallel (one binary per fuzz site).
-fuzz:
-    zig build fuzz --fuzz=10M -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+# Deep coverage-guided fuzzing: every site in its own process (Linux).
+# Args: ITERS (per-site budget, default 1M), JOBS (default CPU count).
+fuzz iters="1M" jobs="":
+    ./scripts/fuzz-parallel.sh {{iters}} {{jobs}}
 
 clean:
     rm -rf .zig-cache zig-out
