@@ -193,10 +193,14 @@ than silently ignored).
 Before exposing a server to arbitrary peers:
 
 - Build with `-Doptimize=ReleaseSafe`.
-- Set ALPN, certificate chain, private key, idle timeout, stream limits,
-  and connection memory budgets explicitly.
-- Configure per-source Initial, Version Negotiation, logging, datagram,
-  and byte-rate limits for your deployment.
+- Set ALPN, certificate chain, private key, stream limits, and
+  connection memory budgets explicitly. The idle timeout defaults to a
+  safe 30s on the server when left unset (`allow_no_idle_timeout` opts
+  out); set it explicitly to match your deployment.
+- The per-source Initial-flood limiter is on by default (32/window) and
+  Version Negotiation flood limiting is on; tune the datagram, byte-rate,
+  and logging limits for your deployment. Set the per-source Initial cap
+  to `null` only behind a trusted front-end that polices source rate.
 - Use `retry_token_key` and `new_token_key` when clients should prove
   source address ownership before allocation.
 - Persist `stateless_reset_key`, Retry token keys, and NEW_TOKEN keys

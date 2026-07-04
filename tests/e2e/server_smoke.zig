@@ -60,6 +60,69 @@ test "Server.init + deinit on a real cert/key pair" {
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
 }
 
+test "Server.init substitutes a safe idle timeout when unset, honors opt-out (M2)" {
+    const protos = [_][]const u8{"hq-test"};
+
+    // (1) Idle timeout left at 0 (struct default) → server substitutes
+    // the safe default instead of "no idle timer".
+    var tp0 = defaultParams();
+    tp0.max_idle_timeout_ms = 0;
+    var srv = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = tp0,
+    });
+    defer srv.deinit();
+    try std.testing.expectEqual(
+        quic_zig.Server.default_server_idle_timeout_ms,
+        srv.transport_params.max_idle_timeout_ms,
+    );
+    try std.testing.expect(srv.transport_params.max_idle_timeout_ms != 0);
+
+    // (2) Explicit opt-out honors a genuine 0 (no idle timer).
+    var srv2 = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = tp0,
+        .allow_no_idle_timeout = true,
+    });
+    defer srv2.deinit();
+    try std.testing.expectEqual(@as(u64, 0), srv2.transport_params.max_idle_timeout_ms);
+
+    // (3) An explicit non-zero value is preserved verbatim.
+    var tp3 = defaultParams();
+    tp3.max_idle_timeout_ms = 5_000;
+    var srv3 = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = tp3,
+    });
+    defer srv3.deinit();
+    try std.testing.expectEqual(@as(u64, 5_000), srv3.transport_params.max_idle_timeout_ms);
+}
+
+test "Server per-source Initial-flood limiter is on by default at 32 (L4)" {
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer srv.deinit();
+    // Secure default: the limiter is enabled without the embedder
+    // opting in. (Enforcement only applies to attributed `from`
+    // datagrams; null-source feeds bypass it — see server.zig feed.)
+    try std.testing.expectEqual(@as(?u32, 32), srv.max_initials_per_source);
+}
+
 test "Server.feed drops non-Initial bytes silently" {
     const protos = [_][]const u8{"hq-test"};
 

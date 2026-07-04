@@ -9,6 +9,14 @@ changes.
 
 ### Security
 
+- The server per-source Initial-flood limiter is now on by default
+  (`Config.max_initials_per_source_per_window = 32`, the previously
+  recommended value); set it to `null` to disable. Enforcement applies
+  only to attributed (`from != null`) datagrams.
+- `Server.init` now substitutes a safe 30s idle timeout when
+  `transport_params.max_idle_timeout_ms` is left at 0, instead of
+  standing up a server with no idle timer. Set the new
+  `Config.allow_no_idle_timeout = true` to genuinely disable it.
 - Client TLS is now secure by default: `Client.connect` verifies the
   server certificate against the system trust store unless the new
   `Client.Config.insecure_skip_verify` opt-out is set. The previous

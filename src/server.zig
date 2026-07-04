@@ -487,8 +487,18 @@ const ConfigImpl = struct {
     /// connection. The `original_destination_connection_id` and
     /// `initial_source_connection_id` fields are filled in
     /// automatically per connection; everything else is taken
-    /// verbatim.
+    /// verbatim, except `max_idle_timeout_ms` — see
+    /// `allow_no_idle_timeout`.
     transport_params: TransportParams,
+
+    /// When the supplied `transport_params.max_idle_timeout_ms` is 0
+    /// (the struct default, meaning "no idle timer"), `Server.init`
+    /// substitutes a safe `default_server_idle_timeout_ms` so an
+    /// inattentive embedder does not stand up a server that keeps
+    /// idle / half-open connections alive forever — a resource-exhaustion
+    /// vector on an internet-facing listener. Set this to `true` to
+    /// honor an explicit 0 and genuinely disable the idle timer.
+    allow_no_idle_timeout: bool = false,
 
     /// Maximum number of concurrent live connections. Excess Initial
     /// packets are dropped.
@@ -567,13 +577,17 @@ const ConfigImpl = struct {
     /// TLS-context behavior the auto-built path doesn't expose.
     tls_context_override: ?boringssl.tls.Context = null,
 
-    /// Per-source-address Initial-acceptance cap. Null disables the
-    /// rate limiter; any other value enables it and rejects fresh
-    /// Initials from a source whose recent count is at or above the
-    /// cap within `source_rate_window_us`. Datagrams to existing
-    /// slots are unaffected. Recommended: 32 for typical
-    /// open-internet deployments.
-    max_initials_per_source_per_window: ?u32 = null,
+    /// Per-source-address Initial-acceptance cap. Enabled by default at
+    /// 32 (the recommended open-internet value): fresh Initials from a
+    /// source whose recent count is at or above the cap within
+    /// `source_rate_window_us` are rejected before any Retry / TLS /
+    /// Connection setup, bounding a per-source Initial flood that would
+    /// otherwise allocate connection state. Datagrams to existing slots
+    /// are unaffected. Set to `null` to disable — e.g. behind a trusted
+    /// front-end that already polices source rate, or when the embedder
+    /// supplies `from = null` (unattributed) datagrams, for which the
+    /// gate is a no-op anyway.
+    max_initials_per_source_per_window: ?u32 = 32,
 
     /// Sliding-window size for `max_initials_per_source_per_window`,
     /// in microseconds. Default is one second. Shared by the VN
@@ -1100,6 +1114,14 @@ pub const Server = struct {
     pub const MetricsSnapshot = MetricsSnapshotImpl;
     pub const RateLimitSnapshot = RateLimitSnapshotImpl;
 
+    /// Idle timeout (ms) `init` substitutes when the embedder leaves
+    /// `transport_params.max_idle_timeout_ms` at 0 and does not set
+    /// `Config.allow_no_idle_timeout`. 30s matches every quick-start
+    /// example and the README production checklist; it keeps idle /
+    /// half-open connections from living forever on an internet-facing
+    /// listener.
+    pub const default_server_idle_timeout_ms: u64 = 30_000;
+
     allocator: std.mem.Allocator,
     tls_ctx: boringssl.tls.Context,
     /// True when `tls_ctx` is Server-owned and must be torn down by
@@ -1417,6 +1439,13 @@ pub const Server = struct {
         // don't mint extra CIDs through this server (the unkeyed CIDs
         // would leak `server_id` directly on every NEW_CONNECTION_ID).
         var resolved_transport_params = config.transport_params;
+        // Secure default: a server that leaves the idle timeout at 0
+        // (the struct default, "no idle timer") would keep idle /
+        // half-open connections alive forever. Substitute a safe
+        // timeout unless the embedder explicitly opts into no-timeout.
+        if (resolved_transport_params.max_idle_timeout_ms == 0 and !config.allow_no_idle_timeout) {
+            resolved_transport_params.max_idle_timeout_ms = default_server_idle_timeout_ms;
+        }
         const resolved_local_cid_len: u8 = if (config.quic_lb) |lb_cfg| blk: {
             if (lb_cfg.isPlaintext() and !resolved_transport_params.disable_active_migration) {
                 resolved_transport_params.disable_active_migration = true;
