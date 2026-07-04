@@ -31,6 +31,47 @@ deterministic fuzz-smoke coverage. `zig build conformance` runs the
 auditor-facing RFC corpus directly. `zig build bench` runs the
 microbenchmark harness.
 
+## Fuzzing
+
+Fuzz targets live inline next to the code they exercise, as
+`test "fuzz: ..."` blocks driving `std.testing.fuzz`. They run in two
+modes:
+
+- **Smoke (every commit).** `zig build test` executes each fuzz target
+  against its seed `.corpus` (and a default input). This is part of the CI
+  gate (`.github/workflows/test.yml`), so a seed that panics or trips a
+  safety check fails the build like any other test.
+- **Deep, coverage-guided (Linux).** CI runs `zig build test --fuzz=$ITERS`
+  weekly on Linux (`.github/workflows/fuzz.yml`). Run it locally the same
+  way, optionally narrowing to one site:
+  `zig build test --fuzz=1M --test-filter "fuzz: open1Rtt"`.
+
+### Regression corpus
+
+There is no separate corpus directory: seed inputs are committed inline in
+each target's `.corpus` array. When deep fuzzing finds a crash, **minimize
+the input and add it to that target's `.corpus`** — it then runs on every
+`zig build test` and is gated by CI, turning a one-off finding into
+permanent per-commit regression coverage.
+
+Corpus hygiene: seeds are protocol bytes, never secrets. Do not paste a
+real key, token, or ticket into a `.corpus` entry — synthesize the shape
+you need (the crypto targets derive keys from fixed test secrets in the
+harness itself).
+
+### Toolchain caveats
+
+- The parallel breadth step `zig build fuzz -j<N>` (one binary per site)
+  currently aborts under the Zig fuzz coordinator ("reached unreachable
+  code") on both Linux and macOS — an upstream limitation
+  (ziglang/zig#25352, hard-coded `n_instances = 1`). Use the
+  single-instance `zig build test --fuzz` path above for deep runs until it
+  is resolved.
+- On macOS the `std.testing.fuzz` coverage-guided runtime aborts even
+  single-instance (reproduced with a trivial standalone test on
+  0.17.0-dev.1158 — a platform gap, not a target bug). Deep-fuzz on Linux
+  or a Linux container; the smoke run works everywhere.
+
 ## Interop
 
 The external interop wrapper drives the official
