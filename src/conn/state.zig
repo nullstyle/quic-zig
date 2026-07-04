@@ -126,6 +126,11 @@ pub const Error = error{
     DatagramIdExhausted,
     InvalidStreamId,
     StreamLimitExceeded,
+    /// A local stream open was refused because the connection is in
+    /// graceful shutdown (`beginGracefulShutdown`): no new streams are
+    /// created while in-flight streams drain. RFC 9000 has no GOAWAY, so
+    /// this is a local-only signal paired with withheld MAX_STREAMS credit.
+    ShuttingDown,
     /// `tryReserveResidentBytes` would push the connection past
     /// `max_connection_memory`. Hardening guide §3.5 / §8: peer-driven
     /// allocations (CRYPTO reassembly, DATAGRAM queues, stream
@@ -1533,6 +1538,13 @@ pub const Connection = struct {
     /// handshake.
     pending_handshake_done: bool = false,
     handshake_done_queued_once: bool = false,
+    /// Graceful-shutdown latch (`beginGracefulShutdown`). While set, local
+    /// stream opens are refused with `Error.ShuttingDown` and no further
+    /// MAX_STREAMS credit is granted (the peer's stream limit freezes at
+    /// its current value), so both sides quiesce new-stream creation while
+    /// in-flight streams complete. Independent of the RFC 9000 §10 close
+    /// state — the connection stays open until the embedder calls `close`.
+    graceful_shutdown: bool = false,
     flow_blocked_events: event_queue_mod.EventQueue(FlowBlockedInfo, max_flow_blocked_events) = .{},
     connection_id_events: event_queue_mod.EventQueue(ConnectionIdReplenishInfo, max_connection_id_events) = .{},
     datagram_send_events: event_queue_mod.EventQueue(StoredDatagramSendEvent, max_datagram_send_events) = .{},
@@ -3451,6 +3463,10 @@ pub const Connection = struct {
     }
 
     fn recordLocalStreamOpen(self: *Connection, id: u64) Error!void {
+        // During graceful shutdown we open no new local streams; in-flight
+        // streams keep draining. Single chokepoint for openBidi/openUni and
+        // the openNext* helpers.
+        if (self.graceful_shutdown) return Error.ShuttingDown;
         const idx = streamIndex(id);
         if (idx >= max_stream_count_limit) return Error.InvalidStreamId;
         const next = idx + 1;
@@ -3881,6 +3897,12 @@ pub const Connection = struct {
     }
 
     pub fn queueMaxStreams(self: *Connection, bidi: bool, maximum_streams: u64) void {
+        // Graceful shutdown withholds all further stream credit: the peer's
+        // limit freezes at its current value, so it cannot open new streams
+        // beyond what it has already been granted (RFC 9000 has no GOAWAY;
+        // this is the transport-level equivalent). In-flight streams are
+        // unaffected. Peer-blocked state is intentionally left set.
+        if (self.graceful_shutdown) return;
         if (maximum_streams > max_stream_count_limit) return;
         const bounded_maximum_streams = @min(maximum_streams, max_streams_per_connection);
         // Early-out if the limit has not strictly advanced. RFC 9000
@@ -7822,6 +7844,23 @@ pub const Connection = struct {
         if (self.haveSecret(.application, .write)) return .established;
         if (self.haveSecret(.handshake, .write)) return .handshake;
         return .initial;
+    }
+
+    /// Begin a graceful shutdown: refuse new local stream opens with
+    /// `Error.ShuttingDown` and stop granting MAX_STREAMS credit so the peer
+    /// quiesces new-stream creation, while in-flight streams keep draining.
+    /// The connection stays open (no CONNECTION_CLOSE) until the embedder
+    /// calls `close` — typically once the remaining streams complete or a
+    /// shutdown deadline elapses. Idempotent. RFC 9000 defines no GOAWAY
+    /// frame, so this is a local policy paired with withheld credit rather
+    /// than a wire signal; a layer like HTTP/3 sends its own GOAWAY on top.
+    pub fn beginGracefulShutdown(self: *Connection) void {
+        self.graceful_shutdown = true;
+    }
+
+    /// True after `beginGracefulShutdown` has been called (until close).
+    pub fn gracefulShutdownActive(self: *const Connection) bool {
+        return self.graceful_shutdown;
     }
 
     /// True after we've sent or received CONNECTION_CLOSE, received a

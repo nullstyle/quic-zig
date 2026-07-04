@@ -46,6 +46,7 @@
 //!   RFC9000 §4.6     MUST     reject peer streams beyond locally-advertised limit (STREAM_LIMIT_ERROR)
 //!   RFC9000 §4.6     MUST     ignore stale (lower) MAX_STREAMS values
 //!   RFC9000 §4.6     MUST     stream open beyond local limit emits STREAM_LIMIT_ERROR CONNECTION_CLOSE
+//!   RFC9000 §19.11   MAY      withhold MAX_STREAMS credit on graceful shutdown (monotonicity preserved)
 //!   RFC9000 §5.1.1   MUST     active_connection_id_limit honoured on NEW_CONNECTION_ID issuance
 //!   RFC9000 §10.1    MUST     idle timeout uses min(local, peer) idle parameter
 //!   RFC9000 §10.2    MUST     closing → draining → closed lifecycle progression
@@ -587,6 +588,34 @@ test "MUST emit STREAM_LIMIT_ERROR CONNECTION_CLOSE when peer opens above the lo
         fixture.TRANSPORT_ERROR_STREAM_LIMIT_ERROR,
         ev.error_code,
     );
+}
+
+test "graceful shutdown withholds MAX_STREAMS credit without violating monotonicity [RFC9000 §19.11 ¶6]" {
+    // §19.11 ¶6: "A receiver MUST ignore any MAX_STREAMS frame that does
+    // not increase the stream limit." The limit is monotonic non-decreasing
+    // and an endpoint is never obligated to send MAX_STREAMS.
+    // `beginGracefulShutdown` uses that latitude as a transport-level
+    // GOAWAY substitute (RFC 9000 defines no GOAWAY): it stops granting new
+    // stream credit so the peer cannot open further streams, while never
+    // decreasing the already-advertised limit — in-flight streams are
+    // unaffected.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const srv = try pair.serverConn();
+
+    // Before shutdown, granting more credit advances the advertised limit.
+    const before = srv.local_max_streams_bidi;
+    srv.queueMaxStreams(true, before + 10);
+    try std.testing.expectEqual(before + 10, srv.local_max_streams_bidi);
+
+    // After shutdown, credit is frozen: the limit neither rises nor falls,
+    // so the peer's concurrency is capped at what it already holds.
+    const frozen = srv.local_max_streams_bidi;
+    srv.beginGracefulShutdown();
+    srv.queueMaxStreams(true, frozen + 100);
+    try std.testing.expectEqual(frozen, srv.local_max_streams_bidi);
 }
 
 // ---------------------------------------------------------------- §5 connection IDs

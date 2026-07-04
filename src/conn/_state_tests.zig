@@ -2741,6 +2741,52 @@ test "openNextBidi surfaces StreamLimitExceeded without consuming the id" {
     try std.testing.expectEqual(@as(u64, 0), (try conn.openNextBidi()).id);
 }
 
+test "beginGracefulShutdown refuses local opens but stays open" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    conn.peer_max_streams_bidi = 100;
+    conn.peer_max_streams_uni = 100;
+
+    _ = try conn.openNextBidi(); // fine before shutdown
+    try std.testing.expect(!conn.gracefulShutdownActive());
+
+    conn.beginGracefulShutdown();
+    try std.testing.expect(conn.gracefulShutdownActive());
+    try std.testing.expectError(Error.ShuttingDown, conn.openNextBidi());
+    try std.testing.expectError(Error.ShuttingDown, conn.openNextUni());
+    try std.testing.expectError(Error.ShuttingDown, conn.openBidi(40));
+    try std.testing.expectError(Error.ShuttingDown, conn.openUni(42));
+
+    // Graceful shutdown is not a close state — the connection stays open.
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+    conn.beginGracefulShutdown(); // idempotent
+    try std.testing.expect(conn.gracefulShutdownActive());
+}
+
+test "beginGracefulShutdown withholds MAX_STREAMS credit" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    conn.local_max_streams_bidi = 10;
+    // Normally, granting more credit advances the limit and queues a frame.
+    conn.queueMaxStreams(true, 20);
+    try std.testing.expectEqual(@as(u64, 20), conn.local_max_streams_bidi);
+    try std.testing.expectEqual(@as(?u64, 20), conn.pending_frames.max_streams_bidi);
+    conn.pending_frames.max_streams_bidi = null;
+
+    // After graceful shutdown, credit freezes: no advance, no queued frame.
+    conn.beginGracefulShutdown();
+    conn.queueMaxStreams(true, 50);
+    try std.testing.expectEqual(@as(u64, 20), conn.local_max_streams_bidi);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_bidi);
+}
+
 test "phase() reports initial before keys and closing after close()" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
