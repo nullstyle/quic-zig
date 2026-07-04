@@ -131,11 +131,22 @@ pub fn handleShort(
         self.scanForPeerCloseFrame(opened.payload, now_us);
         return bytes.len;
     }
+    // Detect a duplicate application PN *before* recording it. A
+    // replayed authenticated 1-RTT packet is still acknowledged (the
+    // peer may have missed our ACK) but its frames MUST NOT be
+    // re-processed (RFC 9000 §12.3 / §13.1). Re-dispatch would
+    // re-deliver a non-idempotent DATAGRAM frame and double-charge the
+    // resident-bytes budget; CRYPTO/STREAM dedup by offset and ACK is
+    // idempotent, so only DATAGRAM is actually harmed — but skipping the
+    // whole dispatch on a duplicate is both correct and cheaper.
+    const duplicate_pn = app_pn_space.received.contains(opened.pn);
     Connection.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, self.delayed_ack_packet_threshold);
     app_pn_space.onPacketReceivedWithEcn(self.last_recv_ecn);
     self.qlog_packets_received +|= 1;
     self.emitPacketReceived(.application, opened.pn, @intCast(bytes.len), Connection.countFrames(opened.payload));
-    try self.dispatchFrames(.application, opened.payload, now_us);
+    if (!duplicate_pn) {
+        try self.dispatchFrames(.application, opened.payload, now_us);
+    }
     return bytes.len;
 }
 

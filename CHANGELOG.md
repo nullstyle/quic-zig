@@ -54,6 +54,10 @@ changes.
   overwrites a CID routed to a different live slot, and slot reaping only
   removes routing entries it still owns — so an (astronomically unlikely)
   CID collision can no longer silently re-route or un-route a peer.
+- Suppress frame re-processing on a duplicate application packet number:
+  a replayed authenticated 1-RTT packet is still acknowledged but no
+  longer re-delivers its (non-idempotent) DATAGRAM frame or double-charges
+  the resident-bytes budget (RFC 9000 §12.3 / §13.1).
 
 ### Changed
 

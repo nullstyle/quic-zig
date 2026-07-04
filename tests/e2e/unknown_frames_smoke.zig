@@ -118,7 +118,11 @@ fn buildPair(
     try client.setPeerDcid(&InitialDcid);
     try server.setLocalScid(&ServerScid);
 
-    const tp = common.defaultParams();
+    var tp = common.defaultParams();
+    // Advertise DATAGRAM support so the replay test below can exercise
+    // the (non-idempotent) DATAGRAM receive path; harmless for the
+    // unknown-frames test, which sends no DATAGRAMs.
+    tp.max_datagram_frame_size = 1200;
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
@@ -245,4 +249,68 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
     var poll_buf: [2048]u8 = undefined;
     _ = try server.poll(&poll_buf, now_us + 1_000);
     try std.testing.expectEqual(quic_zig.CloseState.closing, server.closeState());
+}
+
+test "replayed 1-RTT DATAGRAM packet is delivered only once (L1)" {
+    const allocator = std.testing.allocator;
+
+    var server_tls: boringssl.tls.Context = undefined;
+    var client_tls: boringssl.tls.Context = undefined;
+    var pair = try buildPair(allocator, &server_tls, &client_tls);
+    defer {
+        pair.client.deinit();
+        allocator.destroy(pair.client);
+        pair.server.deinit();
+        allocator.destroy(pair.server);
+        server_tls.deinit();
+        client_tls.deinit();
+    }
+
+    const client = pair.client;
+    const server = pair.server;
+    var now_us = try driveHandshake(client, server, 1_000_000);
+
+    // Settle the handshake tail so the server's app PN space is on a
+    // clean baseline.
+    var drain: [2048]u8 = undefined;
+    if (try client.poll(&drain, now_us)) |n| try server.handle(drain[0..n], null, now_us);
+    if (try server.poll(&drain, now_us)) |n| try client.handle(drain[0..n], null, now_us);
+    now_us += 10_000;
+
+    // A 1-RTT payload of exactly one DATAGRAM frame (type 0x30 = no LEN,
+    // data runs to the end of the packet — legal as the last frame).
+    const dg_data = "replay-me";
+    var payload_buf: [64]u8 = undefined;
+    payload_buf[0] = 0x30;
+    @memcpy(payload_buf[1 .. 1 + dg_data.len], dg_data);
+    const payload = payload_buf[0 .. 1 + dg_data.len];
+
+    const keys = (try client.packetKeys(.application, .write)) orelse
+        return error.NoApplicationWriteKeys;
+    const client_path = client.paths.get(0) orelse return error.NoClientPath;
+    const pn = client_path.app_pn_space.nextPn() orelse return error.PnSpaceExhausted;
+    const dcid = server.local_scid.slice();
+
+    var packet_buf: [1500]u8 = undefined;
+    const packet_len = try quic_zig.wire.short_packet.seal1Rtt(&packet_buf, .{
+        .dcid = dcid,
+        .pn = pn,
+        .largest_acked = null,
+        .payload = payload,
+        .keys = &keys,
+    });
+
+    const before = server.pendingDatagrams();
+
+    // First delivery: the DATAGRAM is accepted and queued once.
+    try server.handle(packet_buf[0..packet_len], null, now_us);
+    try std.testing.expectEqual(before + 1, server.pendingDatagrams());
+    const resident_after_first = server.bytes_resident;
+
+    // Replay the identical sealed packet (same PN). It re-decrypts fine
+    // but the duplicate-PN guard must skip frame dispatch: no second
+    // DATAGRAM delivery, and no second resident-bytes charge.
+    try server.handle(packet_buf[0..packet_len], null, now_us + 1_000);
+    try std.testing.expectEqual(before + 1, server.pendingDatagrams());
+    try std.testing.expectEqual(resident_after_first, server.bytes_resident);
 }

@@ -3503,6 +3503,16 @@ pub const Connection = struct {
             else
                 recv_done;
             if (!reclaimable) continue;
+            // KNOWN LIMITATION (tracked separately): reaping a
+            // peer-initiated stream forgets its locked final size / reset
+            // state, so a later STREAM/RESET_STREAM for the same id
+            // resurrects it with fresh state instead of being ignored as
+            // post-close (RFC 9000 §3.2). A correct fix needs bounded
+            // reaped-id tracking — a plain "highest reaped index"
+            // watermark is wrong because a peer may open a high stream and
+            // only later send first data on an implicitly-opened lower
+            // one, which the watermark would drop. Impact is bounded:
+            // flow control and the resident-bytes cap still apply.
             if (n == batch.len) break;
             batch[n] = s.id;
             n += 1;
