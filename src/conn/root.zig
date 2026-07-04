@@ -168,6 +168,8 @@ pub const NewReno = congestion.NewReno;
 pub const PathValidator = path_validator.PathValidator;
 /// Send-side half-stream (re-export).
 pub const SendStream = send_stream.SendStream;
+/// Read-only snapshot of a stream's send half from `Connection.streamSendStats`.
+pub const StreamSendStats = state.StreamSendStats;
 /// Receive-side half-stream (re-export).
 pub const RecvStream = recv_stream.RecvStream;
 /// A QUIC path endpoint address (IPv4/IPv6/unspecified), the peer-address

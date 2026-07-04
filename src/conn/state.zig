@@ -596,6 +596,21 @@ pub const IncomingDatagram = struct {
     arrived_in_early_data: bool = false,
 };
 
+/// Read-only snapshot of a stream's send half, returned by
+/// `Connection.streamSendStats`. `buffered` (`written - acked`) is the
+/// resident send-buffer volume — the value an embedder watches for
+/// application-level write backpressure.
+pub const StreamSendStats = struct {
+    /// Total bytes the app has queued via `streamWrite` (the write offset).
+    written: u64,
+    /// Bytes contiguously acknowledged from offset 0.
+    acked: u64,
+    /// Bytes written but not yet acknowledged (`written - acked`).
+    buffered: u64,
+    /// Whether any bytes — or a queued FIN / RESET — are ready to send now.
+    has_pending: bool,
+};
+
 const PendingRecvDatagram = pending_frames_mod.PendingRecvDatagram;
 const PendingSendDatagram = pending_frames_mod.PendingSendDatagram;
 
@@ -3760,6 +3775,25 @@ pub const Connection = struct {
     /// at that id.
     pub fn stream(self: *const Connection, id: u64) ?*Stream {
         return self.streams.get(id);
+    }
+
+    /// Snapshot of stream `id`'s send-half progress (bytes written, acked,
+    /// buffered, and whether anything is ready to send), or `null` if the
+    /// stream is not in the live table — either never opened or already
+    /// reaped after both halves reached a terminal state (RFC 9000 §3.2).
+    /// Lets an embedder track send backpressure without reaching into
+    /// `SendStream`'s internals; snapshot a terminal stream's stats before
+    /// the reaping GC removes it if you need them post-close.
+    pub fn streamSendStats(self: *const Connection, id: u64) ?StreamSendStats {
+        const s = self.streams.get(id) orelse return null;
+        const written = s.send.writtenBytes();
+        const acked = s.send.ackedFloor();
+        return .{
+            .written = written,
+            .acked = acked,
+            .buffered = written - acked,
+            .has_pending = s.send.hasPendingChunk(),
+        };
     }
 
     /// Convenience: write `data` to the send half of stream `id`.

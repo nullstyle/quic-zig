@@ -253,6 +253,11 @@ pub const TimerKind = conn.TimerKind;
 /// counters.
 pub const PathStats = conn.PathStats;
 
+/// Read-only snapshot of a stream's send half (bytes written / acked /
+/// buffered + whether anything is ready to send), from
+/// `Connection.streamSendStats` — the send-backpressure query surface.
+pub const StreamSendStats = conn.StreamSendStats;
+
 /// Application-data scheduling policy across multiple validated
 /// paths (primary, round-robin, lowest-RTT-cwnd).
 pub const Scheduler = conn.Scheduler;

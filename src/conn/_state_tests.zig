@@ -77,6 +77,7 @@ const SentPacketTracker = state.SentPacketTracker;
 const Session = state.Session;
 const StopSendingItem = state.StopSendingItem;
 const Stream = state.Stream;
+const StreamSendStats = state.StreamSendStats;
 const Suite = state.Suite;
 const TimerDeadline = state.TimerDeadline;
 const TimerKind = state.TimerKind;
@@ -169,6 +170,29 @@ test "streamReset publicly aborts the send half" {
     try std.testing.expectEqual(@as(u64, 5), s.send.reset.?.final_size);
     try std.testing.expectError(send_stream_mod.Error.StreamClosed, conn.streamWrite(0, "late"));
     try std.testing.expectError(Error.StreamNotFound, conn.streamReset(4, 0));
+}
+
+test "streamSendStats snapshots the send half; null for missing streams" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    // Unopened stream → null (same signal a reaped stream gives).
+    try std.testing.expectEqual(@as(?StreamSendStats, null), conn.streamSendStats(0));
+
+    _ = try conn.openBidi(0);
+    try std.testing.expectEqual(@as(usize, 11), try conn.streamWrite(0, "hello world"));
+
+    const stats = conn.streamSendStats(0) orelse return error.MissingStats;
+    try std.testing.expectEqual(@as(u64, 11), stats.written);
+    try std.testing.expectEqual(@as(u64, 0), stats.acked); // nothing acked yet
+    try std.testing.expectEqual(@as(u64, 11), stats.buffered); // written - acked
+    try std.testing.expect(stats.has_pending); // buffered, unsent
+
+    // A never-opened higher id is still null, not a resurrected zero-stat stream.
+    try std.testing.expectEqual(@as(?StreamSendStats, null), conn.streamSendStats(400));
 }
 
 test "local close is exposed as sticky and pollable event" {
