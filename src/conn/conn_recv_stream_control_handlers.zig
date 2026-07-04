@@ -33,6 +33,9 @@ pub fn handleResetStream(self: *Connection, rs: frame_types.ResetStream) Error!v
         self.close(true, transport_error_stream_state, "peer reset unopened local stream");
         return;
     }
+    // RFC 9000 §3.2: a RESET_STREAM for an already-reaped peer stream is
+    // post-terminal — ignore it rather than resurrecting the stream.
+    if (existing == null and self.peerStreamAlreadyReaped(rs.stream_id)) return;
     if (existing == null and !self.recordPeerStreamOpenOrClose(rs.stream_id)) return;
     const ptr = existing orelse blk: {
         const new_ptr = try self.allocator.create(Stream);

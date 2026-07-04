@@ -1398,6 +1398,25 @@ pub const Connection = struct {
     peer_opened_streams_uni: u64 = 0,
     local_opened_streams_bidi: u64 = 0,
     local_opened_streams_uni: u64 = 0,
+    // Contiguous "reaped" watermark per peer-initiated direction: the
+    // count k such that every peer stream index in [0, k) was created
+    // and reaped (RFC 9000 §3.2). A STREAM/RESET_STREAM for an absent
+    // peer stream with index < the watermark is a post-terminal frame
+    // and is ignored rather than resurrecting the stream (which would
+    // forget its locked final size / reset state). The bitset records
+    // reaped-but-not-yet-coalesced indices in the bounded window
+    // [peer_reaped_below_*, peer_opened_streams_*); the watermark only
+    // ever advances across a contiguous run of reaped indices from the
+    // bottom, so an implicitly-opened-but-never-created lower index
+    // (whose bit is never set) permanently halts the run and its later
+    // first data still flows to the normal create path. Bounded: every
+    // creatable peer index is < local_max_streams_* <=
+    // max_streams_per_connection (4096), so the fixed bitset is always
+    // in range and adds a constant 2×512 B per connection.
+    peer_reaped_below_bidi: u64 = 0,
+    peer_reaped_below_uni: u64 = 0,
+    peer_reaped_bits_bidi: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
+    peer_reaped_bits_uni: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
     /// Decoded peer parameters once BoringSSL exposes them.
     cached_peer_transport_params: ?TransportParams = null,
     /// The peer's transport-parameter stateless reset token is bound
@@ -3353,6 +3372,42 @@ pub const Connection = struct {
         return true;
     }
 
+    /// True if `id` is a peer-initiated stream index below the contiguous
+    /// reaped watermark — i.e. it was already opened, driven to a terminal
+    /// state, and reclaimed. A STREAM/RESET_STREAM for such an id is a
+    /// post-terminal frame that MUST be ignored (RFC 9000 §3.2) rather
+    /// than resurrecting the stream. Only meaningful for peer-initiated
+    /// ids; callers gate on an absent, peer-initiated stream first.
+    pub fn peerStreamAlreadyReaped(self: *const Connection, id: u64) bool {
+        const idx = streamIndex(id);
+        return idx < (if (streamIsBidi(id)) self.peer_reaped_below_bidi else self.peer_reaped_below_uni);
+    }
+
+    /// Record that a peer-initiated stream was reaped, advancing the
+    /// contiguous reaped watermark. Local streams are ignored (their
+    /// absence is handled by the "peer referenced unopened local stream"
+    /// guards). Sets the index's bit, then advances the watermark past
+    /// any consecutive run of reaped indices from the bottom.
+    fn notePeerStreamReaped(self: *Connection, id: u64) void {
+        if (self.streamInitiatedByLocal(id)) return;
+        const idx = streamIndex(id);
+        // Bounded by local_max_streams_* <= max_streams_per_connection.
+        std.debug.assert(idx < max_streams_per_connection);
+        const bidi = streamIsBidi(id);
+        const bits = if (bidi) &self.peer_reaped_bits_bidi else &self.peer_reaped_bits_uni;
+        const below = if (bidi) &self.peer_reaped_below_bidi else &self.peer_reaped_below_uni;
+        const opened = if (bidi) self.peer_opened_streams_bidi else self.peer_opened_streams_uni;
+        bits.set(@intCast(idx));
+        // Coalesce: advance the watermark across consecutive reaped bits.
+        // The `< opened` guard is load-bearing for paths that reap a
+        // stream without bumping peer_opened_streams_* (e.g. direct-put
+        // test setup); it keeps the loop trivially in range too.
+        while (below.* < opened and bits.isSet(@intCast(below.*))) {
+            bits.unset(@intCast(below.*));
+            below.* += 1;
+        }
+    }
+
     pub fn peerStreamWithinLocalLimit(self: *Connection, id: u64) bool {
         const idx = streamIndex(id);
         if (idx >= max_stream_count_limit) {
@@ -3503,16 +3558,6 @@ pub const Connection = struct {
             else
                 recv_done;
             if (!reclaimable) continue;
-            // KNOWN LIMITATION (tracked separately): reaping a
-            // peer-initiated stream forgets its locked final size / reset
-            // state, so a later STREAM/RESET_STREAM for the same id
-            // resurrects it with fresh state instead of being ignored as
-            // post-close (RFC 9000 §3.2). A correct fix needs bounded
-            // reaped-id tracking — a plain "highest reaped index"
-            // watermark is wrong because a peer may open a high stream and
-            // only later send first data on an implicitly-opened lower
-            // one, which the watermark would drop. Impact is bounded:
-            // flow control and the resident-bytes cap still apply.
             if (n == batch.len) break;
             batch[n] = s.id;
             n += 1;
@@ -3520,6 +3565,10 @@ pub const Connection = struct {
         for (batch[0..n]) |id| {
             const removed = self.streams.fetchRemove(id) orelse continue;
             const s = removed.value;
+            // Record the reap so a later STREAM/RESET_STREAM for this
+            // peer-initiated id is treated as post-terminal (RFC 9000
+            // §3.2) instead of resurrecting the stream with fresh state.
+            self.notePeerStreamReaped(id);
             const held = s.send.bytes.items.len + s.recv.bytes.items.len;
             if (held > 0) self.releaseResidentBytes(held);
             self.emitQlog(.{
@@ -8962,6 +9011,12 @@ pub const Connection = struct {
             self.close(true, transport_error_stream_state, "peer referenced unopened local stream");
             return;
         }
+        // RFC 9000 §3.2: a STREAM frame for a peer stream that already
+        // reached a terminal state and was reaped is post-terminal — drop
+        // it instead of resurrecting the stream with fresh (final-size /
+        // reset) state. Checked before recordPeerStreamOpenOrClose so the
+        // id is neither re-counted nor recreated.
+        if (existing == null and self.peerStreamAlreadyReaped(s.stream_id)) return;
         if (existing == null and !self.recordPeerStreamOpenOrClose(s.stream_id)) return;
 
         const ptr = existing orelse blk: {

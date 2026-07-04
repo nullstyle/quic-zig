@@ -7716,6 +7716,68 @@ test "gcClosedStreams reclaims peer-initiated uni streams once recv is terminal 
     try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
 }
 
+test "gcClosedStreams: a reaped peer stream is not resurrected by a replayed frame (L2)" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initServer(allocator, ctx);
+    defer conn.deinit();
+
+    try conn.setTransportParams(.{
+        .initial_max_data = default_connection_receive_window,
+        .initial_max_stream_data_uni = default_stream_receive_window,
+        .initial_max_streams_uni = 4,
+    });
+
+    // Client-initiated uni stream 0 (peer stream from the server's view).
+    const sid: u64 = 2;
+
+    // Open + finish it through the real receive path (bumps the
+    // peer-opened watermark, unlike a direct streams.put).
+    try conn.handleStream(.application, .{
+        .stream_id = sid,
+        .offset = 0,
+        .data = "hi",
+        .has_length = true,
+        .fin = true,
+    });
+    try std.testing.expect(conn.streams.get(sid) != null);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_opened_streams_uni);
+
+    // Consume all bytes so the recv half is fully terminal, then reap.
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try conn.streamRead(sid, &buf));
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.streams.get(sid) == null);
+    // Contiguous reaped watermark advanced past uni index 0.
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_reaped_below_uni);
+
+    // Replay a STREAM frame for the reaped id — must be ignored (RFC 9000
+    // §3.2), not resurrected with fresh state.
+    try conn.handleStream(.application, .{
+        .stream_id = sid,
+        .offset = 0,
+        .data = "XX",
+        .has_length = true,
+    });
+    try std.testing.expect(conn.streams.get(sid) == null);
+
+    // A replayed RESET_STREAM for the reaped id is likewise ignored.
+    try conn.handleResetStream(.{ .stream_id = sid, .application_error_code = 0, .final_size = 2 });
+    try std.testing.expect(conn.streams.get(sid) == null);
+
+    // A higher, never-before-seen peer uni stream still opens normally —
+    // the watermark only suppresses the specific reaped id.
+    const sid2: u64 = 6; // client uni stream 1
+    try conn.handleStream(.application, .{
+        .stream_id = sid2,
+        .offset = 0,
+        .data = "yo",
+        .has_length = true,
+    });
+    try std.testing.expect(conn.streams.get(sid2) != null);
+}
+
 test "gcClosedStreams batch cap rolls surplus to the next tick" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

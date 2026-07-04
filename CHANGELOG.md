@@ -74,6 +74,13 @@ changes.
   a replayed authenticated 1-RTT packet is still acknowledged but no
   longer re-delivers its (non-idempotent) DATAGRAM frame or double-charges
   the resident-bytes budget (RFC 9000 §12.3 / §13.1).
+- Reject post-terminal frames for a reaped peer stream: a STREAM or
+  RESET_STREAM for a peer-initiated stream that already reached a terminal
+  state and was reclaimed is now ignored (RFC 9000 §3.2) instead of
+  resurrecting the stream with fresh state (losing its locked final size /
+  reset state). Uses a bounded per-direction contiguous "reaped" watermark
+  that correctly distinguishes reaped streams from implicitly-opened,
+  never-yet-used lower-numbered streams.
 
 ### Changed
 
