@@ -7,6 +7,14 @@ changes.
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-07-05
+
+### Changed
+
+- Promoted the native `windows-latest` CI leg from advisory to blocking after
+  the v0.7.5 release line proved green, and reconciled the 1.0 release
+  readiness checklist with the verified quic-go interop and sanitizer state.
+
 ## [0.7.5] - 2026-07-05
 
 ### Fixed

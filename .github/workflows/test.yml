@@ -15,14 +15,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux + macOS are tier-1 hard gates. Windows is a tier-1 target
-        # for 1.0 but still has known gaps, so it runs advisory
-        # (continue-on-error below) to produce signal without blocking.
-        # Graduating it = dropping continue-on-error. See
-        # docs/RELEASE_READINESS.md.
+        # Linux, macOS, and Windows are tier-1 hard gates for 1.0.
+        # See docs/RELEASE_READINESS.md for platform tier policy.
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     # Run every step under bash so the toolchain step's `uname` works on
     # the Windows runner too (Git Bash ships on windows-latest).
     defaults:

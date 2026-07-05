@@ -16,18 +16,17 @@ release.
 | Linux | x86-64 | `ubuntu-latest` | Gating |
 | Linux | aarch64 | (via `ubuntu-24.04-arm` downstream) | Gating |
 | macOS | aarch64 | `macos-latest` | Gating |
-| Windows | x86-64 | `windows-latest` | **Advisory today; tier-1 target for 1.0** |
+| Windows | x86-64 | `windows-latest` | Gating |
 
 **Tier 2 — best-effort.** Builds are expected to work but are not
 CI-gated. Bug reports accepted; regressions do not block a release.
 Other architectures and BSDs fall here.
 
-Windows is the one platform mid-promotion. The decision for 1.0 is that
-Windows is tier-1: the `windows-latest` job runs today with
-`continue-on-error: true` so we get signal without gating on a surface
-that still has known gaps (socket abstraction, path MTU probing, and the
-BoringSSL FFI build under MSVC). Graduating it means removing
-`continue-on-error` — tracked as a checklist item below.
+Windows has been promoted to tier-1 after the native `windows-latest`
+`zig build` and `zig build test` leg passed on the v0.7.5 release line.
+Real-socket std.Io loopback smoke tests that currently hit
+`ConcurrencyUnavailable` on native Windows stay skipped in-tree, but the
+package build/test gate itself is blocking.
 
 ## 1.0 graduation checklist
 
@@ -35,11 +34,11 @@ A 1.0 tag asserts the API surface is frozen under semver and the library
 is safe to embed in production. The gates:
 
 ### Correctness & interop
-- [ ] Foreign-peer interop is a **hard** CI gate, not advisory: the
+- [x] Foreign-peer interop is a **hard** CI gate, not advisory: the
       `quic-go-interop` workflow is authored and blocking on push / PR,
       using a pinned quic-interop-runner ref and pinned quic-go image for
-      QNS client `H,D`. This remains open until the first GitHub run proves
-      the external runner path.
+      QNS client `H,D`. Verified green on `main` at commit
+      `6bbc43280383df2f901528a426d6698e78446308`.
 - [x] RFC 9000 §10.2 closing/draining edge-case coverage audited and
       backfilled (roadmap H1 #16). Audited; all 7 verified gaps are now
       covered in `tests/conformance/rfc9000_streams_flow.zig`: closing→draining
@@ -53,7 +52,7 @@ is safe to embed in production. The gates:
 - [x] Sanitizer CI scaffold is in place: `-Dsanitize-c=off|trap|full`
       is accepted by quic-zig-owned build modules and Linux CI runs
       `zig build test -Dsanitize-c=full`. The option is forwarded into
-      `boringssl-zig` v0.6.1 so the BoringSSL C/C++ libraries are
+      `boringssl-zig` v0.6.4 so the BoringSSL C/C++ libraries are
       instrumented consistently with quic-zig's wrapper modules.
 - [ ] Deep fuzzing is scheduled/advisory today, not a release-gating
       corpus job. Plain `zig build test` runs every `std.testing.fuzz`
@@ -65,7 +64,8 @@ is safe to embed in production. The gates:
 ### API surface
 - [ ] The `Connection` surface is partitioned into Stable / Unstable so
       the semver promise covers only what is meant to be stable (roadmap
-      H1 #4).
+      H1 #4). Deferred beyond this CI-truth sprint; do not infer an API
+      partition from the platform / interop gate cleanup.
 - [x] The low-level init-ordering contract is documented and enforced
       (roadmap H1 #9).
 - [x] Serialized resumption / anti-replay state format is versioned and
@@ -78,8 +78,9 @@ is safe to embed in production. The gates:
       (roadmap H1 #3).
 
 ### Platforms
-- [ ] Windows `windows-latest` job is green and `continue-on-error` is
-      removed (promotes Windows to a hard tier-1 gate).
+- [x] Windows `windows-latest` job is green and `continue-on-error` is
+      removed (promotes Windows to a hard tier-1 gate). Verified green on
+      `main` at commit `6bbc43280383df2f901528a426d6698e78446308`.
 
 ### Docs & policy
 - [x] `SECURITY.md` present with a disclosure process.
