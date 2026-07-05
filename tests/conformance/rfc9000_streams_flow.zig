@@ -53,7 +53,10 @@
 //!   RFC9000 §10.2    MUST     terminal-closed transition fires when the closing-state deadline elapses
 //!   RFC9000 §10.2.1  NORMATIVE retransmit CONNECTION_CLOSE on attributed packet in closing state
 //!   RFC9000 §10.2.1  NORMATIVE rate-limit suppresses CONNECTION_CLOSE retransmits in closing state
+//!   RFC9000 §10.2.1  SHOULD   retransmitted CONNECTION_CLOSE error_code/frame_type stay consistent
 //!   RFC9000 §10.2.2  MUST     draining state suppresses new outbound traffic
+//!   RFC9000 §10.2.3  MUST     app close at Handshake level converts to APPLICATION_ERROR transport close
+//!   RFC9000 §10.2.3  SHOULD   app close defers to 1-RTT when application write keys exist
 //!   RFC9000 §10.3    MUST     stateless-reset token compare is constant-time
 //!   RFC9000 §10.3    MUST     stateless-reset token derive is deterministic per CID
 //!
@@ -74,9 +77,66 @@ const recv_stream = quic_zig.conn.recv_stream;
 const lifecycle = quic_zig.conn.lifecycle;
 const stateless_reset = quic_zig.conn.stateless_reset;
 const frame = quic_zig.frame;
+const boringssl = @import("boringssl");
+const conn_state = quic_zig.conn.state;
 const fixture = @import("_handshake_fixture.zig");
 
 const test_alloc = std.testing.allocator;
+
+const TRANSPORT_ERROR_APPLICATION_ERROR: u64 = 0x0c;
+
+const DecodedClose = struct {
+    pn: u64,
+    close: frame.types.ConnectionClose,
+};
+
+fn testSecretMaterial() conn_state.SecretMaterial {
+    var material: conn_state.SecretMaterial = .{ .cipher_protocol_id = 0x1301 };
+    material.secret_len = 32;
+    return material;
+}
+
+fn installTestHandshakeWriteSecret(conn: *quic_zig.Connection) void {
+    conn.levels[conn_state.EncryptionLevel.handshake.idx()].write = testSecretMaterial();
+}
+
+fn installTestApplicationWriteSecret(conn: *quic_zig.Connection) !void {
+    try conn.installApplicationSecret(.write, testSecretMaterial());
+}
+
+fn decodeHandshakeConnectionClose(
+    conn: *quic_zig.Connection,
+    packet: []u8,
+) !frame.types.ConnectionClose {
+    const keys = (try conn.packetKeys(.handshake, .write)) orelse
+        return error.NoHandshakeWriteKeys;
+    var plaintext: [2048]u8 = undefined;
+    const opened = try quic_zig.wire.long_packet.openHandshake(&plaintext, packet, .{
+        .keys = &keys,
+    });
+    const decoded = try frame.decode(opened.payload);
+    try std.testing.expect(decoded.frame == .connection_close);
+    return decoded.frame.connection_close;
+}
+
+fn decodeApplicationConnectionClose(
+    conn: *quic_zig.Connection,
+    packet: []u8,
+    dcid_len: u8,
+    largest_received: u64,
+) !DecodedClose {
+    const keys = (try conn.packetKeys(.application, .write)) orelse
+        return error.NoApplicationWriteKeys;
+    var plaintext: [2048]u8 = undefined;
+    const opened = try quic_zig.wire.short_packet.open1Rtt(&plaintext, packet, .{
+        .dcid_len = dcid_len,
+        .keys = &keys,
+        .largest_received = largest_received,
+    });
+    const decoded = try frame.decode(opened.payload);
+    try std.testing.expect(decoded.frame == .connection_close);
+    return .{ .pn = opened.pn, .close = decoded.frame.connection_close };
+}
 
 // ---------------------------------------------------------------- §2.1 stream IDs
 
@@ -1010,6 +1070,88 @@ test "NORMATIVE rate-limit suppresses CONNECTION_CLOSE retransmits in the closin
     try std.testing.expectEqual(lifecycle.CloseState.closing, srv.closeState());
 }
 
+test "SHOULD keep retransmitted CONNECTION_CLOSE error_code and frame_type consistent [RFC9000 §10.2.1 ¶2]" {
+    // RFC 9000 §10.2.1 ¶2 permits retransmitted CONNECTION_CLOSE frames
+    // to vary in size, but says their error code SHOULD be consistent.
+    // quic_zig re-arms from the sticky CloseEvent, so successive
+    // retransmits should preserve the close namespace, error_code, and
+    // frame_type exactly.
+    var pair = try fixture.HandshakePair.init(test_alloc);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const srv = try pair.serverConn();
+    const cli = pair.clientConn();
+
+    srv.close(true, fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION, "repeat consistency");
+    pair.now_us +%= 1_000;
+    var packet_buf: [2048]u8 = undefined;
+    _ = (try srv.poll(&packet_buf, pair.now_us)) orelse
+        return error.NoFirstCcEmitted;
+
+    const cli_keys = (try cli.packetKeys(.application, .write)) orelse
+        return error.NoApplicationWriteKeys;
+    const dcid = cli.peer_dcid.slice();
+    const srv_to_cli_dcid_len = cli.localDcidLen();
+    const ping_frame = [_]u8{0x01};
+
+    const sealAndFeedPing = struct {
+        fn run(
+            inner_pair: *fixture.HandshakePair,
+            inner_cli: *quic_zig.Connection,
+            inner_keys: conn_state.PacketKeys,
+            inner_dcid: []const u8,
+        ) !void {
+            const pn = inner_cli.allocApplicationPacketNumberForTesting() orelse
+                return error.PnSpaceExhausted;
+            var pkt: [2048]u8 = undefined;
+            const n = try quic_zig.wire.short_packet.seal1Rtt(&pkt, .{
+                .dcid = inner_dcid,
+                .pn = pn,
+                .payload = &ping_frame,
+                .keys = &inner_keys,
+                .key_phase = false,
+            });
+            _ = try inner_pair.server.feed(pkt[0..n], inner_pair.peer_addr, inner_pair.now_us);
+        }
+    }.run;
+
+    pair.now_us +%= 100_000;
+    try sealAndFeedPing(&pair, cli, cli_keys, dcid);
+    pair.now_us +%= 1_000;
+    const second_len = (try srv.poll(&packet_buf, pair.now_us)) orelse
+        return error.NoSecondCcEmitted;
+    const second = try decodeApplicationConnectionClose(
+        srv,
+        packet_buf[0..second_len],
+        srv_to_cli_dcid_len,
+        0,
+    );
+
+    // After the second close emit, §10.2.1 ¶3's exponential backoff
+    // requires a larger gap before another attributed packet can
+    // re-arm the close. Do not tick here: this test is about
+    // retransmit contents, not closing-deadline expiry.
+    pair.now_us +%= 5_000_000;
+    try sealAndFeedPing(&pair, cli, cli_keys, dcid);
+    pair.now_us +%= 1_000;
+    const third_len = (try srv.poll(&packet_buf, pair.now_us)) orelse
+        return error.NoThirdCcEmitted;
+    const third = try decodeApplicationConnectionClose(
+        srv,
+        packet_buf[0..third_len],
+        srv_to_cli_dcid_len,
+        second.pn,
+    );
+
+    try std.testing.expectEqual(true, second.close.is_transport);
+    try std.testing.expectEqual(second.close.is_transport, third.close.is_transport);
+    try std.testing.expectEqual(second.close.error_code, third.close.error_code);
+    try std.testing.expectEqual(second.close.frame_type, third.close.frame_type);
+    try std.testing.expectEqual(fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION, third.close.error_code);
+    try std.testing.expectEqual(@as(u64, 0), third.close.frame_type);
+}
+
 test "MUST drop to terminal closed when the closing-state deadline elapses [RFC9000 §10.2 ¶5]" {
     // RFC 9000 §10.2 ¶5: "The closing and draining connection states
     // exist to ensure that connections close cleanly and that delayed
@@ -1224,6 +1366,72 @@ test "sheds keepalive PING state on entering draining [RFC9000 §10.2 ¶7]" {
 
     // The keepalive PING was shed as part of discarding connection state.
     try std.testing.expect(!srv.primaryPath().pending_ping);
+}
+
+test "MUST convert app CONNECTION_CLOSE to APPLICATION_ERROR transport close at Handshake level [RFC9000 §10.2.3 ¶4]" {
+    // RFC 9000 §10.2.3 ¶4: the application CONNECTION_CLOSE variant
+    // (0x1d) is not legal in Initial or Handshake packets. If only
+    // Handshake write keys are available, a local application close
+    // must go out as transport CONNECTION_CLOSE (0x1c) carrying
+    // APPLICATION_ERROR (0x0c), while the local sticky event still
+    // records the embedder's application error code.
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try quic_zig.Connection.initClient(test_alloc, ctx, "localhost");
+    defer conn.deinit();
+
+    try conn.setPeerDcid(&.{0xaa});
+    try conn.setLocalScid(&.{0xbb});
+    installTestHandshakeWriteSecret(&conn);
+    try std.testing.expect((try conn.packetKeys(.application, .write)) == null);
+
+    conn.close(false, 0x42, "h3 gone");
+    var packet_buf: [2048]u8 = undefined;
+    const n = (try conn.pollLevel(.handshake, &packet_buf, 1_000_000)) orelse
+        return error.NoHandshakeCloseEmitted;
+
+    const decoded = try decodeHandshakeConnectionClose(&conn, packet_buf[0..n]);
+    try std.testing.expectEqual(true, decoded.is_transport);
+    try std.testing.expectEqual(TRANSPORT_ERROR_APPLICATION_ERROR, decoded.error_code);
+    try std.testing.expectEqual(@as(u64, 0), decoded.frame_type);
+
+    const sticky = conn.closeEvent() orelse return error.NoCloseEvent;
+    try std.testing.expectEqual(lifecycle.CloseErrorSpace.application, sticky.error_space);
+    try std.testing.expectEqual(@as(u64, 0x42), sticky.error_code);
+}
+
+test "SHOULD defer app CONNECTION_CLOSE to 1-RTT when application write keys exist [RFC9000 §10.2.3 ¶6]" {
+    // RFC 9000 §10.2.3 ¶6 says CONNECTION_CLOSE is sent at the
+    // highest available encryption level. In the post-1-RTT-key /
+    // pre-confirmation window, Handshake keys may still exist, but
+    // application write keys are higher. Deferring preserves the
+    // 0x1d application variant instead of forcing the Handshake-level
+    // 0x1c/APPLICATION_ERROR conversion tested above.
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try quic_zig.Connection.initClient(test_alloc, ctx, "localhost");
+    defer conn.deinit();
+
+    try conn.setPeerDcid(&.{0xaa});
+    try conn.setLocalScid(&.{0xbb});
+    try std.testing.expect(conn.markPathValidated(0));
+    installTestHandshakeWriteSecret(&conn);
+    try installTestApplicationWriteSecret(&conn);
+    try std.testing.expect(!conn.handshakeDone());
+
+    conn.close(false, 0x42, "h3 gone");
+    var packet_buf: [2048]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        try conn.pollLevel(.handshake, &packet_buf, 1_000_000),
+    );
+
+    const n = (try conn.pollLevel(.application, &packet_buf, 1_001_000)) orelse
+        return error.NoApplicationCloseEmitted;
+    const decoded = try decodeApplicationConnectionClose(&conn, packet_buf[0..n], 1, 0);
+    try std.testing.expectEqual(false, decoded.close.is_transport);
+    try std.testing.expectEqual(@as(u64, 0x42), decoded.close.error_code);
+    try std.testing.expectEqual(@as(u64, 0), decoded.close.frame_type);
 }
 
 // ---------------------------------------------------------------- §10.1 idle timeout
