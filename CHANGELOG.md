@@ -7,6 +7,18 @@ changes.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-05
+
+### Fixed
+
+- The pinned quic-go hard interop gate now keeps its result JSON path alive
+  when it lives under the log directory, and can assume compliance for the
+  pinned quic-go peer so the stale runner unknown-testcase preflight does
+  not skip the real `H,D` client tests.
+- The QNS image workflow now keeps image-build validation blocking while
+  gating GHCR publication behind the `QNS_IMAGE_PUBLISH` repository variable,
+  avoiding red CI when the package does not grant this repository write access.
+
 ## [0.7.2] - 2026-07-05
 
 ### Changed

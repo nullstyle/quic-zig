@@ -55,6 +55,7 @@ jobs:
             --servers quic-go \
             --tests H,D \
             --quic-go-image "${QUIC_GO_IMAGE}" \
+            --assume-compliant quic-go \
             --log-dir "${{ github.workspace }}/interop-logs/quic-go-hard" \
             --json "${{ github.workspace }}/interop-logs/quic-go-hard/result.json"
 

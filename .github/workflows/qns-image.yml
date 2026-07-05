@@ -14,6 +14,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}-qns
   push_build: false
   trigger_build: false
+  publish_image: ${{ vars.QNS_IMAGE_PUBLISH || 'false' }}
   commit_id: ${{ github.sha }}
 
 jobs:
@@ -57,7 +58,7 @@ jobs:
           fi
 
       - name: Decide whether to push
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && env.publish_image == 'true'
         run: echo "push_build=true" >> "$GITHUB_ENV"
 
       - name: Login to GitHub Container Registry

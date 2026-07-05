@@ -62,6 +62,7 @@ const Config = struct {
     build_image: bool = false,
     scenario: ?[]const u8 = null,
     quic_go_image: ?[]const u8 = null,
+    assume_compliant: []const u8 = "",
 };
 
 const RunnerRole = enum {
@@ -127,7 +128,7 @@ fn usage() void {
         \\usage:
         \\  zig build external-interop -- preflight [--image quic-zig-qns:local] [--dry-run]
         \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version 0.17.0-dev.1158+1d1193aa7] [--dry-run]
-        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
+        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--assume-compliant quic-go] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
         \\
     , .{});
 }
@@ -220,6 +221,11 @@ fn parseRunner(allocator: std.mem.Allocator, args: []const []const u8, cfg: *Con
             i += 1;
             if (i >= args.len) return error.MissingQuicGoImage;
             cfg.quic_go_image = args[i];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--assume-compliant")) {
+            i += 1;
+            if (i >= args.len) return error.MissingAssumeCompliant;
+            cfg.assume_compliant = args[i];
             i += 1;
         } else {
             std.debug.print("unknown runner argument: {s}\n", .{arg});
@@ -350,6 +356,7 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     try copyTree(allocator, io, runner_dir, overlay);
     try patchRunnerKeylogSelection(allocator, io, overlay);
     if (cfg.scenario != null) try patchRunnerScenarioOverride(allocator, io, overlay);
+    if (cfg.assume_compliant.len != 0) try patchRunnerAssumeCompliant(allocator, io, overlay);
     try injectQuicZigImplementation(allocator, io, overlay, cfg.image, @tagName(cfg.role));
     if (cfg.quic_go_image) |image| {
         try overrideImplementationImage(allocator, io, overlay, "quic-go", image);
@@ -362,7 +369,7 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
 
     var cmd: std.ArrayList([]const u8) = .empty;
     defer cmd.deinit(allocator);
-    if (trace_tools_dir != null or cfg.scenario != null) {
+    if (trace_tools_dir != null or cfg.scenario != null or cfg.assume_compliant.len != 0) {
         try cmd.append(allocator, "/usr/bin/env");
         if (trace_tools_dir) |dir| {
             const env_path = if (cfg.path_env.len > 0)
@@ -370,6 +377,9 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
             else
                 try std.fmt.allocPrint(allocator, "PATH={s}", .{dir});
             try cmd.append(allocator, env_path);
+        }
+        if (cfg.assume_compliant.len != 0) {
+            try cmd.append(allocator, try std.fmt.allocPrint(allocator, "QUIC_ZIG_ASSUME_COMPLIANT={s}", .{cfg.assume_compliant}));
         }
         if (cfg.scenario) |scenario| {
             try cmd.append(allocator, try std.fmt.allocPrint(allocator, "QUIC_ZIG_INTEROP_SCENARIO={s}", .{scenario}));
@@ -488,10 +498,10 @@ fn recreateDir(io: std.Io, path: []const u8) !void {
 }
 
 fn prepareRunnerOutputs(io: std.Io, cfg: Config) !void {
-    try ensureParentDir(io, cfg.log_dir.?);
-    try ensureParentDir(io, cfg.json_path.?);
     if (cfg.dry_run) return;
     try std.Io.Dir.cwd().deleteTree(io, cfg.log_dir.?);
+    try std.Io.Dir.cwd().createDirPath(io, cfg.log_dir.?);
+    try ensureParentDir(io, cfg.json_path.?);
 }
 
 fn copyTree(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8, dest_path: []const u8) !void {
@@ -682,6 +692,37 @@ fn patchRunnerScenarioOverride(
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = interop_path, .data = patched.items });
 }
 
+fn patchRunnerAssumeCompliant(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    overlay: []const u8,
+) !void {
+    const interop_path = try std.fs.path.join(allocator, &.{ overlay, "interop.py" });
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, interop_path, allocator, .limited(2 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    const needle =
+        \\    def _check_impl_is_compliant(self, name: str, role: Perspective) -> bool:
+        \\        """Check if an implementation returns UNSUPPORTED for unknown test cases."""
+    ;
+    const replacement =
+        \\    def _check_impl_is_compliant(self, name: str, role: Perspective) -> bool:
+        \\        """Check if an implementation returns UNSUPPORTED for unknown test cases."""
+        \\        if name in set(filter(None, os.environ.get("QUIC_ZIG_ASSUME_COMPLIANT", "").split(","))):
+        \\            logging.debug("%s %s compliance assumed by wrapper.", name, role.name.lower())
+        \\            self.compliant.setdefault(name, {})[role] = True
+        \\            return True
+    ;
+    if (std.mem.indexOf(u8, bytes, replacement) != null) return;
+    const idx = std.mem.indexOf(u8, bytes, needle) orelse return error.UnsupportedRunnerComplianceMethod;
+    var patched: std.ArrayList(u8) = .empty;
+    defer patched.deinit(allocator);
+    try patched.appendSlice(allocator, bytes[0..idx]);
+    try patched.appendSlice(allocator, replacement);
+    try patched.appendSlice(allocator, bytes[idx + needle.len ..]);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = interop_path, .data = patched.items });
+}
+
 fn expandCases(allocator: std.mem.Allocator, spec: []const u8) ![]u8 {
     if (std.mem.eql(u8, spec, "core")) {
         return try allocator.dupe(u8, "handshake,transfer,chacha20,resumption,zerortt,multiplexing");
@@ -832,6 +873,8 @@ test "runner paths are normalized to absolute paths" {
         "martenseemann/quic-go-interop@sha256:37db",
         "--scenario",
         "drop-rate --delay=15ms",
+        "--assume-compliant",
+        "quic-go",
     };
     try parseRunner(allocator, &args, &cfg);
     defer allocator.free(cfg.runner_dir.?);
@@ -846,6 +889,7 @@ test "runner paths are normalized to absolute paths" {
     try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, "interop/results/out.json"));
     try std.testing.expectEqualStrings("drop-rate --delay=15ms", cfg.scenario.?);
     try std.testing.expectEqualStrings("martenseemann/quic-go-interop@sha256:37db", cfg.quic_go_image.?);
+    try std.testing.expectEqualStrings("quic-go", cfg.assume_compliant);
 }
 
 test "runner client role defaults to client result path" {
