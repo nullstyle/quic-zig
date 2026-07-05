@@ -10,6 +10,8 @@
 //!  - `early_data_context` — derived 0-RTT context digest builder
 //!    binding ALPN, transport parameters, and an embedder-supplied
 //!    application settings string per RFC 9001 §4.6.
+//!  - `resumption_state` — versioned persisted 0-RTT session-ticket
+//!    plus remembered peer transport-parameter envelope.
 
 /// QUIC encryption level submodule (RFC 9001 §2).
 pub const level = @import("level.zig");
@@ -17,6 +19,8 @@ pub const level = @import("level.zig");
 pub const transport_params = @import("transport_params.zig");
 /// 0-RTT early-data context digest builder (RFC 9001 §4.6.1).
 pub const early_data_context = @import("early_data_context.zig");
+/// Versioned persisted 0-RTT session-ticket + peer transport-params envelope.
+pub const resumption_state = @import("resumption_state.zig");
 /// 0-RTT replay-protection cache (RFC 9001 §5.6 / RFC 8446 §8).
 /// Embedders that opt in to 0-RTT plug an `AntiReplayTracker` into
 /// their server loop and call `consume` per accepted early-data
@@ -32,6 +36,9 @@ pub const TransportParams = transport_params.Params;
 pub const EarlyDataContextOptions = early_data_context.Options;
 /// Re-export of `early_data_context.Digest` (the 32-byte SHA-256 output).
 pub const EarlyDataContextDigest = early_data_context.Digest;
+/// Re-export of `resumption_state.Decoded`, the borrowed view returned
+/// by the versioned client-side 0-RTT persistence envelope decoder.
+pub const ResumptionState = resumption_state.Decoded;
 /// Re-export of `anti_replay.AntiReplayTracker` for the embedder's
 /// 0-RTT replay cache.
 pub const AntiReplayTracker = anti_replay.AntiReplayTracker;
@@ -40,5 +47,6 @@ test {
     _ = level;
     _ = transport_params;
     _ = early_data_context;
+    _ = resumption_state;
     _ = anti_replay;
 }

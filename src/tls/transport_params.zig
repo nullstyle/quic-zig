@@ -331,6 +331,78 @@ pub const Params = struct {
         return pos;
     }
 
+    /// Exact byte length `encode` will emit for `self`.
+    pub fn encodedLen(self: Params) Error!usize {
+        var len: usize = 0;
+        if (self.original_destination_connection_id) |cid| {
+            len += try bytesEncodedLen(Id.original_destination_connection_id, cid.slice().len);
+        }
+        if (self.max_idle_timeout_ms != 0) {
+            len += try varintParamEncodedLen(Id.max_idle_timeout, self.max_idle_timeout_ms);
+        }
+        if (self.stateless_reset_token) |tok| {
+            len += try bytesEncodedLen(Id.stateless_reset_token, tok.len);
+        }
+        if (self.max_udp_payload_size != 65527) {
+            len += try varintParamEncodedLen(Id.max_udp_payload_size, self.max_udp_payload_size);
+        }
+        if (self.initial_max_data != 0) {
+            len += try varintParamEncodedLen(Id.initial_max_data, self.initial_max_data);
+        }
+        if (self.initial_max_stream_data_bidi_local != 0) {
+            len += try varintParamEncodedLen(Id.initial_max_stream_data_bidi_local, self.initial_max_stream_data_bidi_local);
+        }
+        if (self.initial_max_stream_data_bidi_remote != 0) {
+            len += try varintParamEncodedLen(Id.initial_max_stream_data_bidi_remote, self.initial_max_stream_data_bidi_remote);
+        }
+        if (self.initial_max_stream_data_uni != 0) {
+            len += try varintParamEncodedLen(Id.initial_max_stream_data_uni, self.initial_max_stream_data_uni);
+        }
+        if (self.initial_max_streams_bidi != 0) {
+            len += try varintParamEncodedLen(Id.initial_max_streams_bidi, self.initial_max_streams_bidi);
+        }
+        if (self.initial_max_streams_uni != 0) {
+            len += try varintParamEncodedLen(Id.initial_max_streams_uni, self.initial_max_streams_uni);
+        }
+        if (self.ack_delay_exponent != 3) {
+            len += try varintParamEncodedLen(Id.ack_delay_exponent, self.ack_delay_exponent);
+        }
+        if (self.max_ack_delay_ms != 25) {
+            len += try varintParamEncodedLen(Id.max_ack_delay, self.max_ack_delay_ms);
+        }
+        if (self.disable_active_migration) {
+            len += try flagEncodedLen(Id.disable_active_migration);
+        }
+        if (self.preferred_address) |addr| {
+            len += try preferredAddressEncodedLen(addr);
+        }
+        if (self.active_connection_id_limit != 2) {
+            len += try varintParamEncodedLen(Id.active_connection_id_limit, self.active_connection_id_limit);
+        }
+        if (self.initial_source_connection_id) |cid| {
+            len += try bytesEncodedLen(Id.initial_source_connection_id, cid.slice().len);
+        }
+        if (self.retry_source_connection_id) |cid| {
+            len += try bytesEncodedLen(Id.retry_source_connection_id, cid.slice().len);
+        }
+        if (self.compatible_versions_count > 0) {
+            len += try versionListEncodedLen(Id.version_information, self.compatibleVersions());
+        }
+        if (self.max_datagram_frame_size != 0) {
+            len += try varintParamEncodedLen(Id.max_datagram_frame_size, self.max_datagram_frame_size);
+        }
+        if (self.grease_quic_bit) {
+            len += try flagEncodedLen(Id.grease_quic_bit);
+        }
+        if (self.initial_max_path_id) |max_path_id| {
+            len += try varintParamEncodedLen(Id.initial_max_path_id, max_path_id);
+        }
+        if (self.alternative_address) {
+            len += try flagEncodedLen(Id.alternative_address);
+        }
+        return len;
+    }
+
     /// Parse a transport-parameters blob. Unknown parameter ids are
     /// silently ignored per RFC 9000 §18 (allows forward extension
     /// without breaking interop).
@@ -500,6 +572,35 @@ fn writeVarint(dst: []u8, pos: usize, id: u64, value: u64) Error!usize {
     return written;
 }
 
+fn fieldEncodedLen(id: u64, value_len: usize) Error!usize {
+    const id_len = varint.encodedLen(id);
+    if (id_len == 0) return Error.ValueTooLarge;
+    const value_len_u64 = std.math.cast(u64, value_len) orelse return Error.ValueTooLarge;
+    const len_len = varint.encodedLen(value_len_u64);
+    if (len_len == 0) return Error.ValueTooLarge;
+    return @as(usize, id_len) + @as(usize, len_len) + value_len;
+}
+
+fn varintParamEncodedLen(id: u64, value: u64) Error!usize {
+    const value_len = varint.encodedLen(value);
+    if (value_len == 0) return Error.ValueTooLarge;
+    return fieldEncodedLen(id, value_len);
+}
+
+fn bytesEncodedLen(id: u64, bytes_len: usize) Error!usize {
+    return fieldEncodedLen(id, bytes_len);
+}
+
+fn flagEncodedLen(id: u64) Error!usize {
+    return fieldEncodedLen(id, 0);
+}
+
+fn versionListEncodedLen(id: u64, versions: []const u32) Error!usize {
+    if (versions.len == 0) return Error.InvalidValue;
+    if (versions.len > max_compatible_versions) return Error.InvalidValue;
+    return fieldEncodedLen(id, versions.len * 4);
+}
+
 fn writeBytes(dst: []u8, pos: usize, id: u64, bytes: []const u8) Error!usize {
     var written: usize = 0;
     written += try varint.encode(dst[pos..], id);
@@ -568,6 +669,11 @@ fn writePreferredAddress(dst: []u8, pos: usize, addr: PreferredAddress) Error!us
     @memcpy(dst[value_start + 25 + cid_len .. value_start + 41 + cid_len], &addr.stateless_reset_token);
     written += value_len;
     return written;
+}
+
+fn preferredAddressEncodedLen(addr: PreferredAddress) Error!usize {
+    const value_len: usize = 4 + 2 + 16 + 2 + 1 + addr.connection_id.len + 16;
+    return fieldEncodedLen(Id.preferred_address, value_len);
 }
 
 fn hasParameterId(src: []const u8, needle: u64) Error!bool {
@@ -703,6 +809,7 @@ test "round-trip with the parameters a typical client advertises" {
 
     var buf: [256]u8 = undefined;
     const n = try sent.encode(&buf);
+    try testing.expectEqual(try sent.encodedLen(), n);
 
     const got = try Params.decode(buf[0..n]);
     try testing.expectEqual(sent.max_idle_timeout_ms, got.max_idle_timeout_ms);
@@ -734,6 +841,7 @@ test "server-only fields round-trip" {
     };
     var buf: [256]u8 = undefined;
     const n = try sent.encode(&buf);
+    try testing.expectEqual(try sent.encodedLen(), n);
     const got = try Params.decode(buf[0..n]);
     try testing.expectEqualSlices(u8, dcid.slice(), got.original_destination_connection_id.?.slice());
     try testing.expectEqualSlices(u8, scid.slice(), got.initial_source_connection_id.?.slice());
@@ -760,6 +868,7 @@ test "preferred_address round-trips" {
 
     var buf: [128]u8 = undefined;
     const n = try sent.encode(&buf);
+    try testing.expectEqual(try sent.encodedLen(), n);
     const got = (try Params.decode(buf[0..n])).preferred_address.?;
 
     try testing.expectEqualSlices(u8, &preferred.ipv4_address, &got.ipv4_address);

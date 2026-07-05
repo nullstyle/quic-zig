@@ -18,10 +18,12 @@
 //!      NewSessionTicket; the client captures it via
 //!      `setNewSessionCallback` and serializes the bytes via
 //!      `Session.toBytes`.
-//!   2. First "0-RTT attempt" presenting those ticket bytes:
+//!   2. Persist the ticket bytes together with the server transport
+//!      parameters in the versioned `tls.resumption_state` envelope.
+//!   3. First "0-RTT attempt" presenting those ticket bytes:
 //!      compute a stable `[32]u8` identity from the bytes (SHA-256),
 //!      call `tracker.consume(id, now_us)`, expect `.fresh`.
-//!   3. Second "0-RTT attempt" presenting the same ticket bytes:
+//!   4. Second "0-RTT attempt" presenting the same ticket bytes:
 //!      same identity, `tracker.consume(id, now_us)`, expect `.replay`.
 //!
 //! The test demonstrates the full embedder workflow even though the
@@ -185,6 +187,20 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
 
     const ticket_bytes = sink.captured.?;
     try std.testing.expect(ticket_bytes.len > 0);
+    const remembered_params = (try cli.conn.peerTransportParams()) orelse
+        return error.NoPeerTransportParams;
+    const resumption_bytes = try quic_zig.tls.resumption_state.encodeAlloc(
+        allocator,
+        ticket_bytes,
+        remembered_params,
+    );
+    defer allocator.free(resumption_bytes);
+    const persisted = try quic_zig.tls.resumption_state.decode(resumption_bytes);
+    try std.testing.expectEqualSlices(u8, ticket_bytes, persisted.session_ticket);
+    try std.testing.expectEqual(
+        remembered_params.initial_max_data,
+        persisted.transport_params.initial_max_data,
+    );
 
     // -- Step 3: pin the embedder's anti-replay workflow. The tracker
     //   is the data structure §5.2 demands; identity = SHA-256 of the
@@ -197,7 +213,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     });
     defer tracker.deinit();
 
-    const id = ticketIdentity(ticket_bytes);
+    const id = ticketIdentity(persisted.session_ticket);
 
     // First "0-RTT attempt" — the embedder calls `consume` after the
     // handshake reports `earlyDataStatus() == .accepted`. The tracker

@@ -115,6 +115,23 @@ pub const Verdict = enum {
     replay,
 };
 
+pub const PersistenceError = error{
+    BufferTooSmall,
+    InvalidFormat,
+    UnsupportedVersion,
+    InvalidFlags,
+    ValueTooLarge,
+    TrailingBytes,
+    DuplicateEntry,
+    InvalidOptions,
+};
+
+const persistence_magic = "QZAR".*;
+const persistence_version: u8 = 1;
+const persistence_flags: u8 = 0;
+const persistence_header_len: usize = 4 + 1 + 1 + 8 + 8 + 8 + 8;
+const persistence_entry_len: usize = id_len + 8;
+
 const Entry = struct {
     id: Id,
     inserted_at_us: u64,
@@ -228,6 +245,117 @@ pub const AntiReplayTracker = struct {
         return self.entries.items.len;
     }
 
+    /// Exact byte length `encode` will emit for this tracker's
+    /// versioned persisted state.
+    pub fn encodedLen(self: *const AntiReplayTracker) PersistenceError!usize {
+        const entries_bytes = std.math.mul(usize, self.entries.items.len, persistence_entry_len) catch
+            return PersistenceError.ValueTooLarge;
+        return std.math.add(usize, persistence_header_len, entries_bytes) catch
+            return PersistenceError.ValueTooLarge;
+    }
+
+    /// Serialize the replay cache as a versioned, architecture-neutral
+    /// envelope. Entries retain insertion order so FIFO eviction
+    /// behavior is preserved after restore.
+    pub fn encode(self: *const AntiReplayTracker, dst: []u8) PersistenceError!usize {
+        const needed = try self.encodedLen();
+        if (dst.len < needed) return PersistenceError.BufferTooSmall;
+        const max_entries_u64 = std.math.cast(u64, self.options.max_entries) orelse
+            return PersistenceError.ValueTooLarge;
+        const count_u64 = std.math.cast(u64, self.entries.items.len) orelse
+            return PersistenceError.ValueTooLarge;
+
+        @memcpy(dst[0..4], &persistence_magic);
+        dst[4] = persistence_version;
+        dst[5] = persistence_flags;
+        var pos: usize = 6;
+        writeU64(dst, &pos, max_entries_u64);
+        writeU64(dst, &pos, self.options.max_age_us);
+        writeU64(dst, &pos, self.last_observed_now_us);
+        writeU64(dst, &pos, count_u64);
+        for (self.entries.items) |entry| {
+            @memcpy(dst[pos .. pos + id_len], &entry.id);
+            pos += id_len;
+            writeU64(dst, &pos, entry.inserted_at_us);
+        }
+        std.debug.assert(pos == needed);
+        return needed;
+    }
+
+    pub fn encodeAlloc(
+        self: *const AntiReplayTracker,
+        allocator: std.mem.Allocator,
+    ) (std.mem.Allocator.Error || PersistenceError)![]u8 {
+        const len = try self.encodedLen();
+        const out = try allocator.alloc(u8, len);
+        errdefer allocator.free(out);
+        const written = try self.encode(out);
+        std.debug.assert(written == len);
+        return out;
+    }
+
+    /// Restore a tracker from `encode` bytes.
+    pub fn restore(
+        allocator: std.mem.Allocator,
+        src: []const u8,
+    ) (std.mem.Allocator.Error || PersistenceError)!AntiReplayTracker {
+        return decode(allocator, src);
+    }
+
+    /// Decode a persisted tracker envelope. Unknown versions and
+    /// non-zero flags are rejected so future formats can evolve
+    /// without silently changing replay semantics.
+    pub fn decode(
+        allocator: std.mem.Allocator,
+        src: []const u8,
+    ) (std.mem.Allocator.Error || PersistenceError)!AntiReplayTracker {
+        if (src.len < persistence_header_len) return PersistenceError.InvalidFormat;
+        if (!std.mem.eql(u8, src[0..4], &persistence_magic)) return PersistenceError.InvalidFormat;
+        if (src[4] != persistence_version) return PersistenceError.UnsupportedVersion;
+        if (src[5] != persistence_flags) return PersistenceError.InvalidFlags;
+
+        var pos: usize = 6;
+        const max_entries_u64 = readU64(src, &pos);
+        const max_age_us = readU64(src, &pos);
+        const last_observed_now_us = readU64(src, &pos);
+        const entry_count_u64 = readU64(src, &pos);
+        const max_entries = std.math.cast(usize, max_entries_u64) orelse
+            return PersistenceError.ValueTooLarge;
+        const entry_count = std.math.cast(usize, entry_count_u64) orelse
+            return PersistenceError.ValueTooLarge;
+        if (max_entries == 0 or max_age_us == 0) return PersistenceError.InvalidOptions;
+        if (entry_count > max_entries) return PersistenceError.InvalidFormat;
+        const entries_bytes = std.math.mul(usize, entry_count, persistence_entry_len) catch
+            return PersistenceError.ValueTooLarge;
+        const total = std.math.add(usize, persistence_header_len, entries_bytes) catch
+            return PersistenceError.ValueTooLarge;
+        if (src.len < total) return PersistenceError.InvalidFormat;
+        if (src.len > total) return PersistenceError.TrailingBytes;
+
+        var tracker = AntiReplayTracker.init(allocator, .{
+            .max_entries = max_entries,
+            .max_age_us = max_age_us,
+        }) catch |err| switch (err) {
+            error.InvalidOptions => return PersistenceError.InvalidOptions,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        errdefer tracker.deinit();
+        tracker.last_observed_now_us = last_observed_now_us;
+
+        var i: usize = 0;
+        while (i < entry_count) : (i += 1) {
+            var id: Id = undefined;
+            @memcpy(&id, src[pos .. pos + id_len]);
+            pos += id_len;
+            const inserted_at_us = readU64(src, &pos);
+            if (tracker.seen.get(id) != null) return PersistenceError.DuplicateEntry;
+            try tracker.entries.append(allocator, .{ .id = id, .inserted_at_us = inserted_at_us });
+            try tracker.seen.put(allocator, id, inserted_at_us);
+        }
+        std.debug.assert(pos == total);
+        return tracker;
+    }
+
     fn pruneStale(self: *AntiReplayTracker, now_us: u64) void {
         var drop: usize = 0;
         while (drop < self.entries.items.len) : (drop += 1) {
@@ -265,6 +393,17 @@ pub const AntiReplayTracker = struct {
         self.entries.shrinkRetainingCapacity(self.entries.items.len - 1);
     }
 };
+
+fn writeU64(dst: []u8, pos: *usize, value: u64) void {
+    std.mem.writeInt(u64, dst[pos.*..][0..8], value, .big);
+    pos.* += 8;
+}
+
+fn readU64(src: []const u8, pos: *usize) u64 {
+    const value = std.mem.readInt(u64, src[pos.*..][0..8], .big);
+    pos.* += 8;
+    return value;
+}
 
 // -- tests ---------------------------------------------------------------
 
@@ -359,6 +498,75 @@ test "consume re-insertion after age-out preserves single-shot semantics" {
     try testing.expectEqual(Verdict.fresh, try tracker.consume(idOf(0xff), 3_000)); // aged out
     // Same id within the new window: replay again.
     try testing.expectEqual(Verdict.replay, try tracker.consume(idOf(0xff), 3_500));
+}
+
+test "persistence round-trips options, clock, replay verdicts, and FIFO order" {
+    var tracker = try AntiReplayTracker.init(testing.allocator, .{
+        .max_entries = 3,
+        .max_age_us = 10_000,
+    });
+    defer tracker.deinit();
+
+    tracker.bumpClock(2_000);
+    try testing.expectEqual(Verdict.fresh, try tracker.consume(idOf(0x01), 1_000));
+    try testing.expectEqual(Verdict.fresh, try tracker.consume(idOf(0x02), 1_500));
+    const bytes = try tracker.encodeAlloc(testing.allocator);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(try tracker.encodedLen(), bytes.len);
+
+    var restored = try AntiReplayTracker.restore(testing.allocator, bytes);
+    defer restored.deinit();
+
+    try testing.expectEqual(@as(usize, 3), restored.options.max_entries);
+    try testing.expectEqual(@as(u64, 10_000), restored.options.max_age_us);
+    try testing.expectEqual(@as(u64, 2_000), restored.last_observed_now_us);
+    try testing.expectEqual(@as(usize, 2), restored.size());
+    try testing.expectEqual(Verdict.replay, try restored.consume(idOf(0x01), 2_100));
+    try testing.expectEqual(Verdict.replay, try restored.consumeUsingInternalClock(idOf(0x02)));
+
+    // FIFO order survived the restore: inserting two new IDs evicts
+    // 0x01 then 0x02 in that order under max_entries=3.
+    try testing.expectEqual(Verdict.fresh, try restored.consume(idOf(0x03), 3_000));
+    try testing.expectEqual(Verdict.fresh, try restored.consume(idOf(0x04), 4_000));
+    try testing.expectEqual(Verdict.fresh, try restored.consume(idOf(0x01), 4_500));
+    try testing.expectEqual(Verdict.fresh, try restored.consume(idOf(0x02), 5_000));
+}
+
+test "persistence rejects unknown version, flags, malformed lengths, and duplicates" {
+    var tracker = try AntiReplayTracker.init(testing.allocator, .{ .max_entries = 4 });
+    defer tracker.deinit();
+    try testing.expectEqual(Verdict.fresh, try tracker.consume(idOf(0xaa), 1));
+    const bytes = try tracker.encodeAlloc(testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    var mutated = try testing.allocator.dupe(u8, bytes);
+    defer testing.allocator.free(mutated);
+    mutated[4] = persistence_version + 1;
+    try testing.expectError(PersistenceError.UnsupportedVersion, AntiReplayTracker.restore(testing.allocator, mutated));
+    mutated[4] = persistence_version;
+    mutated[5] = 1;
+    try testing.expectError(PersistenceError.InvalidFlags, AntiReplayTracker.restore(testing.allocator, mutated));
+    mutated[5] = persistence_flags;
+
+    std.mem.writeInt(u64, mutated[30..38], @as(u64, 2), .big);
+    try testing.expectError(PersistenceError.InvalidFormat, AntiReplayTracker.restore(testing.allocator, mutated));
+
+    const dup_len = bytes.len + persistence_entry_len;
+    var dup = try testing.allocator.alloc(u8, dup_len);
+    defer testing.allocator.free(dup);
+    @memcpy(dup[0..bytes.len], bytes);
+    @memcpy(dup[bytes.len..dup_len], bytes[persistence_header_len..bytes.len]);
+    std.mem.writeInt(u64, dup[30..38], @as(u64, 2), .big);
+    try testing.expectError(PersistenceError.DuplicateEntry, AntiReplayTracker.restore(testing.allocator, dup));
+
+    var trailing = try testing.allocator.alloc(u8, bytes.len + 1);
+    defer testing.allocator.free(trailing);
+    @memcpy(trailing[0..bytes.len], bytes);
+    trailing[bytes.len] = 0xff;
+    try testing.expectError(PersistenceError.TrailingBytes, AntiReplayTracker.restore(
+        testing.allocator,
+        trailing,
+    ));
 }
 
 // -- fuzz harness --------------------------------------------------------

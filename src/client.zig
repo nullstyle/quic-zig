@@ -77,7 +77,7 @@ const ConfigImpl = struct {
     /// When null, `Client.connect` constructs a TLS-1.3-only client
     /// context with the supplied ALPN list and the verification mode
     /// derived from `ca_pem`. The auto-built context's
-    /// `early_data_enabled` flag follows whether `session_ticket` is
+    /// `early_data_enabled` flag follows whether `resumption_state` is
     /// non-null — 0-RTT is only enabled at the TLS layer when the
     /// embedder actually plans to use it (§5.2 / §12 hardening).
     /// Pass your own to enable, e.g., custom session-ticket capture
@@ -108,30 +108,24 @@ const ConfigImpl = struct {
     qlog_callback: ?QlogCallback = null,
     qlog_user_data: ?*anyopaque = null,
 
-    /// Optional 0-RTT session ticket from a prior connection to this
-    /// server. When provided, the connection attempts 0-RTT: the
-    /// ticket is parsed via `Session.fromBytes`, installed via
-    /// `Connection.setSession`, and `setEarlyDataEnabled(true)` is
-    /// called so the scheduler can emit early data on the first
-    /// flight. Bytes must come from `Session.toBytes` of a previous
-    /// session captured against `tls_context_override` (or a context
-    /// configured equivalently). When `tls_context_override` is null,
-    /// the presence of this field also drives `early_data_enabled` on
-    /// the auto-built TLS context so the path works out of the box;
-    /// embedders without a ticket get `early_data_enabled = false`
-    /// per the §5.2 / §12 hardening posture.
-    session_ticket: ?[]const u8 = null,
-
-    /// The server's transport parameters as observed on the connection
-    /// that ISSUED `session_ticket`, persisted by the embedder alongside
-    /// the ticket. BoringSSL does not carry peer transport params across
-    /// resumption, so without this the client cannot bound its 0-RTT
-    /// sends by the resumed session's limits. When set (together with
-    /// `session_ticket`), early-data stream/connection send windows are
-    /// bounded by these remembered values until the server's real params
-    /// arrive; RFC 9001 §4.6.1 guarantees the server MUST NOT lower them
-    /// on resumption. Ignored when `session_ticket` is null.
-    resumption_peer_transport_params: ?TransportParams = null,
+    /// Optional versioned 0-RTT resumption envelope from a prior
+    /// connection to this server. Bytes must be produced by
+    /// `quic_zig.tls.resumption_state.encode` /
+    /// `encodeAlloc`, which wrap the raw BoringSSL `Session.toBytes`
+    /// payload together with the server transport parameters observed
+    /// on the connection that issued that session ticket. Raw
+    /// `Session.toBytes` bytes are deliberately rejected so the 1.0
+    /// persistence format is explicit and versioned.
+    ///
+    /// When provided, the connection attempts 0-RTT: the decoded
+    /// session ticket is parsed via `Session.fromBytes`, installed via
+    /// `Connection.setSession`, `setEarlyDataEnabled(true)` is called,
+    /// and early-data sends are bounded by the remembered peer
+    /// transport parameters until the server's live parameters arrive.
+    /// When `tls_context_override` is null, this field also drives
+    /// `early_data_enabled` on the auto-built TLS context so the path
+    /// works out of the box.
+    resumption_state: ?[]const u8 = null,
 
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
@@ -320,7 +314,7 @@ pub const Client = struct {
                 .min_version = boringssl.raw.TLS1_3_VERSION,
                 .max_version = boringssl.raw.TLS1_3_VERSION,
                 .alpn = config.alpn_protocols,
-                .early_data_enabled = config.session_ticket != null,
+                .early_data_enabled = config.resumption_state != null,
             });
             owns_tls = true;
         }
@@ -378,19 +372,17 @@ pub const Client = struct {
         // sees it during handshake initiation. `setSession` upref's
         // the underlying SSL_SESSION, so we can deinit our local
         // handle immediately.
-        if (config.session_ticket) |ticket_bytes| {
-            var session = boringssl.tls.Session.fromBytes(tls_ctx, ticket_bytes) catch
+        if (config.resumption_state) |state_bytes| {
+            const state = tls_mod.resumption_state.decode(state_bytes) catch
+                return Error.InvalidConfig;
+            var session = boringssl.tls.Session.fromBytes(tls_ctx, state.session_ticket) catch
                 return Error.InvalidConfig;
             defer session.deinit();
             try conn_ptr.setSession(session);
             conn_ptr.setEarlyDataEnabled(true);
             // Bound 0-RTT sends by the resumed session's remembered peer
-            // params (BoringSSL doesn't remember them for us). Absent
-            // them, early data keeps the pre-existing client-self-limited
-            // window until the server's real params arrive.
-            if (config.resumption_peer_transport_params) |remembered| {
-                conn_ptr.setRememberedPeerTransportParams(remembered);
-            }
+            // params (BoringSSL doesn't remember them for us).
+            conn_ptr.setRememberedPeerTransportParams(state.transport_params);
         }
 
         try conn_ptr.bind();
