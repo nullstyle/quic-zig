@@ -7,6 +7,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-05
+
 ### Fixed
 
 - `setTransportParams` now advertises `initial_source_connection_id`
