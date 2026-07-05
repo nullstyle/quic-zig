@@ -20,8 +20,9 @@ internet traffic without the production checklist in
 - Basic `std.Io` loop helpers in `quic_zig.transport.runUdpServer`
   and `quic_zig.transport.runUdpClient`, allowing integrators to avoid
   rolling their own UDP loop.
-- Stateless Retry, NEW_TOKEN, stateless reset token helpers, 0-RTT with
-  anti-replay hooks, qlog-style callbacks, and key logging support.
+- Stateless Retry, NEW_TOKEN, stateless reset token helpers, versioned
+  0-RTT resumption state with anti-replay persistence hooks,
+  qlog-style callbacks, and key logging support.
 - Version Negotiation, Retry validation, QUIC v2 compatible version
   negotiation, connection migration, preferred address support, and
   draft multipath plumbing.
@@ -205,8 +206,11 @@ Before exposing a server to arbitrary peers:
   source address ownership before allocation.
 - Persist `stateless_reset_key`, Retry token keys, and NEW_TOKEN keys
   across graceful restarts when those features are enabled.
-- Keep 0-RTT off unless `tls.AntiReplayTracker` is wired and the
-  application rejects non-idempotent early requests.
+- Keep 0-RTT off unless `tls.AntiReplayTracker` is wired, its versioned
+  state is persisted across restarts, and the application rejects
+  non-idempotent early requests. Persist client resumption via
+  `tls.resumption_state`; raw BoringSSL session-ticket bytes are not a
+  supported quic-zig state format.
 - Use `Connection.setMigrationCallback` if peer migration needs
   application-level allowlisting.
 - Enable packet-level qlog events with

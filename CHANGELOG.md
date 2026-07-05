@@ -7,6 +7,27 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- Versioned persisted 0-RTT state formats. `quic_zig.tls.resumption_state`
+  encodes a strict `QZRS` envelope around BoringSSL session bytes plus the
+  remembered peer transport parameters, and `tls.AntiReplayTracker` can now
+  `encode` / `restore` a `QZAR` anti-replay snapshot while preserving replay
+  and FIFO behavior.
+- `-Dsanitize-c=off|trap|full` build option for quic-zig-owned modules, plus
+  a Linux CI job that runs `zig build test -Dsanitize-c=full`.
+- Blocking quic-go interop workflow for QNS client `H,D`, using a pinned
+  quic-interop-runner ref and pinned quic-go image digest. The broader
+  advisory interop matrix uses the same pins.
+
+### Changed (BREAKING)
+
+- `Client.Config.session_ticket` and
+  `Client.Config.resumption_peer_transport_params` were replaced by
+  `Client.Config.resumption_state`. Use `tls.resumption_state.encode` /
+  `encodeAlloc` to build the envelope; passing raw BoringSSL session-ticket
+  bytes is rejected as `InvalidConfig`.
+
 ### Fixed
 
 - `setLocalScid` and `setTransportParams` are now order-independent for the
