@@ -1878,7 +1878,17 @@ pub const Connection = struct {
     /// to BoringSSL for transmission inside CRYPTO frames during the
     /// handshake. Must be called before the first `advance`.
     pub fn setTransportParams(self: *Connection, params: TransportParams) !void {
-        const local = try normalizeLocalTransportParams(params);
+        var local = try normalizeLocalTransportParams(params);
+        // RFC 9000 §7.3: every endpoint MUST advertise
+        // `initial_source_connection_id`, set to the Source Connection ID it
+        // put on its Initial packet. The connection already owns that value
+        // (`initial_source_cid`, latched from `setLocalScid`), so fill it in
+        // for callers of this low-level API rather than making every embedder
+        // duplicate it. A missing ISCID is a hard handshake rejection on
+        // strict peers (e.g. quic-go closes with TRANSPORT_PARAMETER_ERROR).
+        if (self.initial_source_cid_set) {
+            local.initial_source_connection_id = self.initial_source_cid;
+        }
         var buf: [1024]u8 = undefined;
         const n = try local.encode(&buf);
         self.local_transport_params = local;

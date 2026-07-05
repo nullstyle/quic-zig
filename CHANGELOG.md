@@ -9,6 +9,12 @@ changes.
 
 ### Fixed
 
+- `setTransportParams` now advertises `initial_source_connection_id`
+  (RFC 9000 §7.3), filled from the connection's own SCID, so callers of the
+  low-level `Connection` API don't have to. Omitting it is a hard handshake
+  rejection on strict peers (quic-go closes with TRANSPORT_PARAMETER_ERROR),
+  which is why in-tree loopback interop passed while every real foreign peer
+  failed. Validated live against webtransport-go.
 - Replayed STREAM / RESET_STREAM frames for an out-of-order reaped peer
   stream (one above the contiguous reaped watermark, when a lower peer
   stream is still live) no longer resurrect the stream. `peerStreamAlreadyReaped`

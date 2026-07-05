@@ -872,6 +872,33 @@ test "server rejects client-sent server-only transport parameters" {
     }, "client sent retry source cid");
 }
 
+test "setTransportParams fills initial_source_connection_id from the local SCID (RFC 9000 §7.3)" {
+    // A client that uses the low-level Connection API (setLocalScid +
+    // setTransportParams) without explicitly setting
+    // `initial_source_connection_id` must still advertise it — set to the
+    // SCID it puts on its Initial. Omitting it is a hard handshake rejection
+    // on strict peers (quic-go closes with TRANSPORT_PARAMETER_ERROR), which
+    // is why in-tree loopback (lenient both ways) passed while every real
+    // foreign peer failed.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    const scid = [_]u8{ 0xc3, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 };
+    try conn.setLocalScid(&scid);
+    // Params that omit initial_source_connection_id entirely.
+    try conn.setTransportParams(.{
+        .initial_max_data = 1024 * 1024,
+        .max_udp_payload_size = 65527,
+    });
+
+    const iscid = conn.localTransportParams().initial_source_connection_id orelse
+        return error.MissingInitialSourceConnectionId;
+    try std.testing.expectEqualSlices(u8, &scid, iscid.slice());
+}
+
 test "server writeRetry emits a Retry addressed to the client Initial SCID" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
