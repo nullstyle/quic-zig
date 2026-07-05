@@ -8192,6 +8192,71 @@ test "gcClosedStreams: a reaped peer stream is not resurrected by a replayed fra
     try std.testing.expect(conn.streams.get(sid2) != null);
 }
 
+test "gcClosedStreams: an out-of-order reaped peer stream above the watermark is not resurrected (L2 sparse)" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initServer(allocator, ctx);
+    defer conn.deinit();
+
+    try conn.setTransportParams(.{
+        .initial_max_data = default_connection_receive_window,
+        .initial_max_stream_data_uni = default_stream_receive_window,
+        .initial_max_streams_uni = 8,
+    });
+
+    // Three client-initiated uni streams (peer streams from the server's
+    // view): indices 0, 1, 2 → ids 2, 6, 10. Open each with a FIN so its
+    // recv half can go terminal once its bytes are read.
+    const id0: u64 = 2;
+    const id1: u64 = 6;
+    const id2: u64 = 10;
+    for ([_]u64{ id0, id1, id2 }) |sid| {
+        try conn.handleStream(.application, .{
+            .stream_id = sid,
+            .offset = 0,
+            .data = "hi",
+            .has_length = true,
+            .fin = true,
+        });
+    }
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_opened_streams_uni);
+
+    // Read + reap indices 0 and 2, but leave index 1 ALIVE — its bytes stay
+    // unread, so its recv half is not terminal and gcClosedStreams keeps it.
+    var buf: [8]u8 = undefined;
+    _ = try conn.streamRead(id0, &buf);
+    _ = try conn.streamRead(id2, &buf);
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.streams.get(id0) == null);
+    try std.testing.expect(conn.streams.get(id2) == null);
+    try std.testing.expect(conn.streams.get(id1) != null);
+
+    // The contiguous watermark only advanced past index 0 (blocked by the
+    // still-live index 1). Index 2 is reaped but ABOVE the watermark —
+    // tracked only by its bit, not the watermark.
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_reaped_below_uni);
+    try std.testing.expect(conn.peer_reaped_bits_uni.isSet(2));
+
+    // A replayed STREAM frame for the out-of-order reaped id (index 2) MUST
+    // be ignored (RFC 9000 §3.2), not resurrected — the reaped bit, not just
+    // the contiguous watermark, has to suppress it.
+    try conn.handleStream(.application, .{
+        .stream_id = id2,
+        .offset = 0,
+        .data = "XX",
+        .has_length = true,
+    });
+    try std.testing.expect(conn.streams.get(id2) == null);
+
+    // A replayed RESET_STREAM for the same reaped id is likewise ignored.
+    try conn.handleResetStream(.{ .stream_id = id2, .application_error_code = 0, .final_size = 2 });
+    try std.testing.expect(conn.streams.get(id2) == null);
+
+    // The still-live in-between stream is unaffected.
+    try std.testing.expect(conn.streams.get(id1) != null);
+}
+
 test "initialSendStreamLimit: remembered 0-RTT params bound the pre-params send window (L6)" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

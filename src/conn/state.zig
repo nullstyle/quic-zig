@@ -3617,15 +3617,24 @@ pub const Connection = struct {
         return true;
     }
 
-    /// True if `id` is a peer-initiated stream index below the contiguous
-    /// reaped watermark — i.e. it was already opened, driven to a terminal
-    /// state, and reclaimed. A STREAM/RESET_STREAM for such an id is a
-    /// post-terminal frame that MUST be ignored (RFC 9000 §3.2) rather
-    /// than resurrecting the stream. Only meaningful for peer-initiated
-    /// ids; callers gate on an absent, peer-initiated stream first.
+    /// True if `id` is a peer-initiated stream that was already opened,
+    /// driven to a terminal state, and reclaimed. A STREAM/RESET_STREAM for
+    /// such an id is a post-terminal frame that MUST be ignored (RFC 9000
+    /// §3.2) rather than resurrecting the stream. Only meaningful for
+    /// peer-initiated ids; callers gate on an absent, peer-initiated stream
+    /// first.
+    ///
+    /// Two cases: below the contiguous watermark (a run of reaped indices
+    /// coalesced from the bottom), OR reaped-but-above the watermark because
+    /// a lower peer stream is still live — the latter is tracked individually
+    /// by its reaped bit until the watermark coalesces past it.
     pub fn peerStreamAlreadyReaped(self: *const Connection, id: u64) bool {
         const idx = streamIndex(id);
-        return idx < (if (streamIsBidi(id)) self.peer_reaped_below_bidi else self.peer_reaped_below_uni);
+        const bidi = streamIsBidi(id);
+        if (idx < (if (bidi) self.peer_reaped_below_bidi else self.peer_reaped_below_uni)) return true;
+        if (idx >= max_streams_per_connection) return false;
+        const bits = if (bidi) &self.peer_reaped_bits_bidi else &self.peer_reaped_bits_uni;
+        return bits.isSet(@intCast(idx));
     }
 
     /// Record that a peer-initiated stream was reaped, advancing the
