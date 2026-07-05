@@ -38,8 +38,22 @@ is safe to embed in production. The gates:
 - [ ] Foreign-peer interop is a **hard** CI gate, not advisory: the
       handshake + a request complete against a pinned quic-go server image
       on every push (roadmap H1 #8).
-- [ ] RFC 9000 §10.2 closing/draining edge-case coverage audited and
-      backfilled (roadmap H1 #16).
+- [~] RFC 9000 §10.2 closing/draining edge-case coverage audited and
+      backfilled (roadmap H1 #16). Audited; 4 of 7 verified gaps backfilled
+      in `tests/conformance/rfc9000_streams_flow.zig` (closing→draining on a
+      peer CONNECTION_CLOSE; draining suppresses a queued ACK; draining
+      suppresses queued STREAM data; draining sheds keepalive PING). Three
+      remain, each needing more test infrastructure:
+      - §10.2.3: an application close (`close(false, …)`) emitted at
+        Initial/Handshake level must convert 0x1d→0x1c/APPLICATION_ERROR.
+        Needs a connection with Handshake write keys but no application keys.
+      - §10.2.1/§10.2.3: with both Handshake and application keys, the close
+        emission defers to the application space and preserves the 0x1d
+        application variant. Needs the narrow post-1-RTT-key / pre-confirm
+        window (handshake keys are discarded at confirmation).
+      - §10.2.1 ¶2: successive closing-state CONNECTION_CLOSE retransmits
+        carry a byte-identical error_code/frame_type. Needs `open1Rtt` +
+        frame-decode of the sealed retransmits to compare.
 
 ### Memory safety
 - [ ] ASan/UBSan run over the BoringSSL FFI boundary in CI (roadmap
