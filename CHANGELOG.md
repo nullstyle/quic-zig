@@ -16,15 +16,17 @@ breaking upgrade actions.
 
 ### Added
 
-- `quic_zig.StreamPriority` (`urgency` 0–7, default 3; `incremental` hint) and
+- `quic_zig.StreamPriority` (`urgency` 0–7, default 3; `incremental`) and
   `Connection.streamSetPriority(id, p)` / `streamPriority(id)`. The
-  application-data send scheduler now emits ready streams in **urgency order**
-  (ties broken by stream id) instead of hash-map order, so a higher-urgency
-  stream's bytes lead each packet. With no explicit priorities every stream is
-  urgency 3, so the order is deterministic stream-id ascending (a no-op change
-  in observable behavior for non-prioritizing embedders). The `incremental`
-  round-robin among equal-urgency streams is deliberately deferred — see
-  `docs/stream-priority-design.md`.
+  application-data send scheduler now emits ready streams by RFC 9218 §10
+  priority instead of hash-map order: **urgency** first, then within a band
+  **non-incremental** streams lead in stream-id order (head-of-line) and
+  **incremental** streams are round-robined so no one monopolizes the band. A
+  higher-urgency stream's bytes therefore lead each packet. With no explicit
+  priorities every stream is non-incremental urgency 3, so the order is
+  deterministic stream-id ascending — a no-op change in observable behavior for
+  non-prioritizing embedders. Cross-path priority interactions with multipath
+  remain out of scope (see `docs/stream-priority-design.md`).
 
 ## [0.5.0] - 2026-07-04
 

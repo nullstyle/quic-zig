@@ -1,12 +1,13 @@
 # Stream priority — design spike
 
 **Status: implemented in 0.6.0.** `StreamPriority` (urgency + incremental),
-`Connection.streamSetPriority` / `streamPriority`, and the urgency-ordered
+`Connection.streamSetPriority` / `streamPriority`, and the priority-ordered
 application-data send scheduler (`collectSendableStreamsByPriority`, driving
 the STREAM-drain loop in `pollLevelOnPath`) landed together with http3-zig's
-first prioritized workload, which validates the ordering. The `incremental`
-hint is stored but not yet used to interleave equal-urgency streams — that
-refinement is deferred until a consumer needs it (see below).
+first prioritized workload, which validates the ordering. Both parameters are
+honored: urgency ordering plus, within a band, head-of-line stream-id order
+for non-incremental streams and a round-robin rotation for incremental ones
+(see below).
 
 This spike records the intended shape of a stream-priority API so the
 downstream HTTP/3 layer can be built against a known target, while
@@ -76,16 +77,19 @@ Explicitly **out of scope** for the eventual first implementation:
 - Any RFC 7540-style dependency tree or weights.
 - Cross-path priority interactions with multipath scheduling.
 
-## What shipped vs. what's deferred
+## What shipped vs. what's out of scope
 
 Shipped in 0.6.0: the `StreamPriority` field, `streamSetPriority` /
-`streamPriority`, and strict **urgency** ordering in the send scheduler (ties
-broken by stream id) — the primary RFC 9218 mechanism, validated by
-http3-zig honoring the `priority` header / `PRIORITY_UPDATE`.
+`streamPriority`, and the RFC 9218 §10 send scheduler — validated by http3-zig
+honoring the `priority` header / `PRIORITY_UPDATE`. Within one urgency band:
 
-Deferred (add when a consumer needs it): the `incremental` round-robin
-rotation among equal-urgency incremental streams. Today equal-urgency streams
-are served in stream-id order regardless of `incremental`, which is a valid
-(if not fully RFC-9218-optimal) policy. The stored `incremental` flag is the
-hook for that refinement. Still explicitly out of scope: any RFC 7540-style
-dependency tree, and cross-path priority interactions with multipath.
+- **Non-incremental** streams (default) lead, in ascending stream-id order —
+  head-of-line, each served toward completion before the next. Non-incremental
+  streams are ordered ahead of incremental ones in the same band.
+- **Incremental** streams are round-robined: a per-connection cursor
+  (`priority_rr_cursor`) advances past the incremental stream that led each
+  packet, so a different one leads the next, and no single incremental stream
+  monopolizes the band's bandwidth.
+
+Explicitly out of scope: any RFC 7540-style dependency tree or weights, and
+cross-path priority interactions with multipath scheduling.

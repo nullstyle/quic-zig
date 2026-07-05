@@ -250,6 +250,48 @@ test "send scheduler orders ready streams by RFC 9218 priority (urgency then id)
     try std.testing.expectError(error.StreamNotFound, conn.streamSetPriority(400, .{}));
 }
 
+test "send scheduler: non-incremental leads its band, incremental streams round-robin" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    try conn.setTransportParams(.{
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 4096,
+        .initial_max_streams_bidi = max_streams_per_connection,
+    });
+
+    // Same urgency: three incremental streams (0, 4, 8) plus one
+    // non-incremental (12), each with pending send data.
+    for ([_]u64{ 0, 4, 8, 12 }) |id| {
+        _ = try conn.openBidi(id);
+        _ = try conn.streamWrite(id, "x");
+    }
+    try conn.streamSetPriority(0, .{ .urgency = 3, .incremental = true });
+    try conn.streamSetPriority(4, .{ .urgency = 3, .incremental = true });
+    try conn.streamSetPriority(8, .{ .urgency = 3, .incremental = true });
+    try conn.streamSetPriority(12, .{ .urgency = 3, .incremental = false });
+
+    var buf: [8]*Stream = undefined;
+    var incremental_leads: [3]u64 = undefined;
+    for (&incremental_leads) |*lead| {
+        const ready = conn.collectSendableStreamsByPriority(&buf);
+        try std.testing.expectEqual(@as(usize, 4), ready.len);
+        // The non-incremental stream always leads the band (head-of-line).
+        try std.testing.expectEqual(@as(u64, 12), ready[0].id);
+        try std.testing.expect(!ready[0].priority.incremental);
+        // The incremental streams follow; which one is first rotates.
+        try std.testing.expect(ready[1].priority.incremental);
+        lead.* = ready[1].id;
+    }
+    // Over three packets each incremental stream leads once — a fair rotation,
+    // not the same stream monopolizing the band.
+    try std.testing.expect(incremental_leads[0] != incremental_leads[1]);
+    try std.testing.expect(incremental_leads[1] != incremental_leads[2]);
+    try std.testing.expect(incremental_leads[0] != incremental_leads[2]);
+}
+
 test "streamReadFin reports FIN inline with the last read; streamRecvState tracks it" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

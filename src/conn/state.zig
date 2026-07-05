@@ -271,27 +271,32 @@ pub const Stream = struct {
     }
 };
 
-/// Ordering for the RFC 9218 send scheduler: lower urgency first (more
-/// urgent), then lower stream id. The `incremental` hint is stored but not
-/// yet used to interleave equal-urgency streams — a documented follow-up (see
-/// `docs/stream-priority-design.md`).
-fn streamPriorityLess(a: *const Stream, b: *const Stream) bool {
+/// Ordering for the RFC 9218 send scheduler. Lower urgency first (more
+/// urgent). Within an urgency band (RFC 9218 §10): non-incremental streams
+/// lead, in ascending stream-id order (head-of-line — serve each to
+/// completion); then incremental streams, round-robined by distance from
+/// `rr_cursor` so a different one leads each packet. With no explicit
+/// priorities every stream is non-incremental urgency 3, so this is plain
+/// stream-id order.
+fn streamPriorityLess(a: *const Stream, b: *const Stream, rr_cursor: u64) bool {
     if (a.priority.urgency != b.priority.urgency) return a.priority.urgency < b.priority.urgency;
-    return a.id < b.id;
+    if (a.priority.incremental != b.priority.incremental) return !a.priority.incremental;
+    if (!a.priority.incremental) return a.id < b.id;
+    return (a.id -% rr_cursor) < (b.id -% rr_cursor);
 }
 
 /// Insert `s` into the priority-sorted (best first) bounded buffer
 /// `buf[0..n.*]`. When the buffer is full, `s` displaces the current worst
 /// only if it ranks strictly higher, so the buffer always holds the
 /// top-`buf.len` streams by priority.
-fn insertStreamByPriority(buf: []*Stream, n: *usize, s: *Stream) void {
+fn insertStreamByPriority(buf: []*Stream, n: *usize, s: *Stream, rr_cursor: u64) void {
     if (n.* == buf.len) {
-        if (!streamPriorityLess(s, buf[n.* - 1])) return;
+        if (!streamPriorityLess(s, buf[n.* - 1], rr_cursor)) return;
     } else {
         n.* += 1;
     }
     var i = n.* - 1;
-    while (i > 0 and streamPriorityLess(s, buf[i - 1])) : (i -= 1) {
+    while (i > 0 and streamPriorityLess(s, buf[i - 1], rr_cursor)) : (i -= 1) {
         buf[i] = buf[i - 1];
     }
     buf[i] = s;
@@ -1546,6 +1551,12 @@ pub const Connection = struct {
     peer_opened_streams_uni: u64 = 0,
     local_opened_streams_bidi: u64 = 0,
     local_opened_streams_uni: u64 = 0,
+    /// Rotating cursor for the RFC 9218 send scheduler's round-robin among
+    /// equal-urgency *incremental* streams: each application packet advances it
+    /// past the incremental stream that led, so a different one leads next
+    /// packet (non-incremental streams are unaffected — they keep strict
+    /// stream-id order). See `collectSendableStreamsByPriority`.
+    priority_rr_cursor: u64 = 0,
     // Contiguous "reaped" watermark per peer-initiated direction: the
     // count k such that every peer stream index in [0, k) was created
     // and reaped (RFC 9000 §3.2). A STREAM/RESET_STREAM for an absent
@@ -3895,9 +3906,19 @@ pub const Connection = struct {
         while (it.next()) |entry| {
             const s = entry.value_ptr.*;
             if (!s.send.hasPendingChunk()) continue;
-            insertStreamByPriority(buf, &n, s);
+            insertStreamByPriority(buf, &n, s, self.priority_rr_cursor);
         }
-        return buf[0..n];
+        const result = buf[0..n];
+        // Advance the round-robin cursor past the incremental stream that
+        // leads this packet, so the next incremental stream of the same urgency
+        // leads the next one. Non-incremental streams don't move the cursor.
+        for (result) |s| {
+            if (s.priority.incremental) {
+                self.priority_rr_cursor = s.id +% 1;
+                break;
+            }
+        }
+        return result;
     }
 
     /// Read-only recv-half status of stream `id`: whether the peer's FIN or
