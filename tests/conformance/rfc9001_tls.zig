@@ -45,6 +45,7 @@
 //!   RFC9001 §5.6 ¶3  MUST       0-RTT replay tracker rejects a duplicate within the active window
 //!   RFC9001 §5.6 ¶3  SHOULD     0-RTT replay tracker uses a single bounded-duration mechanism
 //!   RFC9001 §5.7 ¶1  MUST       initial / handshake / 0-RTT / 1-RTT levels are distinct
+//!   RFC9001 §5.7 ¶3  MUST       discard Initial keys once Handshake keys are available
 //!   RFC9001 §5.8 ¶3  MUST       v1 Retry integrity key matches the §5.8 fixed constant
 //!   RFC9001 §5.8 ¶3  MUST       v1 Retry integrity nonce matches the §5.8 fixed constant
 //!   RFC9001 §5.8 ¶6  MUST       Retry integrity tag is 16 bytes appended to the packet
@@ -64,22 +65,17 @@
 //!                              CloseEvent translation lands)
 //!
 //! Visible debt:
-//!   RFC9001 §4.1.1 ¶3 MUST     server closes with crypto_error 120 when peer
-//!                              omits ALPN — kept as skip_ below. BoringSSL's
-//!                              client-side `ext_alpn_add_clienthello` refuses
-//!                              to construct a no-ALPN ClientHello whenever
-//!                              QUIC is active, so Approach A (an override TLS
-//!                              context with empty ALPN) fails inside the
-//!                              client before any bytes hit the wire.
-//!                              Approach B (synthetic ClientHello bytes) needs
-//!                              a regeneration tool and a fixture file; tracked
-//!                              in the test body.
+//!   RFC9001 §4.1.1 ¶3 MUST     server closes with no_application_protocol
+//!                              (crypto_error 0x178) when a peer omits ALPN
+//!                              entirely — not covered: BoringSSL's client-side
+//!                              `ext_alpn_add_clienthello` refuses to construct a
+//!                              no-ALPN ClientHello whenever QUIC is active, so no
+//!                              compliant peer produces this case. (The ALPN
+//!                              *mismatch* close IS enforced and tested below,
+//!                              asserting error_code 0x178.)
 //!   RFC9001 §4.8 ¶2   SHOULD   session ticket includes transport-parameter context
-//!                              — covered structurally below; full ticket round-trip is skip_.
-//!   RFC9001 §5.7 ¶3   MUST     discard Initial keys once Handshake keys are available
-//!                              — implementation gap: quic_zig derives Initial keys on
-//!                                demand and never clears them post-handshake; skip_
-//!                                until the discard hook lands in `Connection`.
+//!                              — covered structurally below; full ticket round-trip
+//!                                is not yet exercised.
 //!
 //! Out of scope here (covered elsewhere):
 //!   RFC9001 §17.2.5 (Retry framing, packet bytes)            → rfc9000_packet_headers.zig
