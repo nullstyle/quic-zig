@@ -38,11 +38,13 @@ refined before 1.0, but changes will be deliberate, called out in
 
 ### Unstable / evolving — usable, but expect movement
 
-- **Draft extensions:** `quic_zig.lb` (QUIC-LB draft-21),
-  `quic_zig.alt_addr` (Alternative Server Address draft-00), multipath
-  (draft-21), preferred address, and the QUIC v2 negotiation knobs. These
-  track IETF drafts and will change with the draft or on RFC publication —
-  see *Draft-extension sunset path*.
+- **Draft / evolving extensions:** `quic_zig.lb` (QUIC-LB draft-21),
+  multipath (draft-21), `quic_zig.alt_addr` (Alternative Server Address
+  draft-00), and the qlog event surface. Each carries an explicit
+  disposition (Track-to-RFC vs Experimental/Unstable-with-SLA) — see
+  *Draft-extension policy*. Preferred address (RFC 9000 §9.6) and the QUIC v2
+  negotiation knobs (RFC 9369) are RFC-anchored on the wire but their
+  surface here is still maturing, so they also sit in this tier.
 - **Newly added surfaces** may see minor signature or naming refinement
   as they are exercised for the first time.
 - **Config naming** follows a settled convention: on/off feature toggles use
@@ -82,11 +84,35 @@ and were called out as breaking). Existing fields will not silently change
 meaning. The naming/semantics normalization noted above is the one planned
 pre-1.0 churn to this surface.
 
-## Draft-extension sunset path
+## Draft-extension policy
 
 The draft-based extensions are pinned to a specific revision via
-compile-time constants (`quic_zig.lb`, `quic_zig.alt_addr`). When the
-corresponding RFC — or a newer draft — is published:
+compile-time constants. Each carries one of two dispositions so an embedder
+knows what kind of change to expect:
+
+- **Track-to-RFC** — actively converging on a standard. The wire is pinned
+  to a named draft revision, the API is expected to *graduate to Stable* when
+  the RFC publishes, and revision bumps follow the sunset mechanics below.
+- **Experimental (Unstable-with-SLA)** — kept in the surface but not
+  converging on a near-term RFC. The SLA is narrow: the pinned wire constants
+  are correct and tested, but the *API shape may change at any minor release*
+  and the surface may be withdrawn. Do not build load-bearing product on it
+  without pinning the exact quic-zig version.
+
+| Extension | Wire anchor | Disposition |
+| --- | --- | --- |
+| QUIC-LB (`quic_zig.lb`) | draft-ietf-quic-load-balancers-21 | Track-to-RFC |
+| Multipath | draft-ietf-quic-multipath-21 | Experimental (Unstable-with-SLA) |
+| Alternative Server Address (`quic_zig.alt_addr`) | draft-…-00 | Experimental (Unstable-with-SLA) |
+| qlog events | qlog event schema | Stable **API** (callback signatures), draft-tracked **schema** (emitted field shape follows the qlog draft) |
+
+Preferred address (RFC 9000 §9.6) and QUIC v2 negotiation (RFC 9369) are
+RFC-anchored on the wire; they are listed in the Unstable tier for API
+maturity, not draft volatility, and are not part of this table.
+
+### Sunset mechanics (revision bumps)
+
+When a tracked draft moves to a new revision or its RFC publishes:
 
 1. The implementation moves to the new revision.
 2. The superseded draft's code path is kept for **one minor release** with
