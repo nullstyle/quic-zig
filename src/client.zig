@@ -6,7 +6,7 @@
 //! SNI hostname, generate a random initial DCID and SCID, call
 //! `bind` / `setLocalScid` / `setInitialDcid` / `setPeerDcid` /
 //! `setTransportParams` in the right order, and only then start the
-//! `tick`/`poll` loop. Mirror to `Server`, `Client` owns that
+//! `tick`/`poll` loop. Like `Server`, `Client` owns that
 //! boilerplate and hands back a freshly-initialized `Connection`
 //! ready for the first `tick`.
 //!
@@ -20,7 +20,8 @@
 //!
 //! For embedders who don't want to hand-roll the bind/poll/recv/tick
 //! loop, `quic_zig.transport.runUdpClient` is the opinionated
-//! mirror to `runUdpServer`. It owns the UDP socket, drives the
+//! `std.Io` client loop alongside `runUdpServer`. It owns the UDP
+//! socket, drives the
 //! state machine on a monotonic clock, and exits cleanly when the
 //! connection closes (or an embedder-supplied shutdown flag
 //! flips). See `src/transport/udp_client.zig` for the option
@@ -220,8 +221,8 @@ const ErrorImpl = error{
 } || boringssl.tls.Error || ConnectionError;
 
 /// I/O-agnostic helper that builds a freshly-initialized client-side
-/// `Connection` and owns the supporting TLS context. Mirror to
-/// `Server`: returned by value from `connect`, owns its own
+/// `Connection` and owns the supporting TLS context. Like
+/// `Server`, it is returned by value from `connect` and owns its own
 /// allocations (the heap `*Connection` plus the BoringSSL TLS
 /// context when not overridden), torn down by `deinit`.
 ///

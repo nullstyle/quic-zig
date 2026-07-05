@@ -6,9 +6,6 @@
 //! layer: socket-option tuning, ECN cmsg helpers, and opinionated
 //! `std.Io` UDP loops for the high-level `Server` and `Client`
 //! wrappers.
-//!
-//! Future additions may include `recvmmsg` / `sendmmsg` / GSO wrappers
-//! and richer platform-specific path-tracking helpers.
 
 /// Submodule of UDP socket-option helpers (`SO_RCVBUF`, `SO_SNDBUF`).
 pub const socket_opts = @import("socket_opts.zig");
@@ -59,7 +56,7 @@ pub const RunUdpOptions = udp_server.RunUdpOptions;
 pub const RunError = udp_server.RunError;
 
 /// Re-export of `udp_client.runUdpClient` — the opinionated
-/// `std.Io`-based UDP client loop, mirror to `runUdpServer`. See
+/// `std.Io`-based UDP client loop alongside `runUdpServer`. See
 /// `udp_client.zig` for the full option surface.
 pub const runUdpClient = udp_client.runUdpClient;
 /// Re-export of `udp_client.RunUdpClientOptions`.

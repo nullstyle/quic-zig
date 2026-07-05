@@ -95,7 +95,7 @@ pub const Server = @import("server.zig").Server;
 pub const PreferredAddressConfig = @import("server.zig").PreferredAddressConfig;
 
 /// High-level convenience wrapper for embedding quic_zig as a QUIC
-/// client. Mirror to `Server` — owns the TLS context and per-Initial
+/// client. Like `Server`, it owns the TLS context and per-Initial
 /// random DCID/SCID generation; the embedder still owns the UDP
 /// socket, the clock, and the returned `Connection` lifecycle.
 pub const Client = @import("client.zig").Client;
@@ -179,7 +179,7 @@ pub const StreamType = conn.StreamType;
 /// RFC 9218 (Extensible Priorities) per-stream send priority — urgency (0–7)
 /// plus the `incremental` hint. Set with `Connection.streamSetPriority`; the
 /// application-data send scheduler emits ready streams in urgency order. See
-/// `docs/stream-priority-design.md`.
+/// `docs/stream-priority.md`.
 pub const StreamPriority = conn.StreamPriority;
 
 /// Coarse connection lifecycle phase surfaced by `Connection.phase`:

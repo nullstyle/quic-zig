@@ -223,7 +223,7 @@ pub const PerLevelState = struct {
 /// urgent … 7 least (default 3); `incremental` is a hint that a response may
 /// be delivered in interleaved chunks. The application-data send scheduler
 /// orders ready streams by urgency then stream id (see `streamSetPriority`,
-/// `streamPriority`, and `docs/stream-priority-design.md`).
+/// `streamPriority`, and `docs/stream-priority.md`).
 pub const StreamPriority = struct {
     urgency: u3 = 3,
     incremental: bool = false,

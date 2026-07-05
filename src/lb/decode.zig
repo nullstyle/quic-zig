@@ -7,7 +7,7 @@
 //!
 //!   * Round-trip property tests in the conformance suite.
 //!   * Operations tooling that needs to inspect what a server
-//!     would mint (e.g. the QNS harness, future LB tooling).
+//!     would mint (e.g. the QNS harness).
 //!   * External load balancer tooling that needs the recovered
 //!     routing identity.
 //!

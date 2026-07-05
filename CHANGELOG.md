@@ -9,29 +9,27 @@ changes.
 
 ## [0.6.0] - 2026-07-04
 
-RFC 9218 (Extensible Priorities) stream-priority scheduling, co-designed with
-the downstream HTTP/3 layer (the deferred spike in
-`docs/stream-priority-design.md` now graduates to code). Additive — no
-breaking upgrade actions.
+RFC 9218 (Extensible Priorities) stream-priority scheduling. See
+`docs/stream-priority.md`. Additive — no breaking upgrade actions.
 
 ### Added
 
 - `quic_zig.StreamPriority` (`urgency` 0–7, default 3; `incremental`) and
   `Connection.streamSetPriority(id, p)` / `streamPriority(id)`. The
-  application-data send scheduler now emits ready streams by RFC 9218 §10
-  priority instead of hash-map order: **urgency** first, then within a band
-  **non-incremental** streams lead in stream-id order (head-of-line) and
-  **incremental** streams are round-robined so no one monopolizes the band. A
-  higher-urgency stream's bytes therefore lead each packet. With no explicit
-  priorities every stream is non-incremental urgency 3, so the order is
-  deterministic stream-id ascending — a no-op change in observable behavior for
-  non-prioritizing embedders. Cross-path priority interactions with multipath
-  remain out of scope (see `docs/stream-priority-design.md`).
+  application-data send scheduler emits ready streams by RFC 9218 §10
+  priority: **urgency** first, then within a band **non-incremental** streams
+  lead in stream-id order (head-of-line) and **incremental** streams are
+  round-robined so no one monopolizes the band. A higher-urgency stream's
+  bytes therefore lead each packet. With no explicit priorities every stream
+  is non-incremental urgency 3, so the order is deterministic stream-id
+  ascending — a no-op in observable behavior for non-prioritizing embedders.
+  Cross-path priority interactions with multipath remain out of scope (see
+  `docs/stream-priority.md`).
 
 ## [0.5.0] - 2026-07-04
 
-Downstream-driven follow-up to 0.4.0: additive, reap-robust public
-accessors and re-exports so an HTTP/3-class embedder can observe the
+Additive, reap-robust public accessors and re-exports so an HTTP/3-class
+embedder can observe the
 transport's FIN / stream-id / datagram-size / send-stats / event-payload
 truth without reaching into internal modules or reimplementing bookkeeping
 the transport already owns. All changes are additive — no breaking upgrade
@@ -121,19 +119,16 @@ an `else` branch so added variants don't break an exhaustive switch.
   are stable (1.0 semver target) vs evolving vs internal, the
   `ConnectionEvent` forward-compatibility contract, and the sunset path for
   the draft-based extensions (QUIC-LB draft-21, alt-addr draft-00).
-- Added `docs/stream-priority-design.md`, a design spike for a future
-  RFC 9218 (urgency + incremental) stream-priority API — deliberately not
-  implemented yet, pending a downstream consumer to validate the ordering.
+- Added `docs/stream-priority.md`, documenting the RFC 9218 (urgency +
+  incremental) stream-priority model.
 - The QUIC interop endpoint now initiates an RFC 9001 §6 key update from the
   server role too (previously client-only), so the `keyupdate` testcase
   exercises both directions.
 - Fuzzing workflow: removed the filtered-binary parallel fuzz steps
-  (`zig build fuzz` and the per-site targets). On the pinned Zig
-  (`0.17.0-dev.1158`) a filtered test binary aborts the build-runner under
-  `--fuzz`; deep coverage-guided fuzzing is now the unfiltered
-  `zig build test --fuzz`, matching CI. The committed regression corpus
-  (inline `.corpus` seeds, run by every `zig build test`) and the workflow
-  are documented in `CONTRIBUTING.md`.
+  (`zig build fuzz` and the per-site targets). Deep coverage-guided fuzzing
+  is the unfiltered `zig build test --fuzz`, matching CI. The committed
+  regression corpus (inline `.corpus` seeds, run by every `zig build test`)
+  and the workflow are documented in `CONTRIBUTING.md`.
 
 ### Fixed
 
@@ -263,8 +258,6 @@ and flips several server and client defaults to be secure by default.
   compatibility fixes.
 - Reworked the public README and usage docs around stable embedding,
   interop, benchmark, and conformance workflows.
-- Removed tracked investigation/status notes that duplicated local
-  scratch output or stale matrix history.
 
 ## [0.2.0]
 

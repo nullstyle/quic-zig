@@ -63,8 +63,7 @@
 //!
 //! 1. **Session ticket bytes**: SHA-256 of the resumed session's
 //!    ticket bytes. Bound to the ticket exactly. (Requires extracting
-//!    the ticket from BoringSSL's `SSL_SESSION`; not exposed by
-//!    `boringssl-zig` today, but a future addition.)
+//!    the ticket from BoringSSL's `SSL_SESSION`.)
 //! 2. **Early-data digest + ClientHello random**: SHA-256 over the
 //!    `early_data_context` (already computed for QUIC's
 //!    `quic_early_data_context`) plus the 32-byte client random from

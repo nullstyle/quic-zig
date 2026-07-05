@@ -43,8 +43,8 @@ refined before 1.0, but changes will be deliberate, called out in
   (draft-21), preferred address, and the QUIC v2 negotiation knobs. These
   track IETF drafts and will change with the draft or on RFC publication —
   see *Draft-extension sunset path*.
-- **Recently added surfaces** may see minor signature or naming refinement
-  as the downstream layer exercises them for the first time.
+- **Newly added surfaces** may see minor signature or naming refinement
+  as they are exercised for the first time.
 - **Config naming** is a known pre-1.0 cleanup target: field names and the
   `null`-to-disable vs `bool` conventions will be normalized before 1.0.
   New `Config` fields are always added with production-safe defaults.
