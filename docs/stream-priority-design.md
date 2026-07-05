@@ -1,6 +1,12 @@
 # Stream priority — design spike
 
-**Status: design only. No code lands from this document yet.**
+**Status: implemented in 0.6.0.** `StreamPriority` (urgency + incremental),
+`Connection.streamSetPriority` / `streamPriority`, and the urgency-ordered
+application-data send scheduler (`collectSendableStreamsByPriority`, driving
+the STREAM-drain loop in `pollLevelOnPath`) landed together with http3-zig's
+first prioritized workload, which validates the ordering. The `incremental`
+hint is stored but not yet used to interleave equal-urgency streams — that
+refinement is deferred until a consumer needs it (see below).
 
 This spike records the intended shape of a stream-priority API so the
 downstream HTTP/3 layer can be built against a known target, while
@@ -70,9 +76,16 @@ Explicitly **out of scope** for the eventual first implementation:
 - Any RFC 7540-style dependency tree or weights.
 - Cross-path priority interactions with multipath scheduling.
 
-## Next step
+## What shipped vs. what's deferred
 
-Build the minimal `StreamPriority` field + ordering hook **together with**
-the H3 skeleton's first prioritized workload, so the ordering semantics are
-validated by a real consumer before they become 1.0 API. Track the
-graduation in `docs/API_STABILITY.md` (Unstable → Stable) at that point.
+Shipped in 0.6.0: the `StreamPriority` field, `streamSetPriority` /
+`streamPriority`, and strict **urgency** ordering in the send scheduler (ties
+broken by stream id) — the primary RFC 9218 mechanism, validated by
+http3-zig honoring the `priority` header / `PRIORITY_UPDATE`.
+
+Deferred (add when a consumer needs it): the `incremental` round-robin
+rotation among equal-urgency incremental streams. Today equal-urgency streams
+are served in stream-id order regardless of `incremental`, which is a valid
+(if not fully RFC-9218-optimal) policy. The stored `incremental` flag is the
+hook for that refinement. Still explicitly out of scope: any RFC 7540-style
+dependency tree, and cross-path priority interactions with multipath.

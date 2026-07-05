@@ -85,6 +85,8 @@ pub const LifecycleState = lifecycle.LifecycleState;
 pub const ConnectionEvent = state.ConnectionEvent;
 /// (initiator, directionality) class in a stream id's low two bits (§2.1).
 pub const StreamType = state.StreamType;
+/// RFC 9218 per-stream send priority (urgency + incremental).
+pub const StreamPriority = state.StreamPriority;
 /// Coarse lifecycle phase: initial/handshake/established/closing/draining/closed.
 pub const ConnectionPhase = state.ConnectionPhase;
 /// One received ALTERNATIVE_V4/V6_ADDRESS update

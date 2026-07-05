@@ -80,6 +80,7 @@ const Stream = state.Stream;
 const StreamSendStats = state.StreamSendStats;
 const StreamReadResult = state.StreamReadResult;
 const StreamRecvState = state.StreamRecvState;
+const StreamPriority = state.StreamPriority;
 const Suite = state.Suite;
 const TimerDeadline = state.TimerDeadline;
 const TimerKind = state.TimerKind;
@@ -195,6 +196,58 @@ test "streamSendStats snapshots the send half; null for missing streams" {
 
     // A never-opened higher id is still null, not a resurrected zero-stat stream.
     try std.testing.expectEqual(@as(?StreamSendStats, null), conn.streamSendStats(400));
+}
+
+test "send scheduler orders ready streams by RFC 9218 priority (urgency then id)" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+    try conn.setTransportParams(.{
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 4096,
+        .initial_max_streams_bidi = max_streams_per_connection,
+    });
+
+    // Three client bidi streams (ids 0, 4, 8), each with a pending send byte.
+    _ = try conn.openBidi(0);
+    _ = try conn.openBidi(4);
+    _ = try conn.openBidi(8);
+    _ = try conn.streamWrite(0, "a");
+    _ = try conn.streamWrite(4, "b");
+    _ = try conn.streamWrite(8, "c");
+
+    var buf: [8]*Stream = undefined;
+
+    // Default: every stream is urgency 3, so the scheduler order is stream-id
+    // ascending (deterministic, independent of hash-map iteration order).
+    {
+        const ready = conn.collectSendableStreamsByPriority(&buf);
+        try std.testing.expectEqual(@as(usize, 3), ready.len);
+        try std.testing.expectEqual(@as(u64, 0), ready[0].id);
+        try std.testing.expectEqual(@as(u64, 4), ready[1].id);
+        try std.testing.expectEqual(@as(u64, 8), ready[2].id);
+    }
+
+    // Invert by urgency: stream 8 most urgent, stream 0 least. Urgency wins
+    // over stream id, so the order becomes 8, 4, 0.
+    try conn.streamSetPriority(8, .{ .urgency = 0 });
+    try conn.streamSetPriority(4, .{ .urgency = 3 });
+    try conn.streamSetPriority(0, .{ .urgency = 7 });
+    {
+        const ready = conn.collectSendableStreamsByPriority(&buf);
+        try std.testing.expectEqual(@as(usize, 3), ready.len);
+        try std.testing.expectEqual(@as(u64, 8), ready[0].id);
+        try std.testing.expectEqual(@as(u64, 4), ready[1].id);
+        try std.testing.expectEqual(@as(u64, 0), ready[2].id);
+    }
+
+    // streamPriority reflects the set value; unknown/reaped id → null, and
+    // setting priority on an absent stream is a typed error.
+    try std.testing.expectEqual(@as(u3, 0), conn.streamPriority(8).?.urgency);
+    try std.testing.expectEqual(@as(?StreamPriority, null), conn.streamPriority(400));
+    try std.testing.expectError(error.StreamNotFound, conn.streamSetPriority(400, .{}));
 }
 
 test "streamReadFin reports FIN inline with the last read; streamRecvState tracks it" {

@@ -218,6 +218,17 @@ pub const PerLevelState = struct {
     write: ?SecretMaterial = null,
 };
 
+/// RFC 9218 (Extensible Priorities) per-stream send priority — the minimal
+/// two-parameter model, no RFC 7540 dependency tree. `urgency` 0 is most
+/// urgent … 7 least (default 3); `incremental` is a hint that a response may
+/// be delivered in interleaved chunks. The application-data send scheduler
+/// orders ready streams by urgency then stream id (see `streamSetPriority`,
+/// `streamPriority`, and `docs/stream-priority-design.md`).
+pub const StreamPriority = struct {
+    urgency: u3 = 3,
+    incremental: bool = false,
+};
+
 /// One QUIC stream — bundles the send and receive halves with a
 /// stable `id`. Bidi or uni is a property of the id (RFC 9000 §2.1
 /// stream IDs encode direction in the low two bits); `streamIsUni` /
@@ -241,6 +252,11 @@ pub const Stream = struct {
     /// count credit through MAX_STREAMS.
     stream_count_credit_returned: bool = false,
 
+    /// RFC 9218 send priority. Default urgency 3 / non-incremental, so a
+    /// connection with no explicit priorities schedules ready streams in
+    /// stream-id order (unchanged from the pre-priority behavior).
+    priority: StreamPriority = .{},
+
     /// True if the recv side has reached one of the four "no further
     /// peer bytes will land" states. Mirrors `maybeReturnPeerStreamCredit`'s
     /// definition: FIN-with-bytes-drained (data_recvd / data_read) or
@@ -254,6 +270,32 @@ pub const Stream = struct {
             self.recv.state == .reset_read;
     }
 };
+
+/// Ordering for the RFC 9218 send scheduler: lower urgency first (more
+/// urgent), then lower stream id. The `incremental` hint is stored but not
+/// yet used to interleave equal-urgency streams — a documented follow-up (see
+/// `docs/stream-priority-design.md`).
+fn streamPriorityLess(a: *const Stream, b: *const Stream) bool {
+    if (a.priority.urgency != b.priority.urgency) return a.priority.urgency < b.priority.urgency;
+    return a.id < b.id;
+}
+
+/// Insert `s` into the priority-sorted (best first) bounded buffer
+/// `buf[0..n.*]`. When the buffer is full, `s` displaces the current worst
+/// only if it ranks strictly higher, so the buffer always holds the
+/// top-`buf.len` streams by priority.
+fn insertStreamByPriority(buf: []*Stream, n: *usize, s: *Stream) void {
+    if (n.* == buf.len) {
+        if (!streamPriorityLess(s, buf[n.* - 1])) return;
+    } else {
+        n.* += 1;
+    }
+    var i = n.* - 1;
+    while (i > 0 and streamPriorityLess(s, buf[i - 1])) : (i -= 1) {
+        buf[i] = buf[i - 1];
+    }
+    buf[i] = s;
+}
 
 /// Default datagram budget for outgoing 1-RTT packets. RFC 9000 §14
 /// mandates at least 1200 bytes path MTU; DPLPMTUD (RFC 8899) can
@@ -3821,6 +3863,43 @@ pub const Connection = struct {
         };
     }
 
+    /// Set the RFC 9218 send priority of stream `id` (see `StreamPriority`).
+    /// The application-data send scheduler emits ready streams in urgency
+    /// order (then stream id), so a higher-urgency stream's bytes lead. An
+    /// embedder (e.g. an HTTP/3 layer honoring the `priority` header /
+    /// PRIORITY_UPDATE) can update this at any time; it takes effect on the
+    /// next packet built. Returns `StreamNotFound` for an unknown/reaped id.
+    pub fn streamSetPriority(self: *Connection, id: u64, p: StreamPriority) Error!void {
+        const s = self.streams.get(id) orelse return Error.StreamNotFound;
+        s.priority = p;
+    }
+
+    /// The current RFC 9218 send priority of stream `id`, or `null` if the
+    /// stream is not in the live table (never opened, or already reaped).
+    pub fn streamPriority(self: *const Connection, id: u64) ?StreamPriority {
+        const s = self.streams.get(id) orelse return null;
+        return s.priority;
+    }
+
+    /// Collect pointers to streams with pending send data, ordered by RFC 9218
+    /// priority (urgency asc, then stream id asc), into `buf`. Bounded to
+    /// `buf.len` — the per-packet chunk cap — so if more streams are ready than
+    /// fit one packet, the highest-priority `buf.len` are returned and the rest
+    /// are served on a later packet. Returns the filled prefix.
+    ///
+    /// INTERNAL: pub for `_state_tests.zig` access; not part of the embedder
+    /// API (the scheduling it drives is observed through `pollDatagram`).
+    pub fn collectSendableStreamsByPriority(self: *Connection, buf: []*Stream) []*Stream {
+        var n: usize = 0;
+        var it = self.streams.iterator();
+        while (it.next()) |entry| {
+            const s = entry.value_ptr.*;
+            if (!s.send.hasPendingChunk()) continue;
+            insertStreamByPriority(buf, &n, s);
+        }
+        return buf[0..n];
+    }
+
     /// Read-only recv-half status of stream `id`: whether the peer's FIN or
     /// RESET_STREAM has been seen, and whether the receive side has reached a
     /// terminal state (RFC 9000 §3.2). Returns `null` if the stream is not in
@@ -7377,10 +7456,15 @@ pub const Connection = struct {
         var sent_chunk_count: usize = 0;
         var planned_conn_new_bytes: u64 = 0;
         if (!path_response_used_addr_override and !congestion_blocked and (lvl == .application or lvl == .early_data)) {
-            var s_it = self.streams.iterator();
-            while (s_it.next()) |entry| {
+            // RFC 9218: emit ready streams in urgency order (then stream id)
+            // rather than hash-map order, so a higher-urgency stream's bytes
+            // lead each packet. Bounded to the per-packet chunk cap; excess
+            // ready streams are served on later packets. With no explicit
+            // priorities every stream is urgency 3, so this is stream-id order.
+            var pri_buf: [sent_packets_mod.max_stream_keys_per_packet]*Stream = undefined;
+            const ready_streams = self.collectSendableStreamsByPriority(&pri_buf);
+            for (ready_streams) |s| {
                 if (sent_chunk_count >= sent_chunks.len) break;
-                const s = entry.value_ptr.*;
                 const stream_overhead: usize = 25;
                 if (max_payload <= pl_pos + stream_overhead) break;
                 const budget = max_payload - pl_pos - stream_overhead;

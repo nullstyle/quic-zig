@@ -176,6 +176,12 @@ pub const ConnectionIdReplenishInfo = conn.ConnectionIdReplenishInfo;
 /// so embedders (e.g. an HTTP/3 layer) needn't hand-roll stream-id bit math.
 pub const StreamType = conn.StreamType;
 
+/// RFC 9218 (Extensible Priorities) per-stream send priority — urgency (0–7)
+/// plus the `incremental` hint. Set with `Connection.streamSetPriority`; the
+/// application-data send scheduler emits ready streams in urgency order. See
+/// `docs/stream-priority-design.md`.
+pub const StreamPriority = conn.StreamPriority;
+
 /// Coarse connection lifecycle phase surfaced by `Connection.phase`:
 /// initial / handshake / established / closing / draining / closed. Lets an
 /// embedder gate stream creation and shutdown without inferring the epoch
