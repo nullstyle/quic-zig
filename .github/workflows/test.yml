@@ -48,3 +48,20 @@ jobs:
 
       - name: zig build test
         run: zig build test --summary all
+
+  sanitizer:
+    name: sanitizer (sanitize-c=full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout quic-zig
+        uses: actions/checkout@v4
+
+      - name: Set up mise (project tools)
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: zig build test -Dsanitize-c=full
+        run: zig build test -Dsanitize-c=full --summary all

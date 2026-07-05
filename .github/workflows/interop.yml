@@ -26,6 +26,8 @@ jobs:
     continue-on-error: true
     timeout-minutes: 90
     env:
+      QUIC_INTEROP_RUNNER_REF: 1d6f6554ac8e3b7c4cca0e3d40fd69f661420673
+      QUIC_GO_IMAGE: martenseemann/quic-go-interop@sha256:37db4402341f81981ffba01a6fa532d378f165a6fa8dd2b902f33549383d0077
       QUIC_ZIG_IMAGE: quic-zig-qns:local
       TESTS: ${{ github.event.inputs.tests || 'H,D,C,M' }}
       CLIENTS: ${{ github.event.inputs.clients || 'quic-go,quiche,ngtcp2' }}
@@ -39,7 +41,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: quic-interop/quic-interop-runner
-          ref: master
+          ref: ${{ env.QUIC_INTEROP_RUNNER_REF }}
           path: quic-interop-runner
 
       - name: Set up mise (project tools)
@@ -72,6 +74,7 @@ jobs:
             --image "${QUIC_ZIG_IMAGE}" \
             --clients "${CLIENTS}" \
             --tests "${TESTS}" \
+            --quic-go-image "${QUIC_GO_IMAGE}" \
             --log-dir "${{ github.workspace }}/interop-logs" \
             --json "${{ github.workspace }}/interop-logs/result.json"
 

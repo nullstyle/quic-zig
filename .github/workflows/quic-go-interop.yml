@@ -1,0 +1,69 @@
+name: quic-go-interop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  QUIC_INTEROP_RUNNER_REF: 1d6f6554ac8e3b7c4cca0e3d40fd69f661420673
+  # linux/amd64 manifest for martenseemann/quic-go-interop:latest,
+  # resolved 2026-07-05. Keep this immutable until intentionally
+  # refreshing the hard 1.0 interop gate.
+  QUIC_GO_IMAGE: martenseemann/quic-go-interop@sha256:37db4402341f81981ffba01a6fa532d378f165a6fa8dd2b902f33549383d0077
+  QUIC_ZIG_IMAGE: quic-zig-qns:hard-gate
+
+jobs:
+  qns-client-quic-go:
+    name: QNS client vs pinned quic-go
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout quic-zig
+        uses: actions/checkout@v4
+        with:
+          path: quic-zig
+
+      - name: Checkout pinned quic-interop-runner
+        uses: actions/checkout@v4
+        with:
+          repository: quic-interop/quic-interop-runner
+          ref: ${{ env.QUIC_INTEROP_RUNNER_REF }}
+          path: quic-interop-runner
+
+      - name: Set up mise (project tools)
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+          working_directory: quic-zig
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run quic-go hard interop gate
+        working-directory: quic-zig
+        env:
+          RUNNER_DIR: ${{ github.workspace }}/quic-interop-runner
+        run: |
+          zig build external-interop -- runner \
+            --role client \
+            --build-image \
+            --runner-dir "${RUNNER_DIR}" \
+            --image "${QUIC_ZIG_IMAGE}" \
+            --servers quic-go \
+            --tests H,D \
+            --quic-go-image "${QUIC_GO_IMAGE}" \
+            --log-dir "${{ github.workspace }}/interop-logs/quic-go-hard" \
+            --json "${{ github.workspace }}/interop-logs/quic-go-hard/result.json"
+
+      - name: Upload interop logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-go-hard-interop-${{ github.run_id }}
+          path: |
+            interop-logs/**
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,5 +1,23 @@
 const std = @import("std");
 
+fn parseSanitizeC(value: []const u8) std.zig.SanitizeC {
+    if (std.mem.eql(u8, value, "off")) return .off;
+    if (std.mem.eql(u8, value, "trap")) return .trap;
+    if (std.mem.eql(u8, value, "full")) return .full;
+    std.debug.panic("invalid -Dsanitize-c value '{s}' (expected off, trap, or full)", .{value});
+}
+
+fn needsExplicitUbsanRuntime(sanitize_c: ?std.zig.SanitizeC) bool {
+    return sanitize_c == .off or sanitize_c == .trap;
+}
+
+fn maybeBundleUbsanRuntime(compile: *std.Build.Step.Compile, sanitize_c: ?std.zig.SanitizeC) void {
+    // boringssl-zig 0.6.1 does not expose sanitizer propagation yet. Its
+    // native Debug C++ build can therefore carry UBSan references even when
+    // quic-zig-owned modules explicitly choose `off` or `trap`.
+    if (needsExplicitUbsanRuntime(sanitize_c)) compile.bundle_ubsan_rt = true;
+}
+
 // Build-mode policy (hardening guide §3.1).
 //
 // `b.standardOptimizeOption` defaults to `Debug` so iterative
@@ -23,6 +41,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sanitize_c: ?std.zig.SanitizeC = if (b.option(
+        []const u8,
+        "sanitize-c",
+        "Override C/UB sanitizer mode for quic-zig-owned modules: off, trap, or full",
+    )) |mode| parseSanitizeC(mode) else null;
 
     const boringssl_dep = b.dependency("boringssl_zig", .{
         .target = target,
@@ -34,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = sanitize_c,
     });
     quic_zig_mod.addImport("boringssl", boringssl_mod);
 
@@ -47,6 +71,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run quic_zig tests");
 
     const unit_tests = b.addTest(.{ .root_module = quic_zig_mod });
+    maybeBundleUbsanRuntime(unit_tests, sanitize_c);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
 
@@ -57,10 +82,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = sanitize_c,
     });
     tests_mod.addImport("quic_zig", quic_zig_mod);
     tests_mod.addImport("boringssl", boringssl_mod);
     const integration_tests = b.addTest(.{ .root_module = tests_mod });
+    maybeBundleUbsanRuntime(integration_tests, sanitize_c);
     const run_integration_tests = b.addRunArtifact(integration_tests);
     test_step.dependOn(&run_integration_tests.step);
 
@@ -95,6 +122,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/conformance.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = sanitize_c,
     });
     conformance_mod.addImport("quic_zig", quic_zig_mod);
     conformance_mod.addImport("boringssl", boringssl_mod);
@@ -102,6 +130,7 @@ pub fn build(b: *std.Build) void {
         .root_module = conformance_mod,
         .filters = conformance_filters,
     });
+    maybeBundleUbsanRuntime(conformance_tests, sanitize_c);
     const run_conformance_tests = b.addRunArtifact(conformance_tests);
     test_step.dependOn(&run_conformance_tests.step);
 
@@ -112,6 +141,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("interop/qns_endpoint.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = sanitize_c,
     });
     qns_mod.addImport("quic_zig", quic_zig_mod);
     qns_mod.addImport("boringssl", boringssl_mod);
@@ -120,10 +150,12 @@ pub fn build(b: *std.Build) void {
         .name = "qns-endpoint",
         .root_module = qns_mod,
     });
+    maybeBundleUbsanRuntime(qns_exe, sanitize_c);
     const qns_install = b.addInstallArtifact(qns_exe, .{});
     b.getInstallStep().dependOn(&qns_install.step);
 
     const qns_tests = b.addTest(.{ .root_module = qns_mod });
+    maybeBundleUbsanRuntime(qns_tests, sanitize_c);
     const run_qns_tests = b.addRunArtifact(qns_tests);
     test_step.dependOn(&run_qns_tests.step);
 
@@ -138,6 +170,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("examples/alt_addr_embedder.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = sanitize_c,
     });
     alt_addr_example_mod.addImport("quic_zig", quic_zig_mod);
     alt_addr_example_mod.addImport("boringssl", boringssl_mod);
@@ -146,9 +179,11 @@ pub fn build(b: *std.Build) void {
         .name = "alt-addr-embedder-example",
         .root_module = alt_addr_example_mod,
     });
+    maybeBundleUbsanRuntime(alt_addr_example_exe, sanitize_c);
     const alt_addr_example_install = b.addInstallArtifact(alt_addr_example_exe, .{});
 
     const alt_addr_example_tests = b.addTest(.{ .root_module = alt_addr_example_mod });
+    maybeBundleUbsanRuntime(alt_addr_example_tests, sanitize_c);
     const run_alt_addr_example_tests = b.addRunArtifact(alt_addr_example_tests);
     test_step.dependOn(&run_alt_addr_example_tests.step);
 
@@ -159,14 +194,17 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tools/external_interop.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_c = sanitize_c,
     });
     const interop_tool_exe = b.addExecutable(.{
         .name = "quic-zig-external-interop",
         .root_module = interop_tool_mod,
     });
+    maybeBundleUbsanRuntime(interop_tool_exe, sanitize_c);
     b.installArtifact(interop_tool_exe);
 
     const interop_tool_tests = b.addTest(.{ .root_module = interop_tool_mod });
+    maybeBundleUbsanRuntime(interop_tool_tests, sanitize_c);
     const run_interop_tool_tests = b.addRunArtifact(interop_tool_tests);
     test_step.dependOn(&run_interop_tool_tests.step);
 
@@ -201,6 +239,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = bench_optimize,
+        .sanitize_c = sanitize_c,
     });
     bench_quic_zig_mod.addImport("boringssl", bench_boringssl_mod);
     bench_quic_zig_mod.addImport("build_options", build_options_mod);
@@ -209,6 +248,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("bench/main.zig"),
         .target = target,
         .optimize = bench_optimize,
+        .sanitize_c = sanitize_c,
     });
     bench_mod.addImport("quic_zig", bench_quic_zig_mod);
     bench_mod.addImport("boringssl", bench_boringssl_mod);
@@ -217,6 +257,7 @@ pub fn build(b: *std.Build) void {
         .name = "quic-zig-bench",
         .root_module = bench_mod,
     });
+    maybeBundleUbsanRuntime(bench_exe, sanitize_c);
     const run_bench = b.addRunArtifact(bench_exe);
     run_bench.addPassthruArgs();
     const bench_step = b.step("bench", "Run quic_zig microbenchmarks");
@@ -226,10 +267,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("bench/root.zig"),
         .target = target,
         .optimize = bench_optimize,
+        .sanitize_c = sanitize_c,
     });
     bench_tests_mod.addImport("quic_zig", bench_quic_zig_mod);
     bench_tests_mod.addImport("boringssl", bench_boringssl_mod);
     const bench_tests = b.addTest(.{ .root_module = bench_tests_mod });
+    maybeBundleUbsanRuntime(bench_tests, sanitize_c);
     const run_bench_tests = b.addRunArtifact(bench_tests);
     test_step.dependOn(&run_bench_tests.step);
 

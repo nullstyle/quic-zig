@@ -61,6 +61,7 @@ const Config = struct {
     json_path: ?[]const u8 = null,
     build_image: bool = false,
     scenario: ?[]const u8 = null,
+    quic_go_image: ?[]const u8 = null,
 };
 
 const RunnerRole = enum {
@@ -126,7 +127,7 @@ fn usage() void {
         \\usage:
         \\  zig build external-interop -- preflight [--image quic-zig-qns:local] [--dry-run]
         \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version 0.17.0-dev.1158+1d1193aa7] [--dry-run]
-        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
+        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
         \\
     , .{});
 }
@@ -214,6 +215,11 @@ fn parseRunner(allocator: std.mem.Allocator, args: []const []const u8, cfg: *Con
             i += 1;
             if (i >= args.len) return error.MissingScenario;
             cfg.scenario = args[i];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--quic-go-image")) {
+            i += 1;
+            if (i >= args.len) return error.MissingQuicGoImage;
+            cfg.quic_go_image = args[i];
             i += 1;
         } else {
             std.debug.print("unknown runner argument: {s}\n", .{arg});
@@ -345,6 +351,9 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     try patchRunnerKeylogSelection(allocator, io, overlay);
     if (cfg.scenario != null) try patchRunnerScenarioOverride(allocator, io, overlay);
     try injectQuicZigImplementation(allocator, io, overlay, cfg.image, @tagName(cfg.role));
+    if (cfg.quic_go_image) |image| {
+        try overrideImplementationImage(allocator, io, overlay, "quic-go", image);
+    }
     const trace_tools_dir = try prepareTraceTools(allocator, io, cfg, overlay);
 
     const tests = try expandCases(allocator, cfg.tests);
@@ -556,6 +565,29 @@ fn injectQuicZigImplementation(
     try quic_zig.put(allocator, "url", .{ .string = "https://github.com/nullstyle/quic-zig" });
     try quic_zig.put(allocator, "role", .{ .string = role });
     try parsed.value.object.put(allocator, "quic-zig", .{ .object = quic_zig });
+
+    const rendered = try std.fmt.allocPrint(allocator, "{f}\n", .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })});
+    defer allocator.free(rendered);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = impl_path, .data = rendered });
+}
+
+fn overrideImplementationImage(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    overlay: []const u8,
+    name: []const u8,
+    image: []const u8,
+) !void {
+    const impl_path = try std.fs.path.join(allocator, &.{ overlay, "implementations_quic.json" });
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, impl_path, allocator, .limited(8 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidImplementationsJson;
+    const impl = parsed.value.object.getPtr(name) orelse return error.UnknownImplementation;
+    if (impl.* != .object) return error.InvalidImplementationsJson;
+    try impl.object.put(allocator, "image", .{ .string = image });
 
     const rendered = try std.fmt.allocPrint(allocator, "{f}\n", .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })});
     defer allocator.free(rendered);
@@ -796,6 +828,8 @@ test "runner paths are normalized to absolute paths" {
         "interop/logs",
         "--json",
         "interop/results/out.json",
+        "--quic-go-image",
+        "martenseemann/quic-go-interop@sha256:37db",
         "--scenario",
         "drop-rate --delay=15ms",
     };
@@ -811,6 +845,7 @@ test "runner paths are normalized to absolute paths" {
     try std.testing.expect(std.mem.endsWith(u8, cfg.log_dir.?, "interop/logs"));
     try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, "interop/results/out.json"));
     try std.testing.expectEqualStrings("drop-rate --delay=15ms", cfg.scenario.?);
+    try std.testing.expectEqualStrings("martenseemann/quic-go-interop@sha256:37db", cfg.quic_go_image.?);
 }
 
 test "runner client role defaults to client result path" {
