@@ -76,13 +76,11 @@ test "1-RTT keys derive cross-consistently and round-trip a packet" {
     try std.testing.expectEqualSlices(u8, &s_write.iv, &c_read.iv);
     try std.testing.expectEqualSlices(u8, s_write.hpSlice(), c_read.hpSlice());
 
-    // Cipher-suite plumbing reports the same.
+    // Cipher-suite plumbing reports the same negotiated suite. BoringSSL's
+    // platform preference may choose AES-GCM or ChaCha20, so assert agreement
+    // instead of pinning the preference order.
     try std.testing.expectEqual(
-        quic_zig.conn.state.Suite.aes128_gcm_sha256,
         client.cipherSuite(.application, .write).?,
-    );
-    try std.testing.expectEqual(
-        quic_zig.conn.state.Suite.aes128_gcm_sha256,
         server.cipherSuite(.application, .read).?,
     );
 

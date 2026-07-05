@@ -25,6 +25,7 @@
 //!     is out of scope for this smoke test.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const quic_zig = @import("quic_zig");
 
 const common = @import("common.zig");
@@ -113,6 +114,8 @@ test "runUdpServer rejects zero-byte buffers" {
 }
 
 test "runUdpServer with shutdown_flag already set returns immediately" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     // This is the closest we get to exercising the loop body
     // without a peer: pre-set the shutdown flag, point the loop at
     // a loopback ephemeral port, and verify it cleans up without
@@ -167,6 +170,8 @@ test "runUdpServer with shutdown_flag already set returns immediately" {
 }
 
 test "runUdpServer binds preferred-address alt listener and returns cleanly" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     // Same shape as the shutdown-flag-already-set test, but with a
     // `preferred_address` configured. The loop must bind both the
     // primary and the alt listener (else the bind error surfaces),

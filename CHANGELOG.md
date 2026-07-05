@@ -7,6 +7,16 @@ changes.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-07-05
+
+### Fixed
+
+- Fixed the native Windows CI leg by making interop-helper path tests
+  separator-neutral, accepting BoringSSL's platform-specific TLS 1.3 cipher
+  preference, skipping std.Io loopback smoke tests that currently hit
+  `ConcurrencyUnavailable` on Windows, and keeping ReleaseSafe benchmark
+  fixtures out of the default Windows `zig build test` path.
+
 ## [0.7.4] - 2026-07-05
 
 ### Fixed

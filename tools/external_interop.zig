@@ -550,16 +550,26 @@ fn ignoreCopyPath(path: []const u8) bool {
         "interop/results",
     };
     for (exact) |name| {
-        if (std.mem.eql(u8, path, name)) return true;
-        if (std.mem.startsWith(u8, path, name) and
-            path.len > name.len and
-            path[name.len] == std.fs.path.sep)
-        {
-            return true;
-        }
+        if (pathHasPrefix(path, name)) return true;
     }
     if (std.mem.endsWith(u8, path, ".pyc")) return true;
     return false;
+}
+
+fn isPathSep(byte: u8) bool {
+    return byte == '/' or byte == '\\';
+}
+
+fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
+    if (path.len < prefix.len) return false;
+    for (prefix, 0..) |byte, i| {
+        if (isPathSep(byte)) {
+            if (!isPathSep(path[i])) return false;
+        } else if (path[i] != byte) {
+            return false;
+        }
+    }
+    return path.len == prefix.len or isPathSep(path[prefix.len]);
 }
 
 fn injectQuicZigImplementation(
@@ -892,8 +902,12 @@ test "runner paths are normalized to absolute paths" {
     try std.testing.expect(std.fs.path.isAbsolute(cfg.log_dir.?));
     try std.testing.expect(std.fs.path.isAbsolute(cfg.json_path.?));
     try std.testing.expect(std.mem.endsWith(u8, cfg.runner_dir.?, "quic-interop-runner"));
-    try std.testing.expect(std.mem.endsWith(u8, cfg.log_dir.?, "interop/logs"));
-    try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, "interop/results/out.json"));
+    const log_tail = try std.fs.path.join(allocator, &.{ "interop", "logs" });
+    defer allocator.free(log_tail);
+    const json_tail = try std.fs.path.join(allocator, &.{ "interop", "results", "out.json" });
+    defer allocator.free(json_tail);
+    try std.testing.expect(std.mem.endsWith(u8, cfg.log_dir.?, log_tail));
+    try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, json_tail));
     try std.testing.expectEqualStrings("drop-rate --delay=15ms", cfg.scenario.?);
     try std.testing.expectEqualStrings("martenseemann/quic-go-interop@sha256:37db", cfg.quic_go_image.?);
     try std.testing.expectEqualStrings("quic-go", cfg.assume_compliant);
@@ -918,7 +932,9 @@ test "runner client role defaults to client result path" {
 
     try std.testing.expectEqual(RunnerRole.client, cfg.role);
     try std.testing.expectEqualStrings("quic-go", cfg.servers);
-    try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, "interop/results/quic-zig-client.json"));
+    const json_tail = try std.fs.path.join(allocator, &.{ "interop", "results", "quic-zig-client.json" });
+    defer allocator.free(json_tail);
+    try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, json_tail));
 }
 
 test "host Zig package cache honors ZIG_GLOBAL_CACHE_DIR first" {
@@ -932,7 +948,9 @@ test "host Zig package cache honors ZIG_GLOBAL_CACHE_DIR first" {
     const cache = (try hostZigPackageCachePath(allocator, cfg)).?;
     defer allocator.free(cache);
 
-    try std.testing.expectEqualStrings("/tmp/quic_zig/.zig-global-cache/p", cache);
+    const expected = try std.fs.path.join(allocator, &.{ "/tmp/quic_zig/.zig-global-cache", "p" });
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, cache);
 }
 
 test "copy ignore filters generated trees" {
