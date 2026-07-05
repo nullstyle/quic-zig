@@ -235,7 +235,10 @@ The detailed configuration guide is [EMBEDDING.md](EMBEDDING.md).
 - No HTTP/3, QPACK, WebTransport, or MASQUE implementation in this
   package.
 - No FIPS validation.
-- Windows support is not a release gate yet.
+- Windows is a **tier-1 target for 1.0** but not yet a hard CI gate: it
+  runs advisory (non-blocking) in CI today. See
+  [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md) for the platform
+  tiers and the graduation checklist that flips it to blocking.
 - BBR and large-scale performance tuning remain future work.
 
 ## License

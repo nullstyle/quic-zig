@@ -15,8 +15,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Linux + macOS are tier-1 hard gates. Windows is a tier-1 target
+        # for 1.0 but still has known gaps, so it runs advisory
+        # (continue-on-error below) to produce signal without blocking.
+        # Graduating it = dropping continue-on-error. See
+        # docs/RELEASE_READINESS.md.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # Run every step under bash so the toolchain step's `uname` works on
+    # the Windows runner too (Git Bash ships on windows-latest).
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout quic-zig
         uses: actions/checkout@v4
