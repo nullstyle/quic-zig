@@ -7,6 +7,18 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `setLocalScid` and `setTransportParams` are now order-independent for the
+  Initial Source Connection ID (RFC 9000 §7.3). A low-level caller that sets
+  transport parameters before latching its SCID (as the e2e harness and some
+  embedders do) previously shipped without an ISCID; the first `setLocalScid`
+  now back-fills the ISCID into the already-encoded parameters and re-pushes
+  them, so strict peers see it regardless of call order. A caller-supplied
+  ISCID is left untouched. `setLocalScid`'s error set is now inferred (it may
+  surface the re-push's errors); this only affects code that exhaustively
+  switched on its previous `Error` set.
+
 ## [0.6.1] - 2026-07-05
 
 ### Fixed

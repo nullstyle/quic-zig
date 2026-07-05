@@ -899,6 +899,55 @@ test "setTransportParams fills initial_source_connection_id from the local SCID 
     try std.testing.expectEqualSlices(u8, &scid, iscid.slice());
 }
 
+test "setLocalScid after setTransportParams back-fills the ISCID (order-independent, RFC 9000 §7.3)" {
+    // The inverse ordering of the test above: a low-level caller (e.g. the
+    // e2e harness) that sets transport params *before* latching the SCID.
+    // setTransportParams can't know the ISCID yet, so it encodes without one;
+    // the first setLocalScid must back-fill it so strict peers still see it.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    // Params first, no SCID latched — ISCID is absent at this point.
+    try conn.setTransportParams(.{ .initial_max_data = 1024 * 1024, .max_udp_payload_size = 65527 });
+    try std.testing.expect(conn.localTransportParams().initial_source_connection_id == null);
+
+    // Latching the SCID back-fills the ISCID into the stored parameters.
+    const scid = [_]u8{ 0xc3, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 };
+    try conn.setLocalScid(&scid);
+
+    const iscid = conn.localTransportParams().initial_source_connection_id orelse
+        return error.MissingInitialSourceConnectionId;
+    try std.testing.expectEqualSlices(u8, &scid, iscid.slice());
+}
+
+test "setLocalScid does not clobber a caller-supplied ISCID" {
+    // If the caller advertised its own initial_source_connection_id, a later
+    // SCID latch must leave it untouched — back-fill only fills a hole.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    var conn = try Connection.initClient(allocator, ctx, "x");
+    defer conn.deinit();
+
+    const explicit = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    try conn.setTransportParams(.{
+        .initial_max_data = 1024 * 1024,
+        .max_udp_payload_size = 65527,
+        .initial_source_connection_id = ConnectionId.fromSlice(&explicit),
+    });
+
+    const scid = [_]u8{ 0xc3, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 };
+    try conn.setLocalScid(&scid);
+
+    // The explicitly-set ISCID survives; back-fill saw a non-null hole and left it.
+    const iscid = conn.localTransportParams().initial_source_connection_id orelse
+        return error.MissingInitialSourceConnectionId;
+    try std.testing.expectEqualSlices(u8, &explicit, iscid.slice());
+}
+
 test "server writeRetry emits a Retry addressed to the client Initial SCID" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});

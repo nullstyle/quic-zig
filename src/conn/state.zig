@@ -1531,6 +1531,11 @@ pub const Connection = struct {
     /// Local parameters handed to BoringSSL. Kept here too so ACK
     /// delay and idle timers can use the negotiated local values.
     local_transport_params: TransportParams = .{},
+    /// True once `setTransportParams` has encoded and pushed the local
+    /// parameters. Guards the `setLocalScid` ordering contract: the first
+    /// SCID latch must happen before this, so its Initial Source Connection
+    /// ID (RFC 9000 §7.3) makes it into the advertised parameters.
+    local_transport_params_set: bool = false,
     /// Receive-side connection flow-control limit we have advertised
     /// through transport parameters / MAX_DATA.
     local_max_data: u64 = 0,
@@ -1877,6 +1882,13 @@ pub const Connection = struct {
     /// Encode `params` (RFC 9000 §18 + RFC 9221) and hand the blob
     /// to BoringSSL for transmission inside CRYPTO frames during the
     /// handshake. Must be called before the first `advance`.
+    ///
+    /// Initial Source Connection ID (RFC 9000 §7.3): if the local SCID has
+    /// already been latched (`setLocalScid`), fold it into the advertised
+    /// parameters here. If not, `setLocalScid` back-fills and re-pushes it when
+    /// it runs, so the two calls may happen in either order. A caller may also
+    /// set `params.initial_source_connection_id` directly, or omit it entirely
+    /// when talking only to lenient peers.
     pub fn setTransportParams(self: *Connection, params: TransportParams) !void {
         var local = try normalizeLocalTransportParams(params);
         // RFC 9000 §7.3: every endpoint MUST advertise
@@ -1892,6 +1904,7 @@ pub const Connection = struct {
         var buf: [1024]u8 = undefined;
         const n = try local.encode(&buf);
         self.local_transport_params = local;
+        self.local_transport_params_set = true;
         self.applyLocalFlowTransportParams();
         if (local.initial_max_path_id) |max_path_id| {
             self.local_max_path_id = max_path_id;
@@ -2778,12 +2791,38 @@ pub const Connection = struct {
     /// CID is permitted. Used as the SCID on outgoing long-header
     /// packets and as the expected DCID length on every incoming
     /// packet.
-    pub fn setLocalScid(self: *Connection, cid: []const u8) Error!void {
+    ///
+    /// The *first* call latches the connection's Initial Source Connection ID
+    /// (RFC 9000 §7.3), which `setTransportParams` advertises. The two calls
+    /// interact but their order does not matter: if the parameters were
+    /// already encoded and pushed without an ISCID (a caller that set them
+    /// before latching the SCID — e.g. the e2e harness), this back-fills the
+    /// ISCID and re-pushes so the handshake still advertises it. Without that,
+    /// inverting the order would silently omit the ISCID and strict peers
+    /// (quic-go) would reject the handshake with TRANSPORT_PARAMETER_ERROR.
+    /// A later `setLocalScid` (the ISCID is already latched and immutable)
+    /// skips the back-fill. Back-fill assumes the handshake has not yet
+    /// consumed the parameters, which holds for the init-time sequencing all
+    /// real callers use.
+    pub fn setLocalScid(self: *Connection, cid: []const u8) !void {
         if (cid.len > path_mod.max_cid_len) return Error.DcidTooLong;
+        const first_latch = !self.initial_source_cid_set;
         self.local_scid = ConnectionId.fromSlice(cid);
-        if (!self.initial_source_cid_set) {
+        if (first_latch) {
             self.initial_source_cid = self.local_scid;
             self.initial_source_cid_set = true;
+            // Fold the just-latched ISCID into parameters that were set before
+            // this call, then re-push. No-op when the SCID was latched first
+            // (setTransportParams already filled it) or when a caller supplied
+            // its own ISCID.
+            if (self.local_transport_params_set and
+                self.local_transport_params.initial_source_connection_id == null)
+            {
+                self.local_transport_params.initial_source_connection_id = self.initial_source_cid;
+                var buf: [1024]u8 = undefined;
+                const n = try self.local_transport_params.encode(&buf);
+                try self.inner.setQuicTransportParams(buf[0..n]);
+            }
         }
         self.primaryPath().path.local_cid = self.local_scid;
         self.local_scid_set = true;
