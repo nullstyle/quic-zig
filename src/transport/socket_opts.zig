@@ -82,6 +82,12 @@ const ip_consts = blk: {
 /// where this is `false`.
 const has_ip_ecn_sockopts: bool = builtin.os.tag == .linux or builtin.os.tag.isDarwin();
 
+/// True iff this module should use `std.posix.setsockopt` /
+/// `getsockopt` for SO_RCVBUF and SO_SNDBUF. Zig's Windows POSIX shim
+/// intentionally routes sockets through `std.Io`, so this module treats
+/// the Unix-only tuning helpers as unsupported there.
+const has_posix_buffer_sockopts: bool = builtin.os.tag != .windows;
+
 /// Underlying socket handle type; matches `std.Io.net.Socket.Handle`.
 pub const Handle = posix.socket_t;
 
@@ -221,6 +227,8 @@ fn setsockoptIntChecked(handle: Handle, level: u32, optname: u32, opt_bytes: []c
 /// them; QUIC peers can't influence our control buffer so the
 /// guards are belt-and-suspenders for kernel quirks.
 pub fn parseEcnFromControl(control: []const u8) EcnCodepoint {
+    if (!has_ip_ecn_sockopts) return .not_ect;
+
     // cmsghdr layout differs between glibc Linux (`size_t` len, two
     // `int`) and BSD/macOS (`socklen_t` len, two `int`). We read both
     // by reaching into `std.c.cmsghdr` (the `extern struct` defined
@@ -346,6 +354,8 @@ const BufferDirection = enum { recv, send };
 
 fn setBufferImpl(handle: Handle, bytes: usize, dir: BufferDirection) SetBufferError!void {
     if (bytes == 0) return error.InvalidValue;
+    if (!has_posix_buffer_sockopts) return error.Unsupported;
+
     // setsockopt takes a C int. Saturate at INT_MAX rather than
     // overflowing — anyone asking for >2 GiB of socket buffer has
     // bigger problems than UDP drops.
@@ -438,18 +448,24 @@ pub fn applyServerTuning(handle: Handle, tuning: ServerTuning) TuneError!void {
 /// Read back the kernel's actual receive buffer size. Useful for
 /// logging "we asked for 4 MiB, got N MiB" so operators can see
 /// when sysctl caps are biting.
-pub fn getRecvBufferSize(handle: Handle) !usize {
+pub const GetBufferError = error{
+    Unsupported,
+} || posix.UnexpectedError;
+
+pub fn getRecvBufferSize(handle: Handle) GetBufferError!usize {
     return getBufferImpl(handle, .recv);
 }
 
 /// Read back the kernel's actual send buffer size via
 /// `getsockopt(SO_SNDBUF, ...)`. Mirrors `getRecvBufferSize` and is
 /// useful for the same operator-visible "asked vs. got" logging.
-pub fn getSendBufferSize(handle: Handle) !usize {
+pub fn getSendBufferSize(handle: Handle) GetBufferError!usize {
     return getBufferImpl(handle, .send);
 }
 
-fn getBufferImpl(handle: Handle, dir: BufferDirection) !usize {
+fn getBufferImpl(handle: Handle, dir: BufferDirection) GetBufferError!usize {
+    if (!has_posix_buffer_sockopts) return error.Unsupported;
+
     const optname: u32 = switch (dir) {
         .recv => @intCast(posix.SO.RCVBUF),
         .send => @intCast(posix.SO.SNDBUF),
@@ -499,7 +515,10 @@ test "setRecvBufferSize grows the kernel buffer" {
     var ts = try TestSocket.init();
     defer ts.deinit();
 
-    const before = try getRecvBufferSize(ts.handle());
+    const before = getRecvBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
 
     const requested: usize = 1 * 1024 * 1024; // 1 MiB
     setRecvBufferSize(ts.handle(), requested) catch |err| switch (err) {
@@ -510,7 +529,10 @@ test "setRecvBufferSize grows the kernel buffer" {
         else => return err,
     };
 
-    const after = try getRecvBufferSize(ts.handle());
+    const after = getRecvBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
     // Linux doubles the requested value, BSD/macOS returns ~what
     // was set; either way we expect >= the prior default.
     try testing.expect(after >= before);
@@ -520,7 +542,10 @@ test "setSendBufferSize grows the kernel buffer" {
     var ts = try TestSocket.init();
     defer ts.deinit();
 
-    const before = try getSendBufferSize(ts.handle());
+    const before = getSendBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
 
     const requested: usize = 1 * 1024 * 1024;
     setSendBufferSize(ts.handle(), requested) catch |err| switch (err) {
@@ -528,7 +553,10 @@ test "setSendBufferSize grows the kernel buffer" {
         else => return err,
     };
 
-    const after = try getSendBufferSize(ts.handle());
+    const after = getSendBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
     try testing.expect(after >= before);
 }
 
@@ -552,12 +580,18 @@ test "applyServerTuning sets both buffers" {
         .recv_buffer_bytes = 512 * 1024,
         .send_buffer_bytes = 512 * 1024,
     }) catch |err| switch (err) {
-        error.PermissionDenied, error.SystemResources => return error.SkipZigTest,
+        error.PermissionDenied, error.SystemResources, error.Unsupported => return error.SkipZigTest,
         else => return err,
     };
 
-    const rcv = try getRecvBufferSize(ts.handle());
-    const snd = try getSendBufferSize(ts.handle());
+    const rcv = getRecvBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    const snd = getSendBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
     try testing.expect(rcv > 0);
     try testing.expect(snd > 0);
 }
@@ -566,8 +600,14 @@ test "applyServerTuning honors null fields" {
     var ts = try TestSocket.init();
     defer ts.deinit();
 
-    const before_rcv = try getRecvBufferSize(ts.handle());
-    const before_snd = try getSendBufferSize(ts.handle());
+    const before_rcv = getRecvBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    const before_snd = getSendBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
 
     // Skip both; should be a no-op.
     try applyServerTuning(ts.handle(), .{
@@ -575,8 +615,16 @@ test "applyServerTuning honors null fields" {
         .send_buffer_bytes = null,
     });
 
-    try testing.expectEqual(before_rcv, try getRecvBufferSize(ts.handle()));
-    try testing.expectEqual(before_snd, try getSendBufferSize(ts.handle()));
+    const after_rcv = getRecvBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    const after_snd = getSendBufferSize(ts.handle()) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expectEqual(before_rcv, after_rcv);
+    try testing.expectEqual(before_snd, after_snd);
 }
 
 test "saturates oversize requests at INT_MAX" {

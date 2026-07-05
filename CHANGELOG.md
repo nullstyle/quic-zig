@@ -7,6 +7,20 @@ changes.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-05
+
+### Changed
+
+- Repointed `boringssl_zig` to the `v0.6.4` release tag, which keeps the
+  GitHub mirror source fetch and adds Windows SDK macro hygiene, no-asm
+  fallback, and Winsock linking for BoringSSL native Windows builds.
+
+### Fixed
+
+- Socket-option and ECN helper code now gates POSIX-only cmsg /
+  `setsockopt` paths on Windows so `qns-endpoint` reaches the link step on
+  Windows instead of failing during Zig source analysis.
+
 ## [0.7.1] - 2026-07-05
 
 ### Changed
