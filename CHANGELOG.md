@@ -7,6 +7,15 @@ changes.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-05
+
+### Changed
+
+- Repointed `boringssl_zig` to the `v0.6.2` release tag, which keeps the
+  sanitizer propagation from v0.6.1 while switching BoringSSL source fetches
+  to the GitHub mirror and fixing the standalone consumer build under current
+  Zig master.
+
 ## [0.7.0] - 2026-07-05
 
 ### Added
