@@ -500,8 +500,15 @@ fn recreateDir(io: std.Io, path: []const u8) !void {
 fn prepareRunnerOutputs(io: std.Io, cfg: Config) !void {
     if (cfg.dry_run) return;
     try std.Io.Dir.cwd().deleteTree(io, cfg.log_dir.?);
-    try std.Io.Dir.cwd().createDirPath(io, cfg.log_dir.?);
-    try ensureParentDir(io, cfg.json_path.?);
+    try ensureParentDir(io, cfg.log_dir.?);
+
+    // The interop runner owns the log directory and fails fast if it
+    // already exists. Only prepare the JSON parent when doing so does not
+    // recreate that same log directory.
+    const json_parent = std.fs.path.dirname(cfg.json_path.?) orelse return;
+    if (!std.mem.eql(u8, json_parent, cfg.log_dir.?)) {
+        try std.Io.Dir.cwd().createDirPath(io, json_parent);
+    }
 }
 
 fn copyTree(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8, dest_path: []const u8) !void {

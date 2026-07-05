@@ -57,7 +57,7 @@ jobs:
             --quic-go-image "${QUIC_GO_IMAGE}" \
             --assume-compliant quic-go \
             --log-dir "${{ github.workspace }}/interop-logs/quic-go-hard" \
-            --json "${{ github.workspace }}/interop-logs/quic-go-hard/result.json"
+            --json "${{ github.workspace }}/interop-results/quic-go-hard.json"
 
       - name: Upload interop logs
         if: always()
@@ -65,6 +65,7 @@ jobs:
         with:
           name: quic-go-hard-interop-${{ github.run_id }}
           path: |
-            interop-logs/**
+            ${{ github.workspace }}/interop-logs/**
+            ${{ github.workspace }}/interop-results/**
           if-no-files-found: warn
           retention-days: 14
