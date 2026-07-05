@@ -7,6 +7,14 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Replayed STREAM / RESET_STREAM frames for an out-of-order reaped peer
+  stream (one above the contiguous reaped watermark, when a lower peer
+  stream is still live) no longer resurrect the stream. `peerStreamAlreadyReaped`
+  now consults the per-index reaped bitset in addition to the watermark, so
+  such post-terminal frames are ignored per RFC 9000 §3.2.
+
 ## [0.6.0] - 2026-07-04
 
 RFC 9218 (Extensible Priorities) stream-priority scheduling. See

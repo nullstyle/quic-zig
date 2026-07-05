@@ -45,9 +45,13 @@ refined before 1.0, but changes will be deliberate, called out in
   see *Draft-extension sunset path*.
 - **Newly added surfaces** may see minor signature or naming refinement
   as they are exercised for the first time.
-- **Config naming** is a known pre-1.0 cleanup target: field names and the
-  `null`-to-disable vs `bool` conventions will be normalized before 1.0.
-  New `Config` fields are always added with production-safe defaults.
+- **Config naming** follows a settled convention: on/off feature toggles use
+  `enable_` (`enable_ecn`), permission grants use `allow_`
+  (`allow_no_idle_timeout`), and `null`-to-disable is reserved for caps and
+  quotas. A few fields keep intentional semantic prefixes —
+  `insecure_skip_verify` (matching common TLS-config naming) and
+  `reveal_close_reason_on_wire` (privacy-signalling). New `Config` fields
+  follow the same convention and are added with production-safe defaults.
 
 ### Internal — do not depend on
 
