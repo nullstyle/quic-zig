@@ -52,9 +52,9 @@ is safe to embed in production. The gates:
 ### Memory safety
 - [x] Sanitizer CI scaffold is in place: `-Dsanitize-c=off|trap|full`
       is accepted by quic-zig-owned build modules and Linux CI runs
-      `zig build test -Dsanitize-c=full`. Full dependency-level sanitizer
-      propagation has landed in the sibling `boringssl-zig` workspace and
-      can be pinned here after the user publishes a real boringssl-zig tag.
+      `zig build test -Dsanitize-c=full`. The option is forwarded into
+      `boringssl-zig` v0.6.1 so the BoringSSL C/C++ libraries are
+      instrumented consistently with quic-zig's wrapper modules.
 - [ ] Deep fuzzing is scheduled/advisory today, not a release-gating
       corpus job. Plain `zig build test` runs every `std.testing.fuzz`
       seed as a deterministic smoke test on each push; `.github/workflows/fuzz.yml`
@@ -73,10 +73,9 @@ is safe to embed in production. The gates:
       envelope and `AntiReplayTracker` persistence uses `QZAR`.
 
 ### Cross-repo hygiene
-- [ ] `boringssl-zig` is pinned to a tag (not a bare SHA) and a CI lint
+- [x] `boringssl-zig` is pinned to a tag (not a bare SHA) and a CI lint
       asserts quic-zig and http3-zig pin it byte-for-byte identically
-      (roadmap H1 #3). Do not replace the current bare SHA with another
-      bare SHA; this waits for a real boringssl-zig tag.
+      (roadmap H1 #3).
 
 ### Platforms
 - [ ] Windows `windows-latest` job is green and `continue-on-error` is

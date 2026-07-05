@@ -7,6 +7,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-05
+
 ### Added
 
 - Versioned persisted 0-RTT state formats. `quic_zig.tls.resumption_state`
@@ -27,6 +29,10 @@ changes.
   `Client.Config.resumption_state`. Use `tls.resumption_state.encode` /
   `encodeAlloc` to build the envelope; passing raw BoringSSL session-ticket
   bytes is rejected as `InvalidConfig`.
+- `boringssl_zig` is now pinned to the `v0.6.1` release tag instead of a
+  bare commit tarball, and quic-zig forwards `-Dsanitize-c` into that
+  dependency so the BoringSSL C/C++ libraries are instrumented consistently
+  with the Zig wrapper modules.
 
 ### Fixed
 
