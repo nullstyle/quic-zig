@@ -7,6 +7,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-04
+
 Downstream-driven follow-up to 0.4.0: additive, reap-robust public
 accessors and re-exports so an HTTP/3-class embedder can observe the
 transport's FIN / stream-id / datagram-size / send-stats / event-payload
