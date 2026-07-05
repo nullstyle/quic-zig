@@ -1046,6 +1046,186 @@ test "MUST drop to terminal closed when the closing-state deadline elapses [RFC9
     try std.testing.expectEqual(lifecycle.CloseState.closed, srv.closeState());
 }
 
+test "MUST enter draining when a peer CONNECTION_CLOSE arrives during the closing state [RFC9000 §10.2.1 ¶2]" {
+    // RFC 9000 §10.2.1 ¶2 / §10.2.2 ¶1: an endpoint in the closing state
+    // that receives a peer CONNECTION_CLOSE transitions to draining and
+    // stops emitting CONNECTION_CLOSE. The first (local) close cause stays
+    // authoritative (§10.2 ¶3). This exercises the `handleShort`
+    // closing-attribution decrypt tail + `scanForPeerCloseFrame`, which the
+    // retransmit / rate-limit tests above never reach (they inject a PING,
+    // not a CONNECTION_CLOSE).
+    var pair = try fixture.HandshakePair.init(test_alloc);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const srv = try pair.serverConn();
+
+    // Local close, then poll the first CC (but do NOT deliver it) so the
+    // server sits in the closing state with a 3*PTO closing deadline.
+    srv.close(true, fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION, "local first");
+    pair.now_us +%= 1_000;
+    var seal_buf: [2048]u8 = undefined;
+    _ = (try srv.poll(&seal_buf, pair.now_us)) orelse return error.NoFirstCcEmitted;
+    try std.testing.expectEqual(lifecycle.CloseState.closing, srv.closeState());
+
+    // The peer now sends its own CONNECTION_CLOSE. Sealed under the client's
+    // live application keys and fed to the closing server: the
+    // closing-attribution tail decrypts it and transitions to draining.
+    var cc_buf: [64]u8 = undefined;
+    const cc_n = try frame.encode(&cc_buf, .{ .connection_close = .{
+        .is_transport = true,
+        .error_code = 0,
+        .frame_type = 0,
+        .reason_phrase = "peer close",
+    } });
+    _ = try pair.injectFrameAtServer(cc_buf[0..cc_n]);
+
+    try std.testing.expectEqual(lifecycle.CloseState.draining, srv.closeState());
+
+    // First-close-wins: the sticky event stays local with the original code
+    // (§10.2 ¶3), not overwritten by the peer's CONNECTION_CLOSE.
+    const ev = srv.closeEvent() orelse return error.NoCloseEvent;
+    try std.testing.expectEqual(lifecycle.CloseSource.local, ev.source);
+    try std.testing.expectEqual(fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION, ev.error_code);
+
+    // A draining endpoint emits nothing further (§10.2.2 ¶1).
+    pair.now_us +%= 1_000;
+    try std.testing.expectEqual(@as(?usize, null), try srv.poll(&seal_buf, pair.now_us));
+}
+
+test "MUST NOT emit a queued ACK once draining [RFC9000 §10.2.2 ¶1]" {
+    // RFC 9000 §10.2.2 ¶1: "An endpoint in the draining state MUST NOT send
+    // any packets." Even an ACK queued for an ack-eliciting packet received
+    // immediately before the close must be suppressed. The guard is
+    // `pollLevelOnPath`'s `closed and pending_close == null -> return null`.
+    var pair = try fixture.HandshakePair.init(test_alloc);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const srv = try pair.serverConn();
+    const cli = pair.clientConn();
+
+    const cli_keys = (try cli.packetKeys(.application, .write)) orelse
+        return error.NoApplicationWriteKeys;
+    const dcid = cli.peer_dcid.slice();
+
+    // Ack-eliciting PING → the server queues an ACK. Feed WITHOUT polling so
+    // the ACK stays pending into the draining transition.
+    {
+        const pn = cli.allocApplicationPacketNumberForTesting() orelse
+            return error.PnSpaceExhausted;
+        const ping = [_]u8{0x01};
+        var pkt: [2048]u8 = undefined;
+        const n = try quic_zig.wire.short_packet.seal1Rtt(&pkt, .{
+            .dcid = dcid,
+            .pn = pn,
+            .payload = &ping,
+            .keys = &cli_keys,
+            .key_phase = false,
+        });
+        pair.now_us +%= 1_000;
+        _ = try pair.server.feed(pkt[0..n], pair.peer_addr, pair.now_us);
+    }
+
+    // Peer CONNECTION_CLOSE → the server enters draining. Also fed without a
+    // poll in between.
+    {
+        var cc_buf: [64]u8 = undefined;
+        const cc_n = try frame.encode(&cc_buf, .{ .connection_close = .{
+            .is_transport = true,
+            .error_code = 0,
+            .frame_type = 0,
+            .reason_phrase = "bye",
+        } });
+        const pn = cli.allocApplicationPacketNumberForTesting() orelse
+            return error.PnSpaceExhausted;
+        var pkt: [2048]u8 = undefined;
+        const n = try quic_zig.wire.short_packet.seal1Rtt(&pkt, .{
+            .dcid = dcid,
+            .pn = pn,
+            .payload = cc_buf[0..cc_n],
+            .keys = &cli_keys,
+            .key_phase = false,
+        });
+        pair.now_us +%= 1_000;
+        _ = try pair.server.feed(pkt[0..n], pair.peer_addr, pair.now_us);
+    }
+
+    try std.testing.expectEqual(lifecycle.CloseState.draining, srv.closeState());
+
+    // The queued ACK must NOT go on the wire while draining.
+    var seal_buf: [2048]u8 = undefined;
+    pair.now_us +%= 1_000;
+    try std.testing.expectEqual(@as(?usize, null), try srv.poll(&seal_buf, pair.now_us));
+}
+
+test "MUST NOT send queued stream data once draining [RFC9000 §10.2.2 ¶1]" {
+    // RFC 9000 §10.2 / §10.2.2 ¶1: in the closing/draining states the
+    // connection "is unusable" and the endpoint MUST NOT send new
+    // application data. Queue STREAM bytes, then enter draining via a peer
+    // CONNECTION_CLOSE, and confirm poll() emits nothing.
+    //
+    // Note: `streamWrite` still *buffers* after draining — there is no
+    // send-side refusal — so the observable invariant is exclusively that
+    // poll() puts nothing on the wire.
+    var pair = try fixture.HandshakePair.init(test_alloc);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const srv = try pair.serverConn();
+
+    // Server-initiated bidi stream (id 1) with queued bytes.
+    _ = try srv.openBidi(1);
+    _ = try srv.streamWrite(1, "queued application bytes");
+
+    // Peer CONNECTION_CLOSE → draining.
+    var cc_buf: [64]u8 = undefined;
+    const cc_n = try frame.encode(&cc_buf, .{ .connection_close = .{
+        .is_transport = true,
+        .error_code = 0,
+        .frame_type = 0,
+        .reason_phrase = "bye",
+    } });
+    _ = try pair.injectFrameAtServer(cc_buf[0..cc_n]);
+    try std.testing.expectEqual(lifecycle.CloseState.draining, srv.closeState());
+
+    // The queued STREAM data must stay off the wire.
+    var seal_buf: [2048]u8 = undefined;
+    pair.now_us +%= 1_000;
+    try std.testing.expectEqual(@as(?usize, null), try srv.poll(&seal_buf, pair.now_us));
+}
+
+test "sheds keepalive PING state on entering draining [RFC9000 §10.2 ¶7]" {
+    // RFC 9000 §10.2 ¶7: "Once its closing or draining state ends, an
+    // endpoint SHOULD discard all connection state." quic_zig sheds it
+    // eagerly on the draining transition: `enterDraining` calls
+    // `clearPendingPings`. A regression that dropped that call would leave a
+    // keepalive PING armed on a dead connection — this asserts the shed.
+    var pair = try fixture.HandshakePair.init(test_alloc);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const srv = try pair.serverConn();
+
+    // Arm an application-space keepalive PING on the primary path.
+    srv.primaryPath().pending_ping = true;
+    try std.testing.expect(srv.primaryPath().pending_ping);
+
+    // Peer CONNECTION_CLOSE → draining.
+    var cc_buf: [64]u8 = undefined;
+    const cc_n = try frame.encode(&cc_buf, .{ .connection_close = .{
+        .is_transport = true,
+        .error_code = 0,
+        .frame_type = 0,
+        .reason_phrase = "bye",
+    } });
+    _ = try pair.injectFrameAtServer(cc_buf[0..cc_n]);
+    try std.testing.expectEqual(lifecycle.CloseState.draining, srv.closeState());
+
+    // The keepalive PING was shed as part of discarding connection state.
+    try std.testing.expect(!srv.primaryPath().pending_ping);
+}
+
 // ---------------------------------------------------------------- §10.1 idle timeout
 
 test "MUST honour the smaller of local and peer idle_timeout values [RFC9000 §10.1 ¶2]" {
