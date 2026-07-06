@@ -98,5 +98,9 @@ v0.8.0 is the final pre-RC hardening release. It validates the API-stability
 partition, adds the manual release-blocking fuzz gate, and keeps the actual
 `1.0.0` changelog curation open for the RC/final release.
 
+The v0.8.0 code/docs are staged on `main`, but the tag must wait for a
+completed external/manual `rc-fuzz` pass. Do not treat a cancelled or
+in-harness fuzz run as release evidence.
+
 Check items off as they land; the list is the definition of done for the
 1.0 tag.

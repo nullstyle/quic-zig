@@ -36,6 +36,11 @@ refined before 1.0, but changes will be deliberate, called out in
   return. New variants may be added (handle errors exhaustively with an
   `else`); existing ones will not be silently repurposed.
 
+`tests/e2e/public_api_smoke.zig` compile-checks the Stable tier above so an
+accidental removal of a wrapper, config, lifecycle method, stream/datagram
+entry point, event payload, or key top-level re-export fails the normal test
+suite.
+
 ### Unstable / evolving — usable, but expect movement
 
 - **Draft / evolving extensions:** `quic_zig.lb` (QUIC-LB draft-21),
