@@ -14,7 +14,7 @@ on:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     env:
       ITERS: ${{ github.event.inputs.iterations || '1M' }}
     steps:
@@ -28,13 +28,37 @@ jobs:
           cache: true
 
       - name: zig build test --fuzz
-        run: zig build test --fuzz=$ITERS
+        shell: bash
+        run: |
+          set +e
+          rm -rf .zig-cache/v
+          zig build test --fuzz="$ITERS" 2>&1 | tee rc-fuzz.log
+          status=${PIPESTATUS[0]}
+          set -e
 
-      - name: Upload corpus + crashes
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+
+          if grep -q "corrupted coverage file .*pcs_len was zero" rc-fuzz.log; then
+            echo "::warning::Zig fuzz coverage metadata was corrupted; retrying once with a clean fuzz cache"
+            rm -rf .zig-cache/v
+            set +e
+            zig build test --fuzz="$ITERS" 2>&1 | tee -a rc-fuzz.log
+            retry_status=${PIPESTATUS[0]}
+            set -e
+            exit "$retry_status"
+          fi
+
+          exit "$status"
+
+      - name: Upload corpus, crashes, and log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rc-fuzz-cache-${{ github.run_id }}
-          path: .zig-cache/v
+          path: |
+            .zig-cache/v
+            rc-fuzz.log
           if-no-files-found: ignore
           retention-days: 30

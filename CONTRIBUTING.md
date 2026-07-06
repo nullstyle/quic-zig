@@ -81,6 +81,12 @@ harness itself).
   unfiltered binary (reproduced with a trivial standalone test on
   0.17.0-dev.1158 — a platform gap, not a target bug). Deep-fuzz on Linux
   or a Linux container; the smoke run works everywhere.
+- Long Linux limit-mode runs on the current Zig line can occasionally leave
+  an empty-PC coverage metadata file in `.zig-cache/v` and fail with
+  "corrupted coverage file ... pcs_len was zero". The pre-release `rc-fuzz`
+  gate treats only that runner metadata failure as retryable: it deletes
+  `.zig-cache/v` and reruns once. Any target crash, replayable corpus entry,
+  or repeated coverage failure still fails the blocking gate.
 
 ## Interop
 
