@@ -54,18 +54,21 @@ is safe to embed in production. The gates:
       `zig build test -Dsanitize-c=full`. The option is forwarded into
       `boringssl-zig` v0.6.4 so the BoringSSL C/C++ libraries are
       instrumented consistently with quic-zig's wrapper modules.
-- [ ] Deep fuzzing is scheduled/advisory today, not a release-gating
-      corpus job. Plain `zig build test` runs every `std.testing.fuzz`
-      seed as a deterministic smoke test on each push; `.github/workflows/fuzz.yml`
-      runs unfiltered coverage-guided `zig build test --fuzz=100K` weekly
-      with `continue-on-error: true` and uploads `.zig-cache/v` for replay.
-      No open crashers are tracked in-tree.
+- [x] Deep fuzzing has an explicit pre-release gate. Plain
+      `zig build test` runs every `std.testing.fuzz` seed as a deterministic
+      smoke test on each push; `.github/workflows/fuzz.yml` remains weekly
+      advisory coverage. Before tagging v0.8.0 or a later RC/final release,
+      `.github/workflows/rc-fuzz.yml` must pass unfiltered
+      `zig build test --fuzz=1M` (or a larger requested budget) and upload
+      `.zig-cache/v` for replay. No open crashers are tracked in-tree.
 
 ### API surface
-- [ ] The `Connection` surface is partitioned into Stable / Unstable so
+- [x] The `Connection` surface is partitioned into Stable / Unstable so
       the semver promise covers only what is meant to be stable (roadmap
-      H1 #4). Deferred beyond this CI-truth sprint; do not infer an API
-      partition from the platform / interop gate cleanup.
+      H1 #4). For v0.8.0 this is satisfied by the audited
+      `API_STABILITY.md` tiering plus compile-time smoke coverage of the
+      documented Stable surface; no breaking namespace split is planned for
+      1.0.
 - [x] The low-level init-ordering contract is documented and enforced
       (roadmap H1 #9).
 - [x] Serialized resumption / anti-replay state format is versioned and
@@ -88,6 +91,12 @@ is safe to embed in production. The gates:
       draft (roadmap H1 #7).
 - [ ] `CHANGELOG.md` has a curated `1.0.0` section summarizing the frozen
       surface and any final breaking renames.
+
+## v0.8.0 RC-prep release
+
+v0.8.0 is the final pre-RC hardening release. It validates the API-stability
+partition, adds the manual release-blocking fuzz gate, and keeps the actual
+`1.0.0` changelog curation open for the RC/final release.
 
 Check items off as they land; the list is the definition of done for the
 1.0 tag.

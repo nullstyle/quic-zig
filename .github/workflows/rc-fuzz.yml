@@ -1,0 +1,40 @@
+name: rc-fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Coverage-guided fuzz iteration budget (for example 1M, 5M)"
+        required: false
+        default: "1M"
+
+# Manual pre-release gate for 1.0 RC preparation. The scheduled fuzz workflow
+# remains advisory; this one is intentionally blocking and must be green before
+# tagging an RC-prep or RC release.
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ITERS: ${{ github.event.inputs.iterations || '1M' }}
+    steps:
+      - name: Checkout quic-zig
+        uses: actions/checkout@v4
+
+      - name: Set up mise (project tools)
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: zig build test --fuzz
+        run: zig build test --fuzz=$ITERS
+
+      - name: Upload corpus + crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-fuzz-cache-${{ github.run_id }}
+          path: .zig-cache/v
+          if-no-files-found: ignore
+          retention-days: 30

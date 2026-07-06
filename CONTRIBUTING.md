@@ -47,6 +47,10 @@ modes:
   `std.testing.fuzz` site in the unfiltered test binary. It is
   single-instance (see caveats), so it saturates one core; give it a large
   `$ITERS` and let it run.
+- **Pre-release gate.** Before tagging a release candidate, RC-prep release,
+  or final 1.0 release, manually run `.github/workflows/rc-fuzz.yml` with the
+  default `1M` iteration budget or higher. Unlike the weekly fuzz job, this
+  workflow is blocking and must be green before tagging.
 
 ### Regression corpus
 

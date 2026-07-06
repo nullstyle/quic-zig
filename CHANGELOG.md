@@ -7,6 +7,25 @@ changes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-05
+
+### Added
+
+- Added a public API smoke test for the documented 1.0 Stable tier. The test
+  compiles against the wrapper/config types, transport helpers, core
+  `Connection` loop, lifecycle, stream, DATAGRAM, event payload, and top-level
+  re-export surface without introducing a breaking namespace split.
+- Added a manual `rc-fuzz` workflow for pre-release gates. It runs unfiltered
+  `zig build test --fuzz=1M` by default, uploads the fuzzer cache/crash
+  artifacts, and is blocking by design; the weekly fuzz workflow remains
+  advisory.
+
+### Changed
+
+- Marked the 1.0 API partition gate satisfied by the audited
+  `docs/API_STABILITY.md` tiering plus compile-time smoke coverage. The final
+  curated `1.0.0` changelog remains open for the actual RC/final release.
+
 ## [0.7.6] - 2026-07-05
 
 ### Changed
