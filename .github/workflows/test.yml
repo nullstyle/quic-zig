@@ -15,10 +15,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux, macOS, and Windows are tier-1 hard gates for 1.0.
+        # Linux, macOS 15, and Windows are tier-1 hard gates for 1.0.
+        # macOS 26 is advisory while the next hosted image generation settles.
         # See docs/RELEASE_READINESS.md for platform tier policy.
-        os: [ubuntu-latest, macos-15, windows-latest]
+        include:
+          - os: ubuntu-latest
+            advisory: false
+          - os: macos-15
+            advisory: false
+          - os: windows-latest
+            advisory: false
+          - os: macos-26
+            advisory: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.advisory }}
     # Run every step under bash so the toolchain step's `uname` works on
     # the Windows runner too (Git Bash ships on windows-latest).
     defaults:
