@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout quic-zig
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: quic-zig
 
@@ -71,7 +71,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: env.trigger_build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Prepare Docker context shape
         if: env.trigger_build == 'true'
