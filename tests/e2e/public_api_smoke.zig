@@ -168,6 +168,34 @@ test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
     }
 }
 
+test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" {
+    const Conn = quic_zig.Connection;
+    comptime {
+        requireDecl(Conn, "negotiatedAlpn");
+        requireDecl(Conn, "earlyDataStatus");
+        requireDecl(Conn, "earlyDataReason");
+        requireDecl(Conn, "setEarlyDataEnabled");
+        // Wrapper config: ticket capture (client) and 0-RTT replay
+        // context + proactive CID replenish (server).
+        _ = std.meta.fieldInfo(quic_zig.Client.Config, .new_session_callback);
+        _ = std.meta.fieldInfo(quic_zig.Client.Config, .resumption_state);
+        _ = std.meta.fieldInfo(quic_zig.Server.Config, .enable_0rtt);
+        _ = std.meta.fieldInfo(quic_zig.Server.Config, .early_data_application_context);
+        _ = std.meta.fieldInfo(quic_zig.Server.Config, .auto_replenish_connection_ids);
+        _ = std.meta.fieldInfo(quic_zig.Server.Config, .max_auto_replenish_cids);
+        // Typed migration refusals stay in the public error set.
+        const E = quic_zig.conn.state.Error;
+        if (@as(E, error.MigrationPreHandshake) != error.MigrationPreHandshake or
+            @as(E, error.MigrationValidationPending) != error.MigrationValidationPending or
+            @as(E, error.MigrationNoFreshPeerCid) != error.MigrationNoFreshPeerCid)
+        {
+            @compileError("typed migration refusals drifted out of the public error set");
+        }
+    }
+    const alpn: *const fn (*Conn) ?[]const u8 = Conn.negotiatedAlpn;
+    _ = alpn;
+}
+
 test "server hostability surface keeps its callable shape" {
     const Server = quic_zig.Server;
     comptime {

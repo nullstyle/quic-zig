@@ -33,6 +33,31 @@ changes.
   (the loops' single-threaded contract is unchanged); hook errors
   propagate out, so both run functions now return `anyerror!void`.
 
+- 0-RTT now works end-to-end through the wrappers. `Server` installs the
+  RFC 9001 §4.6.1 replay context on every fresh slot before the
+  ClientHello is processed (`Config.enable_0rtt` is now a complete
+  recipe; `Config.early_data_application_context` binds app semantics
+  into the digest), and the client recovers from 0-RTT rejection
+  in-library — the handshake continues as 1-RTT and staged early data
+  is requeued automatically, with the outcome observable via
+  `earlyDataStatus()`. Previously the server wrapper could never accept
+  early data and a rejected client needed an Internal-tier call to
+  survive.
+- `Client.Config.new_session_callback`: session-ticket capture that
+  hands the application ready-to-persist `tls.resumption_state`
+  envelope bytes (ticket + remembered peer transport parameters) —
+  the persistence half that `Config.resumption_state` always assumed
+  existed.
+- `Server.Config.auto_replenish_connection_ids` (on by default when
+  `stateless_reset_key` is set): proactive post-handshake
+  NEW_CONNECTION_ID top-up so client active migration works against a
+  default-configured server. Migration refusals are now typed
+  (`MigrationPreHandshake` / `MigrationValidationPending` /
+  `MigrationNoFreshPeerCid`) instead of all conflating into
+  `PathLimitExceeded`.
+- `Connection.negotiatedAlpn()`: the ALPN protocol selected during the
+  handshake, for multi-protocol servers.
+
 ### Fixed
 
 - EMBEDDING.md's raw connection cycle example now compiles and works

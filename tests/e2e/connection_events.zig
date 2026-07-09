@@ -144,6 +144,11 @@ test "handshake_established surfaces exactly once per side" {
     while (pair.server.pollEvent()) |ev| {
         try std.testing.expect(std.meta.activeTag(ev) != .handshake_established);
     }
+
+    // With the handshake established, both sides report the ALPN the
+    // contexts negotiated.
+    try std.testing.expectEqualStrings("hq-test", pair.client.negotiatedAlpn().?);
+    try std.testing.expectEqualStrings("hq-test", pair.server.negotiatedAlpn().?);
 }
 
 test "stream_opened surfaces peer streams in order, including implicit opens" {

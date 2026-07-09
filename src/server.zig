@@ -589,6 +589,38 @@ const ConfigImpl = struct {
     /// Opaque pointer passed back to `on_connection_will_close`.
     on_connection_will_close_user_data: ?*anyopaque = null,
 
+    /// Proactively top up each connection's local CID inventory once
+    /// its handshake completes. RFC 9000 §9: a client can only migrate
+    /// to a fresh server-issued CID, and a server that never issues
+    /// spares makes every `beginClientActiveMigration` against it fail
+    /// out of the box (the `connection_ids_needed` event only fires on
+    /// retirement, never proactively). Effective only when
+    /// `stateless_reset_key` is set — each issued CID carries a
+    /// derived §10.3 reset token; without the key this is a no-op
+    /// (advertising CIDs whose reset tokens the server cannot honor
+    /// across restarts would be worse than issuing none).
+    auto_replenish_connection_ids: bool = true,
+    /// Cap on spare CIDs minted per connection by the post-handshake
+    /// auto-replenish, further bounded by the peer's
+    /// `active_connection_id_limit`. Three spares (on top of the
+    /// handshake CID) cover a migration plus rotation headroom without
+    /// bloating the routing table.
+    max_auto_replenish_cids: usize = 3,
+
+    /// Application bytes bound into the RFC 9001 §4.6.1 0-RTT replay
+    /// context, alongside the replay-relevant transport parameters and
+    /// the primary ALPN (`alpn_protocols[0]`). Only consulted when
+    /// `enable_0rtt` is true: the accept path installs the resulting
+    /// context digest on every fresh slot *before* the ClientHello is
+    /// processed, which is what lets BoringSSL accept early data on
+    /// resumption at all. Change this string across deployments whose
+    /// application semantics make previously-issued 0-RTT tickets
+    /// unsafe to replay — a changed context invalidates every
+    /// outstanding ticket's early-data capability (the session still
+    /// resumes; only 0-RTT is refused). An HTTP/3 layer would put a
+    /// canonicalized SETTINGS digest here.
+    early_data_application_context: []const u8 = "quic-zig Server wrapper v1",
+
     /// Optional override of the underlying `boringssl.tls.Context`.
     /// When null, `Server.init` constructs a TLS-1.3-only server
     /// context with `verify=.none` and the supplied ALPN list. The
@@ -953,6 +985,12 @@ const SlotImpl = struct {
     /// to release whatever it points at.
     user_data: ?*anyopaque = null,
 
+    /// True once the post-handshake CID auto-replenish ran for this
+    /// slot (see `Config.auto_replenish_connection_ids`). Latched even
+    /// when the top-up mints zero CIDs so the check is one branch per
+    /// feed.
+    cids_replenished: bool = false,
+
     /// RFC 9368 §6 multi-Initial pre-parse state. Non-null only while
     /// a multi-version server is still waiting for a fragmented
     /// ClientHello to complete so it can decide on a compatible-
@@ -1186,6 +1224,9 @@ pub const Server = struct {
     log_user_data: ?*anyopaque,
     on_connection_will_close: ?ConnectionWillCloseCallbackImpl,
     on_connection_will_close_user_data: ?*anyopaque,
+    early_data_application_context: []const u8,
+    auto_replenish_connection_ids: bool,
+    max_auto_replenish_cids: usize,
 
     /// Live connection slots. Embedders may iterate this between
     /// `feed` / `poll` calls to inspect or mutate connections.
@@ -1589,6 +1630,9 @@ pub const Server = struct {
             .log_user_data = config.log_user_data,
             .on_connection_will_close = config.on_connection_will_close,
             .on_connection_will_close_user_data = config.on_connection_will_close_user_data,
+            .early_data_application_context = config.early_data_application_context,
+            .auto_replenish_connection_ids = config.auto_replenish_connection_ids,
+            .max_auto_replenish_cids = config.max_auto_replenish_cids,
             .slots = slots,
             .cid_table = cid_table,
             .source_rate_table = .empty,
@@ -1998,6 +2042,13 @@ pub const Server = struct {
             // round-trip for returning clients); the slot's
             // `new_token_emitted` flag latches at first issuance.
             self.maybeIssueNewToken(slot, from, now_us);
+            // Same trigger as NEW_TOKEN: first post-handshake feed
+            // tops up the migration CID inventory (see
+            // Config.auto_replenish_connection_ids). Before the
+            // resync of the NEXT feed the new CIDs are queued but not
+            // yet routable; that window only delays a peer's first
+            // migration by one datagram.
+            self.maybeReplenishConnectionIds(slot);
             self.feeds_routed += 1;
             return .routed;
         }
@@ -2159,6 +2210,7 @@ pub const Server = struct {
         // very first received datagram, in which case there is no
         // later "routed" feed to trip the issuance check.
         self.maybeIssueNewToken(slot, from, now_us);
+        self.maybeReplenishConnectionIds(slot);
         self.feeds_accepted += 1;
         // Emit *after* slot is fully visible in the routing table so
         // the callback can index into `slots` if it wants to.
@@ -2622,6 +2674,29 @@ pub const Server = struct {
             try params.setCompatibleVersions(ordered[0..n]);
         }
         try conn_ptr.acceptInitial(bytes, params);
+        // RFC 9001 §4.6.1: install the 0-RTT replay context BEFORE the
+        // first `handleWithEcn` processes the ClientHello. BoringSSL
+        // compares a resumed ticket's stored context against the
+        // connection's current one when deciding whether to accept
+        // early data; a context installed after ClientHello processing
+        // is invisible to that check, so early data would always be
+        // rejected (and tickets issued here would never be
+        // 0-RTT-capable). The digest builder deliberately excludes
+        // per-connection identifiers (ODCID/ISCID/preferred-address),
+        // so issuance-time and resumption-time digests match across
+        // connections for a stable config. Failures degrade to
+        // "0-RTT refused, connection proceeds" — except OOM, which the
+        // accept path already treats as fatal.
+        if (self.enable_0rtt and self.alpn_protocols.len > 0) {
+            _ = conn_ptr.setEarlyDataContextForParams(
+                params,
+                self.alpn_protocols[0],
+                self.early_data_application_context,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {},
+            };
+        }
         // Stash the upgrade target so `dispatchToSlot` can flip
         // `self.version` after the first `handleWithEcn` consumes the
         // wire-version Initial under wire-version keys.
@@ -3394,6 +3469,45 @@ pub const Server = struct {
     ///
     /// Called from the routed and accepted feed paths; idempotent
     /// across retries via the slot's `new_token_emitted` latch.
+    /// Post-handshake CID inventory top-up (RFC 9000 §5.1.1 / §9).
+    /// Runs once per slot from the feed paths, next to
+    /// `maybeIssueNewToken`. Mints up to
+    /// `min(local issue budget, max_auto_replenish_cids)` fresh SCIDs
+    /// through the same `mintLocalScid` path as the handshake CID,
+    /// derives each one's §10.3 stateless-reset token from
+    /// `stateless_reset_key`, and queues NEW_CONNECTION_ID frames via
+    /// `replenishConnectionIds`. The post-feed `resyncSlotCids` pass
+    /// picks the new CIDs up into the routing table. Failures skip the
+    /// top-up (the latch stays set): migration then degrades to the
+    /// pre-replenish behavior instead of failing the connection.
+    fn maybeReplenishConnectionIds(self: *Server, slot: *Slot) void {
+        if (!self.auto_replenish_connection_ids) return;
+        if (slot.cids_replenished) return;
+        const key = if (self.stateless_reset_key) |*k| k else return;
+        if (!slot.conn.handshakeDone()) return;
+        slot.cids_replenished = true;
+
+        var cid_storage: [8][20]u8 = undefined;
+        var provisions: [8]conn_mod.ConnectionIdProvision = undefined;
+        const budget = @min(
+            @min(slot.conn.localConnectionIdIssueBudget(0), self.max_auto_replenish_cids),
+            provisions.len,
+        );
+        if (budget == 0) return;
+
+        var n: usize = 0;
+        while (n < budget) : (n += 1) {
+            const cid = cid_storage[n][0..self.local_cid_len];
+            self.mintLocalScid(cid) catch return;
+            const token = conn_mod.stateless_reset.derive(key, cid) catch return;
+            provisions[n] = .{
+                .connection_id = cid,
+                .stateless_reset_token = token,
+            };
+        }
+        _ = slot.conn.replenishConnectionIds(provisions[0..n]) catch {};
+    }
+
     fn maybeIssueNewToken(
         self: *Server,
         slot: *Slot,

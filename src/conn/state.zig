@@ -114,6 +114,18 @@ pub const Error = error{
     PeerDcidNotSet,
     PathNotFound,
     PathLimitExceeded,
+    /// `beginClientActiveMigration` before the handshake confirmed
+    /// (RFC 9000 §9.6 forbids it). Retry after `handshake_established`.
+    MigrationPreHandshake,
+    /// `beginClientActiveMigration` while a path validation is already
+    /// in flight. Retry once the current validation settles.
+    MigrationValidationPending,
+    /// `beginClientActiveMigration` found no fresh (unused) peer CID to
+    /// rotate to (RFC 9000 §5.1.2 ¶1). Retry after the peer issues one
+    /// via NEW_CONNECTION_ID; servers running quic-zig with a
+    /// `stateless_reset_key` provision spares automatically post-
+    /// handshake.
+    MigrationNoFreshPeerCid,
     ConnectionIdLimitExceeded,
     ConnectionIdRequired,
     ConnectionIdAlreadyInUse,
@@ -2093,6 +2105,16 @@ pub const Connection = struct {
     /// was rejected. Empty when 0-RTT was accepted or not attempted.
     pub fn earlyDataReason(self: *Connection) []const u8 {
         return self.inner.earlyDataReason();
+    }
+
+    /// The ALPN protocol negotiated during the handshake, or null
+    /// before selection happens (or when the peer offered none). A
+    /// server configured with several `alpn_protocols` uses this to
+    /// learn which protocol a given connection actually speaks. The
+    /// bytes are owned by BoringSSL and valid for the connection's
+    /// lifetime.
+    pub fn negotiatedAlpn(self: *Connection) ?[]const u8 {
+        return self.inner.alpnSelected();
     }
 
     /// Server-only: install the QUIC 0-RTT replay context (RFC 9001
@@ -5602,11 +5624,11 @@ pub const Connection = struct {
     /// should call `queueNewConnectionId` ahead of this and then drive
     /// the peer through normal CID retirement/promotion.
     ///
-    /// Returns `MigrationRefused` (encoded as `PathLimitExceeded` —
-    /// the closest existing variant for "I would migrate but can't")
-    /// when the precondition checks fail or no fresh peer CID is
-    /// available. The caller can retry once the peer has issued more
-    /// CIDs via NEW_CONNECTION_ID.
+    /// Refusals are typed so the caller knows what to wait for:
+    /// `MigrationPreHandshake` (retry after the handshake confirms),
+    /// `MigrationValidationPending` (retry once the in-flight path
+    /// validation settles), and `MigrationNoFreshPeerCid` (retry after
+    /// the peer issues a NEW_CONNECTION_ID).
     pub fn beginClientActiveMigration(
         self: *Connection,
         new_local_addr: Address,
@@ -5625,11 +5647,11 @@ pub const Connection = struct {
                 .path_id = self.activePath().id,
                 .migration_fail_reason = .pre_handshake,
             });
-            return Error.PathLimitExceeded;
+            return Error.MigrationPreHandshake;
         }
         const path = self.activePath();
         if (path.path.validator.status == .pending) {
-            return Error.PathLimitExceeded;
+            return Error.MigrationValidationPending;
         }
         const fresh_cid = self.consumeFreshPeerCidForMigration(path) orelse {
             self.emitQlog(.{
@@ -5637,7 +5659,7 @@ pub const Connection = struct {
                 .path_id = path.id,
                 .migration_fail_reason = .no_fresh_peer_cid,
             });
-            return Error.PathLimitExceeded;
+            return Error.MigrationNoFreshPeerCid;
         };
 
         // Snapshot rollback state before any mutation so a
@@ -10499,6 +10521,32 @@ pub const Connection = struct {
     fn advanceHandshake(self: *Connection) Error!void {
         self.inner.handshake() catch |e| switch (e) {
             error.WantRead, error.WantWrite => {},
+            // RFC 9001 §4.6.2: the server declined our 0-RTT — a routine
+            // protocol event (ticket expiry, server restart, changed
+            // config), not a connection failure. Recover in-library so
+            // no embedder ever needs the Internal-tier reset call:
+            // reset BoringSSL's handshake state so it proceeds as a
+            // full 1-RTT handshake, stop scheduling early-data packets,
+            // and requeue every staged 0-RTT packet's frames for
+            // retransmission once application keys exist. The embedder
+            // observes the outcome via `earlyDataStatus()` /
+            // `earlyDataReason()`; data written before `advance` still
+            // arrives, just one round trip later.
+            error.EarlyDataRejected => {
+                self.inner.resetEarlyDataReject();
+                self.early_data_send_enabled = false;
+                if (!self.early_data_rejection_processed) {
+                    try self.requeueRejectedEarlyData();
+                    self.early_data_rejection_processed = true;
+                }
+                // Drive the reset handshake forward so this call still
+                // makes progress; a second rejection would violate the
+                // BoringSSL contract, so a repeat propagates.
+                self.inner.handshake() catch |e2| switch (e2) {
+                    error.WantRead, error.WantWrite => {},
+                    else => return e2,
+                };
+            },
             else => return e,
         };
     }

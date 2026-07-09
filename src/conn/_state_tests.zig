@@ -5851,7 +5851,7 @@ test "client active migration: refuses without a fresh peer CID" {
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
 
     try std.testing.expectError(
-        error.PathLimitExceeded,
+        error.MigrationNoFreshPeerCid,
         conn.beginClientActiveMigration(new_local, 1_000_000),
     );
 
@@ -5888,7 +5888,7 @@ test "client active migration: refuses before handshake completion" {
 
     const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
-        error.PathLimitExceeded,
+        error.MigrationPreHandshake,
         conn.beginClientActiveMigration(new_local, 1_000_000),
     );
     try std.testing.expect(conn.pending_frames.path_challenge == null);

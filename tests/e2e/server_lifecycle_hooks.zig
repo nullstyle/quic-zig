@@ -185,3 +185,56 @@ test "Server.nextTimerDeadline aggregates the earliest slot deadline" {
     try std.testing.expectEqual(slot_deadline.?.at_us, agg.?.at_us);
     try std.testing.expectEqual(slot_deadline.?.kind, agg.?.kind);
 }
+
+test "auto-replenished CIDs make client active migration work against a default server" {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+
+    // A keyed server with the default auto-replenish posture. Before
+    // the proactive top-up existed, this exact scenario failed with
+    // PathLimitExceeded: the server never issued spare CIDs and the
+    // client had nothing to migrate to.
+    var srv = try quic_zig.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .stateless_reset_key = @splat(0x5a),
+    });
+    defer srv.deinit();
+
+    var cli = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    });
+    defer cli.deinit();
+
+    var rx: [4096]u8 = undefined;
+    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x77), .port = 7777 } };
+
+    try cli.conn.advance();
+
+    var now_us: u64 = 1_000;
+    var step: u32 = 0;
+    while (step < 48) : (step += 1) {
+        try pumpClientToServer(&cli, &srv, &rx, peer_addr, now_us);
+        while (srv.drainStatelessResponse()) |_| {}
+        try pumpServerToClient(&srv, &cli, &rx, now_us);
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        // Run past handshake completion so the post-handshake
+        // NEW_CONNECTION_ID top-up reaches the client.
+        if (cli.conn.handshakeDone() and step > 12) break;
+        now_us += 1_000;
+    }
+    try std.testing.expect(cli.conn.handshakeDone());
+
+    // The load-bearing assertion: active migration succeeds without
+    // any app-side CID provisioning.
+    const new_local: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x78), .port = 7878 } };
+    try cli.conn.beginClientActiveMigration(new_local, now_us);
+}

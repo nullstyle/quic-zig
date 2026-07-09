@@ -165,6 +165,25 @@ const ConfigImpl = struct {
     new_token_callback: ?conn_mod.NewTokenCallback = null,
     new_token_user_data: ?*anyopaque = null,
 
+    /// Optional session-ticket capture hook — the persistence half of
+    /// resumption/0-RTT (`resumption_state` above is the consumption
+    /// half). Fired each time the server issues a TLS session ticket
+    /// (typically shortly after the handshake completes). The wrapper
+    /// serializes the ticket and packages it with the peer's cached
+    /// transport parameters into the versioned `tls.resumption_state`
+    /// envelope; the callback receives ready-to-persist envelope
+    /// bytes, borrowed only for the duration of the call — copy them
+    /// out. Persist the latest envelope and pass it back as
+    /// `Config.resumption_state` on a future connect to resume (and,
+    /// when the server permits, send 0-RTT). Servers may issue several
+    /// tickets; keeping the most recent one is the standard policy.
+    /// Only supported with the auto-built TLS context: combining this
+    /// with `tls_context_override` fails with `Error.InvalidConfig`,
+    /// because override-mode embedders own the context-level
+    /// `setNewSessionCallback` themselves.
+    new_session_callback: ?NewSessionCallbackImpl = null,
+    new_session_user_data: ?*anyopaque = null,
+
     /// QUIC wire-format version the client puts on its first
     /// Initial. RFC 9000 §15: defaults to v1
     /// (`quic_zig.QUIC_VERSION_1`). Embedders that want v2
@@ -204,6 +223,39 @@ const ConfigImpl = struct {
     /// Set `enable = false` to keep the static-MTU behaviour.
     pmtud: conn_mod.PmtudConfig = .{},
 };
+
+/// Callback receiving ready-to-persist `tls.resumption_state` envelope
+/// bytes each time the server issues a session ticket. See
+/// `Config.new_session_callback` for the lifetime contract.
+const NewSessionCallbackImpl = *const fn (user_data: ?*anyopaque, resumption_state: []const u8) void;
+
+/// Heap holder threading `Config.new_session_callback` through
+/// BoringSSL's context-level new-session hook. Heap-allocated because
+/// the pointer registered with the TLS context must stay stable for
+/// the context's lifetime — the `Client` struct itself moves by value.
+const NewSessionHolder = struct {
+    allocator: std.mem.Allocator,
+    conn: *Connection,
+    cb: NewSessionCallbackImpl,
+    user_data: ?*anyopaque,
+};
+
+fn newSessionEnvelopeTrampoline(user_data: ?*anyopaque, session_in: boringssl.tls.Session) void {
+    const holder: *NewSessionHolder = @ptrCast(@alignCast(user_data orelse return));
+    var session = session_in;
+    defer session.deinit();
+    // The envelope embeds the peer's transport parameters (RFC 9001
+    // §7.4.1 remembered limits, used to bound 0-RTT sends before the
+    // real parameters arrive on the resumed connection). Tickets are
+    // post-handshake, so the cache is normally populated; if it is
+    // not, skip this ticket rather than fabricate limits.
+    const params = holder.conn.cached_peer_transport_params orelse return;
+    const ticket = session.toBytes(holder.allocator) catch return;
+    defer holder.allocator.free(ticket);
+    const envelope = tls_mod.resumption_state.encodeAlloc(holder.allocator, ticket, params) catch return;
+    defer holder.allocator.free(envelope);
+    holder.cb(holder.user_data, envelope);
+}
 
 /// Errors produced by `Client.connect`. Distinct from
 /// `Connection.Error` so the embedder can distinguish configuration
@@ -253,6 +305,9 @@ pub const Client = struct {
     /// (`client.conn.advance`, `client.conn.poll`, `client.conn.handle`,
     /// etc).
     conn: *Connection,
+    /// Heap holder backing `Config.new_session_callback`, or null when
+    /// the callback is unset. Owned by the Client; freed in `deinit`.
+    new_session_holder: ?*NewSessionHolder = null,
 
     /// Build the TLS context, mint the random DCID/SCID, and
     /// initialize the underlying `Connection`. See the type
@@ -281,6 +336,11 @@ pub const Client = struct {
         // versions this implementation knows how to derive keys for
         // are accepted here.
         const wire_initial = @import("wire/initial.zig");
+        // Session-ticket capture rides the auto-built context's
+        // new-session hook; an override context owns that hook itself.
+        if (config.new_session_callback != null and config.tls_context_override != null) {
+            return Error.InvalidConfig;
+        }
         if (!wire_initial.isSupportedVersion(config.preferred_version)) return Error.InvalidConfig;
         if (config.compatible_versions.len > 16) return Error.InvalidConfig;
         for (config.compatible_versions) |v| {
@@ -424,11 +484,30 @@ pub const Client = struct {
         }
         try conn_ptr.setTransportParams(params);
 
+        // Session-ticket capture: register last so the holder's
+        // errdefer does not have to fence earlier failure paths. The
+        // handshake has not started (connect never calls `advance`),
+        // so no ticket can be missed.
+        var new_session_holder: ?*NewSessionHolder = null;
+        if (config.new_session_callback) |cb| {
+            const holder = try config.allocator.create(NewSessionHolder);
+            errdefer config.allocator.destroy(holder);
+            holder.* = .{
+                .allocator = config.allocator,
+                .conn = conn_ptr,
+                .cb = cb,
+                .user_data = config.new_session_user_data,
+            };
+            try tls_ctx.setNewSessionCallback(newSessionEnvelopeTrampoline, holder);
+            new_session_holder = holder;
+        }
+
         return .{
             .allocator = config.allocator,
             .tls_ctx = tls_ctx,
             .owns_tls = owns_tls,
             .conn = conn_ptr,
+            .new_session_holder = new_session_holder,
         };
     }
 
@@ -438,6 +517,9 @@ pub const Client = struct {
         self.conn.deinit();
         self.allocator.destroy(self.conn);
         if (self.owns_tls) self.tls_ctx.deinit();
+        // After the context is gone no new-session callback can fire;
+        // only now is the holder safe to release.
+        if (self.new_session_holder) |holder| self.allocator.destroy(holder);
         self.* = undefined;
     }
 };
