@@ -21,6 +21,29 @@ jobs:
           install: true
           cache: true
 
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-global-cache
+            zig-pkg
+          key: zig-pkg-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-
+
+      # GitHub's tarball/raw endpoints flake (504s, DNS) often enough to fail
+      # real runs. Prefetch the full dependency tree with retries so a bad
+      # window costs seconds, not a red CI run; the cache above makes even
+      # that rare.
+      - name: Prefetch Zig dependencies (retry on network flake)
+        run: |
+          for i in 1 2 3 4 5; do
+            if zig build --fetch; then exit 0; fi
+            echo "fetch attempt $i failed; retrying in $((i * 10))s"
+            sleep $((i * 10))
+          done
+          echo "::error::dependency prefetch failed after 5 attempts"
+          exit 1
+
       - name: Print toolchain
         run: |
           zig version
