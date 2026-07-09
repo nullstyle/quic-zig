@@ -52,11 +52,11 @@ pub fn run(
 
     // DEMO ONLY: this mints a fresh Retry key on every start, which
     // invalidates every outstanding Retry/NEW_TOKEN across a restart
-    // (see "Persist keys across restarts" below). A real deployment
-    // loads this key from durable storage and only generates+stores it
-    // on first run.
+    // (see the key-persistence note under "Required Configuration"
+    // below). A real deployment loads this key from durable storage
+    // and only generates+stores it on first run.
     var retry_key: quic_zig.RetryTokenKey = undefined;
-    std.crypto.random.bytes(&retry_key);
+    io.random(&retry_key);
 
     var server = try quic_zig.Server.init(.{
         .allocator = allocator,
@@ -89,9 +89,16 @@ pub fn run(
 
 `runUdpServer` binds the UDP socket, applies socket tuning, receives
 datagrams, feeds the server, drains outbound packets, ticks connection
-timers, and exits after the shutdown flag flips. Per-stream application
-work can run in a cooperating task that walks `server.iterator()`, or you
-can use a custom loop.
+timers, and exits after the shutdown flag flips. `Server` and
+`Connection` have no internal locking and are single-threaded by
+contract: while the loop runs, nothing else may touch the server or its
+connections — including walking `server.iterator()` — except from the
+loop's own thread or behind the embedder's own mutex around every
+access. The shipped loops expose no application hook today, so they fit
+deployments that only need the transport driven; an application that
+opens, reads, or writes streams while connections are live must
+serialize all of that with the I/O — in practice, a hand-rolled
+single-threaded raw loop (below).
 
 ## Client Wrapper
 
@@ -162,7 +169,19 @@ custom loop repeats four operations:
 3. Drive timers with `conn.tick`.
 4. Sleep until `conn.nextTimerDeadline(now_us)` or the next socket event.
 
+Both feed paths (`conn.handle` / `Server.feed`) take the datagram as a
+mutable `[]u8` — header unprotection rewrites the bytes in place — so
+receive into a mutable buffer, never a `[]const u8` slice.
+
 ```zig
+// Client bootstrap: `Client.connect` deliberately does NOT call
+// `advance`, so 0-RTT data can be staged before the first flight.
+// Call it once after `connect`, before the first loop iteration;
+// without it the ClientHello never hits the wire and the loop
+// waits forever. (Server-accepted connections need no equivalent —
+// `Server.feed` drives them.)
+try conn.advance();
+
 while (!conn.isClosed()) {
     const now_us = monotonicNowUs();
 
@@ -182,7 +201,10 @@ while (!conn.isClosed()) {
         .flow_blocked => handleFlowBlocked(),
         .connection_ids_needed => |info| provideConnectionIds(info),
         .datagram_acked, .datagram_lost => |info| updateDatagramState(info),
-        .alternative_server_address => |addr| scheduleAltAddress(addr),
+        // Covers the variants this app ignores (e.g.
+        // `alternative_server_address`) and any added in a minor
+        // release — always keep an `else` arm (docs/API_STABILITY.md).
+        else => {},
     };
 
     var it = conn.streamIterator();
@@ -255,10 +277,16 @@ stream goes terminal — use the connection-level accessors:
 - `streamSendStats(id)` snapshots `written` / `acked` / `buffered` /
   `has_pending` for write backpressure, or `null` for a reaped stream.
 
-For RFC 9221 DATAGRAMs, `maxDatagramPayload()` returns the largest payload
-`sendDatagram` will currently accept — PMTU-aware and bounded by the peer's
-`max_datagram_frame_size` — so a caller can size buffers up front instead of
-probing for `Error.DatagramTooLarge`.
+RFC 9221 DATAGRAM support is off by default:
+`transport_params.max_datagram_frame_size` defaults to `0`, which
+advertises no DATAGRAM support. Set it to a nonzero value on your own
+transport params to receive DATAGRAM frames — and expect
+`Error.DatagramUnavailable` from `sendDatagram` until the *peer*
+advertises a nonzero value of its own. Once enabled,
+`maxDatagramPayload()` returns the largest payload `sendDatagram` will
+currently accept — PMTU-aware and bounded by the peer's
+`max_datagram_frame_size` — so a caller can size buffers up front instead
+of probing for `Error.DatagramTooLarge`.
 
 `Connection.phase()` reports a coarse `quic_zig.ConnectionPhase` —
 `initial` → `handshake` → `established`, or `closing` / `draining` /
@@ -306,6 +334,15 @@ Set these deliberately for any deployed server:
 - `stateless_reset_key`: required when the server auto-issues CIDs that
   need reset tokens, including preferred-address and QUIC-LB rotation.
 
+Implementation limits: quic-zig caps what `transport_params` may
+advertise, and values above the caps are rejected with
+`error.InvalidValue` (at `Client.connect`, or when the server installs
+the parameters on an accepted connection) rather than clamped:
+`initial_max_data` and each `initial_max_stream_data_*` cap at 16 MiB,
+`initial_max_streams_bidi` / `initial_max_streams_uni` at 4096, and
+`active_connection_id_limit` at 16. Peer-advertised stream-count and
+CID limits above those caps are clamped instead.
+
 Persist Retry, NEW_TOKEN, and stateless-reset keys across graceful
 restarts when continuity matters. Rotating them is a deployment event:
 old Retry and NEW_TOKEN values stop validating, and old stateless-reset
@@ -335,12 +372,16 @@ conn.setEarlyDataEnabled(true);
 On a resuming client, also supply the server's transport parameters as
 observed on the ticket-issuing connection, so early-data sends are bounded
 by the resumed session's flow-control limits. BoringSSL does not carry
-peer transport parameters across resumption, so persist them alongside the
-ticket and feed them back: with the wrapper set
-`Client.Config.resumption_peer_transport_params`, or on a raw `Connection`
-call `conn.setRememberedPeerTransportParams(...)` next to `setSession`.
-Without them, early-data streams keep an unbounded (client-self-limited)
-send window until the server's real parameters arrive.
+peer transport parameters across resumption, so quic-zig persists both in
+one versioned envelope: encode the ticket together with the observed
+parameters via `quic_zig.tls.resumption_state.encode` / `encodeAlloc`,
+and feed the bytes back through `Client.Config.resumption_state` — the
+wrapper decodes the envelope (`tls.resumption_state.decode`), installs
+the session, enables early data, and remembers the peer parameters. On a
+raw `Connection`, call `conn.setRememberedPeerTransportParams(...)` next
+to `setSession`. Without the remembered parameters, early-data streams
+keep an unbounded (client-self-limited) send window until the server's
+real parameters arrive.
 
 ## Diagnostics
 

@@ -3,13 +3,13 @@
 quic-zig is a Zig-first QUIC transport library. It implements the core
 IETF QUIC stack around RFC 8999, RFC 9000, RFC 9001, and RFC 9002, with
 TLS 1.3 and packet protection provided by
-[`boringssl-zig`](../boringssl-zig).
+[`boringssl-zig`](https://github.com/nullstyle/boringssl-zig).
 
 The project is pre-1.0. It is suitable for experiments, embedding work,
 interop testing, and implementation research. Treat public APIs as
 subject to change until a 1.0 release, and do not expose it to untrusted
-internet traffic without the production checklist in
-[EMBEDDING.md](EMBEDDING.md).
+internet traffic without working through the production checklist below
+and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
 
 ## What It Includes
 
@@ -67,6 +67,17 @@ those modes.
 
 The public Zig module name is `quic_zig`.
 
+### Consuming this package
+
+Fetch a tagged release into your `build.zig.zon` — substitute the
+current tag (`v0.7.6` as of this writing):
+
+```sh
+zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.7.6.tar.gz
+```
+
+Then wire the module in `build.zig`:
+
 ```zig
 const quic_zig_dep = b.dependency("quic_zig", .{
     .target = target,
@@ -80,6 +91,13 @@ Application code imports it as:
 ```zig
 const quic_zig = @import("quic_zig");
 ```
+
+**Toolchain**: quic-zig requires Zig `0.17.0-dev` — it tracks Zig
+master. [`mise.toml`](mise.toml) is the source of truth for the
+verified toolchain; `minimum_zig_version` in `build.zig.zon` records
+the floor. On macOS, run `zig` commands with `COPYFILE_DISABLE=1` in
+the environment so AppleDouble (`._*`) metadata files stay out of
+archives and cache hashes.
 
 ## Server Quick Start
 
@@ -177,7 +195,20 @@ pub fn runClient(
 
 `runUdpClient` owns the UDP socket and the receive/poll/tick loop.
 Application code still drives streams, DATAGRAMs, and events through
-`client.conn`. Embedders that want a single-threaded application loop can
+`client.conn` — serialized with the loop, since `Connection` is
+single-threaded. The application-data path in miniature:
+
+```zig
+const stream = try client.conn.openNextBidi();
+_ = try client.conn.streamWrite(stream.id, "GET /index.html\r\n");
+try client.conn.streamFinish(stream.id); // send FIN
+// ... later, as response data arrives:
+var buf: [4096]u8 = undefined;
+const r = try client.conn.streamReadFin(stream.id, &buf);
+// r.n bytes of payload in buf; r.fin is true once the peer's FIN is seen.
+```
+
+Embedders that want a single-threaded application loop can
 use the raw `Connection` cycle described in [EMBEDDING.md](EMBEDDING.md).
 
 `Client.connect` verifies the server certificate against the system
