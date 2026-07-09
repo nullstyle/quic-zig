@@ -179,6 +179,19 @@ const LogEventImpl = union(enum) {
 /// log line, or counter and return.
 const LogCallbackImpl = *const fn (user_data: ?*anyopaque, ev: LogEventImpl) void;
 
+/// Callback invoked from `Server.reap` for each slot whose connection
+/// reached `.closed`, immediately *before* the connection and slot are
+/// destroyed. Inside the callback the slot — including `slot.conn` and
+/// `slot.user_data` — is still fully valid; the moment it returns, both
+/// are dead. This is the ordered-teardown hook for per-connection
+/// application state that borrows `slot.conn` (an HTTP/3 session, an
+/// app-side context keyed by `slot.slot_id`): tear it down here and the
+/// use-after-free window between reap and app-side cleanup disappears.
+/// Runs synchronously on the embedder's thread inside `reap` and must
+/// not call back into the Server (same re-entrancy rule as
+/// `log_callback`).
+const ConnectionWillCloseCallbackImpl = *const fn (user_data: ?*anyopaque, slot: *SlotImpl) void;
+
 /// By-value snapshot of the server's instrumentation counters and
 /// gauges. Returned from `Server.metricsSnapshot`; the snapshot is
 /// taken atomically (no mutation between fields) because all reads
@@ -568,6 +581,14 @@ const ConfigImpl = struct {
     /// Opaque pointer passed back to `log_callback` on every event.
     log_user_data: ?*anyopaque = null,
 
+    /// Ordered-teardown hook: runs inside `reap` for each closed slot
+    /// right before the slot and its connection are destroyed, while
+    /// `slot.conn` / `slot.user_data` are still valid. See
+    /// `ConnectionWillCloseCallback` for the contract. Null disables it.
+    on_connection_will_close: ?ConnectionWillCloseCallbackImpl = null,
+    /// Opaque pointer passed back to `on_connection_will_close`.
+    on_connection_will_close_user_data: ?*anyopaque = null,
+
     /// Optional override of the underlying `boringssl.tls.Context`.
     /// When null, `Server.init` constructs a TLS-1.3-only server
     /// context with `verify=.none` and the supplied ALPN list. The
@@ -923,6 +944,15 @@ const SlotImpl = struct {
     /// for the slot's lifetime when `Server.new_token_key` is null.
     new_token_emitted: bool = false,
 
+    /// Embedder-owned per-connection pointer; quic_zig never reads or
+    /// frees it. Set it when `feed` reports `.accepted` (the new slot is
+    /// at the back of `Server.slots`) to hang application state — an
+    /// HTTP/3 session, routing context, metrics — off the slot without
+    /// maintaining a parallel `slot_id`-keyed map. Still valid inside
+    /// `Config.on_connection_will_close`, which is the last safe place
+    /// to release whatever it points at.
+    user_data: ?*anyopaque = null,
+
     /// RFC 9368 §6 multi-Initial pre-parse state. Non-null only while
     /// a multi-version server is still waiting for a fragmented
     /// ClientHello to complete so it can decide on a compatible-
@@ -1111,6 +1141,7 @@ pub const Server = struct {
     pub const Error = ErrorImpl;
     pub const LogEvent = LogEventImpl;
     pub const LogCallback = LogCallbackImpl;
+    pub const ConnectionWillCloseCallback = ConnectionWillCloseCallbackImpl;
     pub const MetricsSnapshot = MetricsSnapshotImpl;
     pub const RateLimitSnapshot = RateLimitSnapshotImpl;
 
@@ -1153,6 +1184,8 @@ pub const Server = struct {
     qlog_user_data: ?*anyopaque,
     log_callback: ?LogCallbackImpl,
     log_user_data: ?*anyopaque,
+    on_connection_will_close: ?ConnectionWillCloseCallbackImpl,
+    on_connection_will_close_user_data: ?*anyopaque,
 
     /// Live connection slots. Embedders may iterate this between
     /// `feed` / `poll` calls to inspect or mutate connections.
@@ -1554,6 +1587,8 @@ pub const Server = struct {
             .qlog_user_data = config.qlog_user_data,
             .log_callback = config.log_callback,
             .log_user_data = config.log_user_data,
+            .on_connection_will_close = config.on_connection_will_close,
+            .on_connection_will_close_user_data = config.on_connection_will_close_user_data,
             .slots = slots,
             .cid_table = cid_table,
             .source_rate_table = .empty,
@@ -2181,6 +2216,21 @@ pub const Server = struct {
         }
     }
 
+    /// Earliest pending timer deadline across every live slot, or null
+    /// when no slot has one armed. Event loops size their socket
+    /// receive timeout with this instead of a fixed tick: sleep until
+    /// `min(next inbound datagram, deadline.at_us)`, then call `tick`.
+    /// O(slots) per call — cheap enough per loop iteration, and it
+    /// spares every embedder the slot-walk boilerplate.
+    pub fn nextTimerDeadline(self: *const Server, now_us: u64) ?conn_mod.state.TimerDeadline {
+        var best: ?conn_mod.state.TimerDeadline = null;
+        for (self.slots.items) |slot| {
+            const deadline = slot.conn.nextTimerDeadline(now_us) orelse continue;
+            if (best == null or deadline.at_us < best.?.at_us) best = deadline;
+        }
+        return best;
+    }
+
     /// Reap any *terminally-closed* slots from the table. Returns the
     /// number of slots reclaimed. Iterates back-to-front and uses
     /// `swapRemove`, so reaping N closed slots is O(N), not O(N²).
@@ -2201,6 +2251,13 @@ pub const Server = struct {
             i -= 1;
             const slot = self.slots.items[i];
             if (slot.conn.closeState() != .closed) continue;
+            // Ordered-teardown hook: the embedder releases anything
+            // borrowing `slot.conn` (sessions, `slot.user_data`) while
+            // the slot is still fully alive. Must run before any
+            // teardown below.
+            if (self.on_connection_will_close) |callback| {
+                callback(self.on_connection_will_close_user_data, slot);
+            }
             // Capture the close-event source and peer address before
             // we tear the connection down — once `slot.conn.deinit`
             // has run, both pointers are dead.

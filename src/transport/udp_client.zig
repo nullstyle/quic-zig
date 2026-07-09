@@ -39,10 +39,10 @@
 //! from the loop thread. `Connection` is single-threaded with no
 //! internal locking, so application-level work (opening streams,
 //! writing data, reading received data, polling events) must be
-//! serialized with the loop — same thread, or behind the embedder's
-//! own mutex; never a second thread touching `client.conn`
-//! concurrently. Same model as `runUdpServer`; the API-awkwardness
-//! note in `EMBEDDING.md` covers it.
+//! serialized with the loop: run it inside
+//! `RunUdpClientOptions.on_iteration`, which fires once per loop
+//! iteration on the loop thread. Never touch `client.conn` from a
+//! second thread while the loop runs. Same model as `runUdpServer`.
 
 const std = @import("std");
 
@@ -136,10 +136,29 @@ pub const RunUdpClientOptions = struct {
     rx_buffer_bytes: usize = default_rx_buffer_bytes,
     /// Send scratch buffer size.
     tx_buffer_bytes: usize = default_tx_buffer_bytes,
+
+    /// Per-iteration application hook — the one safe place to run
+    /// application logic against a loop-owned client. Invoked once per
+    /// iteration on the loop thread, after inbound datagrams have been
+    /// handled and the recovery clock ticked; the next outbox drain
+    /// runs immediately after the hook returns, so writes it queues
+    /// ship without waiting out a receive timeout. `Connection` has no
+    /// internal locking; open streams, read data, drain
+    /// `client.conn.pollEvent()`, and send datagrams only from inside
+    /// the hook. It keeps firing during the shutdown grace window. An
+    /// error return stops the loop and propagates out of
+    /// `runUdpClient` verbatim.
+    on_iteration: ?*const fn (ctx: ?*anyopaque, client: *Client, now_us: u64) anyerror!void = null,
+    /// Opaque pointer passed back to `on_iteration` every call.
+    on_iteration_ctx: ?*anyopaque = null,
 };
 
-/// Errors `runUdpClient` can return. Mostly propagated from
+/// Errors the loop itself can produce. Mostly propagated from
 /// `std.Io.net.IpAddress.bind`, `Socket.send`, or `Connection.handle`.
+/// The function signature is `anyerror!void` (not `RunError!void`)
+/// only because `RunUdpClientOptions.on_iteration` errors propagate
+/// out verbatim; a loop without a hook fails only with values from
+/// this set.
 pub const RunError = error{
     /// `RunUdpClientOptions.target` did not parse as an IPv4/IPv6 literal.
     InvalidTargetAddress,
@@ -175,7 +194,7 @@ pub const RunError = error{
 /// from another thread concurrently with this loop. Same threading model
 /// as `runUdpServer`. Embedders that want application logic interleaved
 /// on one thread should use the raw `Connection` cycle in EMBEDDING.md.
-pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) RunError!void {
+pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void {
     if (options.rx_buffer_bytes == 0 or options.tx_buffer_bytes == 0) {
         return error.InvalidBufferSize;
     }
@@ -330,6 +349,13 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) RunError!void
         // Tick the recovery clock. PTO / loss detection / key-update
         // deadlines all fire in here.
         try client.conn.tick(now_us);
+
+        // Application hook: inbound handled and clock ticked; the top
+        // of the next iteration drains the outbox immediately, so
+        // anything the hook queues ships without a timeout wait.
+        if (options.on_iteration) |hook| {
+            try hook(options.on_iteration_ctx, client, now_us);
+        }
     }
 }
 

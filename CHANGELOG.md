@@ -7,6 +7,51 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- `ConnectionEvent.handshake_established`: one-shot event surfaced on the
+  first `pollEvent` after `handshakeDone()` latches, so embedders no longer
+  poll `phase()` to learn 1-RTT is usable.
+- `ConnectionEvent.stream_opened` (`StreamOpenedInfo`): lossless, in-order
+  notification of peer-initiated stream opens — including RFC 9000 §3.2
+  implicit creation — via a watermark chase over the opened-stream counters
+  instead of an overflowable queue. Removes the per-tick
+  `streamIterator` diff-scan every application previously hand-rolled.
+- `Server.Slot.user_data`: embedder-owned per-connection pointer, so
+  application state hangs off the slot instead of a parallel
+  `slot_id`-keyed map.
+- `Server.Config.on_connection_will_close`: ordered-teardown hook invoked
+  inside `reap` while the slot and its `Connection` are still valid —
+  closes the use-after-free window between reap and application-side
+  session cleanup (the http3-zig integration seam).
+- `Server.nextTimerDeadline`: aggregate earliest timer deadline across all
+  live slots, for event loops that sleep until the next deadline instead
+  of fixed-tick polling.
+- `RunUdpOptions.on_iteration` / `RunUdpClientOptions.on_iteration`:
+  per-iteration application hooks on the packaged UDP loops, making them
+  hostable for interactive applications. The hooks run on the loop thread
+  (the loops' single-threaded contract is unchanged); hook errors
+  propagate out, so both run functions now return `anyerror!void`.
+
+### Fixed
+
+- EMBEDDING.md's raw connection cycle example now compiles and works
+  against a real network: it includes the mandatory `conn.advance()`
+  handshake kick after `Client.connect`, an `else` arm on the `pollEvent`
+  switch (as the forward-compatibility contract requires), the current
+  std random API, and the real `resumption_state` config field name.
+- Documented the previously-invisible operational contracts: DATAGRAM
+  support requires a nonzero `max_datagram_frame_size` transport param,
+  local transport-parameter caps (16 MiB windows, 4096 streams, 16 CIDs)
+  reject with `error.InvalidValue`, and `handle`/`feed` need a mutable
+  buffer. Replaced the data-racing "cooperating task" threading advice
+  with the real single-threaded serialization contract, and fixed the
+  dangling doc cross-references in EMBEDDING.md/README.md.
+- README gained a "Consuming this package" section (exact `zig fetch`
+  pin, module wiring, toolchain floor, macOS `COPYFILE_DISABLE=1`) and
+  the quick-start now shows the stream write path
+  (`openNextBidi`/`streamWrite`/`streamFinish`/`streamReadFin`).
+
 ## [0.8.0] - 2026-07-05
 
 ### Added

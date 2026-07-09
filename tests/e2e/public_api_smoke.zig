@@ -149,6 +149,7 @@ test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
         _ = quic_zig.FlowBlockedKind;
         _ = quic_zig.FlowBlockedSource;
         _ = quic_zig.ConnectionIdReplenishInfo;
+        _ = quic_zig.StreamOpenedInfo;
 
         if (std.meta.fieldInfo(Event, .datagram_acked).type != quic_zig.DatagramSendEvent) {
             @compileError("ConnectionEvent.datagram_acked payload alias drifted");
@@ -158,6 +159,38 @@ test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
         }
         if (std.meta.fieldInfo(Event, .connection_ids_needed).type != quic_zig.ConnectionIdReplenishInfo) {
             @compileError("ConnectionEvent.connection_ids_needed payload alias drifted");
+        }
+        if (std.meta.fieldInfo(Event, .stream_opened).type != quic_zig.StreamOpenedInfo) {
+            @compileError("ConnectionEvent.stream_opened payload alias drifted");
+        }
+        // `handshake_established` is a void one-shot; pin its presence.
+        _ = std.meta.fieldInfo(Event, .handshake_established);
+    }
+}
+
+test "server hostability surface keeps its callable shape" {
+    const Server = quic_zig.Server;
+    comptime {
+        // Embedder-owned per-connection pointer on the slot.
+        if (std.meta.fieldInfo(Server.Slot, .user_data).type != ?*anyopaque) {
+            @compileError("Slot.user_data drifted from ?*anyopaque");
+        }
+        // Pre-reap ordered-teardown hook and its Config wiring.
+        _ = Server.ConnectionWillCloseCallback;
+        requireDecl(Server, "nextTimerDeadline");
+    }
+    const next_deadline: *const fn (*const Server, u64) ?quic_zig.TimerDeadline = Server.nextTimerDeadline;
+    _ = next_deadline;
+
+    // Per-iteration application hooks on both packaged loops.
+    const server_hook_field = comptime std.meta.fieldInfo(quic_zig.transport.RunUdpOptions, .on_iteration);
+    const client_hook_field = comptime std.meta.fieldInfo(quic_zig.transport.RunUdpClientOptions, .on_iteration);
+    comptime {
+        if (server_hook_field.type != ?*const fn (?*anyopaque, *quic_zig.Server, u64) anyerror!void) {
+            @compileError("RunUdpOptions.on_iteration hook signature drifted");
+        }
+        if (client_hook_field.type != ?*const fn (?*anyopaque, *quic_zig.Client, u64) anyerror!void) {
+            @compileError("RunUdpClientOptions.on_iteration hook signature drifted");
         }
     }
 }

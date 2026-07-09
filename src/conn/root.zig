@@ -100,6 +100,8 @@ pub const AlternativeServerAddressV6Event = state.AlternativeServerAddressV6Even
 pub const DatagramSendEvent = state.DatagramSendEvent;
 /// Detail about why outgoing data is blocked on flow control.
 pub const FlowBlockedInfo = state.FlowBlockedInfo;
+/// A newly-opened peer-initiated stream (payload of `stream_opened`).
+pub const StreamOpenedInfo = state.StreamOpenedInfo;
 /// Which kind of flow-control limit is blocking (data, stream-data, streams).
 pub const FlowBlockedKind = state.FlowBlockedKind;
 /// Whether the local or remote side is the limit holder.

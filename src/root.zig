@@ -152,6 +152,12 @@ pub const ConnectionEvent = conn.ConnectionEvent;
 /// (RFC 9221), as produced by `sendDatagramTracked`.
 pub const DatagramSendEvent = conn.DatagramSendEvent;
 
+/// Payload of `ConnectionEvent.stream_opened`: a newly-opened
+/// peer-initiated stream. Delivery is lossless and in per-type index
+/// order; the stream may already be terminal by the time the event is
+/// polled — query `streamRecvState` rather than assuming liveness.
+pub const StreamOpenedInfo = conn.StreamOpenedInfo;
+
 /// Payload of `ConnectionEvent.flow_blocked`: which flow-control limit
 /// was hit, whether the local or remote side holds it, the limit value,
 /// and (for stream-data) which stream tripped it.
@@ -336,6 +342,7 @@ test "public re-exports: ConnectionEvent payloads + Address resolve at the top l
     // collision or unresolved alias fails the build here; the identity checks
     // catch silent drift if a future edit repoints one of them.
     try std.testing.expect(@sizeOf(Address) > 0);
+    try std.testing.expect(StreamOpenedInfo == std.meta.fieldInfo(ConnectionEvent, .stream_opened).type);
     try std.testing.expect(FlowBlockedInfo == std.meta.fieldInfo(ConnectionEvent, .flow_blocked).type);
     try std.testing.expect(ConnectionIdReplenishInfo == std.meta.fieldInfo(ConnectionEvent, .connection_ids_needed).type);
     try std.testing.expect(DatagramSendEvent == std.meta.fieldInfo(ConnectionEvent, .datagram_acked).type);

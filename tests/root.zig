@@ -16,5 +16,7 @@ test {
     _ = @import("e2e/peer_close_smoke.zig");
     _ = @import("e2e/quic_v2_handshake.zig");
     _ = @import("e2e/connection_phase.zig");
+    _ = @import("e2e/connection_events.zig");
+    _ = @import("e2e/server_lifecycle_hooks.zig");
     _ = @import("e2e/public_api_smoke.zig");
 }

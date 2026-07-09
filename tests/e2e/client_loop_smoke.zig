@@ -26,11 +26,16 @@ test "runUdpClient is importable from the transport namespace" {
     // `runUdpClient` and the option struct must both live on the
     // public `transport` API surface so embedders can reach them
     // without dipping into private modules.
+    // `anyerror` return: `RunUdpClientOptions.on_iteration` hook errors
+    // propagate out verbatim; hook-less loops still fail only with
+    // `transport.RunUdpClientError` values.
     const helper: *const fn (
         *quic_zig.Client,
         quic_zig.transport.RunUdpClientOptions,
-    ) quic_zig.transport.RunUdpClientError!void = quic_zig.transport.runUdpClient;
+    ) anyerror!void = quic_zig.transport.runUdpClient;
     _ = helper;
+    // The documented loop-error set stays public.
+    _ = quic_zig.transport.RunUdpClientError;
 }
 
 test "RunUdpClientOptions defaults match the documented contract" {

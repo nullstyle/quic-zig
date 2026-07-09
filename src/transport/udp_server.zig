@@ -141,11 +141,34 @@ pub const RunUdpOptions = struct {
     /// default of 64 means the slot table is reclaimed every few
     /// hundred milliseconds at idle.
     reap_every_n_iterations: u32 = 64,
+
+    /// Per-iteration application hook — the one safe place to run
+    /// application logic against a loop-owned server. Invoked once per
+    /// iteration on the loop thread, after inbound datagrams have been
+    /// fed and before the per-slot outbox drain, so responses the hook
+    /// writes reach the wire in the same iteration. `Server` and
+    /// `Connection` have no internal locking; all application access
+    /// must be serialized with the loop, and this callback *is* that
+    /// serialization: walk `server.iterator()`, drain
+    /// `slot.conn.pollEvent()`, read/write streams, send datagrams —
+    /// but only from inside the hook. It keeps firing during the
+    /// shutdown grace window (peers are draining; the app can observe
+    /// closes). An error return stops the loop and propagates out of
+    /// `runUdpServer` verbatim. Pair with
+    /// `Server.Config.on_connection_will_close` for per-connection
+    /// teardown — the every-64-iterations auto-reap runs on this same
+    /// thread, so the two hooks never race.
+    on_iteration: ?*const fn (ctx: ?*anyopaque, server: *Server, now_us: u64) anyerror!void = null,
+    /// Opaque pointer passed back to `on_iteration` every call.
+    on_iteration_ctx: ?*anyopaque = null,
 };
 
-/// Errors `runUdpServer` can return. Most are propagated from
+/// Errors the loop itself can produce. Most are propagated from
 /// `std.Io.net.IpAddress.bind`, `Socket.send`, or `Server.feed` —
-/// the helper itself does not introduce new error categories.
+/// the helper itself does not introduce new error categories. The
+/// function signature is `anyerror!void` (not `RunError!void`) only
+/// because `RunUdpOptions.on_iteration` errors propagate out verbatim;
+/// a loop without a hook fails only with values from this set.
 pub const RunError = error{
     /// `RunUdpOptions.listen` did not parse as an IPv4/IPv6 literal.
     InvalidListenAddress,
@@ -203,7 +226,7 @@ const max_listeners: usize = 3;
 /// drain routes replies through that listener — so replies follow the
 /// peer's path before AND after a server-initiated migration to the
 /// preferred-address (RFC 9000 §5.1.1).
-pub fn runUdpServer(server: *Server, options: RunUdpOptions) RunError!void {
+pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     if (options.rx_buffer_bytes == 0 or options.tx_buffer_bytes == 0) {
         return error.InvalidBufferSize;
     }
@@ -447,6 +470,12 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) RunError!void {
                     // through the per-slot poll path soon enough.
                 };
             }
+        }
+
+        // Application hook: inbound is ingested, the outbox drain is
+        // next — anything the hook writes ships this same iteration.
+        if (options.on_iteration) |hook| {
+            try hook(options.on_iteration_ctx, server, now_us);
         }
 
         // Drain every slot's outbox and tick its recovery clock in

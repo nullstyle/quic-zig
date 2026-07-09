@@ -147,6 +147,23 @@ pub const AlternativeServerAddressEvent = union(enum) {
 /// updates can't pin proportional connection memory.
 pub const max_alternative_address_events: usize = 16;
 
+/// One newly-opened peer-initiated stream surfaced via
+/// `Connection.pollEvent`. Emission is lossless and in per-type index
+/// order: peer stream indices open contiguously (RFC 9000 §3.2 implicit
+/// creation), so the connection surfaces them by chasing the
+/// opened-count watermark instead of buffering a queue that could
+/// overflow under a burst of small STREAM frames. The stream may already
+/// have been reset — or driven terminal and reaped by the stream GC — by
+/// the time the event is polled; treat `stream_id` as an invitation to
+/// query (`streamRecvState` / `streamRead`), not a liveness guarantee.
+pub const StreamOpenedInfo = struct {
+    stream_id: u64,
+    /// True for a peer-initiated bidirectional stream. Mirrors the id's
+    /// low-bit classification (RFC 9000 §2.1); carried so embedders
+    /// don't re-derive the bit math.
+    bidi: bool,
+};
+
 /// Internal storage form for datagram events, tagged by ack-vs-loss so the
 /// queue can carry both kinds in one FIFO and `pollEvent` can re-tag them.
 pub const StoredDatagramSendEvent = union(enum) {

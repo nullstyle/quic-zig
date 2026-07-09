@@ -551,6 +551,17 @@ pub const ConnectionPhase = enum {
 /// Connection state.
 pub const ConnectionEvent = union(enum) {
     close: CloseEvent,
+    /// The TLS handshake just completed (`handshakeDone()` latched true):
+    /// 1-RTT application traffic is fully usable in both directions.
+    /// Emitted exactly once per connection, lazily, on the first
+    /// `pollEvent` after completion. Note a server accepting 0-RTT can
+    /// surface `stream_opened` events *before* this one.
+    handshake_established,
+    /// A peer-initiated stream was opened, explicitly or implicitly
+    /// (RFC 9000 §3.2). Delivery is lossless and in per-type index order
+    /// — see `StreamOpenedInfo` for the watermark semantics and the
+    /// already-terminal caveat.
+    stream_opened: StreamOpenedInfo,
     flow_blocked: FlowBlockedInfo,
     connection_ids_needed: ConnectionIdReplenishInfo,
     datagram_acked: DatagramSendEvent,
@@ -599,6 +610,10 @@ pub const max_alternative_address_events: usize = event_queue_mod.max_alternativ
 const StoredDatagramSendEvent = event_queue_mod.StoredDatagramSendEvent;
 
 const StoredCloseEvent = lifecycle_mod.StoredCloseEvent;
+
+/// One newly-opened peer-initiated stream — payload of
+/// `ConnectionEvent.stream_opened`.
+pub const StreamOpenedInfo = event_queue_mod.StreamOpenedInfo;
 
 /// One queued STOP_SENDING frame (RFC 9000 §19.5) with its application error code.
 pub const StopSendingItem = pending_frames_mod.StopSendingItem;
@@ -1556,6 +1571,15 @@ pub const Connection = struct {
     peer_opened_streams_uni: u64 = 0,
     local_opened_streams_bidi: u64 = 0,
     local_opened_streams_uni: u64 = 0,
+    /// `pollEvent` watermarks for `stream_opened` emission: peer-opened
+    /// stream indices in [surfaced, peer_opened_streams_*) have not been
+    /// surfaced to the embedder yet. Peer indices open contiguously
+    /// (RFC 9000 §3.2), so chasing the count is lossless — no queue, no
+    /// overflow, O(1) state.
+    surfaced_peer_streams_bidi: u64 = 0,
+    surfaced_peer_streams_uni: u64 = 0,
+    /// One-shot latch for `ConnectionEvent.handshake_established`.
+    handshake_established_surfaced: bool = false,
     /// Rotating cursor for the RFC 9218 send scheduler's round-robin among
     /// equal-urgency *incremental* streams: each application packet advances it
     /// past the incremental stream that led, so a different one leads next
@@ -8235,6 +8259,22 @@ pub const Connection = struct {
                 event.delivered = true;
                 return .{ .close = out };
             }
+        }
+        if (!self.handshake_established_surfaced and self.inner.handshakeDone()) {
+            self.handshake_established_surfaced = true;
+            return .handshake_established;
+        }
+        if (self.surfaced_peer_streams_bidi < self.peer_opened_streams_bidi) {
+            const stream_type: StreamType = if (self.role == .client) .server_bidi else .client_bidi;
+            const id = stream_type.streamId(self.surfaced_peer_streams_bidi);
+            self.surfaced_peer_streams_bidi += 1;
+            return .{ .stream_opened = .{ .stream_id = id, .bidi = true } };
+        }
+        if (self.surfaced_peer_streams_uni < self.peer_opened_streams_uni) {
+            const stream_type: StreamType = if (self.role == .client) .server_uni else .client_uni;
+            const id = stream_type.streamId(self.surfaced_peer_streams_uni);
+            self.surfaced_peer_streams_uni += 1;
+            return .{ .stream_opened = .{ .stream_id = id, .bidi = false } };
         }
         if (self.flow_blocked_events.pop()) |out| {
             return .{ .flow_blocked = out };

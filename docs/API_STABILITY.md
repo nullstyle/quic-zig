@@ -19,7 +19,10 @@ refined before 1.0, but changes will be deliberate, called out in
 `CHANGELOG.md`, and kept minimal.
 
 - **Wrappers:** `Server`, `Client`, their `Config` structs, and
-  `transport.runUdpServer` / `transport.runUdpClient`.
+  `transport.runUdpServer` / `transport.runUdpClient` — including the
+  loops' `on_iteration` application hooks, `Server.Slot.user_data`,
+  `Server.Config.on_connection_will_close` (pre-reap ordered-teardown
+  hook), and the `Server.nextTimerDeadline` aggregate.
 - **Raw connection cycle:** `Connection.handle` / `handleWithEcn`,
   `pollDatagram`, `tick`, `pollEvent`, `nextTimerDeadline`, `isClosed`,
   `closeState`, `phase`.
