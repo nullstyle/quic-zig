@@ -1,0 +1,15 @@
+// Out-of-tree consumer smoke test manifest. Depends on quic-zig by path
+// exactly the way a real application depends on it by URL+hash; the build
+// proves the exported module surface (quic_zig + the shared boringssl
+// instance) is consumable with correct type identity. See src/main.zig
+// for what is asserted.
+.{
+    .name = .consumer_smoke,
+    .version = "0.0.0",
+    .fingerprint = 0x822bb40d4c038654,
+    .minimum_zig_version = "0.17.0-dev.1158+1d1193aa7",
+    .dependencies = .{
+        .quic_zig = .{ .path = "../.." },
+    },
+    .paths = .{""},
+}

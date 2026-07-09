@@ -92,6 +92,12 @@ Application code imports it as:
 const quic_zig = @import("quic_zig");
 ```
 
+quic-zig also exports its shared BoringSSL module instance as
+`dep.module("boringssl")` — import it when you need to construct a
+`boringssl.tls.Context` that type-unifies with quic_zig's API, e.g.
+for `Client.Config.tls_context_override` (private-CA pinning, custom
+session-ticket capture).
+
 **Toolchain**: quic-zig requires Zig `0.17.0-dev` — it tracks Zig
 master. [`mise.toml`](mise.toml) is the source of truth for the
 verified toolchain; `minimum_zig_version` in `build.zig.zon` records

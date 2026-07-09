@@ -55,6 +55,25 @@ jobs:
       - name: zig build test
         run: zig build test --summary all
 
+      # End-to-end echo example smoke: server loop on a thread, client
+      # loop over real loopback UDP, non-zero exit unless the stream +
+      # datagram round-trip happened. Linux-only: it is a real-socket /
+      # real-thread harness, and one tier-1 leg is enough signal.
+      - name: zig build run-echo-smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build run-echo-smoke
+
+      # Out-of-tree consumer smoke: builds a separate package that
+      # depends on quic-zig by path and pins the exported quic_zig +
+      # boringssl module surface (type identity for
+      # Client.Config.tls_context_override consumers).
+      - name: consumer-smoke (out-of-tree package)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd tools/consumer-smoke
+          zig build --summary all
+          zig build run
+
   sanitizer:
     name: sanitizer (sanitize-c=full)
     runs-on: ubuntu-latest

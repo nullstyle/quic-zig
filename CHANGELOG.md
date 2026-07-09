@@ -57,6 +57,22 @@ changes.
   `PathLimitExceeded`.
 - `Connection.negotiatedAlpn()`: the ALPN protocol selected during the
   handshake, for multi-protocol servers.
+- Canonical echo examples over real UDP sockets: `examples/echo_server.zig`
+  (Server + `runUdpServer` + `on_iteration` event loop, `Slot.user_data`
+  per-connection state freed in `on_connection_will_close`, SIGINT
+  shutdown) and `examples/echo_client.zig` (Client + `runUdpClient` hook
+  state machine), plus `zig build run-echo-smoke` — a one-process binary
+  that runs the full stream+DATAGRAM echo round trip on loopback and
+  gates CI, so the hostability surface is exercised end-to-end on every
+  push.
+- `zig build docs`: Zig autodocs for the `quic_zig` module, emitted to
+  `zig-out/docs`.
+- Exported the shared `boringssl` module instance from build.zig
+  (`dep.module("boringssl")`) so consumers can construct
+  `tls_context_override` values (private-CA pinning) with correct type
+  identity, and added an out-of-tree consumer package
+  (`tools/consumer-smoke/`, CI-checked) proving tag consumers can wire
+  both modules.
 
 ### Fixed
 

@@ -66,6 +66,17 @@ pub fn build(b: *std.Build) void {
     });
     quic_zig_mod.addImport("boringssl", boringssl_mod);
 
+    // Export the exact boringssl module instance quic_zig is compiled
+    // against so consumers can name types that unify with quic_zig's
+    // API surface — e.g. constructing a `boringssl.tls.Context` for
+    // `Client.Config.tls_context_override` (private-CA pinning, custom
+    // session-ticket capture). A consumer that declared its own
+    // boringssl-zig dependency would get a *different* module instance
+    // whose `tls.Context` type does not unify. Mirrors http3-zig's
+    // export of the same module; tools/consumer-smoke pins the type
+    // identity end-to-end.
+    b.modules.put(b.graph.arena, "boringssl", boringssl_mod) catch @panic("OOM");
+
     // Single-source the library version from build.zig.zon so `version()`
     // can't drift from the package manifest (it silently did: 0.2.0 vs 0.3.0).
     const build_options = b.addOptions();
@@ -187,6 +198,76 @@ pub fn build(b: *std.Build) void {
 
     const examples_step = b.step("examples", "Build the embedder example programs");
     examples_step.dependOn(&alt_addr_example_install.step);
+
+    // Canonical first-hour echo pair: a hostable echo server and the
+    // client that round-trips a stream + a DATAGRAM against it, both
+    // built on the `transport.runUdp*` loops' `on_iteration` hooks.
+    // `examples/echo_common.zig` (shared fixtures) and
+    // `examples/support/*.pem` (self-signed test cert) ride along via
+    // relative @import/@embedFile inside the examples/ module root.
+    const echo_server_mod = b.createModule(.{
+        .root_source_file = b.path("examples/echo_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    echo_server_mod.addImport("quic_zig", quic_zig_mod);
+    const echo_server_exe = b.addExecutable(.{
+        .name = "echo-server-example",
+        .root_module = echo_server_mod,
+    });
+    const echo_server_install = b.addInstallArtifact(echo_server_exe, .{});
+    examples_step.dependOn(&echo_server_install.step);
+
+    const echo_client_mod = b.createModule(.{
+        .root_source_file = b.path("examples/echo_client.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    echo_client_mod.addImport("quic_zig", quic_zig_mod);
+    const echo_client_exe = b.addExecutable(.{
+        .name = "echo-client-example",
+        .root_module = echo_client_mod,
+    });
+    const echo_client_install = b.addInstallArtifact(echo_client_exe, .{});
+    examples_step.dependOn(&echo_client_install.step);
+
+    // One-process echo smoke: server loop on a thread, client loop to
+    // completion, non-zero exit unless the round-trip happened. A
+    // standalone binary (real sockets + threads) rather than a test
+    // target; CI runs `zig build run-echo-smoke` on the Linux leg.
+    const echo_smoke_mod = b.createModule(.{
+        .root_source_file = b.path("examples/echo_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    echo_smoke_mod.addImport("quic_zig", quic_zig_mod);
+    const echo_smoke_exe = b.addExecutable(.{
+        .name = "echo-smoke",
+        .root_module = echo_smoke_mod,
+    });
+    const run_echo_smoke = b.addRunArtifact(echo_smoke_exe);
+    const echo_smoke_step = b.step(
+        "run-echo-smoke",
+        "Run the echo example end-to-end (server thread + client) over loopback UDP",
+    );
+    echo_smoke_step.dependOn(&run_echo_smoke.step);
+
+    // Zig autodocs for the public quic_zig module. `zig build docs`
+    // emits the static site into zig-out/docs (open index.html).
+    const docs_obj = b.addObject(.{
+        .name = "quic_zig",
+        .root_module = quic_zig_mod,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_obj.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate quic_zig API documentation (Zig autodocs)");
+    docs_step.dependOn(&install_docs.step);
 
     const interop_tool_mod = b.createModule(.{
         .root_source_file = b.path("tools/external_interop.zig"),
