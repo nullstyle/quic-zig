@@ -100,7 +100,24 @@ partition, adds the manual release-blocking fuzz gate, and keeps the actual
 
 The v0.8.0 code/docs are staged on `main`, but the tag must wait for a
 completed external/manual `rc-fuzz` pass. Do not treat a cancelled or
-in-harness fuzz run as release evidence.
+in-harness fuzz run as release evidence. Tag exactly the commit the
+passing run validated.
+
+## v0.9.0 application-readiness release
+
+v0.9.0 closes the 2026-07 embedding-audit gaps (lifecycle events,
+hostable loops, ordered teardown, wrapper 0-RTT, default-config client
+migration, echo reference examples, autodocs, out-of-tree consumption
+checks — see the CHANGELOG entry). Same gate: a completed `rc-fuzz` pass
+on the release commit before tagging.
+
+### RC/soak criterion toward 1.0
+
+Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig
+consumes the tag as its pin, ships its socket-backed examples on it, and
+one release cycle passes without a Stable-tier breaking-change request.
+That makes "distance to 1.0" measurable from this document instead of
+implied.
 
 Check items off as they land; the list is the definition of done for the
 1.0 tag.

@@ -7,6 +7,18 @@ changes.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-09
+
+The application-readiness release: every gap between "protocol-complete"
+and "an application can be built on this" identified by the 2026-07
+embedding audit is closed. Applications get stream/handshake lifecycle
+events, hostable packaged UDP loops, ordered connection teardown,
+working 0-RTT and client migration through the wrappers, a canonical
+echo example pair exercised in CI over real sockets, generated API
+docs, and out-of-tree consumption checks.
+
+Verified toolchain: zig 0.17.0-dev.1252+e4b325c19.
+
 ### Added
 
 - `ConnectionEvent.handshake_established`: one-shot event surfaced on the
