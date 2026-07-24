@@ -100,8 +100,35 @@ zig build external-interop -- runner --clients quic-go --tests H,D
 zig build external-interop -- runner --role client --servers quic-go --tests H,D
 ```
 
-See [interop/README.md](interop/README.md) for the full command surface
+See [interop/README.md](https://github.com/nullstyle/quic-zig/blob/main/interop/README.md) for the full command surface
 and generated-artifact locations.
+
+## Releases
+
+Downstream projects pin quic-zig by version and hash; these rules exist
+so the version string never lies to them.
+
+- **Every release gets a tag** (`vX.Y.Z`), including hardening and patch
+  releases. Only tagged commits are advertised as consumable — a bare
+  commit SHA between tags carries no compatibility promise. (Release
+  tags additionally wait for the rc-fuzz gate above and the platform
+  tiers in [docs/RELEASE_READINESS.md](https://github.com/nullstyle/quic-zig/blob/main/docs/RELEASE_READINESS.md).)
+- **Any breaking change to the public surface bumps the manifest
+  version** — pre-1.0 that means the minor (`0.x` → `0.(x+1)`) — in the
+  same change that lands the break, using a `-dev` pre-release suffix
+  (e.g. `0.10.0-dev`) until the release-prep commit finalizes it. A
+  consumer pinning an untagged commit then at least sees the bump in
+  the package hash instead of a silent same-version surface change.
+- **Breaking changes go under `### Changed (BREAKING)`** in
+  CHANGELOG.md, with a migration note. A `minimum_zig_version` bump is
+  a breaking change: both this project and its consumers chase Zig
+  master, and a floor move is exactly as build-breaking as an API
+  rename.
+- **When a config field's meaning changes incompatibly, rename it**
+  (or add a new field and deprecate the old one) so consumers get a
+  compile error, not a silent behavior change. Avoid `?T` where `null`
+  would have to mean both "not configured" and "feature off" — spell
+  the states out in a union/enum, as `Server.SourceRateLimit` does.
 
 ## Style
 

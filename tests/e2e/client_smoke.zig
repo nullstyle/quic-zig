@@ -79,12 +79,14 @@ test "Client.connect rejects empty SNI" {
 }
 
 test "Client.connect rejects a ca_pem it cannot honor (no silent system-store downgrade)" {
-    // H2: a non-null ca_pem for the auto-built context is not wired
-    // into BoringSSL. It must be rejected, not silently ignored while
-    // verification falls back to the system store — otherwise an
-    // embedder believes they pinned a CA they did not.
+    // H2 (updated for 0.10.0): ca_pem is now wired into the
+    // auto-built context, so the failure mode shifts from "declared
+    // but unimplemented" to "the bundle must actually parse". A
+    // bundle BoringSSL cannot parse must fail `connect` — not
+    // silently fall back to the system store, which would leave the
+    // embedder believing they pinned a CA they did not.
     const protos = [_][]const u8{"hq-test"};
-    try std.testing.expectError(quic_zig.Client.Error.InvalidConfig, quic_zig.Client.connect(.{
+    try std.testing.expectError(quic_zig.Client.Error.InvalidPem, quic_zig.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "example.com",
         .alpn_protocols = &protos,

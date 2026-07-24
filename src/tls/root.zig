@@ -26,6 +26,10 @@ pub const resumption_state = @import("resumption_state.zig");
 /// their server loop and call `consume` per accepted early-data
 /// connection — see module docstring for the recommended workflow.
 pub const anti_replay = @import("anti_replay.zig");
+/// PEM-from-memory credential installation: trust-anchor pinning
+/// (`Client.Config.ca_pem` / `Server.Config.client_ca_pem`) and the
+/// client-presented mTLS identity (`Client.Config.client_cert_pem`).
+pub const pem = @import("pem.zig");
 /// Re-export of `level.EncryptionLevel` — Initial / 0-RTT / Handshake / 1-RTT.
 pub const EncryptionLevel = level.EncryptionLevel;
 /// Re-export of `level.Direction` — read vs. write side of a derived secret.
@@ -49,4 +53,5 @@ test {
     _ = early_data_context;
     _ = resumption_state;
     _ = anti_replay;
+    _ = pem;
 }

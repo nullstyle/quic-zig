@@ -28,15 +28,15 @@
 //!
 //! DoS posture
 //! -----------
-//! Three opt-in gates harden Initial-driven slot creation; each is
-//! null in `Config` by default and surfaces a distinct
-//! `FeedOutcome` variant when it fires.
+//! Three gates harden Initial-driven slot creation; each surfaces a
+//! distinct `FeedOutcome` variant when it fires.
 //!
-//! 1. `Config.max_initials_per_source_per_window` enables a
-//!    per-source-address token bucket. When the cap is exceeded,
-//!    fresh Initials from that source are dropped without state, so
-//!    an attacker spraying Initials from a single address cannot
-//!    exhaust the slot table or the TLS context.
+//! 1. `Config.initial_source_rate_limit` drives a per-source-address
+//!    token bucket (on by default at the recommended open-internet
+//!    cap). When the cap is exceeded, fresh Initials from that
+//!    source are dropped without state, so an attacker spraying
+//!    Initials from a single address cannot exhaust the slot table
+//!    or the TLS context.
 //! 2. `Config.retry_token_key` enables stateless Retry-based source
 //!    validation (RFC 9000 §8.1.2). The first Initial from a peer
 //!    earns a Retry packet bound to its address; until the peer
@@ -145,7 +145,7 @@ const LogEventImpl = union(enum) {
     /// The per-source rate limiter rejected an Initial. `recent_count`
     /// is the source's tally inside the current window at the moment
     /// of rejection, surfaced so embedders can tune
-    /// `max_initials_per_source_per_window`.
+    /// `initial_source_rate_limit`.
     feed_rate_limited: struct { peer: Address, recent_count: u32 },
     /// A Retry packet was successfully minted and queued for `peer`.
     /// `scid_len` is the length of the server-issued SCID embedded in
@@ -255,7 +255,7 @@ const MetricsSnapshotImpl = struct {
     feeds_initial_too_small: u64,
     /// Non-v1 long-header datagrams that would have triggered a
     /// Version Negotiation response but were dropped because the
-    /// per-source VN rate limit (`max_vn_per_source_per_window`)
+    /// per-source VN rate limit (`vn_source_rate_limit`)
     /// fired. A subset of `feeds_dropped`. Spiking values point at
     /// VN-flood probes.
     feeds_vn_rate_limited: u64,
@@ -421,7 +421,7 @@ const SourceRateEntry = struct {
     window_start_us: u64,
     /// Version-Negotiation responses attributed to this source within
     /// the current VN window. Gated by
-    /// `Config.max_vn_per_source_per_window`.
+    /// `Config.vn_source_rate_limit`.
     vn_count: u32 = 0,
     /// Wall-clock microseconds when the current VN window started.
     vn_window_start_us: u64 = 0,
@@ -479,7 +479,40 @@ pub const PreferredAddressConfig = struct {
     ipv6: ?std.Io.net.Ip6Address = null,
 };
 
+/// Three-state per-source rate-limiter configuration, re-exported as
+/// `Server.SourceRateLimit`. A tagged union instead of `?u32` so
+/// "I didn't configure this" (`.default` — the library-recommended
+/// cap applies) and "turn the protection off" (`.disabled`) are
+/// spelled differently: a consumer mirroring the old `null` default
+/// cannot silently disable a protection the library turned on.
+const SourceRateLimitImpl = union(enum) {
+    /// Apply the library-recommended cap for this limiter (see the
+    /// `default_*_source_rate_cap` constants on `Config`).
+    default,
+    /// Explicitly disable the limiter.
+    disabled,
+    /// Explicit cap per `source_rate_window_us` window. Zero fails
+    /// `Server.init` with `InvalidConfig`.
+    limit: u32,
+
+    /// Resolve to the effective cap: null means the limiter is off.
+    pub fn resolve(self: SourceRateLimitImpl, default_cap: u32) ?u32 {
+        return switch (self) {
+            .default => default_cap,
+            .disabled => null,
+            .limit => |cap| cap,
+        };
+    }
+};
+
 const ConfigImpl = struct {
+    /// Library-recommended open-internet cap backing
+    /// `initial_source_rate_limit = .default`.
+    pub const default_initial_source_rate_cap: u32 = 32;
+    /// Library-recommended open-internet cap backing
+    /// `vn_source_rate_limit = .default`.
+    pub const default_vn_source_rate_cap: u32 = 8;
+
     /// Wall-clock allocator used for the connection table and any
     /// transient per-server allocations. Each `Connection` allocates
     /// from this allocator as well.
@@ -490,6 +523,20 @@ const ConfigImpl = struct {
     /// these bytes alive for the lifetime of the server.
     tls_cert_pem: []const u8,
     tls_key_pem: []const u8,
+
+    /// Optional CA bundle (PEM, one or more certificates) that turns
+    /// on mTLS: when set, the auto-built TLS context **requires** a
+    /// client certificate and verifies it against exactly these
+    /// roots — a client that presents no certificate, or one not
+    /// chaining to this bundle, fails the handshake. Off by default
+    /// (`null`): servers do not verify clients. Only consulted when
+    /// `tls_context_override` is null — an override context owns its
+    /// own verification posture, and combining the two fails
+    /// `Server.init` with `InvalidConfig`. Like `tls_cert_pem`, the
+    /// caller must keep the bytes alive for the lifetime of the
+    /// server: `replaceTlsContext(.{ .pem = ... })` re-installs the
+    /// same bundle on the replacement context.
+    client_ca_pem: ?[]const u8 = null,
 
     /// ALPN protocols the server is willing to negotiate, in
     /// preference order. Required — QUIC rejects connections that do
@@ -623,28 +670,37 @@ const ConfigImpl = struct {
 
     /// Optional override of the underlying `boringssl.tls.Context`.
     /// When null, `Server.init` constructs a TLS-1.3-only server
-    /// context with `verify=.none` and the supplied ALPN list. The
-    /// auto-built context's early-data posture is gated by
-    /// `Config.enable_0rtt` (off by default; §5.2 / §12 hardening).
-    /// Pass your own to enable session-ticket callbacks or any other
-    /// TLS-context behavior the auto-built path doesn't expose.
+    /// context with the supplied ALPN list and `verify=.none` —
+    /// unless `client_ca_pem` is set, which turns on required client
+    /// -certificate verification (mTLS). The auto-built context's
+    /// early-data posture is gated by `Config.enable_0rtt` (off by
+    /// default; §5.2 / §12 hardening). Pass your own to enable
+    /// session-ticket callbacks or any other TLS-context behavior the
+    /// auto-built path doesn't expose; combining an override with
+    /// `client_ca_pem` fails `init` with `InvalidConfig`.
     tls_context_override: ?boringssl.tls.Context = null,
 
-    /// Per-source-address Initial-acceptance cap. Enabled by default at
-    /// 32 (the recommended open-internet value): fresh Initials from a
-    /// source whose recent count is at or above the cap within
+    /// Per-source-address Initial-acceptance cap (was
+    /// `max_initials_per_source_per_window: ?u32` before 0.10.0 —
+    /// renamed so the `null`-disables sentinel could not silently
+    /// switch off a default-on protection). `.default` applies
+    /// `default_initial_source_rate_cap` (32, the recommended
+    /// open-internet value): fresh Initials from a source whose
+    /// recent count is at or above the cap within
     /// `source_rate_window_us` are rejected before any Retry / TLS /
-    /// Connection setup, bounding a per-source Initial flood that would
-    /// otherwise allocate connection state. Datagrams to existing slots
-    /// are unaffected. Set to `null` to disable — e.g. behind a trusted
-    /// front-end that already polices source rate, or when the embedder
-    /// supplies `from = null` (unattributed) datagrams, for which the
-    /// gate is a no-op anyway.
-    max_initials_per_source_per_window: ?u32 = 32,
+    /// Connection setup, bounding a per-source Initial flood that
+    /// would otherwise allocate connection state. Datagrams to
+    /// existing slots are unaffected. Set `.disabled` to opt out —
+    /// e.g. behind a trusted front-end that already polices source
+    /// rate, or when the embedder supplies `from = null`
+    /// (unattributed) datagrams, for which the gate is a no-op
+    /// anyway. `.{ .limit = 0 }` fails `Server.init` with
+    /// `InvalidConfig`.
+    initial_source_rate_limit: SourceRateLimitImpl = .default,
 
-    /// Sliding-window size for `max_initials_per_source_per_window`,
+    /// Sliding-window size for `initial_source_rate_limit`,
     /// in microseconds. Default is one second. Shared by the VN
-    /// rate-limit window (`max_vn_per_source_per_window`).
+    /// rate-limit window (`vn_source_rate_limit`).
     source_rate_window_us: u64 = 1_000_000,
 
     /// Maximum number of distinct source addresses the rate limiter
@@ -652,16 +708,19 @@ const ConfigImpl = struct {
     /// Only consulted when the limiter is enabled.
     source_rate_table_capacity: u32 = 4096,
 
-    /// Per-source-address Version-Negotiation-emission cap. Null
-    /// disables the limiter (every non-v1 long-header packet earns a
-    /// VN response, subject only to the bounded global stateless
-    /// queue). Hardening guide §4.4: a peer flooding non-v1
-    /// long-header probes from a single address can otherwise force
-    /// up to `stateless_response_queue_capacity` outbound bytes per
-    /// drain cycle. Recommended: 8 for open-internet deployments —
-    /// legitimate clients fix their version after one VN response and
-    /// retry with v1.
-    max_vn_per_source_per_window: ?u32 = 8,
+    /// Per-source-address Version-Negotiation-emission cap (was
+    /// `max_vn_per_source_per_window: ?u32` before 0.10.0; renamed
+    /// for the same reason as `initial_source_rate_limit`).
+    /// `.disabled` turns the limiter off (every non-v1 long-header
+    /// packet earns a VN response, subject only to the bounded
+    /// global stateless queue). Hardening guide §4.4: a peer
+    /// flooding non-v1 long-header probes from a single address can
+    /// otherwise force up to `stateless_response_queue_capacity`
+    /// outbound bytes per drain cycle. `.default` applies
+    /// `default_vn_source_rate_cap` (8, the open-internet
+    /// recommendation) — legitimate clients fix their version after
+    /// one VN response and retry with v1.
+    vn_source_rate_limit: SourceRateLimitImpl = .default,
 
     /// 32-byte HMAC key used to mint and validate stateless Retry
     /// tokens (RFC 9000 §8.1.2). When null, Retry is disabled and
@@ -1176,6 +1235,7 @@ pub const Server = struct {
     pub const FeedOutcome = FeedOutcomeImpl;
     pub const StatelessResponse = StatelessResponseImpl;
     pub const TlsReload = TlsReloadImpl;
+    pub const SourceRateLimit = SourceRateLimitImpl;
     pub const Error = ErrorImpl;
     pub const LogEvent = LogEventImpl;
     pub const LogCallback = LogCallbackImpl;
@@ -1202,6 +1262,13 @@ pub const Server = struct {
     /// order. Embedders that need to change the ALPN list across a
     /// reload must use the `.override` variant.
     alpn_protocols: []const []const u8,
+    /// Borrowed mTLS client-CA bundle captured from
+    /// `Config.client_ca_pem` at `init` time (null when mTLS is
+    /// off). Used by `replaceTlsContext({.pem = ...})` to carry the
+    /// verification posture onto the replacement context, so the
+    /// caller must keep the bytes alive for the lifetime of the
+    /// server.
+    client_ca_pem: ?[]const u8,
     transport_params: TransportParams,
     max_concurrent_connections: u32,
     local_cid_len: u8,
@@ -1239,10 +1306,12 @@ pub const Server = struct {
 
     /// Rate limiter state. Empty when the limiter is disabled.
     source_rate_table: std.AutoHashMapUnmanaged(Address, SourceRateEntry) = .empty,
+    /// Resolved `Config.initial_source_rate_limit`. Null means the
+    /// limiter is disabled.
     max_initials_per_source: ?u32,
     source_rate_window_us: u64,
     source_rate_table_capacity: u32,
-    /// Captured `Config.max_vn_per_source_per_window`. Null disables
+    /// Resolved `Config.vn_source_rate_limit`. Null disables
     /// the per-source VN rate limit; otherwise gates VN emission via
     /// the same `source_rate_table` (separate counter pair).
     max_vn_per_source: ?u32,
@@ -1432,12 +1501,19 @@ pub const Server = struct {
         if (config.alpn_protocols.len == 0) return Error.InvalidConfig;
         if (config.local_cid_len == 0 or config.local_cid_len > 20) return Error.InvalidConfig;
         if (config.tls_cert_pem.len == 0 or config.tls_key_pem.len == 0) return Error.InvalidConfig;
-        if (config.max_initials_per_source_per_window) |cap| {
+        if (config.client_ca_pem) |ca| {
+            if (ca.len == 0) return Error.InvalidConfig;
+            // An override context owns its own verification posture;
+            // silently ignoring the bundle would leave the embedder
+            // believing mTLS is on when it is not.
+            if (config.tls_context_override != null) return Error.InvalidConfig;
+        }
+        if (config.initial_source_rate_limit.resolve(Config.default_initial_source_rate_cap)) |cap| {
             if (cap == 0) return Error.InvalidConfig;
             if (config.source_rate_window_us == 0) return Error.InvalidConfig;
             if (config.source_rate_table_capacity == 0) return Error.InvalidConfig;
         }
-        if (config.max_vn_per_source_per_window) |cap| {
+        if (config.vn_source_rate_limit.resolve(Config.default_vn_source_rate_cap)) |cap| {
             if (cap == 0) return Error.InvalidConfig;
             if (config.source_rate_window_us == 0) return Error.InvalidConfig;
             if (config.source_rate_table_capacity == 0) return Error.InvalidConfig;
@@ -1570,6 +1646,12 @@ pub const Server = struct {
             });
             errdefer tls_ctx.deinit();
             try tls_ctx.loadCertChainAndKey(config.tls_cert_pem, config.tls_key_pem);
+            // mTLS: require and verify a client certificate against
+            // the embedder's pinned roots. Rejected during validation
+            // when combined with `tls_context_override`.
+            if (config.client_ca_pem) |ca| {
+                try tls_mod.pem.installTrustAnchors(tls_ctx, ca, .require_peer_cert);
+            }
             // Hardening §5.2 / RFC 9001 §5.6: when the embedder
             // installs an `AntiReplayTracker`, hook BoringSSL's
             // pre-resumption early-data callback so duplicate 0-RTT
@@ -1619,6 +1701,7 @@ pub const Server = struct {
             .tls_ctx = tls_ctx,
             .owns_tls = owns_tls,
             .alpn_protocols = config.alpn_protocols,
+            .client_ca_pem = config.client_ca_pem,
             .transport_params = resolved_transport_params,
             .max_concurrent_connections = config.max_concurrent_connections,
             .local_cid_len = resolved_local_cid_len,
@@ -1636,8 +1719,12 @@ pub const Server = struct {
             .slots = slots,
             .cid_table = cid_table,
             .source_rate_table = .empty,
-            .max_initials_per_source = config.max_initials_per_source_per_window,
-            .max_vn_per_source = config.max_vn_per_source_per_window,
+            .max_initials_per_source = config.initial_source_rate_limit.resolve(
+                Config.default_initial_source_rate_cap,
+            ),
+            .max_vn_per_source = config.vn_source_rate_limit.resolve(
+                Config.default_vn_source_rate_cap,
+            ),
             .source_rate_window_us = config.source_rate_window_us,
             .source_rate_table_capacity = config.source_rate_table_capacity,
             .retry_state_table = .empty,
@@ -2404,11 +2491,20 @@ pub const Server = struct {
     ///
     /// Errors:
     ///   - `OutOfMemory`: appending to `draining_tls_contexts`.
-    ///   - `boringssl.tls.Error.*` / `InvalidConfig`: only the
+    ///   - `boringssl.tls.Error.*` / `InvalidConfig`: from the
     ///     `.pem` variant — propagated from
-    ///     `Context.initServer`/`loadCertChainAndKey`. The Server is
-    ///     left untouched on error: the current context, slot table,
-    ///     and draining list are all unchanged.
+    ///     `Context.initServer`/`loadCertChainAndKey`/the mTLS and
+    ///     anti-replay re-installs carried over from `init`.
+    ///   - `InvalidConfig`: from the `.override` variant when this
+    ///     Server was initialized with `client_ca_pem` — mirroring
+    ///     the `Server.init` rule, because an adopted context would
+    ///     silently drop the required-client-cert posture. mTLS
+    ///     servers rotate via `.pem`. On this error the supplied
+    ///     context was NOT consumed: ownership stays with the
+    ///     caller.
+    ///
+    /// The Server is left untouched on every error: the current
+    /// context, slot table, and draining list are all unchanged.
     pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
         var new_ctx: boringssl.tls.Context = switch (reload) {
             .pem => |pem| blk: {
@@ -2422,9 +2518,38 @@ pub const Server = struct {
                 });
                 errdefer ctx.deinit();
                 try ctx.loadCertChainAndKey(pem.cert_pem, pem.key_pem);
+                // Carry the init-time mTLS posture onto the
+                // replacement context — a cert rotation must not
+                // silently stop verifying clients.
+                if (self.client_ca_pem) |ca| {
+                    try tls_mod.pem.installTrustAnchors(ctx, ca, .require_peer_cert);
+                }
+                // Same for the 0-RTT anti-replay hook: `Server.init`
+                // installs it on the original context; a rotated
+                // context that re-enables early data without it would
+                // silently accept replayed 0-RTT flights for every
+                // ticket minted after the swap (RFC 9001 §5.6 /
+                // hardening §5.2).
+                if (self.enable_0rtt) {
+                    if (self.early_data_anti_replay) |tracker| {
+                        try ctx.setAllowEarlyDataCallback(
+                            antiReplayEarlyDataTrampoline,
+                            @ptrCast(tracker),
+                        );
+                    }
+                }
                 break :blk ctx;
             },
-            .override => |ctx| ctx,
+            // Mirror the `Server.init` rule that rejects
+            // `client_ca_pem` + `tls_context_override`: an adopted
+            // context owns its own verification posture, and adopting
+            // one while this Server is configured for mTLS would
+            // silently stop verifying clients (and flip-flop back on
+            // a later `.pem` reload). mTLS servers rotate via `.pem`.
+            .override => |ctx| blk: {
+                if (self.client_ca_pem != null) return Error.InvalidConfig;
+                break :blk ctx;
+            },
         };
         // From this point on the new context is logically the
         // Server's. If the bookkeeping below fails we have to deinit
@@ -4188,24 +4313,58 @@ test "Server.init validates configuration" {
         .transport_params = .{},
     }));
 
-    // Source rate limiter enabled with cap=0.
+    // Source rate limiter enabled with an explicit cap of 0.
     try std.testing.expectError(Server.Error.InvalidConfig, Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = "stub",
         .tls_key_pem = "stub",
         .alpn_protocols = &protos,
-        .max_initials_per_source_per_window = 0,
+        .initial_source_rate_limit = .{ .limit = 0 },
         .transport_params = .{},
     }));
 
-    // Source rate limiter enabled with window=0.
+    // Source rate limiter enabled with window=0 — the default-on
+    // limiter alone must be enough to trip this.
     try std.testing.expectError(Server.Error.InvalidConfig, Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = "stub",
         .tls_key_pem = "stub",
         .alpn_protocols = &protos,
-        .max_initials_per_source_per_window = 32,
         .source_rate_window_us = 0,
+        .transport_params = .{},
+    }));
+
+    // VN limiter with an explicit cap of 0.
+    try std.testing.expectError(Server.Error.InvalidConfig, Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = "stub",
+        .tls_key_pem = "stub",
+        .alpn_protocols = &protos,
+        .vn_source_rate_limit = .{ .limit = 0 },
+        .transport_params = .{},
+    }));
+
+    // mTLS bundle combined with a context override: the override owns
+    // its own verification posture, so the bundle would be silently
+    // ignored — reject instead. (A real override context is not
+    // needed; validation runs before any TLS work.)
+    try std.testing.expectError(Server.Error.InvalidConfig, Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = "stub",
+        .tls_key_pem = "stub",
+        .alpn_protocols = &protos,
+        .client_ca_pem = "stub",
+        .tls_context_override = .{ .inner = undefined, .mode = .server },
+        .transport_params = .{},
+    }));
+
+    // Empty mTLS bundle.
+    try std.testing.expectError(Server.Error.InvalidConfig, Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = "stub",
+        .tls_key_pem = "stub",
+        .alpn_protocols = &protos,
+        .client_ca_pem = "",
         .transport_params = .{},
     }));
 

@@ -19,6 +19,17 @@ pub const test_cert_pem = @embedFile("../data/test_cert.pem");
 /// Matching private key for `test_cert_pem`.
 pub const test_key_pem = @embedFile("../data/test_key.pem");
 
+/// Second self-signed certificate with the same profile (EC P-256,
+/// CA:TRUE, SAN localhost/127.0.0.1) but a distinct key, so mTLS
+/// tests can present an identity that does NOT chain to
+/// `test_cert_pem`. Regenerate with tools/gen-test-certs.sh.
+pub const test_untrusted_cert_pem = @embedFile("../data/test_untrusted_cert.pem");
+
+/// Matching private key for `test_untrusted_cert_pem`. Also serves
+/// as the "well-formed but wrong key" fixture for KeyMismatch tests
+/// against `test_cert_pem`.
+pub const test_untrusted_key_pem = @embedFile("../data/test_untrusted_key.pem");
+
 /// Reasonable defaults for smoke tests that don't care about
 /// specific transport-parameter shapes. Mirrors the values the
 /// QNS endpoint advertises by default.

@@ -1,4 +1,28 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const manifest = @import("build.zig.zon");
+
+// Zig's build runner parses `minimum_zig_version` from build.zig.zon
+// but never compares it against the running compiler, so an
+// out-of-floor toolchain otherwise fails with an unexplained compile
+// error somewhere inside the tree — usually inside a vendored
+// dependency, from a consumer's point of view. This assert is the
+// enforcement, and it runs for dependency builds too, so downstream
+// projects get the same diagnostic. Floor bumps are recorded as
+// breaking changes in CHANGELOG.md.
+comptime {
+    const required = std.SemanticVersion.parse(manifest.minimum_zig_version) catch
+        @compileError("build.zig.zon minimum_zig_version is not valid semver: " ++
+            manifest.minimum_zig_version);
+    if (builtin.zig_version.order(required) == .lt) {
+        @compileError(std.fmt.comptimePrint(
+            "quic-zig requires zig {s} or newer (build.zig.zon minimum_zig_version); " ++
+                "this build is running zig {s}. Upgrade the toolchain, or pin a quic-zig " ++
+                "release whose CHANGELOG declares support for yours.",
+            .{ manifest.minimum_zig_version, builtin.zig_version_string },
+        ));
+    }
+}
 
 fn parseSanitizeC(value: []const u8) std.zig.SanitizeC {
     if (std.mem.eql(u8, value, "off")) return .off;
@@ -13,6 +37,61 @@ fn sanitizeCOption(mode: std.zig.SanitizeC) []const u8 {
         .trap => "trap",
         .full => "full",
     };
+}
+
+/// Options forwarded into the boringssl_zig dependency. Each is null
+/// when the user didn't pass it, and an unpassed option is NOT
+/// forwarded: `b.dependency` memoizes on the exact args, so passing a
+/// default explicitly would split boringssl into duplicate compile
+/// graphs (and break `tls_context_override` type identity for
+/// consumers of the exported `boringssl` module).
+const BoringsslForward = struct {
+    sanitize_c: ?std.zig.SanitizeC,
+    /// "zig" builds BoringSSL from source; "cmake" links the
+    /// prebuilt archives under boringssl-zig's vendor tree.
+    source: ?[]const u8,
+    /// With source="cmake": which vendor/boringssl-prebuilt/<dir> to
+    /// link. Resolved to "native" when only `source` was passed.
+    prebuilt_target: ?[]const u8,
+};
+
+fn boringsslDependency(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    fwd: BoringsslForward,
+) *std.Build.Dependency {
+    // `b.dependency`'s args struct is comptime-shaped, so every
+    // combination of forwarded options is its own call site.
+    if (fwd.source) |src| {
+        const prebuilt = fwd.prebuilt_target orelse "native";
+        if (fwd.sanitize_c) |mode| {
+            return b.dependency("boringssl_zig", .{
+                .target = target,
+                .optimize = optimize,
+                .@"sanitize-c" = sanitizeCOption(mode),
+                .@"boringssl-source" = src,
+                .@"boringssl-target" = prebuilt,
+            });
+        }
+        return b.dependency("boringssl_zig", .{
+            .target = target,
+            .optimize = optimize,
+            .@"boringssl-source" = src,
+            .@"boringssl-target" = prebuilt,
+        });
+    }
+    if (fwd.sanitize_c) |mode| {
+        return b.dependency("boringssl_zig", .{
+            .target = target,
+            .optimize = optimize,
+            .@"sanitize-c" = sanitizeCOption(mode),
+        });
+    }
+    return b.dependency("boringssl_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
 }
 
 // Build-mode policy (hardening guide §3.1).
@@ -45,17 +124,40 @@ pub fn build(b: *std.Build) void {
         "Override C/UB sanitizer mode for quic-zig and boringssl-zig modules: off, trap, or full",
     )) |mode| parseSanitizeC(mode) else null;
 
-    const boringssl_dep = if (sanitize_c) |mode|
-        b.dependency("boringssl_zig", .{
-            .target = target,
-            .optimize = optimize,
-            .@"sanitize-c" = sanitizeCOption(mode),
-        })
-    else
-        b.dependency("boringssl_zig", .{
-            .target = target,
-            .optimize = optimize,
-        });
+    // Pass-throughs for boringssl-zig's own build options, so a
+    // consumer can reach the prebuilt-BoringSSL escape hatch (283 C++
+    // TUs avoided) without depending on boringssl-zig directly.
+    const bssl_source = b.option(
+        []const u8,
+        "boringssl-source",
+        "Forwarded to boringssl_zig: 'zig' compiles BoringSSL from source (default), 'cmake' links its vendor/ prebuilt archives",
+    );
+    if (bssl_source) |src| {
+        if (!std.mem.eql(u8, src, "zig") and !std.mem.eql(u8, src, "cmake")) {
+            std.debug.panic("invalid -Dboringssl-source value '{s}' (expected zig or cmake)", .{src});
+        }
+    }
+    const bssl_prebuilt_target = b.option(
+        []const u8,
+        "boringssl-target",
+        "Forwarded to boringssl_zig: with -Dboringssl-source=cmake, selects vendor/boringssl-prebuilt/<dir> (default: native)",
+    );
+    // Upstream only consults `boringssl-target` in cmake mode, so a
+    // target passed without `-Dboringssl-source=cmake` would be
+    // silently ignored — the user asked for a specific prebuilt and
+    // would get the full from-source build instead. Fail loudly.
+    if (bssl_prebuilt_target != null and
+        (bssl_source == null or !std.mem.eql(u8, bssl_source.?, "cmake")))
+    {
+        std.debug.panic("-Dboringssl-target requires -Dboringssl-source=cmake", .{});
+    }
+    const bssl_fwd: BoringsslForward = .{
+        .sanitize_c = sanitize_c,
+        .source = bssl_source,
+        .prebuilt_target = bssl_prebuilt_target,
+    };
+
+    const boringssl_dep = boringsslDependency(b, target, optimize, bssl_fwd);
     const boringssl_mod = boringssl_dep.module("boringssl");
 
     const quic_zig_mod = b.addModule("quic_zig", .{
@@ -80,9 +182,17 @@ pub fn build(b: *std.Build) void {
     // Single-source the library version from build.zig.zon so `version()`
     // can't drift from the package manifest (it silently did: 0.2.0 vs 0.3.0).
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    build_options.addOption([]const u8, "version", manifest.version);
     const build_options_mod = build_options.createModule();
     quic_zig_mod.addImport("build_options", build_options_mod);
+
+    // Everything below is development-only surface: test suites, the
+    // QNS endpoint, examples, docs, interop tooling, benchmarks. When
+    // quic-zig runs as a dependency (`pkg_hash` is empty only for the
+    // root package), stop here — consumers need only the module graph
+    // above, and the published archive deliberately omits the dev
+    // trees (see `.paths` in build.zig.zon).
+    if (b.pkg_hash.len != 0) return;
 
     const test_step = b.step("test", "Run quic_zig tests");
 
@@ -306,17 +416,7 @@ pub fn build(b: *std.Build) void {
         .ReleaseFast
     else
         .ReleaseSafe;
-    const bench_boringssl_dep = if (sanitize_c) |mode|
-        b.dependency("boringssl_zig", .{
-            .target = target,
-            .optimize = bench_optimize,
-            .@"sanitize-c" = sanitizeCOption(mode),
-        })
-    else
-        b.dependency("boringssl_zig", .{
-            .target = target,
-            .optimize = bench_optimize,
-        });
+    const bench_boringssl_dep = boringsslDependency(b, target, bench_optimize, bssl_fwd);
     const bench_boringssl_mod = bench_boringssl_dep.module("boringssl");
 
     const bench_quic_zig_mod = b.createModule(.{

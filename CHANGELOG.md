@@ -7,6 +7,93 @@ changes.
 
 ## [Unreleased]
 
+Consumer-feedback release (thanks to the capnp-zig team for a detailed
+downstream audit): the private-CA / mTLS gap is closed, the build is
+lighter to consume, and the release/versioning discipline consumers
+asked for is now written down in CONTRIBUTING.md ("Releases"). The
+manifest version is `0.10.0-dev` from the first breaking change below
+so untagged pins see the bump in the package hash.
+
+### Added
+
+- **Private-CA and mTLS support through the wrappers, no BoringSSL
+  types required.** `Client.Config.ca_pem` is now wired: it pins the
+  supplied PEM bundle as the only trust anchors (replacing, not
+  augmenting, the system store) while keeping hostname/identity
+  verification against `server_name`. New `Client.Config.client_cert_pem`
+  / `client_key_pem` present a client certificate when the server
+  requests one, and new `Server.Config.client_ca_pem` makes the server
+  require and verify client certificates against a pinned bundle
+  (`SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT`), including
+  across `replaceTlsContext(.{ .pem = ... })` rotations. Backed by the
+  new `tls.pem` module (`installTrustAnchors` / `installClientIdentity`)
+  and covered end-to-end by `tests/e2e/tls_verify_e2e.zig` — the first
+  wrapper handshakes in the suite that run with verification ON.
+  Negative coverage includes SAN mismatch, a server chaining to a
+  different root, a missing client cert, an *untrusted* client cert
+  (verification, not just presence), rotation carry-over, and the
+  malformed-PEM error paths. Hardening details: pinned clients set
+  `SSL_CTX_set_reverify_on_resume` so resumed sessions cannot inherit
+  a different trust posture; a PEM bundle with a malformed block
+  after valid certificates fails with `InvalidPem` instead of
+  silently installing a prefix of the roots
+  (`PEM_R_NO_START_LINE`-based end-of-input detection); and
+  `replaceTlsContext(.{ .override = ... })` is rejected with
+  `InvalidConfig` while `client_ca_pem` is configured, because an
+  adopted context would silently drop the required-client-cert
+  posture (mTLS servers rotate via `.pem`).
+- `build.zig` now forwards boringssl-zig's `-Dboringssl-source` and
+  `-Dboringssl-target` options (with `-Dboringssl-target` rejected
+  unless `-Dboringssl-source=cmake`, instead of being silently
+  ignored). Caveat: the boringssl-zig package archive quic-zig pins
+  does not ship the `vendor/` prebuilt archives, so cmake mode
+  currently requires a boringssl-zig checkout with the prebuilts
+  populated (`just boringssl-cmake` upstream) wired in as a path
+  dependency; the forwarding makes quic-zig transparent to that
+  setup rather than the blocker.
+- `build.zig` enforces `minimum_zig_version` with a `comptime` assert
+  (Zig's build runner parses the field but never checks it). An
+  out-of-floor toolchain now gets a one-line diagnostic naming both
+  versions — in dependency builds too — instead of an unexplained
+  compile error inside the tree.
+
+### Changed (BREAKING)
+
+- `Server.Config.max_initials_per_source_per_window: ?u32 = 32` and
+  `max_vn_per_source_per_window: ?u32 = 8` are renamed to
+  `initial_source_rate_limit` and `vn_source_rate_limit`, typed as the
+  new `Server.SourceRateLimit` union: `.default` (library-recommended
+  cap; the new `Config.default_initial_source_rate_cap`/
+  `default_vn_source_rate_cap` constants), `.disabled`, or
+  `.{ .limit = n }`. Rationale: when 0.3.0 turned the Initial limiter
+  on by default, `null` silently inverted from "harmless unset" to
+  "explicitly disable a DoS mitigation", and a downstream consumer
+  mirroring the old default shipped exactly that misconfiguration.
+  The rename makes every stale caller a compile error; the union makes
+  "unset" and "off" different spellings. Migration:
+  `= null` → `= .disabled`; `= 32` (or any explicit cap) →
+  `= .{ .limit = 32 }`; leave the field out to keep the defaults.
+- The published package archive no longer ships the `bench/`, `docs/`,
+  `interop/`, `tests/`, and `tools/` trees, and `build.zig` registers
+  its development steps (tests, QNS endpoint, examples, docs, bench,
+  interop tooling) only when quic-zig is the root package. Consumers
+  fetch and configure just the module graph. Building the dev steps
+  requires a git checkout — which is where they were run anyway.
+
+### Fixed
+
+- `Client.Config.ca_pem` no longer rejects every non-null value with
+  `error.InvalidConfig` (the 0.3.0 "trap field"). The only remaining
+  `InvalidConfig` cases are genuinely contradictory configs: `ca_pem`
+  with `insecure_skip_verify`, credential fields combined with
+  `tls_context_override`, an empty bundle, or a cert/key half-pair.
+  (An unparseable non-empty bundle fails with `InvalidPem`.)
+- `Server.replaceTlsContext(.{ .pem = ... })` re-installs the 0-RTT
+  anti-replay callback (`Config.early_data_anti_replay`) on the
+  replacement context. Previously a hot cert rotation on a 0-RTT
+  server silently disconnected TLS-layer replay protection for every
+  ticket minted after the swap (RFC 9001 §5.6).
+
 ## [0.9.0] - 2026-07-09
 
 The application-readiness release: every gap between "protocol-complete"

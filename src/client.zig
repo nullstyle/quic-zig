@@ -84,22 +84,42 @@ const ConfigImpl = struct {
     /// or keylog wiring (see the QNS endpoint).
     tls_context_override: ?boringssl.tls.Context = null,
 
-    /// Optional CA bundle (PEM) for verifying the server's certificate
-    /// against a specific set of roots. NOT YET wired into the
-    /// auto-built context: a non-null value is rejected with
-    /// `error.InvalidConfig` rather than silently ignored. (It
-    /// previously flipped verification to the system trust store while
-    /// discarding these bytes — so an embedder pinning a private CA got
-    /// system-store verification instead, the worst of both.) To pin a
-    /// private CA today, build your own `tls_context_override`.
+    /// Optional CA bundle (PEM, one or more certificates) for
+    /// verifying the server's certificate against a specific set of
+    /// roots — the private-CA / service-mesh posture. When set, the
+    /// auto-built context trusts **only** these roots (they replace,
+    /// not augment, the system store) and the server certificate's
+    /// identity is checked against `server_name` as usual. The bytes
+    /// are parsed during `connect` and need not outlive the call.
+    /// Combining this with `insecure_skip_verify` or with
+    /// `tls_context_override` (which owns its own verification
+    /// posture) fails with `Error.InvalidConfig`, as does an empty
+    /// bundle; a non-empty bundle BoringSSL cannot parse fails with
+    /// `Error.InvalidPem`. Resumed sessions are re-verified against
+    /// these roots (`SSL_CTX_set_reverify_on_resume`), so a ticket
+    /// captured under a different trust posture cannot skip the pin.
     ca_pem: ?[]const u8 = null,
+
+    /// Optional PEM certificate chain the client presents when the
+    /// server requests one (mTLS). The first certificate is the
+    /// end-entity (leaf); any subsequent PEM certs are intermediates.
+    /// Must be set together with `client_key_pem` — one without the
+    /// other fails with `Error.InvalidConfig`, as does combining
+    /// either with `tls_context_override` (override-mode embedders
+    /// load their own identity). The bytes are parsed during
+    /// `connect` and need not outlive the call.
+    client_cert_pem: ?[]const u8 = null,
+    /// PEM private key matching the leaf in `client_cert_pem`. See
+    /// `client_cert_pem` for the pairing and lifetime rules.
+    client_key_pem: ?[]const u8 = null,
 
     /// Skip server-certificate verification entirely (`verify = .none`).
     /// Off by default: the auto-built client context verifies against
-    /// the system trust store. Only enable this for test/interop setups
-    /// with self-signed peers (RFC 9001 §4.1.1 permits them). It
-    /// disables protection against server impersonation, so never set
-    /// it for a client that talks to an untrusted network.
+    /// the system trust store (or against `ca_pem` when set). Only
+    /// enable this for test/interop setups with self-signed peers
+    /// (RFC 9001 §4.1.1 permits them). It disables protection against
+    /// server impersonation, so never set it for a client that talks
+    /// to an untrusted network.
     insecure_skip_verify: bool = false,
 
     /// If non-null, the freshly-built `Connection` is wired up to
@@ -322,14 +342,32 @@ pub const Client = struct {
         if (config.alpn_protocols.len == 0) return Error.InvalidConfig;
         if (config.initial_dcid_len < 8 or config.initial_dcid_len > 20) return Error.InvalidConfig;
         if (config.local_cid_len == 0 or config.local_cid_len > 20) return Error.InvalidConfig;
-        // A CA bundle for the auto-built context is not yet wired into
-        // BoringSSL (loading PEM-from-memory as trust roots needs an API
-        // we don't surface here). Reject it rather than silently verify
-        // against the system store while discarding the caller's roots —
-        // that would make an embedder believe they pinned a CA they did
-        // not. Pin a private CA via `tls_context_override` instead.
-        if (config.tls_context_override == null and config.ca_pem != null) {
+        // TLS credential fields only apply to the auto-built context;
+        // an override context owns its own trust anchors and identity.
+        // Rejecting the combination keeps the old failure mode (a CA
+        // the embedder believes is pinned but is not) impossible.
+        if (config.tls_context_override != null) {
+            if (config.ca_pem != null) return Error.InvalidConfig;
+            if (config.client_cert_pem != null or config.client_key_pem != null) {
+                return Error.InvalidConfig;
+            }
+        }
+        // Pinned roots and no-verification are contradictory postures.
+        if (config.ca_pem != null and config.insecure_skip_verify) {
             return Error.InvalidConfig;
+        }
+        if (config.ca_pem) |pem_bytes| {
+            if (pem_bytes.len == 0) return Error.InvalidConfig;
+        }
+        // The mTLS identity is a pair: a chain without its key (or the
+        // reverse) can never complete a CertificateVerify.
+        if ((config.client_cert_pem == null) != (config.client_key_pem == null)) {
+            return Error.InvalidConfig;
+        }
+        if (config.client_cert_pem) |chain| {
+            if (chain.len == 0 or config.client_key_pem.?.len == 0) {
+                return Error.InvalidConfig;
+            }
         }
         // The version drives the Initial-key salt + HKDF labels
         // (RFC 9001 §5.2 v1 / RFC 9368 §3.3.1 v2) — only the wire
@@ -356,11 +394,18 @@ pub const Client = struct {
         } else {
             // Secure by default: verify against the system trust store
             // unless the embedder explicitly opts out with
-            // `insecure_skip_verify` (test/interop posture). `ca_pem` is
-            // rejected up front in the validation block above, so it can
-            // no longer silently downgrade to system-store verification.
-            const verify: boringssl.tls.VerifyMode =
-                if (config.insecure_skip_verify) .none else .system;
+            // `insecure_skip_verify` (test/interop posture) or pins
+            // private-CA roots via `ca_pem`. The pinned path starts
+            // from `.none` so the system store is never loaded — the
+            // trust anchors installed below are the only roots — and
+            // `installTrustAnchors` flips the context back to
+            // SSL_VERIFY_PEER.
+            const verify: boringssl.tls.VerifyMode = if (config.insecure_skip_verify)
+                .none
+            else if (config.ca_pem != null)
+                .none
+            else
+                .system;
             // Only enable early-data on the auto-built TLS context
             // when the embedder actually plans to use it (i.e. they
             // supplied a 0-RTT session ticket). This is the §5.2 /
@@ -379,6 +424,26 @@ pub const Client = struct {
             owns_tls = true;
         }
         errdefer if (owns_tls) tls_ctx.deinit();
+
+        // Install the PEM credentials on the auto-built context (both
+        // are rejected up front when combined with an override). The
+        // errdefer above already owns cleanup for these fallible steps.
+        if (owns_tls) {
+            if (config.ca_pem) |pem_bytes| {
+                try tls_mod.pem.installTrustAnchors(tls_ctx, pem_bytes, .verify_peer);
+                // TLS 1.3 resumption skips the Certificate flight and
+                // would inherit whatever verification the ORIGINAL
+                // session ran under. With pinned roots, force BoringSSL
+                // to re-verify the remembered chain (and hostname, via
+                // the per-connection verify param) on every resumption
+                // so a ticket from a different posture can't bypass
+                // the pin.
+                boringssl.raw.zbssl_SSL_CTX_set_reverify_on_resume(tls_ctx.inner, 1);
+            }
+            if (config.client_cert_pem) |chain| {
+                try tls_mod.pem.installClientIdentity(tls_ctx, chain, config.client_key_pem.?);
+            }
+        }
 
         // BoringSSL's hostname API needs a sentinel-terminated
         // string; copy under the caller's allocator. Ownership stays
@@ -580,6 +645,91 @@ test "Client.connect rejects local_cid_len=0" {
         .alpn_protocols = &protos,
         .transport_params = .{},
         .local_cid_len = 0,
+    }));
+}
+
+test "Client.connect rejects ca_pem combined with insecure_skip_verify" {
+    const protos = [_][]const u8{"hq-test"};
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .ca_pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        .insecure_skip_verify = true,
+    }));
+}
+
+test "Client.connect rejects an empty ca_pem bundle" {
+    const protos = [_][]const u8{"hq-test"};
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .ca_pem = "",
+    }));
+}
+
+test "Client.connect rejects a client cert without its key (and vice versa)" {
+    const protos = [_][]const u8{"hq-test"};
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .client_cert_pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+    }));
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .client_key_pem = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+    }));
+}
+
+test "Client.connect rejects credential fields combined with tls_context_override" {
+    // Validation runs before any TLS work, so a context with an
+    // undefined inner pointer is never dereferenced (same trick as
+    // the Server config-validation test).
+    const protos = [_][]const u8{"hq-test"};
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .tls_context_override = .{ .inner = undefined, .mode = .client },
+        .ca_pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+    }));
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .tls_context_override = .{ .inner = undefined, .mode = .client },
+        .client_cert_pem = "x",
+        .client_key_pem = "y",
+    }));
+}
+
+test "Client.connect rejects empty client cert / key strings" {
+    const protos = [_][]const u8{"hq-test"};
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .client_cert_pem = "",
+        .client_key_pem = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+    }));
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .client_cert_pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        .client_key_pem = "",
     }));
 }
 

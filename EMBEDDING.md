@@ -74,7 +74,7 @@ pub fn run(
             .active_connection_id_limit = 4,
         },
         .max_concurrent_connections = 10_000,
-        .max_initials_per_source_per_window = 32,
+        .initial_source_rate_limit = .{ .limit = 32 },
         .retry_token_key = retry_key,
     });
     defer server.deinit();
@@ -152,12 +152,17 @@ packet pacing, or single-threaded application logic, use the raw
 connection cycle below.
 
 The wrapper-built TLS context verifies the server certificate against
-the system trust store by default. For self-signed or test peers, set
+the system trust store by default. To pin a private CA instead —
+the internal-service-mesh posture — pass the PEM bundle as
+`.ca_pem`: the client then trusts exactly those roots (they replace
+the system store) and still checks the certificate's identity
+against `server_name`. For mTLS, additionally set
+`.client_cert_pem` / `.client_key_pem` (the certificate presented
+when the server requests one) and, on the server, set
+`Server.Config.client_ca_pem` to require and verify client
+certificates. For self-signed or test peers, set
 `.insecure_skip_verify = true` in the `Client.connect` config — it turns
-off impersonation protection, so keep it out of production. Pinning a
-private CA to the wrapper-built context is not yet supported (a non-null
-`ca_pem` is rejected, not silently ignored); supply a fully configured
-`tls_context_override` to verify against your own roots.
+off impersonation protection, so keep it out of production.
 
 ## Raw Connection Cycle
 
@@ -322,10 +327,11 @@ Set these deliberately for any deployed server:
 - `max_concurrent_connections`: slot-table cap.
 - `max_connection_memory`: aggregate per-connection cap for peer-driven
   buffers.
-- `max_initials_per_source_per_window` (on by default at 32) and
-  `max_vn_per_source_per_window` (on by default at 8): per-source Initial
-  and Version-Negotiation flood limiters; set to `null` to disable, e.g.
-  behind a trusted front-end that already polices source rate.
+- `initial_source_rate_limit` (on by default at 32) and
+  `vn_source_rate_limit` (on by default at 8): per-source Initial
+  and Version-Negotiation flood limiters; set to `.disabled` to opt
+  out, e.g. behind a trusted front-end that already polices source
+  rate, or `.{ .limit = n }` for an explicit cap.
   `max_datagrams_per_window` and `max_bytes_per_window` are off by
   default — tune to your deployment envelope.
 - `retry_token_key`: enables stateless Retry before allocating a

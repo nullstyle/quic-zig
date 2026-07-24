@@ -3,7 +3,7 @@
 //!
 //! The hardening guide §4.4 calls for two separate VN protections:
 //!
-//!   1. Per-source VN rate limiter (`max_vn_per_source_per_window`).
+//!   1. Per-source VN rate limiter (`vn_source_rate_limit`).
 //!      A single attacker address that sprays non-v1 long-header
 //!      probes is throttled to the configured cap per window.
 //!      Already pinned by `tests/e2e/server_smoke.zig` → "Server VN
@@ -28,7 +28,7 @@
 //!   - 200 distinct fake source addresses each send one VN-eligible
 //!     probe (long-header packet with version != 0x00000001). Per
 //!     source the recent_count stays at 1 — well under any reasonable
-//!     `max_vn_per_source_per_window`. So the per-source limiter is
+//!     `vn_source_rate_limit`. So the per-source limiter is
 //!     NOT the gate that fires.
 //!   - The per-source rate table tracks each address independently
 //!     (`source_rate_table_size` reflects the number of distinct
@@ -89,7 +89,7 @@ test "VN-flood across spoofed sources: per-source table tracks each address inde
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
         // Defaults are fine; spell out the relevant knobs for clarity.
-        .max_vn_per_source_per_window = 8,
+        .vn_source_rate_limit = .{ .limit = 8 },
         .source_rate_window_us = 1_000_000,
         .source_rate_table_capacity = 4096,
     });
@@ -232,7 +232,7 @@ test "VN-flood: 65th distinct source triggers the first global eviction (§4.4 /
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_vn_per_source_per_window = 8,
+        .vn_source_rate_limit = .{ .limit = 8 },
         .source_rate_window_us = 1_000_000,
     });
     defer srv.deinit();

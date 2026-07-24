@@ -120,7 +120,30 @@ test "Server per-source Initial-flood limiter is on by default at 32 (L4)" {
     // Secure default: the limiter is enabled without the embedder
     // opting in. (Enforcement only applies to attributed `from`
     // datagrams; null-source feeds bypass it — see server.zig feed.)
+    try std.testing.expectEqual(
+        @as(?u32, quic_zig.Server.Config.default_initial_source_rate_cap),
+        srv.max_initials_per_source,
+    );
     try std.testing.expectEqual(@as(?u32, 32), srv.max_initials_per_source);
+    // Same posture for the VN-emission limiter: on by default at 8.
+    try std.testing.expectEqual(
+        @as(?u32, quic_zig.Server.Config.default_vn_source_rate_cap),
+        srv.max_vn_per_source,
+    );
+    try std.testing.expectEqual(@as(?u32, 8), srv.max_vn_per_source);
+    // And `.disabled` is the only spelling that turns them off.
+    var srv_off = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .initial_source_rate_limit = .disabled,
+        .vn_source_rate_limit = .disabled,
+    });
+    defer srv_off.deinit();
+    try std.testing.expectEqual(@as(?u32, null), srv_off.max_initials_per_source);
+    try std.testing.expectEqual(@as(?u32, null), srv_off.max_vn_per_source);
 }
 
 test "Server.feed drops non-Initial bytes silently" {
@@ -218,7 +241,7 @@ test "Server source rate limiter trips after the configured cap" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_initials_per_source_per_window = 3,
+        .initial_source_rate_limit = .{ .limit = 3 },
         .source_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -336,7 +359,7 @@ test "Server.feed with unsupported version queues a Version Negotiation packet" 
 }
 
 test "Server VN per-source rate limiter caps VN responses (hardening guide §4.4)" {
-    // Per-source VN-emission cap. After `max_vn_per_source_per_window`
+    // Per-source VN-emission cap. After `vn_source_rate_limit`
     // VN responses to a given source within `source_rate_window_us`,
     // further non-v1 long-header probes from that source are dropped
     // (no VN emitted, queue not bumped). Independent from the Initial
@@ -350,7 +373,7 @@ test "Server VN per-source rate limiter caps VN responses (hardening guide §4.4
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_vn_per_source_per_window = 3,
+        .vn_source_rate_limit = .{ .limit = 3 },
         .source_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -427,8 +450,8 @@ test "Server VN rate limit and Initial rate limit use independent counters" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_initials_per_source_per_window = 2,
-        .max_vn_per_source_per_window = 2,
+        .initial_source_rate_limit = .{ .limit = 2 },
+        .vn_source_rate_limit = .{ .limit = 2 },
         .source_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -1301,7 +1324,7 @@ test "Server log_callback fires for rate_limited and version_negotiated" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_initials_per_source_per_window = 2,
+        .initial_source_rate_limit = .{ .limit = 2 },
         .source_rate_window_us = 1_000_000,
         .log_callback = LogSink.cb,
         .log_user_data = &sink,
@@ -1361,7 +1384,7 @@ test "Server metricsSnapshot tracks counters across feed outcomes" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_initials_per_source_per_window = 2,
+        .initial_source_rate_limit = .{ .limit = 2 },
         .source_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -1412,7 +1435,7 @@ test "Server rateLimitSnapshot reports top offender after cap is hit" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_initials_per_source_per_window = 3,
+        .initial_source_rate_limit = .{ .limit = 3 },
         .source_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -1716,7 +1739,7 @@ test "Server log rate limiter drops events past cap from one source" {
         .transport_params = defaultParams(),
         // Force log events on every call: tiny rate-limit cap so the
         // first feed past it surfaces a `.feed_rate_limited` log.
-        .max_initials_per_source_per_window = 1,
+        .initial_source_rate_limit = .{ .limit = 1 },
         // Cap log emission at 2 per source per window. The first 2
         // log emissions land; subsequent ones drop silently.
         .max_log_events_per_source_per_window = 2,
@@ -1764,7 +1787,7 @@ test "Server log rate limiter is per-source (different sources get fresh budgets
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_initials_per_source_per_window = 1,
+        .initial_source_rate_limit = .{ .limit = 1 },
         .max_log_events_per_source_per_window = 1,
         .source_rate_window_us = 1_000_000,
         .log_callback = LogSink.cb,
@@ -1805,7 +1828,7 @@ test "Server log rate limit window resets after elapsed" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_initials_per_source_per_window = 1,
+        .initial_source_rate_limit = .{ .limit = 1 },
         .max_log_events_per_source_per_window = 1,
         .source_rate_window_us = 1_000_000,
         .log_callback = LogSink.cb,

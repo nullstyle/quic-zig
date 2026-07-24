@@ -634,8 +634,8 @@ test "MUST validate the server certificate chain at the client [RFC9001 §4.7 ¶
     // MUST fail and BoringSSL MUST raise a TLS alert (typically
     // `bad_certificate` 42 or `unknown_ca` 48).
     //
-    // The wrapper-built `Client` only exposes verification via the
-    // `ca_pem != null` flag, which selects `.system`. We pre-build
+    // The wrapper-built `Client` defaults to `.system` verification
+    // (`ca_pem` pins private roots instead). We pre-build
     // the TLS context explicitly here so the assertion chains
     // directly to the public `boringssl.tls.VerifyMode` enum: build
     // a TLS-1.3 client context with `verify = .system`, hand it to

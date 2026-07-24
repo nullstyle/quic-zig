@@ -1,6 +1,12 @@
 .{
     .name = .quic_zig,
-    .version = "0.9.0",
+    // Pre-release of the next minor: 0.10.0 carries breaking public
+    // changes (the Server rate-limiter Config fields were renamed), so
+    // the manifest version moves the moment they land on main — a
+    // consumer pinning an untagged commit sees the bump in the package
+    // hash instead of a silent same-version surface change. The
+    // release-prep commit drops the `-dev` suffix.
+    .version = "0.10.0-dev",
     .fingerprint = 0xe70034831dc6c68c,
     .minimum_zig_version = "0.17.0-dev.1158+1d1193aa7",
     .dependencies = .{
@@ -9,16 +15,15 @@
             .hash = "boringssl_zig-0.6.4-4iEdPG_EAQAatmfvnEyavDt9y1XW-WF5RpkdoMfQtpor",
         },
     },
+    // Consumer-facing archive only. The dev trees (bench/, docs/,
+    // interop/, tests/, tools/) never build downstream — build.zig
+    // returns early for dependency builds — so shipping them was pure
+    // fetch weight.
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "bench",
-        "docs",
         "examples",
-        "interop",
         "src",
-        "tests",
-        "tools",
         "CHANGELOG.md",
         "CONTRIBUTING.md",
         "EMBEDDING.md",

@@ -95,8 +95,10 @@ const quic_zig = @import("quic_zig");
 quic-zig also exports its shared BoringSSL module instance as
 `dep.module("boringssl")` — import it when you need to construct a
 `boringssl.tls.Context` that type-unifies with quic_zig's API, e.g.
-for `Client.Config.tls_context_override` (private-CA pinning, custom
-session-ticket capture).
+for `Client.Config.tls_context_override` (custom session-ticket
+capture, keylog wiring, or any posture the PEM config fields don't
+express — private-CA pinning and mTLS themselves need only
+`ca_pem` / `client_cert_pem` / `client_ca_pem`, no BoringSSL types).
 
 **Toolchain**: quic-zig requires Zig `0.17.0-dev` — it tracks Zig
 master. [`mise.toml`](mise.toml) is the source of truth for the
@@ -218,13 +220,14 @@ Embedders that want a single-threaded application loop can
 use the raw `Connection` cycle described in [EMBEDDING.md](EMBEDDING.md).
 
 `Client.connect` verifies the server certificate against the system
-trust store by default. To talk to a server with a self-signed or
-otherwise untrusted certificate (test and interop setups), set
-`insecure_skip_verify = true` — this disables impersonation protection,
-so never enable it against untrusted networks. Pinning a private CA for
-a wrapper-built context is not yet supplied; build your own
-`tls_context_override` for that (a non-null `ca_pem` is rejected rather
-than silently ignored).
+trust store by default. To pin a private CA, pass the PEM bundle as
+`ca_pem` — the client then trusts exactly those roots. For mTLS, set
+`client_cert_pem` / `client_key_pem` on the client and
+`Server.Config.client_ca_pem` on the server. To talk to a server with
+a self-signed or otherwise untrusted certificate (test and interop
+setups), set `insecure_skip_verify = true` — this disables
+impersonation protection, so never enable it against untrusted
+networks.
 
 ## Production Checklist
 
@@ -258,17 +261,23 @@ The detailed configuration guide is [EMBEDDING.md](EMBEDDING.md).
 
 ## Usage Docs
 
+Links into `docs/`, `interop/`, `tests/`, and `bench/` below are
+absolute because the published package archive ships only the
+consumer-facing files; those trees live in the git repository.
+
 - [EMBEDDING.md](EMBEDDING.md): server, client, raw `Connection`, and
   production configuration.
-- [docs/API_STABILITY.md](docs/API_STABILITY.md): which surfaces are
-  stable vs evolving vs internal, the `ConnectionEvent` forward-compat
-  contract, and the per-draft extension policy (Track-to-RFC vs
-  Experimental) with its sunset mechanics.
-- [interop/README.md](interop/README.md): QUIC interop-runner endpoint
-  and wrapper commands.
-- [tests/conformance/README.md](tests/conformance/README.md):
+- [docs/API_STABILITY.md](https://github.com/nullstyle/quic-zig/blob/main/docs/API_STABILITY.md):
+  which surfaces are stable vs evolving vs internal, the
+  `ConnectionEvent` forward-compat contract, and the per-draft
+  extension policy (Track-to-RFC vs Experimental) with its sunset
+  mechanics.
+- [interop/README.md](https://github.com/nullstyle/quic-zig/blob/main/interop/README.md):
+  QUIC interop-runner endpoint and wrapper commands.
+- [tests/conformance/README.md](https://github.com/nullstyle/quic-zig/blob/main/tests/conformance/README.md):
   RFC-traceable conformance test style and filters.
-- [bench/README.md](bench/README.md): microbenchmark scope and command.
+- [bench/README.md](https://github.com/nullstyle/quic-zig/blob/main/bench/README.md):
+  microbenchmark scope and command.
 - [CONTRIBUTING.md](CONTRIBUTING.md): local workflow and contribution
   expectations.
 
@@ -278,7 +287,8 @@ The detailed configuration guide is [EMBEDDING.md](EMBEDDING.md).
   package.
 - No FIPS validation.
 - Windows is a **tier-1 CI gate for 1.0**: `windows-latest` is blocking on
-  every push / PR. See [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md)
+  every push / PR. See
+  [docs/RELEASE_READINESS.md](https://github.com/nullstyle/quic-zig/blob/main/docs/RELEASE_READINESS.md)
   for the platform tiers and graduation checklist.
 - BBR and large-scale performance tuning remain future work.
 
