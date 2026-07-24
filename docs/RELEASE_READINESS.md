@@ -98,18 +98,23 @@ v0.8.0 is the final pre-RC hardening release. It validates the API-stability
 partition, adds the manual release-blocking fuzz gate, and keeps the actual
 `1.0.0` changelog curation open for the RC/final release.
 
-The v0.8.0 code/docs are staged on `main`, but the tag must wait for a
-completed external/manual `rc-fuzz` pass. Do not treat a cancelled or
-in-harness fuzz run as release evidence. Tag exactly the commit the
-passing run validated.
+**Disposition (2026-07-24): shipped untagged, closed.** The v0.8.0
+code/docs landed on `main` (`4d295d4`) but the rc-fuzz gate was never
+run for that commit, and it has since been superseded by 0.9.0 and the
+0.10.0 line. No retroactive tag is planned; the tag-every-release
+policy (CONTRIBUTING.md "Releases") applies from v0.10.0 onward. This
+item is not awaiting any action.
 
 ## v0.9.0 application-readiness release
 
 v0.9.0 closes the 2026-07 embedding-audit gaps (lifecycle events,
 hostable loops, ordered teardown, wrapper 0-RTT, default-config client
 migration, echo reference examples, autodocs, out-of-tree consumption
-checks — see the CHANGELOG entry). Same gate: a completed `rc-fuzz` pass
-on the release commit before tagging.
+checks — see the CHANGELOG entry).
+
+**Disposition (2026-07-24): shipped untagged, closed.** Same as
+v0.8.0 — the gate was never run for `2aa11ad` and the release is
+superseded. Not awaiting any action.
 
 ### RC/soak criterion toward 1.0
 

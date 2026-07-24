@@ -47,10 +47,13 @@ modes:
   `std.testing.fuzz` site in the unfiltered test binary. It is
   single-instance (see caveats), so it saturates one core; give it a large
   `$ITERS` and let it run.
-- **Pre-release gate.** Before tagging a release candidate, RC-prep release,
-  or final 1.0 release, manually run `.github/workflows/rc-fuzz.yml` with the
-  default `1M` iteration budget or higher. Unlike the weekly fuzz job, this
-  workflow is blocking and must be green before tagging.
+- **Pre-release gate.** Before a release is tagged, a completed green
+  run of `.github/workflows/rc-fuzz.yml` (default `1M` iteration budget
+  or higher) must exist for the release commit. Unlike the weekly fuzz
+  job, this gate is blocking. Anyone — maintainer, contributor, or an
+  agent session — can dispatch it (`gh workflow run rc-fuzz.yml --ref
+  <ref>`) and tag on green; the gate is about the evidence existing,
+  not about who pushes the button.
 
 ### Regression corpus
 
@@ -106,7 +109,14 @@ and generated-artifact locations.
 ## Releases
 
 Downstream projects pin quic-zig by version and hash; these rules exist
-so the version string never lies to them.
+so the version string never lies to them. They constrain the *releases*,
+not the maintainer's time: every mechanical step here (dispatching the
+fuzz gate, prepping the changelog, tagging, pushing) is expected to be
+driven by tooling or agent sessions. The only step that requires the
+maintainer is the decision to cut a release; a session told "cut X.Y.0"
+should be able to run the rest end-to-end. (v0.8.0 and v0.9.0 predate
+this policy and shipped untagged — that's recorded as closed in
+RELEASE_READINESS.md, not an open item.)
 
 - **Every release gets a tag** (`vX.Y.Z`), including hardening and patch
   releases. Only tagged commits are advertised as consumable — a bare
