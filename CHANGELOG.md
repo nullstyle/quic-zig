@@ -138,6 +138,21 @@ so untagged pins see the bump in the package hash.
   fetch and configure just the module graph. Building the dev steps
   requires a git checkout — which is where they were run anyway.
 
+### Fixed (examples)
+
+- The canonical echo example pair silently truncated any stream larger
+  than one read chunk and panicked on the documented backpressure path.
+  `streamReadFin`'s `fin` reports that the FIN *frame arrived*, not that
+  the application has drained the stream, so honouring it before a read
+  returns zero bytes abandoned whatever was still buffered; and
+  `streamWrite` short-writes by design when the send buffer is near
+  `max_buffered`, which an `assert(written == n)` turned into a crash.
+  Both are fixed in `examples/echo_server.zig` and
+  `examples/echo_client.zig`, and `zig build run-echo-smoke` now runs a
+  second leg with a payload larger than one chunk as a permanent
+  regression gate. These are the examples embedders copy first, so the
+  wrong pattern was the most costly part of the bug.
+
 ### Changed
 
 - **Wire-visible close code for TLS handshake failures.** When a

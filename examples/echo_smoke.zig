@@ -8,6 +8,13 @@
 //! zig build run-echo-smoke
 //! ```
 //!
+//! Two legs run against the same server: the canonical demo message,
+//! then a payload several times the server's per-stream read chunk.
+//! The second one is the regression gate for the multi-chunk echo path
+//! — an echo loop that treats `StreamReadResult.fin` as "all data
+//! read", or that assumes `streamWrite` accepts everything, returns a
+//! truncated stream and fails here.
+//!
 //! This is a standalone binary (not a `zig build test` target) so it
 //! can exercise real sockets, threads, and both `runUdp*` loops
 //! end-to-end without dragging network flakiness into the unit-test
@@ -22,6 +29,17 @@ const echo_client = @import("echo_client.zig");
 /// client's Initial beats the server thread to the socket) with a
 /// wide margin for slow CI runners.
 const client_timeout_us: u64 = 30 * std.time.us_per_s;
+
+/// Payload length for the second round-trip. Chosen so the multi-chunk
+/// path is not just exercised but *unavoidable and deterministic*:
+/// larger than the server's per-stream read chunk, yet small enough to
+/// still arrive in a single QUIC datagram. The server's first read
+/// therefore always comes back full with the peer's FIN already seen —
+/// exactly the shape an echo loop truncates if it honours `fin` before
+/// draining. A payload spanning several datagrams walks the same loops,
+/// but which read sees the FIN then depends on packetization, so it
+/// makes a weaker gate.
+const large_payload_len: usize = echo_server.stream_chunk_bytes + 76;
 
 const ServerTask = struct {
     allocator: std.mem.Allocator,
@@ -78,12 +96,24 @@ pub fn main(init: std.process.Init) !void {
     // on PTO); it just keeps the happy path fast.
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
 
-    // The client's `run` only returns cleanly when the stream echo
-    // AND the datagram echo both round-tripped (`EchoIncomplete`
-    // otherwise, `EchoTimedOut` past the deadline) — that is the
-    // smoke assertion.
+    // Leg 1: the canonical demo message. The client's `run` only
+    // returns cleanly when the stream echo AND the datagram echo both
+    // round-tripped (`EchoIncomplete` otherwise, `EchoTimedOut` past
+    // the deadline) — that is the smoke assertion.
     echo_client.run(allocator, io, addr, client_timeout_us) catch |err| {
-        std.debug.print("echo-smoke: FAIL ({s})\n", .{@errorName(err)});
+        std.debug.print("echo-smoke: FAIL (small payload: {s})\n", .{@errorName(err)});
+        return err;
+    };
+
+    // Leg 2: a payload longer than one server read chunk, on a fresh
+    // connection. Same assertion, but it exercises the multi-chunk
+    // drain and the staged write-back; the client compares the echo
+    // byte-for-byte, so a truncated or reordered echo fails here.
+    const large = try allocator.alloc(u8, large_payload_len);
+    defer allocator.free(large);
+    for (large, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+    echo_client.runPayload(allocator, io, addr, client_timeout_us, large) catch |err| {
+        std.debug.print("echo-smoke: FAIL (large payload: {s})\n", .{@errorName(err)});
         return err;
     };
 
@@ -92,5 +122,9 @@ pub fn main(init: std.process.Init) !void {
         return error.ServerLoopFailed;
     }
 
-    std.debug.print("echo-smoke: PASS (stream + datagram echo round-tripped on {s})\n", .{addr});
+    std.debug.print(
+        "echo-smoke: PASS (stream + datagram echo round-tripped on {s}; " ++
+            "payloads {d} and {d} bytes)\n",
+        .{ addr, echo_client.stream_message.len, large_payload_len },
+    );
 }

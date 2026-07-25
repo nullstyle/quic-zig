@@ -21,9 +21,15 @@
 //!     reads, all on the loop thread.
 //!
 //! Round-trip exercised: open a bidi stream after
-//! `handshake_established`, write one message + FIN, read the echo
-//! back to FIN, then send one DATAGRAM and wait for its echo, then
+//! `handshake_established`, write the message + FIN, read the echo
+//! back in full, then send one DATAGRAM and wait for its echo, then
 //! close cleanly (which exits the loop).
+//!
+//! Both stream legs are loops, not single calls, and that is the point
+//! worth copying: `Connection.streamWrite` short-writes when the send
+//! buffer is full, and `StreamReadResult.fin` reports that the FIN
+//! *frame arrived* rather than that the stream is drained. Neither is
+//! an error condition.
 
 const std = @import("std");
 const quic_zig = @import("quic_zig");
@@ -34,13 +40,21 @@ pub const stream_message = "hello over a QUIC stream";
 /// Payload for the RFC 9221 DATAGRAM leg.
 pub const datagram_message = "hello over a QUIC datagram";
 
-/// The client's whole application: a four-stage state machine
+/// The client's whole application: a five-stage state machine
 /// advanced once per loop iteration by `onIteration`.
 pub const EchoFlow = struct {
     stage: Stage = .awaiting_handshake,
     stream_id: u64 = 0,
-    /// Echo bytes accumulated so far (streams can deliver in chunks).
-    reply: [stream_message.len]u8 = undefined,
+    /// Bytes to write on the stream. Caller-supplied so `run` can send
+    /// the demo message and `runPayload` can send something longer.
+    payload: []const u8 = stream_message,
+    /// Payload bytes `streamWrite` has *accepted* so far — not the same
+    /// as bytes offered, since it short-writes when the send buffer is
+    /// full.
+    sent: usize = 0,
+    /// Echo accumulator, exactly `payload.len` bytes. Caller-owned.
+    reply: []u8,
+    /// Echo bytes received so far (streams can deliver in chunks).
     reply_len: usize = 0,
     /// Give-up deadline on the loop's monotonic clock (microseconds
     /// since loop start). `onIteration` errors out past this, which
@@ -49,6 +63,7 @@ pub const EchoFlow = struct {
 
     pub const Stage = enum {
         awaiting_handshake,
+        sending_request,
         awaiting_stream_echo,
         awaiting_datagram_echo,
         done,
@@ -69,13 +84,10 @@ pub const EchoFlow = struct {
             .handshake_established => {
                 const stream = try client.conn.openNextBidi();
                 flow.stream_id = stream.id;
-                const written = try client.conn.streamWrite(flow.stream_id, stream_message);
-                std.debug.assert(written == stream_message.len);
-                try client.conn.streamFinish(flow.stream_id);
-                flow.stage = .awaiting_stream_echo;
+                flow.stage = .sending_request;
                 std.debug.print(
-                    "[client] handshake established; sent {d} bytes + FIN on stream {d}\n",
-                    .{ stream_message.len, flow.stream_id },
+                    "[client] handshake established; opened stream {d}\n",
+                    .{flow.stream_id},
                 );
             },
             .close => |close_ev| {
@@ -89,14 +101,57 @@ pub const EchoFlow = struct {
 
         switch (flow.stage) {
             .awaiting_handshake, .done => {},
-            .awaiting_stream_echo => {
-                const res = try client.conn.streamReadFin(
-                    flow.stream_id,
-                    flow.reply[flow.reply_len..],
+            .sending_request => {
+                // `streamWrite` clamps to the stream's remaining
+                // send-buffer room and returns what it accepted, so a
+                // short write is backpressure to resume from — never an
+                // error, and never something to assert on.
+                while (flow.sent < flow.payload.len) {
+                    const accepted = try client.conn.streamWrite(
+                        flow.stream_id,
+                        flow.payload[flow.sent..],
+                    );
+                    if (accepted == 0) return; // buffer full; resume next iteration
+                    flow.sent += accepted;
+                }
+                try client.conn.streamFinish(flow.stream_id);
+                flow.stage = .awaiting_stream_echo;
+                std.debug.print(
+                    "[client] sent {d} bytes + FIN on stream {d}\n",
+                    .{ flow.sent, flow.stream_id },
                 );
-                flow.reply_len += res.n;
-                if (!res.fin) return; // echo still in flight
-                if (!std.mem.eql(u8, flow.reply[0..flow.reply_len], stream_message)) {
+            },
+            .awaiting_stream_echo => {
+                // Read until the peer's buffer is dry. Note what this
+                // does NOT key off: `res.fin` reports that the FIN
+                // *frame arrived*, not that the stream is drained, so
+                // for a reply of known length the byte count is the
+                // reliable completion signal. (A protocol whose reply
+                // length is unknown waits for a read that returns zero
+                // bytes with `fin` set — that is what the server side
+                // of this pair does in `echoStream`.)
+                while (flow.reply_len < flow.reply.len) {
+                    const res = client.conn.streamReadFin(
+                        flow.stream_id,
+                        flow.reply[flow.reply_len..],
+                    ) catch |err| switch (err) {
+                        // The stream has left the live table. The GC
+                        // reaps a bidi stream once both halves are
+                        // terminal, and "recv terminal" means the
+                        // peer's FIN arrived — so missing bytes here
+                        // mean the peer FIN'd early and shorted us,
+                        // not that the echo is still in flight.
+                        error.StreamNotFound => {
+                            if (flow.reply_len < flow.reply.len) return error.EchoTruncated;
+                            break;
+                        },
+                        else => return err,
+                    };
+                    flow.reply_len += res.n;
+                    if (res.n == 0) break;
+                }
+                if (flow.reply_len < flow.reply.len) return; // echo still in flight
+                if (!std.mem.eql(u8, flow.reply, flow.payload)) {
                     return error.EchoMismatch;
                 }
                 std.debug.print(
@@ -107,6 +162,9 @@ pub const EchoFlow = struct {
                 flow.stage = .awaiting_datagram_echo;
             },
             .awaiting_datagram_echo => {
+                // At least the `max_datagram_frame_size` we advertise
+                // (1200): `receiveDatagram` pops the payload whether or
+                // not it fit, so a short buffer loses the tail silently.
                 var buf: [2048]u8 = undefined;
                 const n = client.conn.receiveDatagram(&buf) orelse return;
                 if (!std.mem.eql(u8, buf[0..n], datagram_message)) {
@@ -123,16 +181,36 @@ pub const EchoFlow = struct {
     }
 };
 
-/// Run the full echo round-trip against `target`. Returns an error
-/// if any leg fails or `timeout_us` elapses. Factored out of `main`
-/// so `echo_smoke.zig` can drive the identical flow in-process.
+/// Run the full echo round-trip against `target` with the demo
+/// message. Returns an error if any leg fails or `timeout_us` elapses.
+/// Factored out of `main` so `echo_smoke.zig` can drive the identical
+/// flow in-process.
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
     target: []const u8,
     timeout_us: u64,
 ) !void {
+    return runPayload(allocator, io, target, timeout_us, stream_message);
+}
+
+/// As `run`, but with a caller-chosen stream payload. `echo_smoke.zig`
+/// uses this to round-trip something several times the server's
+/// per-stream read chunk — the case where an echo loop that stops at
+/// the first `fin` (or at the first short write) silently truncates.
+pub fn runPayload(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target: []const u8,
+    timeout_us: u64,
+    payload: []const u8,
+) !void {
     const protos = [_][]const u8{common.alpn};
+
+    // The echo accumulator is exactly as long as what we sent, so
+    // "every byte is back" is a length comparison.
+    const reply = try allocator.alloc(u8, payload.len);
+    defer allocator.free(reply);
 
     var client = try quic_zig.Client.connect(.{
         .allocator = allocator,
@@ -147,9 +225,16 @@ pub fn run(
     });
     defer client.deinit();
 
-    std.debug.print("[client] connecting to {s} (ALPN {s})\n", .{ target, common.alpn });
+    std.debug.print(
+        "[client] connecting to {s} (ALPN {s}, {d}-byte stream payload)\n",
+        .{ target, common.alpn, payload.len },
+    );
 
-    var flow: EchoFlow = .{ .deadline_us = timeout_us };
+    var flow: EchoFlow = .{
+        .deadline_us = timeout_us,
+        .payload = payload,
+        .reply = reply,
+    };
     try quic_zig.transport.runUdpClient(&client, .{
         .target = target,
         .io = io,
