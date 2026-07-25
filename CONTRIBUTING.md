@@ -80,10 +80,34 @@ harness itself).
   binaries. Deep fuzzing is single-instance (n_instances = 1;
   ziglang/zig#25352) until upstream fixes filtered-binary fuzzing or lifts
   the instance cap.
-- On macOS the `std.testing.fuzz` coverage-guided runtime aborts even the
-  unfiltered binary (reproduced with a trivial standalone test on
-  0.17.0-dev.1158 — a platform gap, not a target bug). Deep-fuzz on Linux
-  or a Linux container; the smoke run works everywhere.
+- **macOS deep-fuzzing works as of 0.17.0-dev.1252** — this used to say it
+  did not. On 0.17.0-dev.1158 the coverage-guided runtime aborted on
+  macOS; on the pinned toolchain `zig build test --fuzz=1000` completes on
+  aarch64-macOS with real coverage (verified: 41,865 runs, 1,669 unique,
+  3058/33548 PCs = 9.12%, exit 0). Re-check before assuming a platform
+  gap, and prefer Linux only for long runs, since that is what CI does.
+- **Do not add `-ffuzz` / `Module.fuzz` by hand.** `--fuzz` already sets
+  the compilation-level flag on the *root* module, and every
+  `std.testing.fuzz` site lives in `src/`, which is the root module of
+  `zig build test`. Forcing the per-module flag instead instruments
+  `quic_zig` where it is a non-root *dependency* (`tests/`,
+  `tests/conformance.zig`, `interop/`, the `examples/` targets), and those
+  binaries' test runners are compiled with `builtin.fuzz == false`, so the
+  seven `export fn runner_*` hooks in Zig's `lib/compiler/test_runner.zig`
+  are never emitted while `lib/fuzzer.zig` still links — 7 undefined
+  symbols, on Linux and macOS alike. It looks like a platform bug and is
+  not one.
+- **Verify a deep-fuzz run was real** rather than trusting exit status.
+  A populated coverage file is large (~270 KB here); a 24-byte one is a
+  header with `pcs_len = 0`, i.e. the truncated-artifact flake below, not
+  a run with no instrumentation:
+
+  ```sh
+  python3 -c 'import struct,glob
+  for f in glob.glob(".zig-cache/v/*"):
+      b=open(f,"rb").read(); n,u,p=struct.unpack("<QQQ",b[:24])
+      print(f, len(b), f"n_runs={n:,} unique_runs={u:,} pcs_len={p}")'
+  ```
 - Long Linux limit-mode runs on the current Zig line can occasionally leave
   an empty-PC coverage metadata file in `.zig-cache/v` and fail with
   "corrupted coverage file ... pcs_len was zero". The pre-release `rc-fuzz`
