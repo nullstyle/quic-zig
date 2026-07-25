@@ -116,6 +116,19 @@ checks — see the CHANGELOG entry).
 v0.8.0 — the gate was never run for `2aa11ad` and the release is
 superseded. Not awaiting any action.
 
+## v0.10.0 consumer-adoption release
+
+v0.10.0 is the first release cut under the CONTRIBUTING.md "Releases"
+policy, and the first to be tagged since v0.7.6. It closes the
+private-CA / mTLS gap the capnp-zig downstream audit identified, and
+lands the one pre-1.0 `Server.Config` naming/semantics normalization
+that `docs/API_STABILITY.md` had reserved — so `Config` field names are
+frozen from here to 1.0.
+
+Gate: rc-fuzz green on the release commit before tagging, per the policy
+above. Tier-1 `test` legs (Linux, macOS, Windows + the `-Dsanitize-c=full`
+job) green on the same commit.
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig

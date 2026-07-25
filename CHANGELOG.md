@@ -7,12 +7,15 @@ changes.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-24
+
 Consumer-feedback release (thanks to the capnp-zig team for a detailed
 downstream audit): the private-CA / mTLS gap is closed, the build is
 lighter to consume, and the release/versioning discipline consumers
 asked for is now written down in CONTRIBUTING.md ("Releases"). The
-manifest version is `0.10.0-dev` from the first breaking change below
-so untagged pins see the bump in the package hash.
+`Server.Config` field names are frozen from here to 1.0.
+
+Verified toolchain: zig 0.17.0-dev.1252+e4b325c19.
 
 ### Added
 

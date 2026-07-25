@@ -1,12 +1,6 @@
 .{
     .name = .quic_zig,
-    // Pre-release of the next minor: 0.10.0 carries breaking public
-    // changes (the Server rate-limiter Config fields were renamed), so
-    // the manifest version moves the moment they land on main — a
-    // consumer pinning an untagged commit sees the bump in the package
-    // hash instead of a silent same-version surface change. The
-    // release-prep commit drops the `-dev` suffix.
-    .version = "0.10.0-dev",
+    .version = "0.10.0",
     .fingerprint = 0xe70034831dc6c68c,
     .minimum_zig_version = "0.17.0-dev.1158+1d1193aa7",
     .dependencies = .{
