@@ -1,11 +1,23 @@
 [tools]
-# Zig 0.17 is unreleased, so we track master. Last build verified green
-# (full test suite + examples + echo smoke + consumer smoke):
-# 0.17.0-dev.1252+e4b325c19 — also recorded in each release's CHANGELOG
-# entry so a pinned tag names the compiler it was proven against. The
-# floor in build.zig.zon `minimum_zig_version` is 0.17.0-dev.1158. Bump
-# the floor and this note together after re-verifying on a newer master.
-zig = "master"
+# Zig 0.17 is unreleased, so we track master — but we PIN an exact master
+# build rather than resolving `master` at install time. `zig = "master"`
+# made CI non-reproducible: every job silently got whatever master was
+# published that morning, which is not the compiler any release was
+# verified against, and a Zig-side behaviour change then looked like a
+# flake in our own code.
+#
+# That is not hypothetical. The blocking `rc-fuzz` gate failed for two
+# weeks with "corrupted coverage file ... pcs_len was zero" because CI had
+# drifted to 0.17.0-dev.1282+c0f9b51d8, where `--fuzz` no longer
+# instruments the root module on its own. On the pinned build below the
+# identical 1M-budget run (37.1M executions) completes clean with real
+# coverage — verified on both aarch64-linux and aarch64-macos.
+#
+# To move: bump this, re-verify (full test suite + examples + echo smoke +
+# consumer smoke + a deep fuzz run), then update the floor in
+# build.zig.zon `minimum_zig_version` (currently 0.17.0-dev.1158) and the
+# "Verified toolchain" line in the CHANGELOG entry together.
+zig = "0.17.0-dev.1252+e4b325c19"
 just = "1.49.0"
 python = "3.12.13"
 uv = "0.11.3"
