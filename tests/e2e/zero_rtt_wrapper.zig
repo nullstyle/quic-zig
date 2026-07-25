@@ -8,7 +8,7 @@
 //!      `Config.resumption_state`, stages stream data before
 //!      `advance()`, and sends it as 0-RTT.
 //!   3. `quic_zig.Server` — with nothing beyond
-//!      `Config.enable_0rtt = true` — accepts the early data because
+//!      `Config.early_data` enabled — accepts the early data because
 //!      the accept path now installs the RFC 9001 §4.6.1 replay
 //!      context before the ClientHello is processed.
 //!
@@ -77,7 +77,7 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .enable_0rtt = true,
+        .early_data = .without_replay_protection,
     });
     defer srv.deinit();
 
@@ -199,7 +199,7 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .enable_0rtt = true,
+        .early_data = .without_replay_protection,
     });
     defer srv2.deinit();
 

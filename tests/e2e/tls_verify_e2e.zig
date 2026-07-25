@@ -148,6 +148,28 @@ fn driveExpectingRejection(cli: *quic_zig.Client, srv: *quic_zig.Server, base_us
     return saw_rejection and fed_server > 0 and !server_completed;
 }
 
+/// Assert a TLS rejection landed in RFC 9001 §4.8's CRYPTO_ERROR window
+/// (0x0100-0x01ff). §4.8 turns TLS alert N into QUIC error code
+/// 0x0100 + N, and quic_zig closes an alert-less handshake failure with
+/// §4.8's generic `handshake_failure` (0x0128) — so *every* TLS
+/// rejection must report a code in that window. INTERNAL_ERROR (0x01)
+/// here would mean the transport blamed itself for a TLS decision.
+fn expectCryptoErrorClose(ev: quic_zig.CloseEvent) !void {
+    try std.testing.expectEqual(quic_zig.CloseSource.local, ev.source);
+    try std.testing.expectEqual(quic_zig.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expect(ev.error_code >= 0x0100 and ev.error_code <= 0x01ff);
+}
+
+/// First slot carrying a latched close event. `Server.iterator` keeps
+/// closed slots until `reap`, which this suite never calls, so the
+/// event is still readable after the pump loop returns.
+fn serverCloseEvent(srv: *quic_zig.Server) ?quic_zig.CloseEvent {
+    for (srv.iterator()) |slot| {
+        if (slot.conn.closeEvent()) |ev| return ev;
+    }
+    return null;
+}
+
 test "ca_pem pins the fixture root and the verified handshake completes (no insecure_skip_verify)" {
     var srv = try quic_zig.Server.init(.{
         .allocator = std.testing.allocator,
@@ -195,6 +217,7 @@ test "ca_pem client rejects a server_name outside the certificate SAN (identity,
     defer cli.deinit();
 
     try std.testing.expect(try driveExpectingRejection(&cli, &srv, 0));
+    try expectCryptoErrorClose(cli.conn.closeEvent() orelse return error.NoClientCloseEvent);
 }
 
 test "ca_pem client rejects a server whose certificate chains to a different root" {
@@ -225,6 +248,7 @@ test "ca_pem client rejects a server whose certificate chains to a different roo
     defer cli.deinit();
 
     try std.testing.expect(try driveExpectingRejection(&cli, &srv, 0));
+    try expectCryptoErrorClose(cli.conn.closeEvent() orelse return error.NoClientCloseEvent);
 }
 
 test "mTLS: server requires a client certificate and the handshake completes when one is presented" {
@@ -277,6 +301,7 @@ test "mTLS: a client presenting no certificate is refused" {
     defer cli.deinit();
 
     try std.testing.expect(try driveExpectingRejection(&cli, &srv, 0));
+    try expectCryptoErrorClose(serverCloseEvent(&srv) orelse return error.NoServerCloseEvent);
 }
 
 test "mTLS: a client certificate not chaining to client_ca_pem is refused" {
@@ -307,6 +332,7 @@ test "mTLS: a client certificate not chaining to client_ca_pem is refused" {
     defer cli.deinit();
 
     try std.testing.expect(try driveExpectingRejection(&cli, &srv, 0));
+    try expectCryptoErrorClose(serverCloseEvent(&srv) orelse return error.NoServerCloseEvent);
 }
 
 test "mTLS posture survives replaceTlsContext(.pem) rotation; .override is rejected" {
@@ -347,6 +373,7 @@ test "mTLS posture survives replaceTlsContext(.pem) rotation; .override is rejec
     });
     defer bare.deinit();
     try std.testing.expect(try driveExpectingRejection(&bare, &srv, 0));
+    try expectCryptoErrorClose(serverCloseEvent(&srv) orelse return error.NoServerCloseEvent);
 
     // ...and a certificate-bearing client must still complete
     // (proving rotation didn't just break TLS wholesale). Later

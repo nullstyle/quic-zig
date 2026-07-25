@@ -44,7 +44,7 @@
 //!    is allocated. Set this to gate the 3x amplification window
 //!    behind a proof-of-address round trip.
 //! 3. Long-header packets carrying any version not in
-//!    `Config.versions` (which defaults to QUIC v1 only) always
+//!    `Config.accepted_versions` (which defaults to QUIC v1 only) always
 //!    trigger a Version Negotiation response (RFC 9000 §6 / RFC
 //!    8999 §6 / RFC 9368 §6); this is unconditional and requires
 //!    no further `Config` opt-in.
@@ -260,23 +260,23 @@ const MetricsSnapshotImpl = struct {
     /// VN-flood probes.
     feeds_vn_rate_limited: u64,
     /// Datagrams dropped at the listener-level packet rate limit
-    /// (`Config.max_datagrams_per_window`). Subset of `feeds_dropped`.
+    /// (`Config.listener_datagram_rate_limit`). Subset of `feeds_dropped`.
     /// Hardening guide §4.1.
     feeds_listener_rate_limited: u64,
     /// Datagrams dropped at the listener-level byte rate limit
-    /// (`Config.max_bytes_per_window`). Subset of `feeds_dropped`.
+    /// (`Config.listener_byte_rate_limit`). Subset of `feeds_dropped`.
     /// Tracks bandwidth-flavored floods that the packet-count cap
     /// would let through (few-but-large datagrams). Hardening guide §4.1.
     feeds_listener_byte_rate_limited: u64,
     /// Datagrams dropped at the per-source bandwidth shaper
-    /// (`Config.max_bytes_per_source_per_second`). Subset of
+    /// (`Config.source_byte_rate_limit`). Subset of
     /// `feeds_dropped`. Distinct from `feeds_listener_byte_rate_limited`:
     /// the listener cap protects the aggregate firehose, this protects
     /// against any single source consuming more than its fair share.
     /// Hardening guide §4.1 token-bucket.
     feeds_source_bandwidth_limited: u64,
     /// LogEvents the server dropped under the per-source log rate
-    /// limit (`Config.max_log_events_per_source_per_window`).
+    /// limit (`Config.log_source_rate_limit`).
     /// Distinct from `feeds_dropped` — feeding a datagram and emitting
     /// a log are separate side effects. Hardening guide §9.4.
     feeds_log_rate_limited: u64,
@@ -426,7 +426,7 @@ const SourceRateEntry = struct {
     /// Wall-clock microseconds when the current VN window started.
     vn_window_start_us: u64 = 0,
     /// LogEvents emitted on behalf of this source within the current
-    /// log window. Gated by `Config.max_log_events_per_source_per_window`.
+    /// log window. Gated by `Config.log_source_rate_limit`.
     /// Hardening guide §9.4: a flood of feed-rate-limited /
     /// table-full / VN-rate-limited / etc. log events from one
     /// address would otherwise let the peer flood the embedder's
@@ -435,7 +435,7 @@ const SourceRateEntry = struct {
     /// Wall-clock microseconds when the current log window started.
     log_window_start_us: u64 = 0,
     /// Token-bucket level (in bytes) for per-source bandwidth shaping.
-    /// Gated by `Config.max_bytes_per_source_per_second`. Refilled at
+    /// Gated by `Config.source_byte_rate_limit`. Refilled at
     /// the configured rate up to a one-second burst cap; each accepted
     /// datagram debits `bytes.len`. Hardening guide §4.1 token-bucket.
     bandwidth_tokens: u64 = 0,
@@ -479,28 +479,82 @@ pub const PreferredAddressConfig = struct {
     ipv6: ?std.Io.net.Ip6Address = null,
 };
 
-/// Three-state per-source rate-limiter configuration, re-exported as
-/// `Server.SourceRateLimit`. A tagged union instead of `?u32` so
+/// Three-state rate/quota configuration, re-exported as
+/// `Server.RateLimit`. A tagged union instead of `?T` so
 /// "I didn't configure this" (`.default` — the library-recommended
-/// cap applies) and "turn the protection off" (`.disabled`) are
-/// spelled differently: a consumer mirroring the old `null` default
-/// cannot silently disable a protection the library turned on.
-const SourceRateLimitImpl = union(enum) {
-    /// Apply the library-recommended cap for this limiter (see the
-    /// `default_*_source_rate_cap` constants on `Config`).
+/// setting applies, which for some limiters is "off") and "turn the
+/// protection off" (`.disabled`) are spelled differently: a consumer
+/// mirroring a `null` default cannot silently disable a protection
+/// the library turned on, and the library can change a recommended
+/// default in a later release without silently overriding embedders
+/// who deliberately opted out.
+///
+/// Every rate/quota knob on `Config` uses this one type, so the
+/// idiom is learned once. Limiters whose recommended setting is a
+/// real cap expose it as a `Config.default_*_cap` constant; the ones
+/// whose recommendation is "off, it depends on your deployment
+/// envelope" say so in their field doc.
+const RateLimitImpl = union(enum) {
+    /// Apply this limiter's library-recommended setting (see the
+    /// `Config.default_*` constants; for the listener and bandwidth
+    /// limiters the recommendation is "off — depends on your
+    /// deployment envelope").
     default,
-    /// Explicitly disable the limiter.
+    /// Explicitly disable the limiter, accepting the unbounded rate.
     disabled,
-    /// Explicit cap per `source_rate_window_us` window. Zero fails
-    /// `Server.init` with `InvalidConfig`.
-    limit: u32,
+    /// Explicit cap, in the unit named by the field's doc comment.
+    /// Zero fails `Server.init` with `InvalidConfig`.
+    limit: u64,
 
     /// Resolve to the effective cap: null means the limiter is off.
-    pub fn resolve(self: SourceRateLimitImpl, default_cap: u32) ?u32 {
+    /// `default_cap` of 0 expresses "recommended off".
+    pub fn resolve(self: RateLimitImpl, default_cap: u64) ?u64 {
         return switch (self) {
-            .default => default_cap,
+            .default => if (default_cap == 0) null else default_cap,
             .disabled => null,
             .limit => |cap| cap,
+        };
+    }
+};
+
+/// 0-RTT (early-data) posture for `Server.Config.early_data`,
+/// re-exported as `Server.EarlyData`. A union rather than a
+/// `bool` + `?*AntiReplayTracker` pair because the dangerous
+/// combination — early data on, tracker forgotten — was
+/// representable, valid, and silent. Here it has a name.
+const EarlyDataImpl = union(enum) {
+    /// Refuse 0-RTT: the auto-built TLS context is created with
+    /// early data disabled, and resumed connections complete as
+    /// 1-RTT. The secure default.
+    disabled,
+    /// Accept 0-RTT with TLS-layer replay protection. The Server
+    /// installs a BoringSSL `allow_early_data` callback that hashes
+    /// the resumed-session ticket bytes (`Conn.peerSessionId`) to the
+    /// tracker's 32-byte `Id` and calls `tracker.consume(id, now)`.
+    /// Verdict `.fresh` lets BoringSSL accept 0-RTT; `.replay`
+    /// toggles `early_data_enabled` off for that handshake (the
+    /// connection then completes as 1-RTT). The tracker is owned by
+    /// the embedder and must outlive the `Server`.
+    with_anti_replay: *tls_mod.anti_replay.AntiReplayTracker,
+    /// Accept 0-RTT with NO transport-layer replay protection.
+    /// Correct only when every request the application will accept
+    /// over early data is idempotent, or the application runs its own
+    /// replay defense above quic_zig (RFC 9001 §5.6 leaves the check
+    /// to the application). Spelled out so that shipping unprotected
+    /// 0-RTT is always a deliberate, greppable choice.
+    without_replay_protection,
+
+    /// True when either enabled variant is selected.
+    pub fn enabled(self: EarlyDataImpl) bool {
+        return self != .disabled;
+    }
+
+    /// The embedder's replay tracker, or null when 0-RTT is disabled
+    /// or deliberately unprotected.
+    pub fn antiReplayTracker(self: EarlyDataImpl) ?*tls_mod.anti_replay.AntiReplayTracker {
+        return switch (self) {
+            .with_anti_replay => |t| t,
+            .disabled, .without_replay_protection => null,
         };
     }
 };
@@ -508,10 +562,13 @@ const SourceRateLimitImpl = union(enum) {
 const ConfigImpl = struct {
     /// Library-recommended open-internet cap backing
     /// `initial_source_rate_limit = .default`.
-    pub const default_initial_source_rate_cap: u32 = 32;
+    pub const default_initial_source_rate_cap: u64 = 32;
     /// Library-recommended open-internet cap backing
     /// `vn_source_rate_limit = .default`.
-    pub const default_vn_source_rate_cap: u32 = 8;
+    pub const default_vn_source_rate_cap: u64 = 8;
+    /// Library-recommended cap backing
+    /// `log_source_rate_limit = .default`.
+    pub const default_log_source_rate_cap: u64 = 16;
 
     /// Wall-clock allocator used for the connection table and any
     /// transient per-server allocations. Each `Connection` allocates
@@ -652,12 +709,12 @@ const ConfigImpl = struct {
     /// `active_connection_id_limit`. Three spares (on top of the
     /// handshake CID) cover a migration plus rotation headroom without
     /// bloating the routing table.
-    max_auto_replenish_cids: usize = 3,
+    max_auto_replenish_cids: u8 = 3,
 
     /// Application bytes bound into the RFC 9001 §4.6.1 0-RTT replay
     /// context, alongside the replay-relevant transport parameters and
     /// the primary ALPN (`alpn_protocols[0]`). Only consulted when
-    /// `enable_0rtt` is true: the accept path installs the resulting
+    /// `early_data` is enabled: the accept path installs the resulting
     /// context digest on every fresh slot *before* the ClientHello is
     /// processed, which is what lets BoringSSL accept early data on
     /// resumption at all. Change this string across deployments whose
@@ -673,7 +730,7 @@ const ConfigImpl = struct {
     /// context with the supplied ALPN list and `verify=.none` —
     /// unless `client_ca_pem` is set, which turns on required client
     /// -certificate verification (mTLS). The auto-built context's
-    /// early-data posture is gated by `Config.enable_0rtt` (off by
+    /// early-data posture is gated by `Config.early_data` (off by
     /// default; §5.2 / §12 hardening). Pass your own to enable
     /// session-ticket callbacks or any other TLS-context behavior the
     /// auto-built path doesn't expose; combining an override with
@@ -696,7 +753,7 @@ const ConfigImpl = struct {
     /// (unattributed) datagrams, for which the gate is a no-op
     /// anyway. `.{ .limit = 0 }` fails `Server.init` with
     /// `InvalidConfig`.
-    initial_source_rate_limit: SourceRateLimitImpl = .default,
+    initial_source_rate_limit: RateLimitImpl = .default,
 
     /// Sliding-window size for `initial_source_rate_limit`,
     /// in microseconds. Default is one second. Shared by the VN
@@ -720,7 +777,7 @@ const ConfigImpl = struct {
     /// `default_vn_source_rate_cap` (8, the open-internet
     /// recommendation) — legitimate clients fix their version after
     /// one VN response and retry with v1.
-    vn_source_rate_limit: SourceRateLimitImpl = .default,
+    vn_source_rate_limit: RateLimitImpl = .default,
 
     /// 32-byte HMAC key used to mint and validate stateless Retry
     /// tokens (RFC 9000 §8.1.2). When null, Retry is disabled and
@@ -768,37 +825,29 @@ const ConfigImpl = struct {
     /// that a stolen token's window of misuse is bounded.
     new_token_lifetime_us: u64 = 24 * 3600 * 1_000_000,
 
-    /// Enable QUIC 0-RTT (early data) on the auto-built TLS context.
-    /// Off by default to satisfy the §5.2 / §12 hardening posture:
-    /// 0-RTT is replayable and unsuitable for state-changing requests
-    /// without an application-level anti-replay mechanism (RFC 9001
-    /// §5.6 / RFC 8446 §8). Embedders that want 0-RTT must opt in
-    /// here AND wire a `quic_zig.tls.AntiReplayTracker` (or equivalent)
-    /// into their server loop so duplicate early-data is rejected;
-    /// see that type's module docstring for the recommended
-    /// workflow. The transport ships the data structure but the
-    /// "is this 0-RTT bytes a replay?" check fires at the embedder's
-    /// application layer.
+    /// QUIC 0-RTT (early data) posture on the auto-built TLS context
+    /// (replaces `enable_0rtt: bool` + `early_data_anti_replay: ?*T`
+    /// as of 0.10.0 — see `EarlyData`). `.disabled` by default to
+    /// satisfy the §5.2 / §12 hardening posture: 0-RTT is replayable
+    /// and unsuitable for state-changing requests without an
+    /// anti-replay mechanism (RFC 9001 §5.6 / RFC 8446 §8).
     ///
-    /// Only consulted when `tls_context_override` is null. Embedders
-    /// supplying their own `boringssl.tls.Context` are responsible for
-    /// configuring its early-data posture themselves.
-    enable_0rtt: bool = false,
-
-    /// Anti-replay tracker for 0-RTT early-data (hardening §5.2 /
-    /// RFC 9001 §5.6). When `enable_0rtt` is true and this is non-null,
-    /// the Server installs a BoringSSL `allow_early_data` callback
-    /// that hashes the resumed-session ticket bytes
-    /// (`Conn.peerSessionId`) to the tracker's 32-byte `Id` and calls
-    /// `tracker.consume(id, now)`. Verdict `.fresh` lets BoringSSL
-    /// accept 0-RTT; `.replay` toggles `early_data_enabled` off for
-    /// that handshake (the connection then completes as 1-RTT).
+    /// The two enabled variants differ only in replay protection, and
+    /// the unprotected one has to be named explicitly — the old pair
+    /// let `enable_0rtt = true` with a forgotten tracker ship
+    /// replay-exposed 0-RTT with no error and no log line.
     ///
-    /// The tracker is owned by the embedder and must outlive the
-    /// `Server`. Only consulted when `tls_context_override` is null —
-    /// override-mode embedders install their own callback via
-    /// `boringssl.tls.Context.setAllowEarlyDataCallback`.
-    early_data_anti_replay: ?*tls_mod.anti_replay.AntiReplayTracker = null,
+    /// Override-mode embedders must set this too. Supplying your own
+    /// `tls_context_override` means you own that context's
+    /// `early_data_enabled` flag — but this field additionally drives
+    /// the RFC 9001 §4.6.1 early-data *context* install on every fresh
+    /// slot (`setEarlyDataContextForParams`, without which BoringSSL
+    /// refuses 0-RTT and issued tickets are never 0-RTT-capable), the
+    /// anti-replay tracker's clock, and the posture carried across
+    /// `replaceTlsContext`. Leaving it `.disabled` while enabling early
+    /// data on your own context yields a server where 0-RTT silently
+    /// never works.
+    early_data: EarlyDataImpl = .disabled,
 
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
@@ -838,23 +887,28 @@ const ConfigImpl = struct {
     /// every Connection's `ecn_enabled` field at slot-open time.
     enable_ecn: bool = true,
 
-    /// Listener-level packet rate limit (hardening guide §4.1):
-    /// drop incoming UDP datagrams when the global per-window count
-    /// exceeds this cap. Off by default (`null`) so embedders
-    /// explicitly opt in for production. The window length is
+    /// Listener-level packet rate limit (hardening guide §4.1; was
+    /// `max_datagrams_per_window: ?u32` before 0.10.0 — retyped onto
+    /// the shared `RateLimit` union with its siblings): drop incoming
+    /// UDP datagrams when the global per-window count exceeds this
+    /// cap, in datagrams per window. `.default` is off — the right
+    /// value depends on your deployment envelope, so production opts
+    /// in with `.{ .limit = n }`. The window length is
     /// `listener_rate_window_us`; the bucket is single-global (no
     /// per-source bookkeeping) so it shares state with nothing and
     /// triggers cheaply on a flood from many spoofed sources.
     ///
     /// Recommended: scale to ~2x peak observed packets-per-window,
     /// then alert on `MetricsSnapshot.feeds_listener_rate_limited`
-    /// growing. cap=0 fails `Server.init` with `InvalidConfig`.
-    max_datagrams_per_window: ?u32 = null,
+    /// growing. `.{ .limit = 0 }` fails `Server.init` with
+    /// `InvalidConfig`.
+    listener_datagram_rate_limit: RateLimitImpl = .default,
 
-    /// Listener-level byte rate limit (hardening guide §4.1):
-    /// drop incoming UDP datagrams when the global per-window byte
-    /// total exceeds this cap. Off by default (`null`) so embedders
-    /// explicitly opt in for production. Shares
+    /// Listener-level byte rate limit (hardening guide §4.1; was
+    /// `max_bytes_per_window: ?u64` before 0.10.0): drop incoming UDP
+    /// datagrams when the global per-window byte total exceeds this
+    /// cap, in bytes per window. `.default` is off — production opts
+    /// in with `.{ .limit = n }`. Shares
     /// `listener_rate_window_us` with the packet-count cap; the
     /// bucket is single-global (no per-source bookkeeping) so a
     /// flood of few-but-large datagrams from any number of sources
@@ -862,43 +916,51 @@ const ConfigImpl = struct {
     ///
     /// Recommended: scale to ~2x peak observed bytes-per-window,
     /// then alert on `MetricsSnapshot.feeds_listener_byte_rate_limited`
-    /// growing. cap=0 fails `Server.init` with `InvalidConfig`.
-    max_bytes_per_window: ?u64 = null,
+    /// growing. `.{ .limit = 0 }` fails `Server.init` with
+    /// `InvalidConfig`.
+    listener_byte_rate_limit: RateLimitImpl = .default,
 
-    /// Window length for `max_datagrams_per_window` /
-    /// `max_bytes_per_window` in microseconds. Default 1 second.
+    /// Window length for `listener_datagram_rate_limit` /
+    /// `listener_byte_rate_limit` in microseconds. Default 1 second.
     /// Smaller windows make the caps more responsive at the cost of
     /// more reset jitter; larger windows smooth bursty traffic. Both
     /// listener-level caps share this single window.
     listener_rate_window_us: u64 = 1_000_000,
 
-    /// Per-source bandwidth shaping (hardening §4.1 token-bucket).
-    /// When non-null, every accepted datagram from a given source charges
-    /// `bytes.len` against a token bucket that refills at
-    /// `max_bytes_per_source_per_second` bytes per second up to the same
-    /// value as a hard cap (one second's burst). When the bucket is empty
-    /// the datagram is dropped and `feeds_source_bandwidth_limited` ticks.
+    /// Per-source bandwidth shaping (hardening §4.1 token-bucket; was
+    /// `max_bytes_per_source_per_second: ?u64` before 0.10.0). The cap
+    /// is in **bytes per second**: every accepted datagram from a given
+    /// source charges `bytes.len` against a token bucket that refills
+    /// at that rate, up to the same value as a hard cap (one second's
+    /// burst). When the bucket is empty the datagram is dropped and
+    /// `feeds_source_bandwidth_limited` ticks.
     ///
-    /// Null disables (default — production opts in). Distinct from the
-    /// global sliding-window `max_bytes_per_window` cap: this gates per
+    /// `.default` is off — production opts in with
+    /// `.{ .limit = bytes_per_second }`. Distinct from the global
+    /// sliding-window `listener_byte_rate_limit`: this gates per
     /// source, the global cap gates aggregate. Charging happens AFTER
-    /// the global gates approve, so the global caps still bound aggregate
-    /// bandwidth even when every individual source has full buckets.
-    /// cap=0 fails `Server.init` with `InvalidConfig`.
-    max_bytes_per_source_per_second: ?u64 = null,
+    /// the global gates approve, so the global caps still bound
+    /// aggregate bandwidth even when every individual source has full
+    /// buckets. `.{ .limit = 0 }` fails `Server.init` with
+    /// `InvalidConfig`.
+    source_byte_rate_limit: RateLimitImpl = .default,
 
     /// Per-source cap on `LogEvent` emissions per window (hardening
-    /// guide §9.4). When the cap fires, the log is dropped silently —
-    /// no nested log about the dropped log. Defaults to 16 events
-    /// per window per source; null disables. Reuses
-    /// `source_rate_window_us` (so the Initial / VN / log windows
-    /// all share one knob).
+    /// guide §9.4; was `max_log_events_per_source_per_window: ?u32`
+    /// before 0.10.0 — renamed and retyped alongside its two sibling
+    /// limiters so `null` could not silently switch off a
+    /// default-on protection). When the cap fires, the log is
+    /// dropped silently — no nested log about the dropped log.
+    /// `.default` applies `default_log_source_rate_cap` (16 events
+    /// per window per source); `.disabled` opts out, accepting an
+    /// unbounded log-event rate. Reuses `source_rate_window_us` (so
+    /// the Initial / VN / log windows all share one knob).
     ///
     /// Log events with `from = null` (no source attribution) bypass
     /// the limiter — see `acceptLogRate`. Embedders that want a
     /// global ceiling on null-source events should put one in their
     /// own log_callback.
-    max_log_events_per_source_per_window: ?u32 = 16,
+    log_source_rate_limit: RateLimitImpl = .default,
 
     /// QUIC wire-format versions this server accepts on inbound
     /// Initials. RFC 9000 §6 / RFC 8999 §6: any long-header packet
@@ -915,7 +977,7 @@ const ConfigImpl = struct {
     /// `version_information` (codepoint 0x11) transport parameter
     /// advertises the full list to the peer for compatible-version
     /// upgrade.
-    versions: []const u32 = &.{0x00000001},
+    accepted_versions: []const u32 = &.{0x00000001},
 
     /// RFC 8899 DPLPMTUD configuration applied to every accepted
     /// connection. The default config (1200 floor, 1452 ceiling,
@@ -961,7 +1023,7 @@ const TlsReloadImpl = union(enum) {
     /// `Server.init`'s default path: TLS-1.3 only, `verify=.none`,
     /// the server's currently-cached ALPN list, and the early-data
     /// posture the Server was originally initialized with via
-    /// `Config.enable_0rtt`. The Server takes ownership of the
+    /// `Config.early_data`. The Server takes ownership of the
     /// resulting context and `deinit`s it (after refcounted draining)
     /// on `Server.deinit` or on a subsequent `replaceTlsContext`.
     pem: struct {
@@ -1184,7 +1246,7 @@ const FeedOutcomeImpl = enum {
     /// reaped.
     table_full,
     /// The datagram carried a long-header packet with a version
-    /// that is not in `Config.versions`. A Version Negotiation
+    /// that is not in `Config.accepted_versions`. A Version Negotiation
     /// response was queued for the embedder to drain via
     /// `drainStatelessResponse`. No `Connection` was created.
     /// RFC 9000 §6 / RFC 8999 §6 / RFC 9368 §6.
@@ -1235,7 +1297,8 @@ pub const Server = struct {
     pub const FeedOutcome = FeedOutcomeImpl;
     pub const StatelessResponse = StatelessResponseImpl;
     pub const TlsReload = TlsReloadImpl;
-    pub const SourceRateLimit = SourceRateLimitImpl;
+    pub const RateLimit = RateLimitImpl;
+    pub const EarlyData = EarlyDataImpl;
     pub const Error = ErrorImpl;
     pub const LogEvent = LogEventImpl;
     pub const LogCallback = LogCallbackImpl;
@@ -1293,7 +1356,7 @@ pub const Server = struct {
     on_connection_will_close_user_data: ?*anyopaque,
     early_data_application_context: []const u8,
     auto_replenish_connection_ids: bool,
-    max_auto_replenish_cids: usize,
+    max_auto_replenish_cids: u8,
 
     /// Live connection slots. Embedders may iterate this between
     /// `feed` / `poll` calls to inspect or mutate connections.
@@ -1308,13 +1371,13 @@ pub const Server = struct {
     source_rate_table: std.AutoHashMapUnmanaged(Address, SourceRateEntry) = .empty,
     /// Resolved `Config.initial_source_rate_limit`. Null means the
     /// limiter is disabled.
-    max_initials_per_source: ?u32,
+    max_initials_per_source: ?u64,
     source_rate_window_us: u64,
     source_rate_table_capacity: u32,
     /// Resolved `Config.vn_source_rate_limit`. Null disables
     /// the per-source VN rate limit; otherwise gates VN emission via
     /// the same `source_rate_table` (separate counter pair).
-    max_vn_per_source: ?u32,
+    max_vn_per_source: ?u64,
 
     /// Per-source Retry bookkeeping. Empty when Retry is disabled.
     /// One entry per peer that earned a Retry packet, dropped once
@@ -1333,14 +1396,14 @@ pub const Server = struct {
     /// `new_token_key` is non-null.
     new_token_lifetime_us: u64,
 
-    /// Captured `Config.enable_0rtt` from `init`. Drives the
+    /// Resolved from `Config.early_data` at `init`. Drives the
     /// `early_data_enabled` knob on TLS contexts auto-built by
     /// `replaceTlsContext({.pem = ...})` so reloads preserve the
     /// original 0-RTT posture without forcing the embedder to pass
     /// it again.
     enable_0rtt: bool,
 
-    /// Captured `Config.early_data_anti_replay`. Drives the
+    /// Resolved from `Config.early_data`. Drives the
     /// `bumpClock` call in `feed` so the BoringSSL trampoline has
     /// the latest `now_us` to consult in its
     /// `consumeUsingInternalClock` call.
@@ -1375,19 +1438,19 @@ pub const Server = struct {
     /// feature is disabled (default).
     preferred_address: ?PreferredAddressConfig,
 
-    /// Captured `Config.max_datagrams_per_window`. Null disables the
+    /// Resolved `Config.listener_datagram_rate_limit`. Null disables the
     /// listener-level packet rate limit; otherwise gates *every*
     /// inbound datagram (existing-slot routes included) at the very
     /// top of `feed`. Hardening guide §4.1.
-    max_datagrams_per_window: ?u32,
-    /// Captured `Config.max_bytes_per_window`. Null disables the
+    max_datagrams_per_window: ?u64,
+    /// Resolved `Config.listener_byte_rate_limit`. Null disables the
     /// listener-level byte rate limit; otherwise gates *every* inbound
     /// datagram by total bytes accumulated within the shared window.
     /// Runs after the packet-count gate at the top of `feed`.
     /// Hardening guide §4.1.
     max_bytes_per_window: ?u64,
     /// Captured `Config.listener_rate_window_us`. Window length shared
-    /// by `max_datagrams_per_window` and `max_bytes_per_window`.
+    /// by the two listener limiters.
     listener_rate_window_us: u64,
     /// Sliding-window counters for the listener-level caps. Single
     /// global bucket per counter, sharing one window — no per-source
@@ -1396,18 +1459,18 @@ pub const Server = struct {
     listener_rate_count: u32 = 0,
     bytes_in_window: u64 = 0,
     listener_rate_window_start_us: u64 = 0,
-    /// Captured `Config.max_bytes_per_source_per_second`. Null disables
+    /// Resolved `Config.source_byte_rate_limit`. Null disables
     /// the per-source bandwidth shaper; when set, every datagram that
     /// the global listener gates approve charges `bytes.len` against
     /// the source's token bucket (one second's burst capacity, refills
     /// at the configured rate). Hardening guide §4.1 token-bucket.
     max_bytes_per_source_per_second: ?u64,
 
-    /// Captured `Config.max_log_events_per_source_per_window`. Null
+    /// Resolved `Config.log_source_rate_limit`. Null
     /// disables the per-source log rate limit. Hardening guide §9.4.
-    max_log_events_per_source: ?u32,
+    max_log_events_per_source: ?u64,
 
-    /// Captured `Config.versions`. Drives both the Version Negotiation
+    /// Captured `Config.accepted_versions`. Drives both the Version Negotiation
     /// gate (any inbound long-header packet whose declared version is
     /// not in this list earns a VN response listing the entries here)
     /// and the per-Initial version selection in `openSlotFromInitial`
@@ -1470,21 +1533,21 @@ pub const Server = struct {
     feeds_initial_too_small: u64 = 0,
     feeds_vn_rate_limited: u64 = 0,
     /// Datagrams dropped at the listener-level packet rate limit
-    /// (`Config.max_datagrams_per_window`). Subset of `feeds_dropped`.
+    /// (`Config.listener_datagram_rate_limit`). Subset of `feeds_dropped`.
     /// Spiking values point at a flood-style attack.
     feeds_listener_rate_limited: u64 = 0,
     /// Datagrams dropped at the listener-level byte rate limit
-    /// (`Config.max_bytes_per_window`). Subset of `feeds_dropped`.
+    /// (`Config.listener_byte_rate_limit`). Subset of `feeds_dropped`.
     /// Spiking values point at a few-but-large bandwidth flood.
     feeds_listener_byte_rate_limited: u64 = 0,
     /// Datagrams dropped at the per-source bandwidth shaper
-    /// (`Config.max_bytes_per_source_per_second`). Subset of
+    /// (`Config.source_byte_rate_limit`). Subset of
     /// `feeds_dropped`. Spiking values point at a single-source
     /// bandwidth abuser that the global listener cap is wide enough
     /// to let through. Hardening guide §4.1 token-bucket.
     feeds_source_bandwidth_limited: u64 = 0,
     /// LogEvents dropped by the per-source log rate limiter
-    /// (`Config.max_log_events_per_source_per_window`). NOT a subset
+    /// (`Config.log_source_rate_limit`). NOT a subset
     /// of `feeds_dropped` — log emission is a separate side effect
     /// from datagram disposition.
     feeds_log_rate_limited: u64 = 0,
@@ -1533,11 +1596,11 @@ pub const Server = struct {
         // rate limits — it would drop every datagram. Surface it as
         // `InvalidConfig` instead of letting it silently DoS the
         // server itself.
-        if (config.max_datagrams_per_window) |cap| {
+        if (config.listener_datagram_rate_limit.resolve(0)) |cap| {
             if (cap == 0) return Error.InvalidConfig;
             if (config.listener_rate_window_us == 0) return Error.InvalidConfig;
         }
-        if (config.max_bytes_per_window) |cap| {
+        if (config.listener_byte_rate_limit.resolve(0)) |cap| {
             if (cap == 0) return Error.InvalidConfig;
             if (config.listener_rate_window_us == 0) return Error.InvalidConfig;
         }
@@ -1547,11 +1610,11 @@ pub const Server = struct {
         // shares the `source_rate_table` with `acceptSourceRate` /
         // `acceptVnRate` / `acceptLogRate`, so the same capacity bound
         // applies; explicit checks here mirror those helpers' shape.
-        if (config.max_bytes_per_source_per_second) |cap| {
+        if (config.source_byte_rate_limit.resolve(0)) |cap| {
             if (cap == 0) return Error.InvalidConfig;
             if (config.source_rate_table_capacity == 0) return Error.InvalidConfig;
         }
-        if (config.max_log_events_per_source_per_window) |cap| {
+        if (config.log_source_rate_limit.resolve(Config.default_log_source_rate_cap)) |cap| {
             if (cap == 0) return Error.InvalidConfig;
             if (config.source_rate_window_us == 0) return Error.InvalidConfig;
             if (config.source_rate_table_capacity == 0) return Error.InvalidConfig;
@@ -1626,8 +1689,8 @@ pub const Server = struct {
         // how to derive Initial keys for (RFC 9001 §5.2 v1 / RFC
         // 9368 §3.3.1 v2). Reject `version == 0` outright because
         // the wire reserves it for Version Negotiation packets.
-        if (config.versions.len == 0) return Error.InvalidConfig;
-        for (config.versions) |v| {
+        if (config.accepted_versions.len == 0) return Error.InvalidConfig;
+        for (config.accepted_versions) |v| {
             if (v == 0) return Error.InvalidConfig;
             if (!wire.initial.isSupportedVersion(v)) return Error.InvalidConfig;
         }
@@ -1642,7 +1705,7 @@ pub const Server = struct {
                 .min_version = boringssl.raw.TLS1_3_VERSION,
                 .max_version = boringssl.raw.TLS1_3_VERSION,
                 .alpn = config.alpn_protocols,
-                .early_data_enabled = config.enable_0rtt,
+                .early_data_enabled = config.early_data.enabled(),
             });
             errdefer tls_ctx.deinit();
             try tls_ctx.loadCertChainAndKey(config.tls_cert_pem, config.tls_key_pem);
@@ -1659,10 +1722,10 @@ pub const Server = struct {
             // application post-handshake). Only fires on the
             // auto-built path; override-mode embedders own the hook
             // themselves.
-            if (config.enable_0rtt and config.early_data_anti_replay != null) {
+            if (config.early_data.antiReplayTracker()) |tracker| {
                 try tls_ctx.setAllowEarlyDataCallback(
                     antiReplayEarlyDataTrampoline,
-                    @ptrCast(config.early_data_anti_replay.?),
+                    @ptrCast(tracker),
                 );
             }
             owns_tls = true;
@@ -1733,18 +1796,23 @@ pub const Server = struct {
             .retry_state_table_capacity = config.retry_state_table_capacity,
             .new_token_key = config.new_token_key,
             .new_token_lifetime_us = config.new_token_lifetime_us,
-            .enable_0rtt = config.enable_0rtt,
-            .early_data_anti_replay = config.early_data_anti_replay,
+            .enable_0rtt = config.early_data.enabled(),
+            .early_data_anti_replay = config.early_data.antiReplayTracker(),
             .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
             .max_connection_memory = config.max_connection_memory,
             .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
             .ecn_enabled = config.enable_ecn,
-            .max_datagrams_per_window = config.max_datagrams_per_window,
-            .max_bytes_per_window = config.max_bytes_per_window,
+            // The listener and bandwidth limiters recommend "off"
+            // (envelope-dependent), so `.default` resolves through a
+            // zero default cap to null.
+            .max_datagrams_per_window = config.listener_datagram_rate_limit.resolve(0),
+            .max_bytes_per_window = config.listener_byte_rate_limit.resolve(0),
             .listener_rate_window_us = config.listener_rate_window_us,
-            .max_bytes_per_source_per_second = config.max_bytes_per_source_per_second,
-            .max_log_events_per_source = config.max_log_events_per_source_per_window,
-            .versions = config.versions,
+            .max_bytes_per_source_per_second = config.source_byte_rate_limit.resolve(0),
+            .max_log_events_per_source = config.log_source_rate_limit.resolve(
+                Config.default_log_source_rate_cap,
+            ),
+            .versions = config.accepted_versions,
             .pmtud_config = config.pmtud,
             .preferred_address = config.preferred_address,
             .stateless_responses = .empty,
@@ -2053,7 +2121,7 @@ pub const Server = struct {
         // handshake Initials that would otherwise route to an existing
         // slot.
         //
-        // Gated on `Config.versions` membership so unsupported-version
+        // Gated on `Config.accepted_versions` membership so unsupported-version
         // probes still flow into the Version Negotiation path below
         // (whose response is governed by RFC 9000 §6, not §14). The
         // size check keys off the leading packet's long-header type
@@ -2142,7 +2210,7 @@ pub const Server = struct {
 
         // Long-header packets reach the version-negotiation gate
         // first: any long-header packet whose declared version is
-        // not in `Config.versions` earns a VN response, regardless
+        // not in `Config.accepted_versions` earns a VN response, regardless
         // of the long-type bits. Per RFC 9000 §6 / RFC 9368 §6 this
         // catches non-Initial long-header probes (0-RTT, Handshake)
         // too.
@@ -2162,7 +2230,10 @@ pub const Server = struct {
                             self.feeds_dropped += 1;
                             self.emitLog(.{ .feed_rate_limited = .{
                                 .peer = addr,
-                                .recent_count = if (self.source_rate_table.get(addr)) |e| e.vn_count else cap,
+                                .recent_count = if (self.source_rate_table.get(addr)) |e|
+                                    e.vn_count
+                                else
+                                    std.math.lossyCast(u32, cap),
                             } });
                             return .dropped;
                         }
@@ -2218,7 +2289,10 @@ pub const Server = struct {
                     // Surface the bucket count *after* the rejection
                     // so the embedder sees the value the gate just
                     // tripped against.
-                    const recent_count = if (self.source_rate_table.get(addr)) |e| e.count else cap;
+                    const recent_count = if (self.source_rate_table.get(addr)) |e|
+                        e.count
+                    else
+                        std.math.lossyCast(u32, cap);
                     self.emitLog(.{ .feed_rate_limited = .{
                         .peer = addr,
                         .recent_count = recent_count,
@@ -2899,6 +2973,45 @@ pub const Server = struct {
         return slot;
     }
 
+    /// Close code + local reason for a per-connection error that
+    /// escaped `Connection.handleWithEcn`. Pure and separately tested
+    /// (`slotErrorCloseCode maps ...` below) because the live path
+    /// almost never observes it: when BoringSSL raises an alert, the
+    /// `send_alert` callback has already closed the connection with
+    /// RFC 9001 §4.8's *specific* CRYPTO_ERROR (0x0100 + alert byte)
+    /// before the error unwinds, and `close` is first-wins — so that
+    /// specific code stands and the caller's `close` is a no-op. What
+    /// this mapping actually decides is the alert-less case, and there
+    /// §4.8's generic `handshake_failure` (0x0128) keeps the close
+    /// inside the CRYPTO_ERROR window: INTERNAL_ERROR would tell the
+    /// peer, and the embedder's metrics, that quic-zig broke when TLS
+    /// simply said no.
+    ///
+    /// Reason strings are local-only by default
+    /// (`reveal_close_reason_on_wire`), so they are for the embedder's
+    /// close event, not the peer.
+    fn slotErrorCloseCode(err: anyerror) struct { code: u64, reason: []const u8 } {
+        return switch (err) {
+            error.HandshakeFailed, error.PeerAlerted => .{
+                .code = conn_mod.state.transport_error_crypto_handshake_failure,
+                .reason = "handshake failed",
+            },
+            // RFC 9000 §20.1 INTERNAL_ERROR (0x01) is the catch-all.
+            // Note this bucket is not purely local-side: peer-driven
+            // resource failures (e.g. a full per-level CRYPTO inbox)
+            // land here too, because they reach this catch without a
+            // more specific code of their own. Routing those to
+            // EXCESSIVE_LOAD (0x09) would be more precise and is
+            // deliberately left for a follow-up — it changes
+            // wire-visible codes for cases this release does not
+            // otherwise touch.
+            else => .{
+                .code = conn_mod.state.transport_error_internal,
+                .reason = "Server.handle failed",
+            },
+        };
+    }
+
     fn dispatchToSlot(
         self: *Server,
         slot: *Slot,
@@ -2922,16 +3035,16 @@ pub const Server = struct {
             // embedder, who can decide whether to retry, scale, or
             // bail.
             error.OutOfMemory => return Error.OutOfMemory,
-            // Per-connection error (peer protocol violation, TLS
-            // hiccup, malformed input). Don't tear down the server.
-            // If Connection.handle didn't already transition the
-            // connection to `.closed`, force it so the slot gets
-            // reaped on the next `reap` call. RFC 9000 §20.1
-            // INTERNAL_ERROR (0x01) is the catch-all close code for
-            // local-side failures.
+            // Everything else is a per-connection failure: don't tear
+            // down the server. If `Connection.handle` didn't already
+            // transition the connection to `.closed` with a more
+            // specific code, force it so the slot gets reaped on the
+            // next `reap` call. `slotErrorCloseCode` picks the code;
+            // see it for why this is usually a no-op.
             else => {
                 if (!slot.conn.isClosed()) {
-                    slot.conn.close(true, 0x01, "Server.handle failed");
+                    const close_with = slotErrorCloseCode(err);
+                    slot.conn.close(true, close_with.code, close_with.reason);
                 }
             },
         };
@@ -3047,7 +3160,7 @@ pub const Server = struct {
     fn acceptSourceRate(
         self: *Server,
         addr: Address,
-        cap: u32,
+        cap: u64,
         now_us: u64,
     ) bool {
         // Lazy eviction when the table is at capacity. Pruning
@@ -3090,7 +3203,7 @@ pub const Server = struct {
     fn acceptVnRate(
         self: *Server,
         addr: Address,
-        cap: u32,
+        cap: u64,
         now_us: u64,
     ) bool {
         // Lazy eviction shared with `acceptSourceRate`.
@@ -3143,7 +3256,7 @@ pub const Server = struct {
     fn acceptLogRate(
         self: *Server,
         addr: Address,
-        cap: u32,
+        cap: u64,
         now_us: u64,
     ) bool {
         // Lazy eviction shared with `acceptSourceRate` / `acceptVnRate`.
@@ -3307,7 +3420,7 @@ pub const Server = struct {
     /// ClientHello, looks for `quic_transport_parameters` and inside
     /// that for `version_information` (codepoint 0x11). Intersects
     /// the client's advertised `available_versions` with the server's
-    /// configured `Config.versions` and returns the first server-
+    /// configured `Config.accepted_versions` and returns the first server-
     /// preferred entry that also appears in the client's list.
     ///
     /// Returns:
@@ -3553,7 +3666,7 @@ pub const Server = struct {
     /// Errors propagate from the encoder (`InsufficientBytes`) or
     /// the queue allocator (`OutOfMemory`); on either, `feed` falls
     /// back to `.dropped`. The supported_versions list mirrors
-    /// `Config.versions`; the response echoes the client's CIDs
+    /// `Config.accepted_versions`; the response echoes the client's CIDs
     /// swapped (RFC 8999 §6) and the unused bits are left as the
     /// encoder default.
     fn queueVersionNegotiation(
@@ -3615,7 +3728,10 @@ pub const Server = struct {
         var cid_storage: [8][20]u8 = undefined;
         var provisions: [8]conn_mod.ConnectionIdProvision = undefined;
         const budget = @min(
-            @min(slot.conn.localConnectionIdIssueBudget(0), self.max_auto_replenish_cids),
+            @min(
+                slot.conn.localConnectionIdIssueBudget(0),
+                @as(usize, self.max_auto_replenish_cids),
+            ),
             provisions.len,
         );
         if (budget == 0) return;
@@ -4272,6 +4388,38 @@ fn addressContext(dst: []u8, addr: Address) []const u8 {
 // The tests below only exercise pure helpers and config validation —
 // neither needs a TLS context.
 
+test "slotErrorCloseCode maps TLS failures to CRYPTO_ERROR and everything else to INTERNAL_ERROR" {
+    // The live `dispatchToSlot` path is dominated by `sendAlert`,
+    // which closes with the specific 0x0100+alert code before the
+    // error unwinds — so this mapping is the only place the
+    // alert-less decision is observable, and without this test a
+    // revert to INTERNAL_ERROR passes the entire suite (it did).
+    const crypto = Server.slotErrorCloseCode(error.HandshakeFailed);
+    try std.testing.expectEqual(
+        conn_mod.state.transport_error_crypto_handshake_failure,
+        crypto.code,
+    );
+    // RFC 9001 §4.8: the whole 0x0100-0x01ff window means "TLS
+    // rejected this connection".
+    try std.testing.expect(crypto.code >= 0x0100 and crypto.code <= 0x01ff);
+    try std.testing.expectEqual(
+        conn_mod.state.transport_error_crypto_handshake_failure,
+        Server.slotErrorCloseCode(error.PeerAlerted).code,
+    );
+
+    // Everything else keeps the RFC 9000 §20.1 catch-all.
+    for ([_]anyerror{
+        error.InboxOverflow,
+        error.UnsupportedCipherSuite,
+        error.ProtocolViolation,
+    }) |err| {
+        try std.testing.expectEqual(
+            conn_mod.state.transport_error_internal,
+            Server.slotErrorCloseCode(err).code,
+        );
+    }
+}
+
 test "Server.init validates configuration" {
     const protos = [_][]const u8{"hq-test"};
 
@@ -4341,6 +4489,16 @@ test "Server.init validates configuration" {
         .tls_key_pem = "stub",
         .alpn_protocols = &protos,
         .vn_source_rate_limit = .{ .limit = 0 },
+        .transport_params = .{},
+    }));
+
+    // Log limiter with an explicit cap of 0.
+    try std.testing.expectError(Server.Error.InvalidConfig, Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = "stub",
+        .tls_key_pem = "stub",
+        .alpn_protocols = &protos,
+        .log_source_rate_limit = .{ .limit = 0 },
         .transport_params = .{},
     }));
 

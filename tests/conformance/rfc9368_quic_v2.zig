@@ -310,7 +310,7 @@ fn buildServerWithVersions(versions: []const u32) !quic_zig.Server {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = default_server_params,
-        .versions = versions,
+        .accepted_versions = versions,
     });
 }
 
@@ -389,7 +389,7 @@ test "server with only v1 emits VN listing v1 for a v2 Initial [RFC9368 §6]" {
     try std.testing.expectEqual(QUIC_V1, vn_hdr.version(0));
 }
 
-test "server VN body mirrors Config.versions when configured for both [RFC9368 §6]" {
+test "server VN body mirrors Config.accepted_versions when configured for both [RFC9368 §6]" {
     const versions = [_]u32{ QUIC_V2, QUIC_V1 };
     var srv = try buildServerWithVersions(&versions);
     defer srv.deinit();
@@ -423,7 +423,7 @@ test "Server.init rejects empty versions list [RFC9368 §6]" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = default_server_params,
-        .versions = &.{},
+        .accepted_versions = &.{},
     }));
 }
 
@@ -436,6 +436,6 @@ test "Server.init rejects unknown version [RFC9368 §6]" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = default_server_params,
-        .versions = &versions,
+        .accepted_versions = &versions,
     }));
 }

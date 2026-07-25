@@ -51,6 +51,30 @@ so untagged pins see the bump in the package hash.
   populated (`just boringssl-cmake` upstream) wired in as a path
   dependency; the forwarding makes quic-zig transparent to that
   setup rather than the blocker.
+- **`examples/foreign_loop_embedder.zig`** — a worked, tested
+  integration of the caller-drives (no-I/O) path into a hand-rolled
+  `std.posix.poll` reactor, plus a new
+  `## Foreign Event Loops` section in EMBEDDING.md. Driving
+  `feed`/`handle`, `drainStatelessResponse`, `pollDatagram`, `tick`,
+  `pollEvent`, and `reap` from your own loop has always been supported;
+  it was not discoverable, and a downstream consumer hand-rolled ~450
+  lines of wake-pipe and timer plumbing before finding it. The example
+  isolates the parts that are easy to get wrong — deadline→timeout
+  conversion (past-due must clamp to 0, sub-millisecond must round up
+  to 1) and the queue+wake handoff for cross-thread application work —
+  as pure, separately tested units, and its in-memory test completes a
+  real TLS 1.3 handshake plus stream and datagram echo through the
+  pumps with no socket involved. Builds as
+  `foreign-loop-embedder-example` under `zig build examples`; its
+  inline tests run under `zig build test` on every tier-1 platform
+  (the socket/poll group skips on Windows, where `std.posix.poll` is a
+  compile error).
+- `quic_zig.ConnectionError` (and `conn.Error`) re-export the error set
+  `Connection`'s methods return, so embedders composing their own error
+  sets stop reaching through the `conn.state` submodule path.
+  `Connection.last_activity_us` is documented as a stable,
+  embedder-readable connection clock — http3-zig already reads it that
+  way for request-deadline enforcement.
 - `build.zig` enforces `minimum_zig_version` with a `comptime` assert
   (Zig's build runner parses the field but never checks it). An
   out-of-floor toolchain now gets a one-line diagnostic naming both
@@ -59,26 +83,77 @@ so untagged pins see the bump in the package hash.
 
 ### Changed (BREAKING)
 
-- `Server.Config.max_initials_per_source_per_window: ?u32 = 32` and
-  `max_vn_per_source_per_window: ?u32 = 8` are renamed to
-  `initial_source_rate_limit` and `vn_source_rate_limit`, typed as the
-  new `Server.SourceRateLimit` union: `.default` (library-recommended
-  cap; the new `Config.default_initial_source_rate_cap`/
-  `default_vn_source_rate_cap` constants), `.disabled`, or
-  `.{ .limit = n }`. Rationale: when 0.3.0 turned the Initial limiter
-  on by default, `null` silently inverted from "harmless unset" to
-  "explicitly disable a DoS mitigation", and a downstream consumer
-  mirroring the old default shipped exactly that misconfiguration.
-  The rename makes every stale caller a compile error; the union makes
-  "unset" and "off" different spellings. Migration:
-  `= null` → `= .disabled`; `= 32` (or any explicit cap) →
-  `= .{ .limit = 32 }`; leave the field out to keep the defaults.
+- **`Server.Config` naming/semantics normalization.** This is the one
+  pre-1.0 `Config` churn `docs/API_STABILITY.md` has always reserved,
+  batched into this release so consumers migrate once. `Config` field
+  names are frozen from here to 1.0.
+
+  Every rate and quota knob now shares one three-state type,
+  `Server.RateLimit` — `.default` (the library's recommendation),
+  `.disabled` (opt out), `.{ .limit = n }` (explicit cap). `null` is no
+  longer spellable for these, which is the point: when 0.3.0 turned the
+  Initial-flood limiter on by default, `null` silently inverted from
+  "harmless unset" to "explicitly disable a DoS mitigation", and a
+  downstream consumer mirroring the old default shipped exactly that
+  misconfiguration with no compile error and no failing test. Every
+  stale caller is now a compile error.
+
+  | old field | new field | migration |
+  | --- | --- | --- |
+  | `max_initials_per_source_per_window: ?u32 = 32` | `initial_source_rate_limit: RateLimit = .default` | `null` → `.disabled`; `n` → `.{ .limit = n }` |
+  | `max_vn_per_source_per_window: ?u32 = 8` | `vn_source_rate_limit: RateLimit = .default` | same |
+  | `max_log_events_per_source_per_window: ?u32 = 16` | `log_source_rate_limit: RateLimit = .default` | same |
+  | `max_datagrams_per_window: ?u32 = null` | `listener_datagram_rate_limit: RateLimit = .default` | same (`.default` is off) |
+  | `max_bytes_per_window: ?u64 = null` | `listener_byte_rate_limit: RateLimit = .default` | same (`.default` is off) |
+  | `max_bytes_per_source_per_second: ?u64 = null` | `source_byte_rate_limit: RateLimit = .default` | same; cap is still bytes/second |
+  | `enable_0rtt: bool` + `early_data_anti_replay: ?*T` | `early_data: EarlyData = .disabled` | see below |
+  | `versions: []const u32` | `accepted_versions: []const u32` | rename only |
+  | `max_auto_replenish_cids: usize` | `max_auto_replenish_cids: u8` | literals unchanged |
+
+  The recommended caps are exposed as `Config.default_initial_source_rate_cap`
+  (32), `default_vn_source_rate_cap` (8), and
+  `default_log_source_rate_cap` (16). The listener and bandwidth
+  limiters recommend "off" — the right ceiling is deployment-specific —
+  so `.default` resolves to no limit for those three.
+
+  `enable_0rtt: bool` + `early_data_anti_replay: ?*AntiReplayTracker`
+  collapse into `early_data: Server.EarlyData`, a union of `.disabled`,
+  `.{ .with_anti_replay = &tracker }`, and
+  `.without_replay_protection`. The old pair let `enable_0rtt = true`
+  with a forgotten tracker ship replay-exposed 0-RTT as a perfectly
+  valid config, with no error and no log line; shipping unprotected
+  0-RTT is now a deliberate, greppable choice. Migration:
+  `.enable_0rtt = true` + `.early_data_anti_replay = &t` →
+  `.early_data = .{ .with_anti_replay = &t }`; `.enable_0rtt = true`
+  alone → `.early_data = .without_replay_protection`; omit the field to
+  keep 0-RTT off.
+
+  `usize` was the only platform-width integer in either `Config`, which
+  would have frozen a field whose size differs between a 32- and
+  64-bit build of the same consumer.
 - The published package archive no longer ships the `bench/`, `docs/`,
   `interop/`, `tests/`, and `tools/` trees, and `build.zig` registers
   its development steps (tests, QNS endpoint, examples, docs, bench,
   interop tooling) only when quic-zig is the root package. Consumers
   fetch and configure just the module graph. Building the dev steps
   requires a git checkout — which is where they were run anyway.
+
+### Changed
+
+- **Wire-visible close code for TLS handshake failures.** When a
+  connection dies inside `Server.feed` because TLS rejected it, the
+  CONNECTION_CLOSE the peer sees now carries RFC 9001 §4.8's generic
+  CRYPTO_ERROR `handshake_failure` (0x0128) instead of RFC 9000 §20.1
+  INTERNAL_ERROR (0x01), so a TLS rejection is no longer reported as
+  "the server broke". Most rejections already carried the *specific*
+  0x0100+alert code — BoringSSL's `send_alert` closes first and
+  `close` is first-wins — so this only moves the alert-less handshake
+  failure, but it moves it into the window a peer can classify. Three
+  new public constants name the codes:
+  `conn.state.transport_error_internal`,
+  `transport_error_crypto_base`, and
+  `transport_error_crypto_handshake_failure`. The e2e TLS suite now
+  asserts rejection close codes land in 0x0100-0x01ff on both sides.
 
 ### Fixed
 
@@ -89,7 +164,7 @@ so untagged pins see the bump in the package hash.
   `tls_context_override`, an empty bundle, or a cert/key half-pair.
   (An unparseable non-empty bundle fails with `InvalidPem`.)
 - `Server.replaceTlsContext(.{ .pem = ... })` re-installs the 0-RTT
-  anti-replay callback (`Config.early_data_anti_replay`) on the
+  anti-replay callback (`Config.early_data`'s tracker) on the
   replacement context. Previously a hot cert rotation on a 0-RTT
   server silently disconnected TLS-layer replay protection for every
   ticket minted after the swap (RFC 9001 §5.6).

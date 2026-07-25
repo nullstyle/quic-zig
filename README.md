@@ -278,6 +278,10 @@ consumer-facing files; those trees live in the git repository.
   RFC-traceable conformance test style and filters.
 - [bench/README.md](https://github.com/nullstyle/quic-zig/blob/main/bench/README.md):
   microbenchmark scope and command.
+- [examples/foreign_loop_embedder.zig](https://github.com/nullstyle/quic-zig/blob/main/examples/foreign_loop_embedder.zig):
+  worked integration of the caller-drives (no-I/O) path into a
+  hand-rolled `poll` reactor — the supported shape when your runtime
+  already owns the wait.
 - [CONTRIBUTING.md](CONTRIBUTING.md): local workflow and contribution
   expectations.
 

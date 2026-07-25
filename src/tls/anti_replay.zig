@@ -10,7 +10,7 @@
 //! check has to live at a layer that knows the ticket's identity.
 //!
 //! `AntiReplayTracker` is the data structure that check needs.
-//! Embedders that opt in to 0-RTT (`Server.Config.enable_0rtt = true`)
+//! Embedders that opt in to 0-RTT (`Server.Config.early_data`)
 //! follow this workflow on every connection that 0-RTT accepts:
 //!
 //! ```zig

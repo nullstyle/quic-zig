@@ -19,7 +19,7 @@ pub const QUIC_VERSION_1: u32 = 0x00000001;
 /// labels (§3.3.1 / §3.3.2), the long-header packet-type bit layout
 /// (§3.2), and the Retry integrity constants (§3.3.3); short-header
 /// packets, frame syntax, and connection-level state are identical.
-/// Embedders opt in via `Server.Config.versions` (server) and
+/// Embedders opt in via `Server.Config.accepted_versions` (server) and
 /// `Client.Config.preferred_version` (client).
 pub const QUIC_VERSION_2: u32 = 0x6b3343cf;
 
@@ -103,6 +103,13 @@ pub const Client = @import("client.zig").Client;
 /// The per-connection state machine. See `conn.Connection` for the
 /// full method surface (~106 public methods).
 pub const Connection = conn.Connection;
+
+/// The error set `Connection`'s methods return. Embedders building a
+/// composite error set for their own layer (`MyError = ConnectionError
+/// || ...`) should name this rather than reaching through
+/// `quic_zig.conn.state.Error`, which is a submodule path, not part of
+/// the advertised surface.
+pub const ConnectionError = conn.Error;
 
 /// One emitted UDP datagram as produced by `Connection.pollDatagram`.
 /// Carries the byte length, optional destination address (for

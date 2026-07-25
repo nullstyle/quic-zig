@@ -1,6 +1,6 @@
 //! Hardening guide §5.2 / §11.2 regression: 0-RTT replay rejection.
 //!
-//! Embedders that opt in to 0-RTT (`Server.Config.enable_0rtt = true`)
+//! Embedders that opt in to 0-RTT (`Server.Config.early_data`)
 //! are required to wire `quic_zig.tls.AntiReplayTracker` into their
 //! server loop and reject any 0-RTT request whose ticket-derived
 //! identity has already been seen — RFC 9001 §5.6 / RFC 8446 §8.
@@ -126,7 +126,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .enable_0rtt = true,
+        .early_data = .without_replay_protection,
     });
     defer srv.deinit();
 
@@ -285,7 +285,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .enable_0rtt = true,
+        .early_data = .without_replay_protection,
     });
     defer srv.deinit();
 

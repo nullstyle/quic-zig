@@ -67,6 +67,10 @@ pub const event_queue = @import("event_queue.zig");
 
 /// Top-level QUIC connection state machine (RFC 9000).
 pub const Connection = state.Connection;
+/// The error set every `Connection` method draws from. Re-exported so
+/// embedders composing their own error sets don't have to name the
+/// `conn.state` submodule.
+pub const Error = state.Error;
 /// One UDP datagram queued for transmission with destination metadata.
 pub const OutgoingDatagram = state.OutgoingDatagram;
 /// One UDP datagram delivered from the network with source metadata.

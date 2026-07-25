@@ -179,12 +179,16 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         // context + proactive CID replenish (server).
         _ = std.meta.fieldInfo(quic_zig.Client.Config, .new_session_callback);
         _ = std.meta.fieldInfo(quic_zig.Client.Config, .resumption_state);
-        _ = std.meta.fieldInfo(quic_zig.Server.Config, .enable_0rtt);
+        _ = std.meta.fieldInfo(quic_zig.Server.Config, .early_data);
+        _ = quic_zig.Server.EarlyData.disabled;
         _ = std.meta.fieldInfo(quic_zig.Server.Config, .early_data_application_context);
         _ = std.meta.fieldInfo(quic_zig.Server.Config, .auto_replenish_connection_ids);
         _ = std.meta.fieldInfo(quic_zig.Server.Config, .max_auto_replenish_cids);
         // Typed migration refusals stay in the public error set.
-        const E = quic_zig.conn.state.Error;
+        // Named via the root alias on purpose: that is the path
+        // embedders composing their own error sets should use, so
+        // pinning it here keeps it from being dropped.
+        const E = quic_zig.ConnectionError;
         if (@as(E, error.MigrationPreHandshake) != error.MigrationPreHandshake or
             @as(E, error.MigrationValidationPending) != error.MigrationValidationPending or
             @as(E, error.MigrationNoFreshPeerCid) != error.MigrationNoFreshPeerCid)

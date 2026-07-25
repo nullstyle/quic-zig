@@ -101,7 +101,7 @@ test "v2 handshake completes on both sides [RFC9368 §3]" {
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .versions = &versions,
+        .accepted_versions = &versions,
     });
     defer srv.deinit();
 
@@ -143,7 +143,7 @@ test "v1 handshake regression: still completes after v2 plumbing landed" {
         .transport_params = common.defaultParams(),
         // Default versions = v1 only. Explicit so the test reads as
         // intent rather than relying on the default.
-        .versions = &.{QUIC_V1},
+        .accepted_versions = &.{QUIC_V1},
     });
     defer srv.deinit();
 
@@ -175,7 +175,7 @@ test "v1+v2 server with a v1 client: server accepts v1 directly [RFC9368 §6]" {
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .versions = &versions,
+        .accepted_versions = &versions,
     });
     defer srv.deinit();
 
@@ -206,7 +206,7 @@ test "v2-only server with a v1-only client emits a VN listing v2 [RFC9368 §6]" 
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .versions = &versions,
+        .accepted_versions = &versions,
     });
     defer srv.deinit();
 
@@ -264,7 +264,7 @@ test "v1+v2 client advertises version_information transport parameter [RFC9368 �
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .versions = &versions,
+        .accepted_versions = &versions,
     });
     defer srv.deinit();
 
@@ -294,7 +294,7 @@ test "v1+v2 client advertises version_information transport parameter [RFC9368 �
     try std.testing.expectEqual(QUIC_V1, got_versions[0]);
     try std.testing.expectEqual(QUIC_V2, got_versions[1]);
 
-    // The server in turn advertises its full `Config.versions` set
+    // The server in turn advertises its full `Config.accepted_versions` set
     // back to the client. With chosen-version-first ordering, the
     // first entry matches the negotiated v1.
     const server_advertised_opt = try cli.conn.peerTransportParams();
@@ -322,7 +322,7 @@ test "[v2,v1] server upgrades a v1-wire ClientHello that lists v2 [RFC9368 §6]"
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .versions = &srv_versions,
+        .accepted_versions = &srv_versions,
     });
     defer srv.deinit();
 
@@ -379,7 +379,7 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .versions = &srv_versions,
+        .accepted_versions = &srv_versions,
     });
     defer srv.deinit();
 
@@ -563,7 +563,7 @@ test "[v2,v1] server with v1-only client commits to v1, no upgrade [RFC9368 §6]
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
-        .versions = &srv_versions,
+        .accepted_versions = &srv_versions,
     });
     defer srv.deinit();
 

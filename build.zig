@@ -365,6 +365,36 @@ pub fn build(b: *std.Build) void {
     );
     echo_smoke_step.dependOn(&run_echo_smoke.step);
 
+    // Foreign-event-loop embedder: the caller-drives (no-I/O) path
+    // wired into a hand-rolled `std.posix.poll` reactor instead of
+    // `transport.runUdp*`. Ships as both a runnable example
+    // (`zig build examples`) and a test target (`zig build test` walks
+    // its inline tests via `test_step`) — the portable scheduling +
+    // in-memory pump tests run on every tier-1 platform, and the
+    // socket/poll tests skip on Windows, where std routes sockets
+    // through `std.Io` and `std.posix.poll` is a compile error.
+    // `examples/echo_common.zig` (shared fixtures) and
+    // `examples/support/*.pem` ride along via relative
+    // @import/@embedFile inside the examples/ module root.
+    const foreign_loop_example_mod = b.createModule(.{
+        .root_source_file = b.path("examples/foreign_loop_embedder.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    foreign_loop_example_mod.addImport("quic_zig", quic_zig_mod);
+
+    const foreign_loop_example_exe = b.addExecutable(.{
+        .name = "foreign-loop-embedder-example",
+        .root_module = foreign_loop_example_mod,
+    });
+    const foreign_loop_example_install = b.addInstallArtifact(foreign_loop_example_exe, .{});
+    examples_step.dependOn(&foreign_loop_example_install.step);
+
+    const foreign_loop_example_tests = b.addTest(.{ .root_module = foreign_loop_example_mod });
+    const run_foreign_loop_example_tests = b.addRunArtifact(foreign_loop_example_tests);
+    test_step.dependOn(&run_foreign_loop_example_tests.step);
+
     // Zig autodocs for the public quic_zig module. `zig build docs`
     // emits the static site into zig-out/docs (open index.html).
     const docs_obj = b.addObject(.{

@@ -57,7 +57,7 @@
 //!   RFC9001 §8.2 ¶1  MUST       only TLS_AES_128/256_GCM_*, TLS_CHACHA20_POLY1305_SHA256 are negotiated
 //!   RFC9001 §4.6.1 ¶3 MUST      0-RTT context digest changes when transport parameters change
 //!   RFC9001 §4.6.1 ¶3 SHOULD    session-ticket context binds ALPN, transport params, and app context
-//!   RFC9001 §4.6 ¶1   MUST      0-RTT remains opt-in (Server.Config.enable_0rtt defaults to false)
+//!   RFC9001 §4.6 ¶1   MUST      0-RTT remains opt-in (Server.Config.early_data defaults to .disabled)
 //!   RFC9001 §4.7 ¶1   MUST      client rejects the server's certificate chain when no
 //!                              trust anchor matches (handshake-fixture-driven; chain
 //!                              failure surfaces as `error.PeerAlerted` from `advance`
@@ -608,9 +608,9 @@ test "MUST close with CRYPTO_ERROR + no_application_protocol (0x178) on ALPN mis
 test "MUST keep 0-RTT opt-in (default disabled) [RFC9001 §4.6 ¶1]" {
     // §4.6 ¶1: "A server MUST NOT enable 0-RTT … unless it has been
     // configured to do so." quic_zig exposes this knob as
-    // `Server.Config.enable_0rtt`; the conformance guarantee is that
+    // `Server.Config.early_data`; the conformance guarantee is that
     // a Config built without explicitly opting in carries
-    // `enable_0rtt = false`, so the Server starts up with early-data
+    // `early_data = .disabled`, so the Server starts up with early-data
     // disabled.
     const protos = [_][]const u8{"hq-test"};
     const cfg: quic_zig.Server.Config = .{
@@ -620,7 +620,8 @@ test "MUST keep 0-RTT opt-in (default disabled) [RFC9001 §4.6 ¶1]" {
         .alpn_protocols = &protos,
         .transport_params = fixture.defaultParams(),
     };
-    try std.testing.expect(!cfg.enable_0rtt);
+    try std.testing.expect(!cfg.early_data.enabled());
+    try std.testing.expectEqual(quic_zig.Server.EarlyData.disabled, cfg.early_data);
 }
 
 test "MUST validate the server certificate chain at the client [RFC9001 §4.7 ¶1]" {

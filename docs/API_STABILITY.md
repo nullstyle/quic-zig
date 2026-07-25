@@ -56,17 +56,45 @@ suite.
 - **Newly added surfaces** may see minor signature or naming refinement
   as they are exercised for the first time.
 - **Config naming** follows a settled convention: on/off feature toggles use
-  `enable_` (`enable_ecn`), permission grants use `allow_`
-  (`allow_no_idle_timeout`), and `null`-to-disable is reserved for caps and
-  quotas. A few fields keep intentional semantic prefixes —
+  `enable_` (`enable_ecn`) and permission grants use `allow_`
+  (`allow_no_idle_timeout`). A few fields keep intentional semantic prefixes —
   `insecure_skip_verify` (matching common TLS-config naming) and
   `reveal_close_reason_on_wire` (privacy-signalling). New `Config` fields
   follow the same convention and are added with production-safe defaults.
 
+- **`?T` is for "no payload supplied", never for "feature off".** A
+  nullable field is the right spelling when the feature *is* the payload
+  and has no payload-free enabled state: a key (`retry_token_key`), a PEM
+  bundle (`client_ca_pem`), a callback (`log_callback`), a context
+  override, an optional sub-config (`preferred_address`). There, `null`
+  reads unambiguously as "I didn't supply one".
+
+  It is the wrong spelling for anything with a library-recommended
+  setting, because `null` then has to mean both "I didn't configure
+  this" and "turn it off" — and when the library later changes the
+  recommendation, every consumer that mirrored `null` silently loses the
+  new behavior. That is exactly what happened when 0.3.0 turned the
+  Initial-flood limiter on by default. Such settings use a three-state
+  union instead: `Server.RateLimit` (`.default` / `.disabled` /
+  `.{ .limit = n }`) for every rate and quota knob, and
+  `Server.EarlyData` for the 0-RTT posture, where the unprotected
+  variant has to be named rather than reached by forgetting a field.
+  Prefer making a dangerous configuration *unrepresentable* over
+  catching it with an `InvalidConfig` check.
+
 ### Internal — do not depend on
 
-- Anything named `_internal`, any file or decl prefixed with `_`, and
-  `Connection`'s non-`pub` fields.
+- Anything named `_internal`, and any file or decl prefixed with `_`.
+- `Connection`'s fields, with the documented exceptions below. Zig has
+  no field-level privacy, so reachability is not permission: treat a
+  field as internal unless its own doc comment says otherwise. The
+  fields that *are* stable observation points say so explicitly —
+  today that is `Connection.last_activity_us` (the connection clock, in
+  the same microsecond origin you pass to `handle` / `poll` / `tick`)
+  and the mutable posture switches the wrappers thread onto each
+  connection (`ecn_enabled`, `reveal_close_reason_on_wire`,
+  `delayed_ack_packet_threshold`), which `Server`/`Client` set from
+  `Config` and a raw-`Connection` embedder sets directly.
 - The low-level `frame` and `wire` codecs are exported for tests and
   advanced use, but are **not** covered by the stability guarantee.
 - Test-only helpers and fixtures.
@@ -89,8 +117,17 @@ contract, which 1.0 will keep:
 New `Config` fields are additive and default to safe, backward-compatible
 behavior (the 0.3.0 secure-by-default flips were the deliberate exception,
 and were called out as breaking). Existing fields will not silently change
-meaning. The naming/semantics normalization noted above is the one planned
-pre-1.0 churn to this surface.
+meaning.
+
+The naming/semantics normalization that this section previously listed as
+planned pre-1.0 churn **landed in 0.10.0** and is now complete: the rate
+and quota knobs moved onto `Server.RateLimit`, the 0-RTT pair became
+`Server.EarlyData`, `Server.Config.versions` became `accepted_versions`,
+and `max_auto_replenish_cids` dropped its platform-width `usize`. See the
+0.10.0 CHANGELOG entry for the field-by-field migration. **No further
+`Config` renames are planned before 1.0**; from here the surface grows
+additively, and a field whose meaning genuinely has to change gets a new
+name alongside the old one rather than a redefinition.
 
 ## Draft-extension policy
 

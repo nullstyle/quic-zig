@@ -121,16 +121,23 @@ test "Server per-source Initial-flood limiter is on by default at 32 (L4)" {
     // opting in. (Enforcement only applies to attributed `from`
     // datagrams; null-source feeds bypass it — see server.zig feed.)
     try std.testing.expectEqual(
-        @as(?u32, quic_zig.Server.Config.default_initial_source_rate_cap),
+        @as(?u64, quic_zig.Server.Config.default_initial_source_rate_cap),
         srv.max_initials_per_source,
     );
-    try std.testing.expectEqual(@as(?u32, 32), srv.max_initials_per_source);
+    try std.testing.expectEqual(@as(?u64, 32), srv.max_initials_per_source);
     // Same posture for the VN-emission limiter: on by default at 8.
     try std.testing.expectEqual(
-        @as(?u32, quic_zig.Server.Config.default_vn_source_rate_cap),
+        @as(?u64, quic_zig.Server.Config.default_vn_source_rate_cap),
         srv.max_vn_per_source,
     );
-    try std.testing.expectEqual(@as(?u32, 8), srv.max_vn_per_source);
+    try std.testing.expectEqual(@as(?u64, 8), srv.max_vn_per_source);
+    // Third member of the same family: per-source log-event limiter,
+    // on by default at 16.
+    try std.testing.expectEqual(
+        @as(?u64, quic_zig.Server.Config.default_log_source_rate_cap),
+        srv.max_log_events_per_source,
+    );
+    try std.testing.expectEqual(@as(?u64, 16), srv.max_log_events_per_source);
     // And `.disabled` is the only spelling that turns them off.
     var srv_off = try quic_zig.Server.init(.{
         .allocator = std.testing.allocator,
@@ -140,10 +147,69 @@ test "Server per-source Initial-flood limiter is on by default at 32 (L4)" {
         .transport_params = defaultParams(),
         .initial_source_rate_limit = .disabled,
         .vn_source_rate_limit = .disabled,
+        .log_source_rate_limit = .disabled,
     });
     defer srv_off.deinit();
-    try std.testing.expectEqual(@as(?u32, null), srv_off.max_initials_per_source);
-    try std.testing.expectEqual(@as(?u32, null), srv_off.max_vn_per_source);
+    try std.testing.expectEqual(@as(?u64, null), srv_off.max_initials_per_source);
+    try std.testing.expectEqual(@as(?u64, null), srv_off.max_vn_per_source);
+    try std.testing.expectEqual(@as(?u64, null), srv_off.max_log_events_per_source);
+}
+
+test "Server.Config.early_data: each variant maps to the intended internal posture" {
+    const protos = [_][]const u8{"hq-test"};
+
+    // Secure default: 0-RTT refused outright.
+    var off = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer off.deinit();
+    try std.testing.expect(!off.enable_0rtt);
+    try std.testing.expectEqual(
+        @as(?*quic_zig.tls.AntiReplayTracker, null),
+        off.early_data_anti_replay,
+    );
+
+    // Protected: early data on AND the embedder's tracker installed —
+    // this is the variant that wires the BoringSSL allow_early_data
+    // callback, so the mapping must not silently drop the tracker.
+    var tracker = try quic_zig.tls.AntiReplayTracker.init(std.testing.allocator, .{});
+    defer tracker.deinit();
+    var protected = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .early_data = .{ .with_anti_replay = &tracker },
+    });
+    defer protected.deinit();
+    try std.testing.expect(protected.enable_0rtt);
+    try std.testing.expectEqual(
+        @as(?*quic_zig.tls.AntiReplayTracker, &tracker),
+        protected.early_data_anti_replay,
+    );
+
+    // Deliberately unprotected: early data on, no tracker. Legitimate
+    // only for idempotent-only applications — and now impossible to
+    // reach by forgetting a field.
+    var unprotected = try quic_zig.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .early_data = .without_replay_protection,
+    });
+    defer unprotected.deinit();
+    try std.testing.expect(unprotected.enable_0rtt);
+    try std.testing.expectEqual(
+        @as(?*quic_zig.tls.AntiReplayTracker, null),
+        unprotected.early_data_anti_replay,
+    );
 }
 
 test "Server.feed drops non-Initial bytes silently" {
@@ -1625,7 +1691,7 @@ test "Server listener rate limit drops datagrams past cap" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_datagrams_per_window = 3,
+        .listener_datagram_rate_limit = .{ .limit = 3 },
         .listener_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -1663,7 +1729,7 @@ test "Server listener rate limit window resets after elapsed" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_datagrams_per_window = 2,
+        .listener_datagram_rate_limit = .{ .limit = 2 },
         .listener_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -1696,7 +1762,7 @@ test "Server listener rate limit is null-by-default" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        // No `max_datagrams_per_window` — the limiter is off.
+        // No `listener_datagram_rate_limit` — the limiter is off.
     });
     defer srv.deinit();
 
@@ -1712,7 +1778,7 @@ test "Server listener rate limit is null-by-default" {
     try std.testing.expectEqual(@as(u64, 0), m.feeds_listener_rate_limited);
 }
 
-test "Server.init rejects max_datagrams_per_window=0" {
+test "Server.init rejects listener_datagram_rate_limit .{ .limit = 0 }" {
     const protos = [_][]const u8{"hq-test"};
     try std.testing.expectError(quic_zig.Server.Error.InvalidConfig, quic_zig.Server.init(.{
         .allocator = std.testing.allocator,
@@ -1720,7 +1786,7 @@ test "Server.init rejects max_datagrams_per_window=0" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_datagrams_per_window = 0,
+        .listener_datagram_rate_limit = .{ .limit = 0 },
     }));
 }
 
@@ -1742,7 +1808,7 @@ test "Server log rate limiter drops events past cap from one source" {
         .initial_source_rate_limit = .{ .limit = 1 },
         // Cap log emission at 2 per source per window. The first 2
         // log emissions land; subsequent ones drop silently.
-        .max_log_events_per_source_per_window = 2,
+        .log_source_rate_limit = .{ .limit = 2 },
         .source_rate_window_us = 1_000_000,
         .log_callback = LogSink.cb,
         .log_user_data = &sink,
@@ -1788,7 +1854,7 @@ test "Server log rate limiter is per-source (different sources get fresh budgets
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
         .initial_source_rate_limit = .{ .limit = 1 },
-        .max_log_events_per_source_per_window = 1,
+        .log_source_rate_limit = .{ .limit = 1 },
         .source_rate_window_us = 1_000_000,
         .log_callback = LogSink.cb,
         .log_user_data = &sink,
@@ -1829,7 +1895,7 @@ test "Server log rate limit window resets after elapsed" {
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
         .initial_source_rate_limit = .{ .limit = 1 },
-        .max_log_events_per_source_per_window = 1,
+        .log_source_rate_limit = .{ .limit = 1 },
         .source_rate_window_us = 1_000_000,
         .log_callback = LogSink.cb,
         .log_user_data = &sink,
@@ -1873,7 +1939,7 @@ test "Server log rate limit doesn't block log events for from=null paths" {
         .transport_params = defaultParams(),
         .max_concurrent_connections = 0,
         // Aggressive cap — would suppress *every* per-source log.
-        .max_log_events_per_source_per_window = 1,
+        .log_source_rate_limit = .{ .limit = 1 },
         .source_rate_window_us = 1_000_000,
         .log_callback = LogSink.cb,
         .log_user_data = &sink,
@@ -1910,7 +1976,7 @@ test "Server listener byte rate limit drops datagrams past byte cap" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_bytes_per_window = 1500,
+        .listener_byte_rate_limit = .{ .limit = 1500 },
         .listener_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -1948,7 +2014,7 @@ test "Server listener byte and packet caps are independently enforced" {
             .tls_key_pem = test_key_pem,
             .alpn_protocols = &protos,
             .transport_params = defaultParams(),
-            .max_bytes_per_window = 1500,
+            .listener_byte_rate_limit = .{ .limit = 1500 },
             .listener_rate_window_us = 1_000_000,
         });
         defer srv.deinit();
@@ -1975,7 +2041,7 @@ test "Server listener byte and packet caps are independently enforced" {
             .tls_key_pem = test_key_pem,
             .alpn_protocols = &protos,
             .transport_params = defaultParams(),
-            .max_datagrams_per_window = 2,
+            .listener_datagram_rate_limit = .{ .limit = 2 },
             .listener_rate_window_us = 1_000_000,
         });
         defer srv.deinit();
@@ -2007,7 +2073,7 @@ test "Server listener byte rate limit window resets after elapsed" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_bytes_per_window = 1500,
+        .listener_byte_rate_limit = .{ .limit = 1500 },
         .listener_rate_window_us = 1_000_000,
     });
     defer srv.deinit();
@@ -2039,7 +2105,7 @@ test "Server listener byte rate limit window resets after elapsed" {
     try std.testing.expectEqual(@as(u64, 2), m.feeds_listener_byte_rate_limited);
 }
 
-test "Server.init rejects max_bytes_per_window=0" {
+test "Server.init rejects listener_byte_rate_limit .{ .limit = 0 }" {
     const protos = [_][]const u8{"hq-test"};
     try std.testing.expectError(quic_zig.Server.Error.InvalidConfig, quic_zig.Server.init(.{
         .allocator = std.testing.allocator,
@@ -2047,7 +2113,7 @@ test "Server.init rejects max_bytes_per_window=0" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_bytes_per_window = 0,
+        .listener_byte_rate_limit = .{ .limit = 0 },
     }));
 }
 
@@ -2065,7 +2131,7 @@ test "Server per-source bandwidth shaper drops datagrams when bucket is empty" {
         // bytes/s the refill rate is ~0.004096 bytes/us; a 1ms gap
         // refills ~4 bytes (negligible compared to a 2000-byte
         // datagram).
-        .max_bytes_per_source_per_second = 4096,
+        .source_byte_rate_limit = .{ .limit = 4096 },
     });
     defer srv.deinit();
 
@@ -2103,7 +2169,7 @@ test "Server per-source bandwidth shaper refills on idle" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_bytes_per_source_per_second = 4096,
+        .source_byte_rate_limit = .{ .limit = 4096 },
     });
     defer srv.deinit();
 
@@ -2139,7 +2205,7 @@ test "Server per-source bandwidth shaper is per-source" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_bytes_per_source_per_second = 4096,
+        .source_byte_rate_limit = .{ .limit = 4096 },
     });
     defer srv.deinit();
 
@@ -2172,7 +2238,7 @@ test "Server per-source bandwidth shaper is per-source" {
     try std.testing.expectEqual(@as(u64, 1), m.feeds_source_bandwidth_limited);
 }
 
-test "Server.init rejects max_bytes_per_source_per_second=0" {
+test "Server.init rejects source_byte_rate_limit .{ .limit = 0 }" {
     const protos = [_][]const u8{"hq-test"};
     try std.testing.expectError(quic_zig.Server.Error.InvalidConfig, quic_zig.Server.init(.{
         .allocator = std.testing.allocator,
@@ -2180,7 +2246,7 @@ test "Server.init rejects max_bytes_per_source_per_second=0" {
         .tls_key_pem = test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .max_bytes_per_source_per_second = 0,
+        .source_byte_rate_limit = .{ .limit = 0 },
     }));
 }
 

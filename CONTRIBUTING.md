@@ -138,7 +138,10 @@ RELEASE_READINESS.md, not an open item.)
   (or add a new field and deprecate the old one) so consumers get a
   compile error, not a silent behavior change. Avoid `?T` where `null`
   would have to mean both "not configured" and "feature off" — spell
-  the states out in a union/enum, as `Server.SourceRateLimit` does.
+  the states out in a union/enum, as `Server.RateLimit` and
+  `Server.EarlyData` do. Prefer making a dangerous configuration
+  unrepresentable over catching it with a runtime `InvalidConfig`
+  check; `docs/API_STABILITY.md` carries the full rule.
 
 ## Style
 

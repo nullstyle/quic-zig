@@ -34,7 +34,7 @@ const conn_mod = @import("conn/root.zig");
 const tls_mod = @import("tls/root.zig");
 
 const Connection = conn_mod.Connection;
-const ConnectionError = conn_mod.state.Error;
+const ConnectionError = conn_mod.Error;
 const TransportParams = tls_mod.TransportParams;
 const ConnectionId = conn_mod.path.ConnectionId;
 const QlogCallback = conn_mod.QlogCallback;

@@ -94,11 +94,12 @@ timers, and exits after the shutdown flag flips. `Server` and
 contract: while the loop runs, nothing else may touch the server or its
 connections — including walking `server.iterator()` — except from the
 loop's own thread or behind the embedder's own mutex around every
-access. The shipped loops expose no application hook today, so they fit
-deployments that only need the transport driven; an application that
-opens, reads, or writes streams while connections are live must
-serialize all of that with the I/O — in practice, a hand-rolled
-single-threaded raw loop (below).
+access. The shipped loops call `RunUdpOptions.on_iteration` (and the
+client's equivalent) once per iteration on the loop's own thread, which
+is where application stream and datagram work belongs — the packaged
+echo example pair is built on exactly that hook. When your process
+already has an event loop of its own, drive the caller-drives path
+directly instead: see "Foreign Event Loops" below.
 
 ## Client Wrapper
 
@@ -174,6 +175,9 @@ custom loop repeats four operations:
 3. Drive timers with `conn.tick`.
 4. Sleep until `conn.nextTimerDeadline(now_us)` or the next socket event.
 
+"Foreign Event Loops" below covers where the sleep and the wake come
+from when the wait belongs to a runtime you don't control.
+
 Both feed paths (`conn.handle` / `Server.feed`) take the datagram as a
 mutable `[]u8` — header unprotection rewrites the bytes in place — so
 receive into a mutable buffer, never a `[]const u8` slice.
@@ -232,6 +236,75 @@ while (server.drainStatelessResponse()) |resp| {
     try sock.send(resp.dst, resp.slice());
 }
 ```
+
+## Foreign Event Loops
+
+If your process already owns a wait — an existing reactor, a runtime's
+scheduler, a `poll`/`epoll`/`kqueue` set you multiplex yourself — you do
+not need `transport.runUdp*` at all. The caller-drives path above **is**
+the supported integration for that case, and
+`examples/foreign_loop_embedder.zig` is a worked, tested implementation
+of it: a hand-rolled `std.posix.poll` reactor driving a `Server` and a
+`Client` in one loop, with cross-thread application work arriving
+through a queue and a wake socket.
+
+### What you take on
+
+Everything the packaged loop was doing for you:
+
+- **Bind and tune the socket.** `socket_opts.applyServerTuning` raises
+  `SO_RCVBUF`/`SO_SNDBUF` to 4 MiB; kernel defaults (~200 KiB on Linux,
+  ~9 KiB on macOS) drop datagrams, and to QUIC a drop is loss.
+- **Refresh the clock *after* the blocking wait.** Reusing the
+  pre-wait timestamp makes PTO and loss-detection timers fire late.
+- **Bound ingress per iteration.** The packaged loop reads one datagram
+  per iteration so a hot receive queue cannot starve tick-driven
+  recovery work. Batch if you like, but budget it.
+- **Drain stateless responses separately.** Version Negotiation and
+  Retry belong to no connection, so `drainStatelessResponse` is its own
+  step alongside the per-slot outbox.
+- **Pick destinations per datagram.** `out.to orelse slot.peer_addr` —
+  not a single cached peer address — or migration, multipath, and
+  VN/Retry peers get the wrong destination.
+- **Contain per-connection errors.** A malformed peer must not tear
+  down the loop; the packaged loop swallows per-slot failures.
+- **Skip terminal slots, keep closing ones.** `closeState() == .closed`
+  slots are done, but closing/draining ones still need `tick` so
+  CONNECTION_CLOSE retransmits (RFC 9000 §10.2.1).
+- **`reap` periodically.** `reap` is what invokes
+  `Config.on_connection_will_close` while the slot is still valid.
+- **Honour a shutdown grace window** so peers get a CONNECTION_CLOSE.
+
+### One iteration, in order
+
+Compute the timeout, wait, then: receive → `feed`/`handle` →
+`drainStatelessResponse` → per-slot `pollEvent` and application I/O →
+`pollDatagram` → `tick` → periodic `reap`. The invariant that matters:
+**drain the outbox after every state change and before you sleep.**
+
+### Deciding how long to sleep
+
+`Server.nextTimerDeadline(now_us)` (or `Connection.nextTimerDeadline`)
+returns the soonest armed deadline as an absolute `at_us` on your own
+clock origin. Convert it to your wait's units, and mind two traps the
+example isolates into a tested pure function:
+
+- A **past-due** deadline must clamp to zero. A negative timeout means
+  "block forever" to `poll`, and the PTO never fires.
+- A **sub-millisecond** deadline must round *up* to 1 ms, or the loop
+  spins hot on a 300 µs ACK-delay timer.
+
+A null deadline means nothing is armed: block until an fd is readable
+if you have a wake channel, otherwise cap the sleep.
+
+### Waking the loop from application threads
+
+`Server` and `Connection` have no internal locking. In a foreign loop
+*you* are the serializer: no thread but the loop thread may call into
+quic_zig. The pattern is a queue plus a wake fd — producers push work
+under a mutex and nudge the loop; the loop thread drains the queue and
+is the only caller. A wake means "check the queue", not "one item", so
+N pushes may coalesce into one wake; drain until empty.
 
 ## Stream Conventions, Lifecycle, and Shutdown
 
@@ -327,13 +400,22 @@ Set these deliberately for any deployed server:
 - `max_concurrent_connections`: slot-table cap.
 - `max_connection_memory`: aggregate per-connection cap for peer-driven
   buffers.
-- `initial_source_rate_limit` (on by default at 32) and
-  `vn_source_rate_limit` (on by default at 8): per-source Initial
-  and Version-Negotiation flood limiters; set to `.disabled` to opt
-  out, e.g. behind a trusted front-end that already polices source
-  rate, or `.{ .limit = n }` for an explicit cap.
-  `max_datagrams_per_window` and `max_bytes_per_window` are off by
-  default — tune to your deployment envelope.
+- Rate/quota knobs all share one three-state type,
+  `Server.RateLimit`: `.default` takes the library's recommendation,
+  `.disabled` opts out, `.{ .limit = n }` sets an explicit cap.
+  `null` is deliberately not spellable, so mirroring an unset field
+  can never silently switch a protection off.
+  - `initial_source_rate_limit` (recommended 32) and
+    `vn_source_rate_limit` (recommended 8): per-source Initial and
+    Version-Negotiation flood limiters. `.disabled` suits a trusted
+    front-end that already polices source rate.
+  - `log_source_rate_limit` (recommended 16): per-source cap on
+    `LogEvent` emissions, so a peer cannot flood your log pipeline.
+  - `listener_datagram_rate_limit` / `listener_byte_rate_limit`
+    (global, per `listener_rate_window_us`) and
+    `source_byte_rate_limit` (per-source bytes/second): recommended
+    off, because the right ceiling is your deployment envelope. Set
+    them in production.
 - `retry_token_key`: enables stateless Retry before allocating a
   connection slot.
 - `new_token_key`: enables NEW_TOKEN issuance for returning clients.
@@ -358,9 +440,13 @@ tokens stop matching previously issued CIDs.
 
 0-RTT is off by default. To enable it safely:
 
-- Set `Server.Config.enable_0rtt = true`.
-- Allocate `quic_zig.tls.AntiReplayTracker` and pass it through
-  `Server.Config.early_data_anti_replay`.
+- Allocate a `quic_zig.tls.AntiReplayTracker` (it must outlive the
+  `Server`) and set `Server.Config.early_data` to
+  `.{ .with_anti_replay = &tracker }`. The union carries the tracker,
+  so there is no separate field to remember — which is the point: the
+  only way to run early data without replay protection is to name
+  `.without_replay_protection`, and that is correct only when every
+  request reachable over early data is idempotent.
 - Bind tickets to replay-relevant transport and application settings
   with `Connection.setEarlyDataContextForParams`.
 - Treat bytes where `Connection.streamArrivedInEarlyData(id)` is true as
@@ -417,7 +503,7 @@ off in low-overhead deployments.
 
 ## Extension Surfaces
 
-- QUIC v2 is available through `Server.Config.versions`,
+- QUIC v2 is available through `Server.Config.accepted_versions`,
   `Client.Config.preferred_version`, and
   `Client.Config.compatible_versions`.
 - Multipath tracks draft 21 through `initial_max_path_id`,

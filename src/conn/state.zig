@@ -318,6 +318,15 @@ fn insertStreamByPriority(buf: []*Stream, n: *usize, s: *Stream, rr_cursor: u64)
 /// mandates at least 1200 bytes path MTU; DPLPMTUD (RFC 8899) can
 /// lift this per path.
 pub const default_mtu: usize = 1200;
+/// RFC 9000 §20.1 INTERNAL_ERROR (0x01): the endpoint hit an internal
+/// problem and cannot continue. quic_zig uses it as the catch-all for
+/// failures with no more specific code — never for a TLS rejection,
+/// which gets RFC 9001 §4.8's CRYPTO_ERROR window instead. Note the
+/// bucket is not purely local-side today: a peer-driven resource
+/// failure that reaches `Server`'s per-connection catch without
+/// having closed itself first lands here too, where EXCESSIVE_LOAD
+/// (0x09) would be more precise.
+pub const transport_error_internal: u64 = 0x01;
 pub const transport_error_protocol_violation: u64 = 0x0a;
 pub const transport_error_flow_control: u64 = 0x03;
 pub const transport_error_stream_limit: u64 = 0x04;
@@ -338,6 +347,22 @@ pub const transport_error_aead_limit_reached: u64 = 0x0f;
 /// "the application or application protocol caused the connection to
 /// be closed."
 pub const transport_error_application_error: u64 = 0x0c;
+
+/// RFC 9001 §4.8 CRYPTO_ERROR base. "The alert description is added to
+/// 0x0100 to produce a QUIC error code from the range reserved for
+/// CRYPTO_ERROR" — so the whole 0x0100-0x01ff window means "TLS
+/// rejected this connection". `sendAlert` performs the addition.
+pub const transport_error_crypto_base: u64 = 0x0100;
+
+/// RFC 9001 §4.8's generic stand-in: CRYPTO_ERROR carrying the TLS
+/// `handshake_failure` alert (40 / 0x28). §4.8 explicitly permits
+/// "replacing any alert with a generic alert, such as
+/// handshake_failure (0x0128 in QUIC)". Used when the handshake failed
+/// but the TLS stack raised no alert of its own, so an alert-less TLS
+/// failure still lands in the CRYPTO_ERROR window a peer or embedder
+/// can classify — instead of being mislabeled INTERNAL_ERROR.
+pub const transport_error_crypto_handshake_failure: u64 =
+    transport_error_crypto_base + 0x28;
 
 /// Default per-Connection cap on bytes resident in peer-controlled
 /// reassembly buffers (CRYPTO, DATAGRAM, stream send/recv). Hits at
@@ -1642,8 +1667,15 @@ pub const Connection = struct {
     /// send queue exactly once.
     early_data_rejection_processed: bool = false,
 
-    /// Last send/receive activity on this connection. Zero means no
-    /// packet activity has been observed yet.
+    /// Last send/receive activity on this connection, in the same
+    /// microsecond clock the embedder passes to `handle` / `poll` /
+    /// `tick`. Zero means no packet activity has been observed yet.
+    ///
+    /// Stable, embedder-readable observation point: layers above
+    /// (e.g. an HTTP/3 session enforcing request deadlines) read this
+    /// directly as the connection clock rather than threading their
+    /// own timestamp through every call. Read-only for embedders —
+    /// quic_zig maintains it.
     last_activity_us: u64 = 0,
 
     /// Close/draining lifecycle: pending CONNECTION_CLOSE, closing/
@@ -10651,7 +10683,7 @@ fn sendAlert(
     //
     // Idempotent: if the connection has already started closing
     // (e.g. from another simultaneous error path), `close` no-ops.
-    const quic_error_code: u64 = @as(u64, 0x100) + @as(u64, alert);
+    const quic_error_code: u64 = transport_error_crypto_base + @as(u64, alert);
     conn.close(true, quic_error_code, "tls alert");
     return 1;
 }
