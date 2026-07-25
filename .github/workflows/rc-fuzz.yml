@@ -55,7 +55,7 @@ jobs:
         run: |
           set +e
           rm -rf .zig-cache/v
-          zig build test -Dfuzz=true --fuzz="$ITERS" 2>&1 | tee rc-fuzz.log
+          zig build test --fuzz="$ITERS" 2>&1 | tee rc-fuzz.log
           status=${PIPESTATUS[0]}
           set -e
 
@@ -67,7 +67,7 @@ jobs:
             echo "::warning::Zig fuzz coverage metadata was corrupted; retrying once with a clean fuzz cache"
             rm -rf .zig-cache/v
             set +e
-            zig build test -Dfuzz=true --fuzz="$ITERS" 2>&1 | tee -a rc-fuzz.log
+            zig build test --fuzz="$ITERS" 2>&1 | tee -a rc-fuzz.log
             retry_status=${PIPESTATUS[0]}
             set -e
             exit "$retry_status"

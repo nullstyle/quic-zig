@@ -194,30 +194,6 @@ pub fn build(b: *std.Build) void {
     // trees (see `.paths` in build.zig.zon).
     if (b.pkg_hash.len != 0) return;
 
-    // Coverage-guided fuzzing needs the target modules compiled with
-    // Zig's fuzzer instrumentation, which is a per-module opt-in
-    // (`std.Build.Module.fuzz`; see the note on
-    // `Step.Compile.sanitize_coverage_trace_pc_guard`). Nothing in the
-    // build runner turns it on for you: `--fuzz` will happily execute
-    // every `std.testing.fuzz` target against an *uninstrumented*
-    // binary, where the fuzzer collects zero program counters. That
-    // yields blind random input generation with no coverage feedback,
-    // and the build runner then fails the run reporting a "corrupted
-    // coverage file ... pcs_len was zero" — which is what the
-    // pre-release `rc-fuzz` gate had been dying on.
-    //
-    // It is an option rather than an unconditional flag because
-    // `quic_zig_mod` is the very module `b.addModule` publishes to
-    // consumers: instrumenting it here would instrument every
-    // downstream build. Pass `-Dfuzz=true` alongside `--fuzz`
-    // (rc-fuzz.yml does).
-    const fuzz_instrumentation = b.option(
-        bool,
-        "fuzz",
-        "Compile the test modules with fuzzer coverage instrumentation. Use ONLY together with `--fuzz`, and only on Linux: it links Zig's fuzzer runtime, whose `runner_*` hooks the macOS test runner does not provide (a plain `zig build test -Dfuzz=true` fails to link there).",
-    ) orelse false;
-    if (fuzz_instrumentation) quic_zig_mod.fuzz = true;
-
     const test_step = b.step("test", "Run quic_zig tests");
 
     const unit_tests = b.addTest(.{ .root_module = quic_zig_mod });
