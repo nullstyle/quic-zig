@@ -240,7 +240,6 @@ test "stream_opened uses server-initiated ids on the client side" {
 
     try pump(&pair, 10);
 
-
     var opened: std.ArrayList(u64) = .empty;
     defer opened.deinit(allocator);
     while (pair.client.pollEvent()) |ev| switch (ev) {
