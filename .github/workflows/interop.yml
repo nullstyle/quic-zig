@@ -55,9 +55,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            .zig-global-cache
-            zig-pkg
-          key: zig-pkg-${{ hashFiles('build.zig.zon') }}
+            quic-zig/.zig-global-cache
+            quic-zig/zig-pkg
+          key: zig-pkg-${{ hashFiles('quic-zig/build.zig.zon') }}
           restore-keys: zig-pkg-
 
       # GitHub's tarball/raw endpoints flake (504s, DNS) often enough to fail
@@ -65,6 +65,7 @@ jobs:
       # window costs seconds, not a red CI run; the cache above makes even
       # that rare.
       - name: Prefetch Zig dependencies (retry on network flake)
+        working-directory: quic-zig
         run: |
           for i in 1 2 3 4 5; do
             if zig build --fetch; then exit 0; fi
