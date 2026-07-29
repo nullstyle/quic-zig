@@ -129,6 +129,15 @@ Gate: rc-fuzz green on the release commit before tagging, per the policy
 above. Tier-1 `test` legs (Linux, macOS, Windows + the `-Dsanitize-c=full`
 job) green on the same commit.
 
+0.10.0 also re-scoped that gate. It was a `1M` budget (~5 hours) which
+made tagging a half-day commitment and is a large part of why v0.8.0 and
+v0.9.0 shipped untagged; it is now `50000` (~10 minutes), justified by the
+measurement that the long run adds 0.67 percentage points of coverage
+over a short one. The gate additionally verifies the coverage file
+reports non-zero `pcs_len`, so an uninstrumented run can no longer pass
+silently. Deep fuzzing moved to the weekly advisory job, which is the
+right home for it: it runs whether or not anyone is cutting a release.
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig

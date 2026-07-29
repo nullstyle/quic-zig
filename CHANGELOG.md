@@ -7,7 +7,7 @@ changes.
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-07-24
+## [0.10.0] - 2026-07-29
 
 Consumer-feedback release (thanks to the capnp-zig team for a detailed
 downstream audit): the private-CA / mTLS gap is closed, the build is
@@ -15,7 +15,9 @@ lighter to consume, and the release/versioning discipline consumers
 asked for is now written down in CONTRIBUTING.md ("Releases"). The
 `Server.Config` field names are frozen from here to 1.0.
 
-Verified toolchain: zig 0.17.0-dev.1252+e4b325c19.
+Verified toolchain: zig 0.17.0-dev.1252+e4b325c19 — and as of this
+release that is *enforced*, not just recorded: `mise.toml` pins the exact
+master build instead of resolving `master` at install time.
 
 ### Added
 
@@ -172,6 +174,14 @@ Verified toolchain: zig 0.17.0-dev.1252+e4b325c19.
   `transport_error_crypto_base`, and
   `transport_error_crypto_handshake_failure`. The e2e TLS suite now
   asserts rejection close codes land in 0x0100-0x01ff on both sides.
+- **The pinned Zig toolchain is now reproducible.** `mise.toml` pinned
+  `zig = "master"`, which resolves at install time, so every CI job
+  silently ran whatever master shipped that morning rather than the
+  compiler the release was verified against. It now pins the exact build
+  (`0.17.0-dev.1252+e4b325c19`). This is a development-tooling change —
+  it does not affect the published module — but it is what makes the
+  "Verified toolchain" line above meaningful, and it is worth copying if
+  you also track Zig master.
 
 ### Fixed
 
@@ -186,6 +196,23 @@ Verified toolchain: zig 0.17.0-dev.1252+e4b325c19.
   replacement context. Previously a hot cert rotation on a 0-RTT
   server silently disconnected TLS-layer replay protection for every
   ticket minted after the swap (RFC 9001 §5.6).
+- **CONTRIBUTING.md's fuzzing guidance was wrong in two ways**, both
+  corrected against the pinned toolchain. macOS *can* deep-fuzz
+  (`zig build test --fuzz=1000` completes on aarch64-macOS with real
+  coverage; the old note described 0.17.0-dev.1158 behaviour). And
+  adding `-ffuzz` / `Module.fuzz` by hand is actively harmful: `--fuzz`
+  already instruments the root module, where every fuzz target lives, so
+  setting the per-module flag only instruments `quic_zig` where it is a
+  non-root dependency and breaks the link with seven undefined
+  `runner_*` symbols on every platform. There is now also a documented
+  way to check a deep-fuzz run actually collected coverage, because exit
+  status alone is not sufficient evidence.
+- The `quic-go-interop` and `interop` workflows had been failing since
+  2026-07-09: both check the repo out into a `quic-zig/` subdirectory,
+  but the dependency-prefetch step ran at the workspace root (`no
+  build.zig file found`, exhausting all retries) and the package-cache
+  path and key resolved one level too high, so the cache never hit and
+  its key could never invalidate.
 
 ## [0.9.0] - 2026-07-09
 

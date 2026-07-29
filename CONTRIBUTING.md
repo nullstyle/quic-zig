@@ -47,13 +47,32 @@ modes:
   `std.testing.fuzz` site in the unfiltered test binary. It is
   single-instance (see caveats), so it saturates one core; give it a large
   `$ITERS` and let it run.
-- **Pre-release gate.** Before a release is tagged, a completed green
-  run of `.github/workflows/rc-fuzz.yml` (default `1M` iteration budget
-  or higher) must exist for the release commit. Unlike the weekly fuzz
-  job, this gate is blocking. Anyone — maintainer, contributor, or an
-  agent session — can dispatch it (`gh workflow run rc-fuzz.yml --ref
-  <ref>`) and tag on green; the gate is about the evidence existing,
-  not about who pushes the button.
+- **Pre-release gate (~10 minutes).** Before a release is tagged, a
+  completed green run of `.github/workflows/rc-fuzz.yml` must exist for
+  the release commit. Default budget is `50000` per target (37 targets,
+  so ~1.85M executions). Unlike the weekly fuzz job, this gate is
+  blocking. Anyone — maintainer, contributor, or an agent session — can
+  dispatch it (`gh workflow run rc-fuzz.yml --ref <ref>`) and tag on
+  green; the gate is about the evidence existing, not about who pushes
+  the button.
+
+  It used to be `1M` (~5 hours) and that was the wrong trade. Measured
+  on the pinned toolchain: coverage is 8.81% at 39k executions and 9.48%
+  at 37.1M — **0.67 percentage points for ~950x the work**, with unique
+  runs plateauing near 12.5k. A blocking gate that costs half a day
+  buys under a point of coverage and, empirically, means releases don't
+  get tagged at all (v0.8.0 and v0.9.0 both shipped untagged). Deep
+  exploration belongs to the weekly `fuzz.yml` job at `10M`, which runs
+  regardless of the release calendar.
+
+  What the release gate is for, and still does at `50000`: prove the fuzz
+  harness is genuinely instrumented on this commit, and catch a crash or
+  corpus regression before a tag. The workflow now asserts the coverage
+  file's `pcs_len` is non-zero rather than trusting exit status, because
+  an uninstrumented run executes the whole budget and looks green — that
+  is precisely how this gate produced no signal for two weeks. Raise the
+  budget for an RC or 1.0 if you want more; the default is tuned for
+  "tag a 0.x release in half an hour".
 
 ### Regression corpus
 
