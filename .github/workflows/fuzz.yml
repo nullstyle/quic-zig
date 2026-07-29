@@ -57,7 +57,7 @@ jobs:
           exit 1
 
       - name: zig build test --fuzz
-        run: zig build test --fuzz=$ITERS
+        run: zig build test -Duse-llvm=true --fuzz=$ITERS
 
       - name: Upload corpus + crashes
         if: always()

@@ -194,9 +194,36 @@ pub fn build(b: *std.Build) void {
     // trees (see `.paths` in build.zig.zon).
     if (b.pkg_hash.len != 0) return;
 
+    // Coverage-guided fuzzing needs the LLVM backend. Zig's fuzzer reads
+    // its program-counter range from the linker-provided `__sancov_pcs*`
+    // / `__sancov_cntrs` sections, and only the LLVM backend emits them:
+    // measured on 0.17.0-dev.1252, an x86_64-linux test binary has 0
+    // sancov sections (0 bytes) on the self-hosted backend and 2
+    // (~87 KB) with `-fllvm`. Since 0.17 defaults x86_64 to
+    // `stage2_x86_64` while aarch64 defaults to `stage2_llvm`, `--fuzz`
+    // silently collected zero coverage on x86_64 CI while working fine
+    // on aarch64 — the fuzzer still executed the full budget, so the run
+    // looked real and then died reporting a "corrupted coverage file
+    // ... pcs_len was zero". That cost two weeks of misdiagnosis.
+    //
+    // This is an option rather than a default because the self-hosted
+    // backend is markedly faster to build, and every non-fuzzing test
+    // run should keep that. Pass `-Duse-llvm=true` alongside `--fuzz`
+    // (both fuzz workflows do). Only the unit-test binary needs it:
+    // every `std.testing.fuzz` site lives in `src/`, which is that
+    // binary's root module.
+    const use_llvm_for_tests = b.option(
+        bool,
+        "use-llvm",
+        "Build the unit-test binary with the LLVM backend. Required for a meaningful `--fuzz` run, because only LLVM emits the sancov coverage sections the fuzzer reads.",
+    );
+
     const test_step = b.step("test", "Run quic_zig tests");
 
-    const unit_tests = b.addTest(.{ .root_module = quic_zig_mod });
+    const unit_tests = b.addTest(.{
+        .root_module = quic_zig_mod,
+        .use_llvm = use_llvm_for_tests,
+    });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
 
