@@ -125,9 +125,43 @@ lands the one pre-1.0 `Server.Config` naming/semantics normalization
 that `docs/API_STABILITY.md` had reserved — so `Config` field names are
 frozen from here to 1.0.
 
-Gate: rc-fuzz green on the release commit before tagging, per the policy
-above. Tier-1 `test` legs (Linux, macOS, Windows + the `-Dsanitize-c=full`
-job) green on the same commit.
+**Tagged 2026-07-29 at `a113cd9`, all four gates green on that commit:**
+rc-fuzz, `test` (Linux, macOS, Windows + `-Dsanitize-c=full`),
+quic-go-interop, and the QNS image build.
+
+The rc-fuzz pass is worth recording precisely, because it is the first
+one this project has ever had that measured anything:
+`n_runs=1,858,230 unique_runs=7,830 pcs_len=34,268`, coverage
+3182/34268 (9.29%), no crash. `unique_runs` being non-zero is the part
+that matters — it means coverage feedback was actually steering input
+generation.
+
+It had been failing since 2026-07-09 for a reason that took six
+hypotheses to pin down: **coverage-guided fuzzing needs the LLVM
+backend.** Zig's fuzzer reads its program-counter range from the
+linker-provided `__sancov_pcs*` / `__sancov_cntrs` sections, and only
+LLVM emits them (measured on 0.17.0-dev.1252: an x86_64 test binary
+built with `-ffuzz` has 0 sancov sections on the self-hosted backend and
+2 totalling 89,460 bytes with `-fllvm`). Zig 0.17 defaults x86_64 to
+`stage2_x86_64` and aarch64 to `stage2_llvm`, so the gate collected real
+coverage on every aarch64 machine we tested and none on x86_64 CI, while
+still executing the full budget — so it looked like a real run and then
+died reporting `corrupted coverage file ... pcs_len was zero`. `build.zig`
+now takes `-Duse-llvm=true` (applied to the unit-test binary only, since
+that is where every fuzz target lives) and both fuzz workflows pass it.
+
+Two process notes worth keeping, since the failure was diagnosed wrong
+five times first:
+
+- The thing that finally worked was making the gate report its own
+  numbers unconditionally (`if: always()` on the coverage check). One
+  line of `pcs_len=0` beat weeks of inference from a 24-byte artifact.
+- One of those wrong turns was a *bad measurement*, not a missing one:
+  `strings | grep sancov` counts the fuzzer runtime's own symbol names
+  and so shows a similar count either way, which "refuted" the correct
+  hypothesis. Section sizes were the right instrument. A weak
+  measurement yields confident wrong conclusions as efficiently as no
+  measurement at all.
 
 0.10.0 also re-scoped that gate. It was a `1M` budget (~5 hours) which
 made tagging a half-day commitment and is a large part of why v0.8.0 and
