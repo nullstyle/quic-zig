@@ -96,7 +96,12 @@ jobs:
       # assert on the coverage file's own header: pcs_len is the number of
       # instrumented program counters and must be non-zero, and n_runs must
       # be in the neighbourhood of 37 targets x the budget.
+      # `if: always()` on purpose: this is the only place the coverage
+      # numbers are ever printed, so skipping it on failure is exactly
+      # backwards — a failed run is when you most need to know whether
+      # pcs_len was zero. It still fails the job on bad coverage.
       - name: Verify the run actually collected coverage
+        if: always()
         shell: bash
         run: |
           python3 - <<'PY'
