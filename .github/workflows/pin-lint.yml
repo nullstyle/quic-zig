@@ -1,0 +1,106 @@
+name: pin-lint
+
+# Cross-repo dependency-pin lint (docs/RELEASE_READINESS.md, "Cross-repo
+# hygiene"). quic-zig and http3-zig must agree on the boringssl-zig pin
+# byte-for-byte, or `boringssl.tls.Context` type identity breaks for
+# embedders composing both packages.
+#
+# Today the pins deliberately diverge: quic-zig carries unreleased
+# boringssl-zig 0.6.5 (bare SHA 292c70a2..., Windows socket link fix)
+# while http3-zig is on tag v0.6.4. This lint is therefore a RATCHET:
+# identical pins pass; the exact known pair below passes with a warning;
+# any other combination fails. When boringssl-zig tags v0.6.5 and both
+# repos repin to it, delete the known-pair branch so the lint enforces
+# strict identity — and re-check the RELEASE_READINESS box.
+on:
+  push:
+    branches: [main]
+    paths:
+      - build.zig.zon
+      - .github/workflows/pin-lint.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - build.zig.zon
+      - .github/workflows/pin-lint.yml
+  schedule:
+    # Weekly Monday sweep: catches drift introduced on the http3-zig side,
+    # which no push to this repo would otherwise re-lint.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  boringssl-pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout quic-zig
+        uses: actions/checkout@v7
+
+      - name: Compare boringssl-zig pins with http3-zig
+        run: |
+          set -eu
+
+          extract_hash() {
+              awk '
+                  index($0, ".boringssl_zig = .{") { in_dep = 1; next }
+                  in_dep && index($0, ".hash = ") {
+                      line = $0
+                      sub(/^[^"]*"/, "", line)
+                      sub(/".*$/, "", line)
+                      print line
+                      found = 1
+                      exit
+                  }
+                  END { if (!found) exit 1 }
+              ' "$1"
+          }
+
+          ours=$(extract_hash build.zig.zon) || {
+              echo "FAIL: could not extract .boringssl_zig .hash from build.zig.zon" >&2
+              exit 1
+          }
+
+          curl -fsSL --retry 3 -o http3-build.zig.zon \
+              https://raw.githubusercontent.com/nullstyle/http3-zig/main/build.zig.zon
+          theirs=$(extract_hash http3-build.zig.zon) || {
+              echo "FAIL: could not extract .boringssl_zig .hash from http3-zig build.zig.zon" >&2
+              exit 1
+          }
+
+          # The one tolerated divergence (see header comment). Delete this
+          # pair when boringssl-zig v0.6.5 is tagged and both repos repin.
+          known_ours="boringssl_zig-0.6.5-4iEdPEz1AQDkuuIR0qV6v4sv7Iy9mxOl2-bX2yZW1xCG"
+          known_theirs="boringssl_zig-0.6.4-4iEdPG_EAQAatmfvnEyavDt9y1XW-WF5RpkdoMfQtpor"
+
+          if [ "$ours" = "$theirs" ]; then
+              {
+                  echo "### pin-lint: OK"
+                  echo ""
+                  echo "boringssl-zig pins are byte-for-byte identical:"
+                  echo ""
+                  echo '`'"$ours"'`'
+              } | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$ours" = "$known_ours" ] && [ "$theirs" = "$known_theirs" ]; then
+              {
+                  echo "### pin-lint: WARNING (known divergence tolerated)"
+                  echo ""
+                  echo "- quic-zig: \`$ours\` (unreleased 0.6.5, Windows socket link fix)"
+                  echo "- http3-zig: \`$theirs\` (tag v0.6.4)"
+                  echo ""
+                  echo "Reconverge when boringssl-zig tags v0.6.5, then delete the"
+                  echo "known pair from pin-lint.yml to restore strict identity."
+              } | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+              {
+                  echo "### pin-lint: FAIL (pins drifted beyond the known pair)"
+                  echo ""
+                  echo "- quic-zig: \`$ours\`"
+                  echo "- http3-zig: \`$theirs\`"
+                  echo ""
+                  echo "Either repin both repos identically, or (for a deliberate"
+                  echo "temporary divergence) update the known pair in pin-lint.yml"
+                  echo "with a dated justification."
+              } | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 1
+          fi

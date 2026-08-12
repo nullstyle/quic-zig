@@ -52,8 +52,8 @@ is safe to embed in production. The gates:
 - [x] Sanitizer CI scaffold is in place: `-Dsanitize-c=off|trap|full`
       is accepted by quic-zig-owned build modules and Linux CI runs
       `zig build test -Dsanitize-c=full`. The option is forwarded into
-      `boringssl-zig` v0.6.4 so the BoringSSL C/C++ libraries are
-      instrumented consistently with quic-zig's wrapper modules.
+      the pinned `boringssl-zig` revision so the BoringSSL C/C++ libraries
+      are instrumented consistently with quic-zig's wrapper modules.
 - [x] Deep fuzzing has an explicit pre-release gate. Plain
       `zig build test` runs every `std.testing.fuzz` seed as a deterministic
       smoke test on each push; `.github/workflows/fuzz.yml` remains weekly
@@ -76,9 +76,16 @@ is safe to embed in production. The gates:
       envelope and `AntiReplayTracker` persistence uses `QZAR`.
 
 ### Cross-repo hygiene
-- [x] `boringssl-zig` is pinned to a tag (not a bare SHA) and a CI lint
-      asserts quic-zig and http3-zig pin it byte-for-byte identically
-      (roadmap H1 #3).
+- [ ] `boringssl-zig` is pinned to a tag (not a bare SHA) in both quic-zig
+      and http3-zig, byte-for-byte identically (roadmap H1 #3). Current
+      reality (2026-08-11): quic-zig deliberately pins bare SHA
+      `292c70a2…` — unreleased 0.6.5 carrying the Windows socket link
+      fix — while http3-zig pins tag `v0.6.4`. The CI lint half of this
+      gate now exists: `.github/workflows/pin-lint.yml` compares the two
+      pins on push/PR and weekly, tolerating exactly this known pair (with
+      a warning) and failing on any other divergence. Re-check this box
+      when boringssl-zig tags v0.6.5, both repos repin to the tag, and the
+      known pair is deleted from the lint.
 
 ### Platforms
 - [x] Windows `windows-latest` job is green and `continue-on-error` is
