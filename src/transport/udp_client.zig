@@ -370,9 +370,11 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
             },
         });
         var received: usize = ret[1];
-        if (ret[0]) |err| switch (err) {
-            error.Timeout => {},
-            else => return err,
+        if (ret[0]) |err| switch (udp_server.classifyReceiveError(err)) {
+            // Same posture as the server loop: a peer-provoked ICMP or
+            // an oversized datagram must not tear down the client.
+            .tolerate => {},
+            .fatal => return err,
         };
 
         // Refresh time after the (possibly-blocking) receive.

@@ -7,6 +7,34 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A peer could end the bundled UDP loops.** `runUdpServer` /
+  `runUdpClient` treated every non-timeout receive error as fatal,
+  including three that the remote side influences: `PortUnreachable`
+  and `ConnectionResetByPeer` (ICMP feedback queued against the bound
+  socket and reported at the next receive — so a peer that goes away,
+  or an off-path packet that provokes an ICMP, could stop a server
+  from serving everyone else) and `MessageOversize` (a datagram larger
+  than the per-message buffer, which the sender chooses). These are
+  now tolerated and the datagram discarded, which is what
+  `examples/foreign_loop_embedder.zig` already did — the bundled loops
+  were the inconsistent ones. Local faults still propagate.
+  Classification is pinned by `transport.classifyReceiveError` and its
+  test. Thanks to the capnp-zig team, who hit the Windows half of this
+  in their own receive bridge and flagged the pattern.
+
+### Changed
+
+- The Windows limitation of the bundled event loops is now documented
+  at both `RunError` sets and in `EMBEDDING.md`, and asserted by the
+  three real-socket smoke tests rather than skipped: `runUdpServer` /
+  `runUdpClient` fail with `error.ConcurrencyUnavailable` on native
+  Windows because std has no overlapped-I/O `net_receive` there, so no
+  timed receive — the loops' heartbeat — is possible. The protocol
+  engine is unaffected and remains tier-1 on Windows; embedders there
+  drive their own loop. Applies equally to v0.10.x and v0.11.0.
+
 ## [0.11.0] - 2026-08-12
 
 The performance release, measured. Three long-deferred datapath levers

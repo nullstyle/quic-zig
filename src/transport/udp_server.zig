@@ -527,9 +527,12 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 },
             });
             var received: usize = ret[1];
-            if (ret[0]) |err| switch (err) {
-                error.Timeout => {},
-                else => return err,
+            if (ret[0]) |err| switch (classifyReceiveError(err)) {
+                // Keep whatever the batch did deliver; see
+                // `classifyReceiveError` for why a peer must not be
+                // able to end the loop.
+                .tolerate => {},
+                .fatal => return err,
             };
 
             // Refresh time after the (possibly-blocking) receive call.
@@ -908,6 +911,73 @@ test clampTimeoutToDeadline {
         @as(i64, 1),
         clampTimeoutToDeadline(five, 1_400, 1_000).toMilliseconds(),
     );
+}
+
+/// What the loop should do about a failed receive.
+pub const ReceiveDisposition = enum {
+    /// Not a loop-ending condition: keep whatever messages the batch
+    /// did deliver and continue to the next iteration.
+    tolerate,
+    /// A genuine local fault; propagate to the caller.
+    fatal,
+};
+
+/// Classify a receive failure.
+///
+/// Three members of `ReceiveError` are influenced by the *remote* side,
+/// and a QUIC endpoint that dies because a peer misbehaved is a
+/// denial-of-service vector rather than a safety property. They are
+/// tolerated:
+///
+///   * `PortUnreachable` and `ConnectionResetByPeer` — ICMP feedback
+///     queued against the bound socket and reported at the next
+///     receive, per the std docs. A peer that went away, or an off-path
+///     packet that provokes an ICMP, must not stop us serving everyone
+///     else; the socket remains usable. `examples/foreign_loop_embedder.zig`
+///     has always taken this posture and the bundled loops did not,
+///     which is the inconsistency this fixes.
+///   * `MessageOversize` — a datagram larger than the per-message
+///     buffer, which a peer chooses. POSIX reports the same event as a
+///     *successful* receive with `flags.trunc` set (dropped below);
+///     Windows AFD surfaces it as this error instead. Same event, same
+///     correct response: discard the datagram, keep the loop.
+///
+/// `Timeout` is the ordinary idle path. Everything else — resource
+/// exhaustion, `NetworkDown`, the Windows `ConcurrencyUnavailable`
+/// platform limit — is a local fault and still propagates.
+pub fn classifyReceiveError(err: Net.Socket.ReceiveTimeoutError) ReceiveDisposition {
+    return switch (err) {
+        error.Timeout,
+        error.PortUnreachable,
+        error.ConnectionResetByPeer,
+        error.MessageOversize,
+        => .tolerate,
+        else => .fatal,
+    };
+}
+
+test "remote-influenced receive errors never end the loop" {
+    // Peer-controllable or peer-provoked conditions: tolerating these
+    // is what stops one misbehaving peer from taking down the endpoint.
+    for ([_]Net.Socket.ReceiveTimeoutError{
+        error.Timeout,
+        error.PortUnreachable,
+        error.ConnectionResetByPeer,
+        error.MessageOversize,
+    }) |err| {
+        try std.testing.expectEqual(ReceiveDisposition.tolerate, classifyReceiveError(err));
+    }
+
+    // Local faults must still surface rather than spin silently.
+    for ([_]Net.Socket.ReceiveTimeoutError{
+        error.SystemResources,
+        error.NetworkDown,
+        error.ConcurrencyUnavailable,
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
+    }) |err| {
+        try std.testing.expectEqual(ReceiveDisposition.fatal, classifyReceiveError(err));
+    }
 }
 
 pub fn monotonicNowUs(io: std.Io, start: std.Io.Timestamp) u64 {
