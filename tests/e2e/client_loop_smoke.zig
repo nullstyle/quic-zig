@@ -186,7 +186,12 @@ test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
         // way.
         error.HandshakeFailed,
         => return error.SkipZigTest,
-        else => return err,
+        else => {
+            // TEMPORARY: name the error so the windows-latest log
+            // identifies it instead of only showing a return trace.
+            std.debug.print("\nWINDOWS-DIAG {s} unexpected error: {s}\n", .{ "runUdpClient", @errorName(err) });
+            return err;
+        },
     };
 
     // The connection never completed a handshake (no peer); after

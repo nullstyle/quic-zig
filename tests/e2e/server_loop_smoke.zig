@@ -163,7 +163,12 @@ test "runUdpServer with shutdown_flag already set returns immediately" {
         error.ProtocolUnsupportedBySystem,
         error.ProtocolUnsupportedByAddressFamily,
         => return error.SkipZigTest,
-        else => return err,
+        else => {
+            // TEMPORARY: name the error so the windows-latest log
+            // identifies it instead of only showing a return trace.
+            std.debug.print("\nWINDOWS-DIAG {s} unexpected error: {s}\n", .{ "runUdpServer", @errorName(err) });
+            return err;
+        },
     };
 
     // No live connections were ever fed in, so `connectionCount`
@@ -216,7 +221,12 @@ test "runUdpServer binds preferred-address alt listener and returns cleanly" {
         error.ProtocolUnsupportedBySystem,
         error.ProtocolUnsupportedByAddressFamily,
         => return error.SkipZigTest,
-        else => return err,
+        else => {
+            // TEMPORARY: name the error so the windows-latest log
+            // identifies it instead of only showing a return trace.
+            std.debug.print("\nWINDOWS-DIAG {s} unexpected error: {s}\n", .{ "runUdpServer", @errorName(err) });
+            return err;
+        },
     };
 
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
