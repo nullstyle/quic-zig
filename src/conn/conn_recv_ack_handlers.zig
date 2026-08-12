@@ -343,14 +343,13 @@ pub fn handleAckAtLevel(
 
     // Close the delivery-rate sampler's ACK event AFTER loss
     // detection, so `newly_lost` covers everything this ACK declared
-    // lost (ccwg-bbr-06 §2.3). The sample is currently unconsumed —
-    // the controller inlet lands with the rate-based controller; the
-    // sampler still runs for its own state (C.* totals, app-limited
-    // marker retirement).
+    // lost (ccwg-bbr-06 §2.3), and hand the sample to the controller
+    // with the post-ACK, post-loss in-flight residue (the draft's
+    // C.inflight at model-update time).
     if (lvl == .application) {
         const min_rtt_us = self.rttForLevel(lvl).min_rtt_us;
         if (ack_path.path.delivery.generateRateSample(min_rtt_us, ce_delta_packets)) |rs| {
-            _ = rs;
+            self.ccForApplication().onDeliveryRateSample(&rs, now_us, sent.bytes_in_flight);
         }
     }
 
@@ -473,7 +472,7 @@ pub fn handleApplicationAckOnPath(
     // Close the sampler's ACK event after loss detection — twin of
     // `handleAckAtLevel`; see there for the ordering rationale.
     if (path.path.delivery.generateRateSample(path.path.rtt.min_rtt_us, ce_delta_packets)) |rs| {
-        _ = rs;
+        path.path.cc.onDeliveryRateSample(&rs, now_us, path.sent.bytes_in_flight);
     }
 
     // Snapshot metrics + congestion phase after a meaningful ACK.

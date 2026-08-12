@@ -3625,9 +3625,7 @@ pub const Connection = struct {
         const cc = &app_path.path.cc;
         app_path.path.pacer.refill(
             now_us,
-            cc.cwndBytes(),
-            app_path.path.rtt.smoothed_rtt_us,
-            cc.isSlowStart(),
+            cc.pacingRateBps(app_path.path.rtt.smoothed_rtt_us),
             cc.config().max_datagram_size,
         );
         return !app_path.path.pacer.canSend(datagram_bytes);
@@ -3738,9 +3736,7 @@ pub const Connection = struct {
                     if (path.path.pacer.nextReadyUs(
                         now_us,
                         @min(@as(u64, @intCast(path.pmtu)), default_mtu),
-                        cc.cwndBytes(),
-                        path.path.rtt.smoothed_rtt_us,
-                        cc.isSlowStart(),
+                        cc.pacingRateBps(path.path.rtt.smoothed_rtt_us),
                         cc.config().max_datagram_size,
                     )) |at_us| {
                         if (self.canSend()) {

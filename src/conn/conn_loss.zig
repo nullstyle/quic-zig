@@ -583,11 +583,12 @@ pub fn detectLossesByPacketThresholdAtLevel(
             ctx.stats.add(lost.*);
             // Delivery-rate sampler C.lost accounting (in-flight
             // application bytes only, DPLPMTUD probes excluded above
-            // — the same gate the controller's LossStats ride).
-            // Result unconsumed until the rate-based controller's
-            // per-lost inlet lands.
+            // — the same gate the controller's LossStats ride), then
+            // the per-packet loss inlet, BEFORE the aggregate
+            // onPacketLost fires after the walk.
             if (ctx.lvl == .application and lost.in_flight) {
-                _ = ctx.path.path.delivery.onPacketLost(lost);
+                const info = ctx.path.path.delivery.onPacketLost(lost);
+                ctx.path.path.cc.onPacketNewlyLost(&info);
             }
             if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
@@ -648,8 +649,11 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
             _ = try requeueLostPacketOnPath(ctx.self, .application, lost, ctx.path.id);
             if (is_probe) return;
             ctx.stats.add(lost.*);
-            // Delivery-rate sampler C.lost, per-path twin.
-            if (lost.in_flight) _ = ctx.path.path.delivery.onPacketLost(lost);
+            // Delivery-rate sampler C.lost + per-packet inlet, per-path twin.
+            if (lost.in_flight) {
+                const info = ctx.path.path.delivery.onPacketLost(lost);
+                ctx.path.path.cc.onPacketNewlyLost(&info);
+            }
             pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
     };
@@ -721,11 +725,12 @@ pub fn detectLossesByTimeThresholdAtLevel(
             ctx.stats.add(lost.*);
             // Delivery-rate sampler C.lost accounting (in-flight
             // application bytes only, DPLPMTUD probes excluded above
-            // — the same gate the controller's LossStats ride).
-            // Result unconsumed until the rate-based controller's
-            // per-lost inlet lands.
+            // — the same gate the controller's LossStats ride), then
+            // the per-packet loss inlet, BEFORE the aggregate
+            // onPacketLost fires after the walk.
             if (ctx.lvl == .application and lost.in_flight) {
-                _ = ctx.path.path.delivery.onPacketLost(lost);
+                const info = ctx.path.path.delivery.onPacketLost(lost);
+                ctx.path.path.cc.onPacketNewlyLost(&info);
             }
             if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
@@ -794,8 +799,11 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
             _ = try requeueLostPacketOnPath(ctx.self, .application, lost, ctx.path.id);
             if (is_probe) return;
             ctx.stats.add(lost.*);
-            // Delivery-rate sampler C.lost, per-path twin.
-            if (lost.in_flight) _ = ctx.path.path.delivery.onPacketLost(lost);
+            // Delivery-rate sampler C.lost + per-packet inlet, per-path twin.
+            if (lost.in_flight) {
+                const info = ctx.path.path.delivery.onPacketLost(lost);
+                ctx.path.path.cc.onPacketNewlyLost(&info);
+            }
             pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
     };
@@ -864,7 +872,8 @@ fn firePtoAtLevel(
         // Delivery-rate sampler C.lost: PTO-expired packets are real
         // losses to the estimator too (probe losses returned above).
         if (lvl == .application and lost.in_flight) {
-            _ = path.path.delivery.onPacketLost(&lost);
+            const info = path.path.delivery.onPacketLost(&lost);
+            path.path.cc.onPacketNewlyLost(&info);
         }
         self.qlog_packets_lost +|= stats.count;
         conn_qlog.emitLossDetected(self, lvl, stats, .pto_probe);
@@ -899,8 +908,11 @@ fn firePtoOnApplicationPath(
         }
         var stats: LossStats = .{};
         stats.add(lost);
-        // Delivery-rate sampler C.lost, per-path PTO twin.
-        if (lost.in_flight) _ = path.path.delivery.onPacketLost(&lost);
+        // Delivery-rate sampler C.lost + per-packet inlet, per-path PTO twin.
+        if (lost.in_flight) {
+            const info = path.path.delivery.onPacketLost(&lost);
+            path.path.cc.onPacketNewlyLost(&info);
+        }
         self.qlog_packets_lost +|= stats.count;
         conn_qlog.emitLossDetected(self, .application, stats, .pto_probe);
         onApplicationPathPacketsLost(self, path, stats);

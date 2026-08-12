@@ -12,7 +12,9 @@
 
 const std = @import("std");
 const congestion = @import("congestion.zig");
+const delivery_rate = @import("delivery_rate.zig");
 const hystart_mod = @import("hystart.zig");
+const pacing_mod = @import("pacing.zig");
 
 /// CUBIC multiplicative-decrease factor β_cubic = 0.7 (RFC 9438 §4.6).
 pub const beta_num: u64 = 7;
@@ -239,6 +241,47 @@ pub const Cubic = struct {
     pub fn sendAllowance(self: *const Cubic, bytes_in_flight: u64) u64 {
         if (bytes_in_flight >= self.cwnd) return 0;
         return self.cwnd - bytes_in_flight;
+    }
+
+    /// Delivery-rate samples carry no signal CUBIC acts on (loss and
+    /// RTT drive its curve). Rate-based controllers consume this inlet.
+    pub fn onDeliveryRateSample(
+        self: *Cubic,
+        rs: *const delivery_rate.RateSample,
+        now_us: u64,
+        bytes_in_flight: u64,
+    ) void {
+        _ = self;
+        _ = rs;
+        _ = now_us;
+        _ = bytes_in_flight;
+    }
+
+    /// Transmit edges carry no signal CUBIC acts on.
+    pub fn onPacketSent(
+        self: *Cubic,
+        now_us: u64,
+        bytes_in_flight_before: u64,
+        bytes: u64,
+        is_app_limited: bool,
+    ) void {
+        _ = self;
+        _ = now_us;
+        _ = bytes_in_flight_before;
+        _ = bytes;
+        _ = is_app_limited;
+    }
+
+    /// Per-packet loss detail carries no signal CUBIC acts on (the
+    /// aggregate onPacketLost is its loss input).
+    pub fn onPacketNewlyLost(self: *Cubic, info: *const delivery_rate.LostPacketInfo) void {
+        _ = self;
+        _ = info;
+    }
+
+    /// RFC 9002 §7.7 pacing rate: gain x cwnd / srtt, gain by phase.
+    pub fn pacingRateBps(self: *const Cubic, srtt_us: u64) u64 {
+        return pacing_mod.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
     }
 };
 

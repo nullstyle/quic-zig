@@ -22,12 +22,15 @@
 //!     rate), so coarse loops sustain any rate while the worst-case
 //!     burst stays ≤ 1 ms of line rate — the "lumpy pacing" approach.
 //!
-//! Rate: `gain × cwnd / srtt`, gain 2.0 in slow start (pacing must
-//! never throttle exponential growth) and 1.25 in congestion
-//! avoidance (RFC 9002 §7.7's N). srtt is pre-seeded by the RTT
-//! estimator (333 ms initial), so the rate is always finite; before
-//! the first sample the initial-window burst capacity dominates
-//! anyway.
+//! Rate: supplied by the congestion controller (`pacingRateBps` on
+//! the union). Loss-based controllers use `rateBytesPerSecond` below —
+//! `gain × cwnd / srtt`, gain 2.0 in slow start (pacing must never
+//! throttle exponential growth) and 1.25 in congestion avoidance
+//! (RFC 9002 §7.7's N); rate-based controllers (BBR) supply the rate
+//! from their bandwidth model instead. srtt is pre-seeded by the RTT
+//! estimator (333 ms initial), so the loss-based rate is always
+//! finite; before the first sample the initial-window burst capacity
+//! dominates anyway.
 
 const std = @import("std");
 
@@ -73,18 +76,20 @@ pub const Pacer = struct {
     /// First use seeds a full bucket (the §7.7 initial burst).
     primed: bool = false,
 
-    /// Bring the bucket up to date at `now_us` for the current
-    /// controller state. Call before `canSend`/`consume` on the send
-    /// path; refill is lazy — there is no timer-driven upkeep.
+    /// Bring the bucket up to date at `now_us` for the given pacing
+    /// rate. Call before `canSend`/`consume` on the send path; refill
+    /// is lazy — there is no timer-driven upkeep. The rate comes from
+    /// the congestion controller (`pacingRateBps`): loss-based
+    /// controllers derive it as gain x cwnd / srtt via
+    /// `rateBytesPerSecond`; rate-based controllers supply their own
+    /// bandwidth-model rate. The bucket itself is rate-agnostic.
     pub fn refill(
         self: *Pacer,
         now_us: u64,
-        cwnd: u64,
-        srtt_us: u64,
-        slow_start: bool,
+        rate_bytes_per_s: u64,
         mds: u64,
     ) void {
-        const rate = rateBytesPerSecond(cwnd, srtt_us, slow_start);
+        const rate = rate_bytes_per_s;
         const capacity = std.math.lossyCast(i64, bucketCapacity(rate, mds));
         if (!self.primed) {
             self.primed = true;
@@ -114,21 +119,19 @@ pub const Pacer = struct {
         self.tokens -|= std.math.lossyCast(i64, bytes);
     }
 
-    /// Earliest time a `bytes`-sized datagram will have credit, given
-    /// the current controller state — WITHOUT mutating the bucket
-    /// (safe from `nextTimerDeadline`'s const walk). Returns null when
-    /// it is ready now (or the pacer has never been used).
+    /// Earliest time a `bytes`-sized datagram will have credit at the
+    /// given pacing rate — WITHOUT mutating the bucket (safe from
+    /// `nextTimerDeadline`'s const walk). Returns null when it is
+    /// ready now (or the pacer has never been used).
     pub fn nextReadyUs(
         self: *const Pacer,
         now_us: u64,
         bytes: u64,
-        cwnd: u64,
-        srtt_us: u64,
-        slow_start: bool,
+        rate_bytes_per_s: u64,
         mds: u64,
     ) ?u64 {
         if (!self.primed) return null;
-        const rate = rateBytesPerSecond(cwnd, srtt_us, slow_start);
+        const rate = rate_bytes_per_s;
         const capacity = std.math.lossyCast(i64, bucketCapacity(rate, mds));
         // Project the lazy refill forward from last_refill_us.
         const elapsed = now_us -| self.last_refill_us;
@@ -170,42 +173,45 @@ test "bucket capacity: initial-window floor vs line-rate quantum" {
 test "first use seeds a full burst; steady state refills at the pacing rate" {
     var pacer: Pacer = .{};
     // 12_000-byte bucket (floor), rate 1.25 MB/s.
-    pacer.refill(1_000_000, 100_000, 100_000, false, 1200);
+    const rate = rateBytesPerSecond(100_000, 100_000, false);
+    pacer.refill(1_000_000, rate, 1200);
     try testing.expect(pacer.canSend(12_000));
     try testing.expect(!pacer.canSend(12_001));
 
     // Drain, then refill after exactly 1 ms: 1.25 MB/s x 1 ms = 1250 B.
     pacer.consume(12_000);
     try testing.expect(!pacer.canSend(1));
-    pacer.refill(1_001_000, 100_000, 100_000, false, 1200);
+    pacer.refill(1_001_000, rate, 1200);
     try testing.expect(pacer.canSend(1250));
     try testing.expect(!pacer.canSend(1251));
 }
 
 test "exempt sends drive tokens negative and delay the next data send" {
     var pacer: Pacer = .{};
-    pacer.refill(0, 100_000, 100_000, false, 1200);
+    const rate = rateBytesPerSecond(100_000, 100_000, false);
+    pacer.refill(0, rate, 1200);
     pacer.consume(12_000); // drain the burst
     pacer.consume(2_400); // exempt send: two probe packets of debt
     try testing.expectEqual(@as(i64, -2_400), pacer.tokens);
     // Next 1200-byte send needs 3_600 bytes of credit at 1.25 MB/s
     // = 2_880 us.
-    const ready = pacer.nextReadyUs(0, 1200, 100_000, 100_000, false, 1200).?;
+    const ready = pacer.nextReadyUs(0, 1200, rate, 1200).?;
     try testing.expectEqual(@as(u64, 2_880), ready);
 }
 
 test "nextReadyUs projects the lazy refill without mutating" {
     var pacer: Pacer = .{};
-    pacer.refill(0, 100_000, 100_000, false, 1200);
+    const rate = rateBytesPerSecond(100_000, 100_000, false);
+    pacer.refill(0, rate, 1200);
     pacer.consume(12_000);
     const tokens_before = pacer.tokens;
     // 1 ms later, 1250 accrued credit is visible to the projection...
-    const ready = pacer.nextReadyUs(1_000, 1250, 100_000, 100_000, false, 1200);
+    const ready = pacer.nextReadyUs(1_000, 1250, rate, 1200);
     try testing.expectEqual(@as(?u64, null), ready);
     // ...but the bucket itself was untouched.
     try testing.expectEqual(tokens_before, pacer.tokens);
     // A bigger ask reports the residual wait from now.
-    const later = pacer.nextReadyUs(1_000, 2_450, 100_000, 100_000, false, 1200).?;
+    const later = pacer.nextReadyUs(1_000, 2_450, rate, 1200).?;
     try testing.expect(later > 1_000);
 }
 
@@ -221,7 +227,7 @@ test "liveness: a paced sender sustains rate x T minus one bucket" {
     var sent: u64 = 0;
     var now: u64 = 0;
     while (now <= 1_000_000) : (now += 5_000) {
-        pacer.refill(now, cwnd, srtt, false, 1200);
+        pacer.refill(now, rate, 1200);
         while (pacer.canSend(1200)) {
             pacer.consume(1200);
             sent += 1200;

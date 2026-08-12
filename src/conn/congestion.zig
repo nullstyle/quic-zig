@@ -16,7 +16,9 @@
 
 const std = @import("std");
 const cubic_mod = @import("congestion_cubic.zig");
+const delivery_rate = @import("delivery_rate.zig");
 const hystart_mod = @import("hystart.zig");
+const pacing_mod = @import("pacing.zig");
 
 /// RFC 9406 HyStart++ state/config, shared by both controllers.
 pub const HyStart = hystart_mod.State;
@@ -172,6 +174,75 @@ pub const CongestionController = union(Algorithm) {
         switch (self.*) {
             inline else => |*impl| impl.onCongestionEvent(ce_packet_sent_time_us),
         }
+    }
+
+    /// Per-ACK-event delivery-rate sample (draft-cheng-02 §3.3 /
+    /// ccwg-bbr §4.1.2), fired once per processed ACK at the
+    /// application level, AFTER same-event loss detection (so
+    /// `rs.newly_lost` is complete) and only when at least one
+    /// in-flight packet was newly delivered. `bytes_in_flight` is the
+    /// tracker's post-ACK, post-loss residue — the draft's C.inflight
+    /// at model-update time. No-op for the loss-based controllers;
+    /// the inlet rate-based control consumes.
+    pub fn onDeliveryRateSample(
+        self: *CongestionController,
+        rs: *const delivery_rate.RateSample,
+        now_us: u64,
+        bytes_in_flight: u64,
+    ) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onDeliveryRateSample(rs, now_us, bytes_in_flight),
+        }
+    }
+
+    /// Per-packet transmit notification, fired at the same site that
+    /// stamps delivery-rate state (before the tracker records the
+    /// packet): `bytes_in_flight_before` excludes the packet, `bytes`
+    /// is its wire size, `is_app_limited` is the sampler's marker
+    /// state. Rate-based control needs the transmit edge for
+    /// restart-from-idle (ccwg-bbr §5.4.1) and cwnd-limited tracking;
+    /// no-op for the loss-based controllers.
+    pub fn onPacketSent(
+        self: *CongestionController,
+        now_us: u64,
+        bytes_in_flight_before: u64,
+        bytes: u64,
+        is_app_limited: bool,
+    ) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPacketSent(
+                now_us,
+                bytes_in_flight_before,
+                bytes,
+                is_app_limited,
+            ),
+        }
+    }
+
+    /// Per-newly-lost-packet notification carrying transmit-time
+    /// delivery stamps (ccwg-bbr §5.5.10.2 HandleLostPacket inputs).
+    /// Fires during the loss walk, BEFORE the aggregate onPacketLost,
+    /// under the same DPLPMTUD-probe exclusion as the loss stats.
+    /// No-op for the loss-based controllers.
+    pub fn onPacketNewlyLost(
+        self: *CongestionController,
+        info: *const delivery_rate.LostPacketInfo,
+    ) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPacketNewlyLost(info),
+        }
+    }
+
+    /// The pacing rate this controller wants right now, in bytes per
+    /// second. NewReno/Cubic delegate to `pacing.rateBytesPerSecond`
+    /// (gain x cwnd / srtt) — numerically identical to what the pacer
+    /// computed internally before this outlet existed; a rate-based
+    /// controller returns its bandwidth-model rate instead. The pacer
+    /// consumes this value verbatim and applies no further gain.
+    pub fn pacingRateBps(self: *const CongestionController, srtt_us: u64) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.pacingRateBps(srtt_us),
+        };
     }
 
     // -- read surface --------------------------------------------------------
@@ -422,6 +493,47 @@ pub const NewReno = struct {
         if (bytes_in_flight >= self.cwnd) return 0;
         return self.cwnd - bytes_in_flight;
     }
+
+    /// Delivery-rate samples carry no signal NewReno acts on (loss is
+    /// its only input). Rate-based controllers consume this inlet.
+    pub fn onDeliveryRateSample(
+        self: *NewReno,
+        rs: *const delivery_rate.RateSample,
+        now_us: u64,
+        bytes_in_flight: u64,
+    ) void {
+        _ = self;
+        _ = rs;
+        _ = now_us;
+        _ = bytes_in_flight;
+    }
+
+    /// Transmit edges carry no signal NewReno acts on.
+    pub fn onPacketSent(
+        self: *NewReno,
+        now_us: u64,
+        bytes_in_flight_before: u64,
+        bytes: u64,
+        is_app_limited: bool,
+    ) void {
+        _ = self;
+        _ = now_us;
+        _ = bytes_in_flight_before;
+        _ = bytes;
+        _ = is_app_limited;
+    }
+
+    /// Per-packet loss detail carries no signal NewReno acts on (the
+    /// aggregate onPacketLost is its loss input).
+    pub fn onPacketNewlyLost(self: *NewReno, info: *const delivery_rate.LostPacketInfo) void {
+        _ = self;
+        _ = info;
+    }
+
+    /// RFC 9002 §7.7 pacing rate: gain x cwnd / srtt, gain by phase.
+    pub fn pacingRateBps(self: *const NewReno, srtt_us: u64) u64 {
+        return pacing_mod.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
+    }
 };
 
 // -- tests ---------------------------------------------------------------
@@ -614,4 +726,62 @@ test "CongestionController dispatch is observably identical to direct NewReno" {
     try std.testing.expectEqual(@as(u64, 1200), boxed.config().max_datagram_size);
     boxed.setCwndForTest(99_999);
     try std.testing.expectEqual(@as(u64, 99_999), boxed.cwndBytes());
+}
+
+test "rate-sample surface: no-op hooks leave observables untouched, pacing outlet matches the pacer formula" {
+    // The three delivery-rate hooks must be observable no-ops for the
+    // loss-based controllers, and pacingRateBps must reproduce the
+    // exact number the pacer used to compute internally — together
+    // that is the zero-delta claim of the surface commit.
+    const rs: delivery_rate.RateSample = .{
+        .delivery_rate_bps = 1_000_000,
+        .has_rate = true,
+        .delivered = 1_200,
+        .newly_acked = 1_200,
+        .newly_lost = 600,
+        .c_delivered = 240_000,
+        .c_lost = 600,
+        .tx_in_flight = 12_000,
+    };
+    const info: delivery_rate.LostPacketInfo = .{
+        .bytes = 1_200,
+        .tx_in_flight = 12_000,
+        .lost_at_send = 0,
+        .delivered_at_send = 100_000,
+        .is_app_limited = false,
+        .sent_time_us = 500,
+        .c_lost = 1_200,
+        .c_delivered = 240_000,
+    };
+    inline for ([_]Algorithm{ .new_reno, .cubic }) |algo| {
+        var cc = CongestionController.init(.{ .max_datagram_size = 1200, .algorithm = algo });
+        const before_cwnd = cc.cwndBytes();
+        const before_ssthresh = cc.ssthreshBytes();
+        cc.onDeliveryRateSample(&rs, 1_000_000, 24_000);
+        cc.onPacketSent(1_000_500, 24_000, 1_200, true);
+        cc.onPacketNewlyLost(&info);
+        try std.testing.expectEqual(before_cwnd, cc.cwndBytes());
+        try std.testing.expectEqual(before_ssthresh, cc.ssthreshBytes());
+        try std.testing.expectEqual(@as(?u64, null), cc.recoveryStartTimeUs());
+
+        // Pacing parity over a (cwnd, srtt, phase) grid. Phase flips
+        // via ssthresh: loss ends slow start for both algorithms.
+        for ([_]u64{ 2_400, 14_720, 1_000_000 }) |w| {
+            cc.setCwndForTest(w);
+            for ([_]u64{ 0, 500, 25_000, 333_000 }) |srtt| {
+                try std.testing.expectEqual(
+                    pacing_mod.rateBytesPerSecond(w, srtt, cc.isSlowStart()),
+                    cc.pacingRateBps(srtt),
+                );
+            }
+        }
+        cc.onPacketLost(1_200, 2_000_000);
+        try std.testing.expect(!cc.isSlowStart());
+        for ([_]u64{ 500, 25_000 }) |srtt| {
+            try std.testing.expectEqual(
+                pacing_mod.rateBytesPerSecond(cc.cwndBytes(), srtt, false),
+                cc.pacingRateBps(srtt),
+            );
+        }
+    }
 }

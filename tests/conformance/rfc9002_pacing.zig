@@ -33,9 +33,7 @@ fn drainClientPacer(pair: *HandshakePair) void {
     const cc = &path.path.cc;
     path.path.pacer.refill(
         pair.now_us,
-        cc.cwndBytes(),
-        path.path.rtt.smoothed_rtt_us,
-        cc.isSlowStart(),
+        cc.pacingRateBps(path.path.rtt.smoothed_rtt_us),
         cc.config().max_datagram_size,
     );
     path.path.pacer.consume(10_000_000);
@@ -47,7 +45,7 @@ test "SHOULD limit the initial send burst to the initial congestion window [RFC9
     // exactly the 10-packet initial-window burst.
     const pacing = quic_zig.conn.pacing;
     var pacer: pacing.Pacer = .{};
-    pacer.refill(0, 12_000, 333_000, true, 1_200);
+    pacer.refill(0, pacing.rateBytesPerSecond(12_000, 333_000, true), 1_200);
     try std.testing.expect(pacer.canSend(pacing.burst_packets * 1_200));
     try std.testing.expect(!pacer.canSend(pacing.burst_packets * 1_200 + 1));
 }

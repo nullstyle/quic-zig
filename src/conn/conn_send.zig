@@ -1272,6 +1272,12 @@ pub fn pollLevelOnPath(
     // tracker's pre-record bytes-in-flight as the draft's C.inflight.
     if ((lvl == .application or lvl == .early_data) and sent_packet.in_flight) {
         app_path.path.delivery.onPacketSent(&sent_packet, sent_tracker.bytes_in_flight);
+        app_path.path.cc.onPacketSent(
+            now_us,
+            sent_tracker.bytes_in_flight,
+            sent_packet.bytes,
+            app_path.path.delivery.isAppLimited(),
+        );
     }
     if (sent_packet.ack_eliciting) {
         try sent_tracker.record(sent_packet);
