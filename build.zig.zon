@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0-dev.1158+1d1193aa7",
     .dependencies = .{
         .boringssl_zig = .{
-            .url = "https://github.com/nullstyle/boringssl-zig/archive/refs/tags/v0.6.4.tar.gz",
-            .hash = "boringssl_zig-0.6.4-4iEdPG_EAQAatmfvnEyavDt9y1XW-WF5RpkdoMfQtpor",
+            .url = "https://github.com/nullstyle/boringssl-zig/archive/292c70a2fbe8e48c4efc482c9e5f450e1f22bc6b.tar.gz",
+            .hash = "boringssl_zig-0.6.5-4iEdPEz1AQDkuuIR0qV6v4sv7Iy9mxOl2-bX2yZW1xCG",
         },
     },
     // Consumer-facing archive only. The dev trees (bench/, docs/,
