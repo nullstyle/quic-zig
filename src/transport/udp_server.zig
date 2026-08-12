@@ -211,6 +211,34 @@ pub const RunError = error{
     /// to 0. Both must be > 0 for the loop to make progress.
     InvalidBufferSize,
     OutOfMemory,
+    //
+    // Inherited from `Net.Socket.ReceiveTimeoutError`, and worth
+    // calling out because one member is a hard platform limit rather
+    // than a runtime condition:
+    //
+    //   `error.ConcurrencyUnavailable` — **this loop cannot run on
+    //   native Windows** at the pinned toolchain. Every timed receive
+    //   lowers to `Io.operateTimeout` -> `Batch.awaitConcurrent`, and
+    //   std's Windows `net_receive` has no overlapped-I/O path yet
+    //   (`Io/Threaded.zig`: "TODO integrate with overlapped I/O or
+    //   equivalent to avoid this error"), so it refuses the
+    //   concurrent wait outright. Untimed `receive` works there but
+    //   blocks forever, which would strand `tick` — and with it PTO,
+    //   the idle timeout, pacing, and `shutdown_flag`. Since the
+    //   timed receive *is* this loop's heartbeat, there is nothing to
+    //   degrade to, so the error propagates rather than being
+    //   swallowed into a loop that silently stops keeping time.
+    //
+    //   `enable_ecn = false` is not a workaround: `receiveTimeout`
+    //   and `receiveManyTimeout` share that same lowering, so both
+    //   receive paths fail identically. This has been true since
+    //   before batched receive landed.
+    //
+    //   Windows embedders drive their own loop instead — see
+    //   `examples/foreign_loop_embedder.zig` and the caller-drives
+    //   section of `EMBEDDING.md`. The protocol engine itself is
+    //   fully supported on Windows; only this bundled convenience
+    //   loop is not.
 } || Net.IpAddress.BindError ||
     Net.Socket.SendError ||
     Net.Socket.ReceiveTimeoutError ||

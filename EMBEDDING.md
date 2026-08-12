@@ -539,3 +539,15 @@ quic-zig does not implement HTTP/3, QPACK, WebTransport, MASQUE, FIPS
 validation, or BBR. (Windows used to be listed here; it has since been
 promoted to a tier-1 release-gating platform — see
 `docs/RELEASE_READINESS.md`.)
+
+One Windows caveat, and it is about the *bundled* loop only: the
+convenience helpers `transport.runUdpServer` / `runUdpClient` fail
+with `error.ConcurrencyUnavailable` on native Windows, because std has
+no overlapped-I/O `net_receive` there and so cannot perform the timed
+receive those loops use as their heartbeat. This is not a limitation
+of the protocol engine, which is fully supported on Windows. Drive the
+connection yourself with the caller-drives API described above — the
+pattern in `examples/foreign_loop_embedder.zig`, which already handles
+this exact error by falling back to a blocking read. If std gains an
+overlapped `net_receive`, the bundled loops will work unchanged and
+the tests pinning this behavior will fail to tell us so.

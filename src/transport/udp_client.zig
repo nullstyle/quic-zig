@@ -184,6 +184,15 @@ pub const RunError = error{
     /// `rx_buffer_bytes` or `tx_buffer_bytes` was set to 0.
     InvalidBufferSize,
     OutOfMemory,
+    //
+    // Inherited from `Net.Socket.ReceiveTimeoutError`:
+    // `error.ConcurrencyUnavailable` means **this loop cannot run on
+    // native Windows** at the pinned toolchain. See the matching note
+    // on `udp_server.RunError` for the full explanation; the short
+    // version is that std has no overlapped-I/O `net_receive` on
+    // Windows, so no timed receive is possible, and a timed receive is
+    // what drives `tick`. Windows embedders drive their own loop —
+    // see `examples/foreign_loop_embedder.zig`.
 } || Net.IpAddress.BindError ||
     Net.Socket.SendError ||
     Net.Socket.ReceiveTimeoutError ||

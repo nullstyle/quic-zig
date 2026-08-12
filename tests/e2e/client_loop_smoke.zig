@@ -15,6 +15,7 @@
 //!      layer.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const quic_zig = @import("quic_zig");
 
 const common = @import("common.zig");
@@ -186,12 +187,18 @@ test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
         // way.
         error.HandshakeFailed,
         => return error.SkipZigTest,
-        else => {
-            // TEMPORARY: name the error so the windows-latest log
-            // identifies it instead of only showing a return trace.
-            std.debug.print("\nWINDOWS-DIAG {s} unexpected error: {s}\n", .{ "runUdpClient", @errorName(err) });
-            return err;
+        error.ConcurrencyUnavailable => {
+            // Native Windows cannot run this loop at all: std has no
+            // overlapped-I/O `net_receive`, so the timed receive that
+            // drives `tick` is refused outright. Pinned as a platform
+            // contract rather than skipped — if std ever gains the
+            // capability, this assertion fails and tells us to
+            // re-enable the loop there. See the note on
+            // `transport.RunError`.
+            try std.testing.expect(builtin.os.tag == .windows);
+            return;
         },
+        else => return err,
     };
 
     // The connection never completed a handshake (no peer); after

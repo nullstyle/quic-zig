@@ -28,27 +28,38 @@ The protocol engine, wire codecs, conformance suite, and in-memory TLS
 handshakes therefore genuinely execute on native Windows — this is not
 a cross-compile-only claim.
 
-Three real-socket loopback smoke tests are the exception (two in
-`tests/e2e/server_loop_smoke.zig`, one in `client_loop_smoke.zig`):
-the ones that enter `runUdpServer` / `runUdpClient`. They carry an
-unconditional `builtin.os.tag == .windows` skip, so **native Windows
-real-socket operation is untested, not known-broken.**
+The one documented exception is the **bundled convenience event loop**:
+`transport.runUdpServer` / `runUdpClient` cannot run on native Windows
+at the pinned toolchain. This was measured, not inferred — the skips
+that used to hide it were deleted and the `windows-latest` leg was
+read (2026-08-12).
 
-The skip predates the current toolchain pin and its recorded cause no
-longer holds: it was attributed to `error.ConcurrencyUnavailable` from
-std's `batchAwaitConcurrent`, but at 0.17.0-dev.1683 that function
-takes a dedicated Windows branch (`batchDrainSubmittedWindows` +
-`NtDelayExecution`) that never returns it — the `ConcurrencyUnavailable`
-path is reachable only on wasi and on platforms without `poll`. Note
-also that a timed receive needs the same machinery whether it asks for
-one datagram or many: `receiveTimeout` and `receiveManyTimeout` both
-lower to `Io.operateTimeout`, which is `batch.awaitConcurrent`. So
-`enable_ecn = false` was never a Windows escape hatch, and 0.11.0's
-move to an always-batched receive did not remove one.
+Cause: every timed receive lowers to `Io.operateTimeout` ->
+`Batch.awaitConcurrent`, and std's Windows `net_receive` arm has no
+overlapped-I/O path — `Io/Threaded.zig` carries a literal *"TODO
+integrate with overlapped I/O or equivalent to avoid this error"* and
+returns `error.ConcurrencyUnavailable` instead. Untimed `receive`
+does work on Windows, but blocks indefinitely, which would strand
+`tick` and with it PTO, the idle timeout, pacing, and `shutdown_flag`.
+A timed receive *is* the loop's heartbeat, so there is nothing to
+degrade to; the error propagates. Every readiness-wait alternative is
+also closed at this pin: `std.posix.poll` is a `@compileError` on
+Windows and `ws2_32.pollfd` / `WSAPoll` are not defined (see
+`examples/foreign_loop_embedder.zig`).
 
-Resolving this means deleting the three skips and reading the
-`windows-latest` leg. It is deliberately not bundled into a release
-commit, since it can only turn red in CI.
+`enable_ecn = false` is not a workaround — `receiveTimeout` and
+`receiveManyTimeout` share the same lowering, so both receive paths
+fail identically, and have since before batched receive landed. v0.10.x
+is affected the same way.
+
+This is a std gap rather than a quic-zig defect, and it is narrow: the
+protocol engine, wire codecs, conformance suite, and TLS handshakes all
+genuinely execute on Windows. Windows embedders drive their own loop,
+which is the library's primary supported pattern anyway (`EMBEDDING.md`,
+`examples/foreign_loop_embedder.zig`). The three tests now **assert**
+the documented failure instead of skipping, so if std implements
+overlapped `net_receive` the assertion fails and tells us to re-enable
+the loop there.
 
 ## 1.0 graduation checklist
 
