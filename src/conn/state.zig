@@ -54,6 +54,7 @@ const conn_cids = @import("conn_cids.zig");
 const conn_streams = @import("conn_streams.zig");
 const conn_datagram = @import("conn_datagram.zig");
 const conn_flow = @import("conn_flow.zig");
+const conn_paths = @import("conn_paths.zig");
 
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
@@ -2878,58 +2879,26 @@ pub const Connection = struct {
         return conn_datagram.pendingDatagrams(self);
     }
 
-    /// Enable or disable the public multipath surface. The current
-    /// implementation keeps existing single-path behavior unless callers
-    /// explicitly open and schedule additional paths.
     pub fn enableMultipath(self: *Connection, enabled: bool) void {
-        self.multipath_enabled = enabled;
+        return conn_paths.enableMultipath(self, enabled);
     }
 
-    /// True if `enableMultipath(true)` has been called locally.
-    /// Doesn't imply the peer agreed — see `multipathNegotiated`.
     pub fn multipathEnabled(self: *const Connection) bool {
-        return self.multipath_enabled;
+        return conn_paths.multipathEnabled(self);
     }
 
-    /// True only when *both* sides advertised
-    /// `initial_max_path_id` in transport parameters. Until this
-    /// returns true, `openPath` for non-zero path ids will fail.
     pub fn multipathNegotiated(self: *const Connection) bool {
-        if (!self.multipath_enabled) return false;
-        if (self.local_transport_params.initial_max_path_id == null) return false;
-        const peer_params = self.cached_peer_transport_params orelse return false;
-        return peer_params.initial_max_path_id != null;
+        return conn_paths.multipathNegotiated(self);
     }
 
-    /// True only when *both* peers advertised the RFC 9287 §3
-    /// `grease_quic_bit` transport parameter. While this returns
-    /// true, every encoded long- or short-header packet draws bit 6
-    /// of the first byte (the QUIC Bit) at random; the wire decoder
-    /// has always accepted any value there.
     pub fn peerSupportsGreaseQuicBit(self: *const Connection) bool {
-        if (!self.local_transport_params.grease_quic_bit) return false;
-        const peer_params = self.cached_peer_transport_params orelse return false;
-        return peer_params.grease_quic_bit;
+        return conn_paths.peerSupportsGreaseQuicBit(self);
     }
 
-    /// Draw a fresh QUIC Bit value for the next outgoing packet.
-    /// Returns 1 unless `peerSupportsGreaseQuicBit()` is true, in
-    /// which case the bit is sampled uniformly at random per packet
-    /// from BoringSSL's CSPRNG (RFC 9287 §3 SHOULDs an unpredictable
-    /// value). Falls back to 1 if `RAND_bytes` errors so a transient
-    /// CSPRNG failure can't drop us off the wire.
     fn nextQuicBit(self: *const Connection) u1 {
-        if (!self.peerSupportsGreaseQuicBit()) return 1;
-        var byte: [1]u8 = undefined;
-        boringssl.crypto.rand.fillBytes(&byte) catch return 1;
-        return @intCast(byte[0] & 0x01);
+        return conn_paths.nextQuicBit(self);
     }
 
-    /// Register a new application path. The path owns independent
-    /// Application PN, sent, RTT, congestion, validation, and PTO
-    /// state; the multipath control frames are emitted from
-    /// `emitPendingMultipathFrames` and the receive switch dispatches
-    /// the inbound side (see `conn_recv_multipath_handlers.zig`).
     pub fn openPath(
         self: *Connection,
         peer_addr: Address,
@@ -2937,117 +2906,48 @@ pub const Connection = struct {
         local_cid: ConnectionId,
         peer_cid: ConnectionId,
     ) Error!u32 {
-        const path_id = self.paths.next_path_id;
-        if (self.multipathNegotiated()) {
-            if (path_id > self.peer_max_path_id) {
-                self.queuePathsBlocked(self.peer_max_path_id);
-                return Error.PathLimitExceeded;
-            }
-            if (path_id > self.local_max_path_id) return Error.PathLimitExceeded;
-            if (local_cid.len == 0 or peer_cid.len == 0) return Error.ConnectionIdRequired;
-            try _internal.ensureCanIssueLocalCid(self, path_id, 0, 0, local_cid.len);
-            try _internal.ensureLocalCidAvailable(self, path_id, 0, local_cid);
-        }
-        const opened_path_id = try self.paths.openPath(
-            self.allocator,
-            peer_addr,
-            local_addr,
-            local_cid,
-            peer_cid,
-            .{ .max_datagram_size = self.mtu },
-        );
-        // Seed RFC 8899 PMTUD state on the freshly-opened path.
-        if (self.paths.get(opened_path_id)) |new_path| {
-            new_path.pmtudInit(self.pmtud_config);
-        }
-        try _internal.rememberLocalCid(self, opened_path_id, 0, 0, local_cid, @splat(0));
-        return opened_path_id;
+        return conn_paths.openPath(self, peer_addr, local_addr, local_cid, peer_cid);
     }
 
-    /// Make `path_id` the primary path for new application data.
-    /// Returns false if no such path exists.
     pub fn setActivePath(self: *Connection, path_id: u32) bool {
-        return self.paths.setActive(path_id);
+        return conn_paths.setActivePath(self, path_id);
     }
 
-    /// Mark `path_id` for retirement at the current activity time
-    /// with error code 0. New traffic stops scheduling here; in-flight
-    /// frames may still be acked.
     pub fn abandonPath(self: *Connection, path_id: u32) bool {
-        return self.abandonPathAt(path_id, 0, self.last_activity_us);
+        return conn_paths.abandonPath(self, path_id);
     }
 
-    /// As `abandonPath` but with an explicit timestamp and PATH_ABANDON
-    /// error code (draft-21 §6.2). Useful when the embedder has a
-    /// tighter clock than `last_activity_us`.
     pub fn abandonPathAt(
         self: *Connection,
         path_id: u32,
         error_code: u64,
         now_us: u64,
     ) bool {
-        return self.retirePath(path_id, error_code, now_us, true);
+        return conn_paths.abandonPathAt(self, path_id, error_code, now_us);
     }
 
-    /// Override the lifecycle state of `path_id` directly. Mainly
-    /// useful for tests; production code should drive paths via
-    /// `openPath`, `markPathValidated`, `abandonPath`.
     pub fn setPathStatus(self: *Connection, path_id: u32, state: path_mod.State) bool {
-        const p = self.paths.get(path_id) orelse return false;
-        p.path.state = state;
-        return true;
+        return conn_paths.setPathStatus(self, path_id, state);
     }
 
-    /// Mark `path_id` available (`backup=false`) or backup
-    /// (`backup=true`) and queue a PATH_STATUS_AVAILABLE /
-    /// PATH_STATUS_BACKUP frame to inform the peer (draft-21 §6.4).
     pub fn setPathBackup(self: *Connection, path_id: u32, backup: bool) bool {
-        const p = self.paths.get(path_id) orelse return false;
-        p.local_status_sequence_number +|= 1;
-        self.queuePathStatus(
-            path_id,
-            !backup,
-            p.local_status_sequence_number,
-        ) catch return false;
-        return true;
+        return conn_paths.setPathBackup(self, path_id, backup);
     }
 
-    /// Treat `path_id` as validated without running PATH_CHALLENGE.
-    /// Useful when validation is provided out-of-band (e.g. tests
-    /// that drive multipath through a mock transport). Returns false
-    /// for unknown `path_id`.
     pub fn markPathValidated(self: *Connection, path_id: u32) bool {
-        const p = self.paths.get(path_id) orelse return false;
-        p.path.markValidated();
-        if (p.pending_migration_reset) self.resetPathRecoveryAfterMigration(p);
-        return true;
+        return conn_paths.markPathValidated(self, path_id);
     }
 
-    /// Choose how `poll` distributes application bytes across
-    /// validated paths: `primary`, `round_robin`, or
-    /// `lowest_rtt_cwnd`.
     pub fn setScheduler(self: *Connection, scheduler: Scheduler) void {
-        self.paths.setScheduler(scheduler);
+        return conn_paths.setScheduler(self, scheduler);
     }
 
-    /// Path id currently used as the primary (active) path. Always 0
-    /// for single-path connections.
     pub fn activePathId(self: *const Connection) u32 {
-        return self.paths.activeConst().id;
+        return conn_paths.activePathId(self);
     }
 
-    /// Read-only snapshot of `path_id`'s RTT, congestion, and loss
-    /// counters. Returns null for unknown `path_id`.
     pub fn pathStats(self: *const Connection, path_id: u32) ?PathStats {
-        var st = self.paths.stats(path_id) orelse return null;
-        // Connection-level counters live on Connection, not on PathState,
-        // because they aggregate across all paths/levels (and across migrations).
-        st.total_bytes_sent = self.qlog_bytes_sent;
-        st.total_bytes_received = self.qlog_bytes_received;
-        st.packets_sent = self.qlog_packets_sent;
-        st.packets_received = self.qlog_packets_received;
-        st.packets_lost = self.qlog_packets_lost;
-        return st;
+        return conn_paths.pathStats(self, path_id);
     }
 
     pub fn queuePathAbandon(self: *Connection, path_id: u32, error_code: u64) Error!void {
@@ -3348,49 +3248,27 @@ pub const Connection = struct {
     }
 
     pub fn primaryPath(self: *Connection) *PathState {
-        return self.paths.primary();
+        return conn_paths.primaryPath(self);
     }
 
     pub fn primaryPathConst(self: *const Connection) *const PathState {
-        return self.paths.primaryConst();
+        return conn_paths.primaryPathConst(self);
     }
 
     pub fn activePath(self: *Connection) *PathState {
-        return self.paths.active();
+        return conn_paths.activePath(self);
     }
 
     pub fn pathForId(self: *Connection, path_id: u32) *PathState {
-        return self.paths.get(path_id) orelse self.primaryPath();
+        return conn_paths.pathForId(self, path_id);
     }
 
     fn applicationPathForPoll(self: *Connection) *PathState {
-        if (self.pending_frames.path_response != null) {
-            const p = self.pathForId(self.pending_frames.path_response_path_id);
-            if (p.path.state != .failed and p.path.state != .retiring) return p;
-        }
-        if (self.pending_frames.path_challenge != null) {
-            const p = self.pathForId(self.pending_frames.path_challenge_path_id);
-            if (p.path.state != .failed and p.path.state != .retiring) return p;
-        }
-        for (self.paths.paths.items) |*p| {
-            if (p.path.state == .failed) continue;
-            if (p.app_pn_space.received.pending_ack) return p;
-        }
-        for (self.paths.paths.items) |*p| {
-            if (p.path.state == .failed) continue;
-            if (p.pending_ping) return p;
-        }
-        return self.paths.selectForSending();
+        return conn_paths.applicationPathForPoll(self);
     }
 
     pub fn incomingPathId(self: *Connection, from: ?Address) u32 {
-        if (from) |addr| {
-            for (self.paths.paths.items) |*p| {
-                if (p.matchesPeerAddress(addr)) return p.id;
-            }
-            return self.activePath().id;
-        }
-        return self.activePath().id;
+        return conn_paths.incomingPathId(self, from);
     }
 
     pub fn peerAddressChangeCandidate(
@@ -3398,19 +3276,7 @@ pub const Connection = struct {
         path_id: u32,
         from: ?Address,
     ) ?Address {
-        const addr = from orelse return null;
-        const path = self.pathForId(path_id);
-        if (!path.peer_addr_set) return null;
-        if (path.matchesPeerAddress(addr)) return null;
-        return addr;
-    }
-
-    fn clearQueuedPathChallengeForPath(self: *Connection, path_id: u32) void {
-        if (self.pending_frames.path_challenge != null and
-            self.pending_frames.path_challenge_path_id == path_id)
-        {
-            self.pending_frames.path_challenge = null;
-        }
+        return conn_paths.peerAddressChangeCandidate(self, path_id, from);
     }
 
     pub fn queuePathResponseOnPath(
@@ -3419,9 +3285,7 @@ pub const Connection = struct {
         token: [8]u8,
         addr: ?Address,
     ) void {
-        self.pending_frames.path_response = token;
-        self.pending_frames.path_response_path_id = path_id;
-        self.pending_frames.path_response_addr = addr;
+        return conn_paths.queuePathResponseOnPath(self, path_id, token, addr);
     }
 
     fn queuePathChallengeOnPath(
@@ -3429,47 +3293,18 @@ pub const Connection = struct {
         path_id: u32,
         token: [8]u8,
     ) void {
-        self.pending_frames.path_challenge = token;
-        self.pending_frames.path_challenge_path_id = path_id;
+        return conn_paths.queuePathChallengeOnPath(self, path_id, token);
     }
 
     fn newPathChallengeToken(self: *Connection) Error![8]u8 {
-        _ = self;
-        var token: [8]u8 = undefined;
-        try boringssl.crypto.rand.fillBytes(&token);
-        return token;
-    }
-
-    fn resetPathRecoveryAfterMigration(
-        self: *Connection,
-        path: *PathState,
-    ) void {
-        path.resetRecoveryAfterMigration(.{ .max_datagram_size = self.mtu });
+        return conn_paths.newPathChallengeToken(self);
     }
 
     fn handlePathValidationFailure(
         self: *Connection,
         path: *PathState,
     ) void {
-        const path_id = path.id;
-        if (path.pending_migration_reset and path.rollbackFailedMigration()) {
-            self.clearQueuedPathChallengeForPath(path_id);
-            self.emitQlog(.{
-                .name = .migration_path_failed,
-                .path_id = path_id,
-                .migration_fail_reason = .timeout,
-            });
-            return;
-        }
-        path.path.fail();
-        path.pending_migration_reset = false;
-        path.migration_rollback = null;
-        self.clearQueuedPathChallengeForPath(path_id);
-        self.emitQlog(.{
-            .name = .migration_path_failed,
-            .path_id = path_id,
-            .migration_fail_reason = .timeout,
-        });
+        return conn_paths.handlePathValidationFailure(self, path);
     }
 
     pub fn recordPathResponse(
@@ -3477,15 +3312,7 @@ pub const Connection = struct {
         path_id: u32,
         token: [8]u8,
     ) void {
-        const path = self.pathForId(path_id);
-        const matched = path.path.validator.recordResponse(token) catch return;
-        if (!matched) return;
-        path.path.validated = true;
-        self.clearQueuedPathChallengeForPath(path_id);
-        if (path.pending_migration_reset) {
-            self.resetPathRecoveryAfterMigration(path);
-        }
-        self.emitQlog(.{ .name = .migration_path_validated, .path_id = path_id });
+        return conn_paths.recordPathResponse(self, path_id, token);
     }
 
     fn shouldRequeuePathChallenge(
@@ -3493,9 +3320,7 @@ pub const Connection = struct {
         path_id: u32,
         token: [8]u8,
     ) bool {
-        const path = self.paths.get(path_id) orelse return false;
-        if (path.path.validator.status != .pending) return false;
-        return std.mem.eql(u8, &token, &path.path.validator.pending_token);
+        return conn_paths.shouldRequeuePathChallenge(self, path_id, token);
     }
 
     pub fn handlePeerAddressChange(
@@ -4173,7 +3998,8 @@ pub const Connection = struct {
         return 3 * self.primaryPathConst().path.rtt.pto(self.peerMaxAckDelayUs());
     }
 
-    fn saturatingMul(a: u64, b: u64) u64 {
+    // INTERNAL: pub for conn_migration.zig access; not part of the embedder API.
+    pub fn saturatingMul(a: u64, b: u64) u64 {
         return std.math.mul(u64, a, b) catch std.math.maxInt(u64);
     }
 
@@ -4231,25 +4057,11 @@ pub const Connection = struct {
         now_us: u64,
         queue_abandon: bool,
     ) bool {
-        if (!self.paths.abandon(path_id)) return false;
-        const path = self.paths.get(path_id) orelse return false;
-        path.retire_deadline_us = now_us +| self.retiredPathRetentionUs();
-        if (queue_abandon) {
-            self.queuePathAbandon(path_id, error_code) catch return false;
-        }
-        return true;
+        return conn_paths.retirePath(self, path_id, error_code, now_us, queue_abandon);
     }
 
     fn expireRetiringPaths(self: *Connection, now_us: u64) void {
-        for (self.paths.paths.items) |*path| {
-            if (path.path.state != .retiring) continue;
-            const deadline = path.retire_deadline_us orelse continue;
-            if (now_us < deadline) continue;
-            path.clearRecovery(self.allocator);
-            self.retirePeerCidsForPath(path.id);
-            path.path.fail();
-            path.retire_deadline_us = null;
-        }
+        return conn_paths.expireRetiringPaths(self, now_us);
     }
 
     fn considerDeadline(best: *?TimerDeadline, candidate: TimerDeadline) void {
@@ -6089,20 +5901,15 @@ pub const Connection = struct {
         self.emitConnectionStateIfChanged();
     }
 
-    /// Initiate path validation by queueing a PATH_CHALLENGE on
-    /// the next outgoing 1-RTT packet. `timeout_us` is typically
-    /// `3 * pto` per RFC 9000 §8.2.4. Returns the token.
     pub fn probePath(
         self: *Connection,
         token: [8]u8,
         now_us: u64,
         timeout_us: u64,
     ) Error!void {
-        try self.probePathId(0, token, now_us, timeout_us);
+        return conn_paths.probePath(self, token, now_us, timeout_us);
     }
 
-    /// As `probePath` but for an explicit `path_id`. Returns
-    /// `error.PathNotFound` if the id is unknown.
     pub fn probePathId(
         self: *Connection,
         path_id: u32,
@@ -6110,31 +5917,19 @@ pub const Connection = struct {
         now_us: u64,
         timeout_us: u64,
     ) Error!void {
-        const path = self.paths.get(path_id) orelse return Error.PathNotFound;
-        path.path.validator.beginChallenge(token, now_us, timeout_us);
-        self.queuePathChallengeOnPath(path_id, token);
+        return conn_paths.probePathId(self, path_id, token, now_us, timeout_us);
     }
 
-    /// Queue an application-level PING on the primary path. This is
-    /// useful for embedders that need an explicit liveness probe even
-    /// when they have no stream or datagram bytes to send.
     pub fn requestPing(self: *Connection) void {
-        if (self.closeState() != .open) return;
-        self.primaryPath().pending_ping = true;
+        return conn_paths.requestPing(self);
     }
 
-    /// Queue an application-level PING on a specific path.
     pub fn requestPathPing(self: *Connection, path_id: u32) Error!void {
-        if (self.closeState() != .open) return;
-        const path = self.paths.get(path_id) orelse return Error.PathNotFound;
-        if (path.path.state == .failed or path.path.state == .retiring) return Error.PathNotFound;
-        path.pending_ping = true;
+        return conn_paths.requestPathPing(self, path_id);
     }
 
-    /// True iff the active path has been validated (either via the
-    /// validator's PATH_RESPONSE flow or by `markPathValidated`).
     pub fn isPathValidated(self: *const Connection) bool {
-        return self.primaryPathConst().path.validator.isValidated();
+        return conn_paths.isPathValidated(self);
     }
 
     /// Current public shutdown state.
