@@ -6,6 +6,7 @@
 // path keeps resolving.
 
 const state_mod = @import("state.zig");
+const pacing_mod = @import("pacing.zig");
 const Connection = state_mod.Connection;
 const EncryptionLevel = state_mod.EncryptionLevel;
 const ConnectionId = state_mod.ConnectionId;
@@ -449,5 +450,13 @@ pub fn emitMetricsSnapshot(self: *Connection, now_us: u64) void {
         .rtt_var_us = rtt.rtt_var_us,
         .min_rtt_us = rtt.min_rtt_us,
         .latest_rtt_us = rtt.latest_rtt_us,
+        .pacing_rate = if (self.pacing_enabled)
+            pacing_mod.rateBytesPerSecond(
+                cc.cwndBytes(),
+                rtt.smoothed_rtt_us,
+                cc.isSlowStart(),
+            )
+        else
+            null,
     });
 }

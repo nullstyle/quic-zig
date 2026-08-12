@@ -565,6 +565,12 @@ pub const Config = struct {
     /// long-standing default) or `.cubic` (RFC 9438).
     congestion_control: conn_mod.CongestionAlgorithm = .new_reno,
 
+    /// RFC 9002 §7.7 packet pacing for every accepted connection (on
+    /// by default): spreads sends at gain x cwnd/RTT instead of
+    /// bursting a full window. `false` restores the pre-0.11 emission
+    /// timing exactly.
+    enable_pacing: bool = true,
+
     /// RFC 9000 §18.2 / §5.1.1 server preferred-address advertisement.
     /// Null disables the feature (default — no `preferred_address`
     /// transport parameter is sent and clients have no server-driven

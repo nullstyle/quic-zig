@@ -248,6 +248,11 @@ const ConfigImpl = struct {
     /// `.cubic` (RFC 9438). Applies to every path the connection
     /// uses, including post-migration paths.
     congestion_control: conn_mod.CongestionAlgorithm = .new_reno,
+
+    /// RFC 9002 §7.7 packet pacing (on by default): spreads sends at
+    /// gain x cwnd/RTT instead of bursting a full window. `false`
+    /// restores the pre-0.11 emission timing exactly.
+    enable_pacing: bool = true,
 };
 
 /// Callback receiving ready-to-persist `tls.resumption_state` envelope
@@ -477,6 +482,7 @@ pub const Client = struct {
         // re-initialise the per-path PMTUD state.
         conn_ptr.setPmtudConfig(config.pmtud);
         conn_ptr.setCongestionAlgorithm(config.congestion_control);
+        conn_ptr.pacing_enabled = config.enable_pacing;
 
         if (config.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, config.qlog_user_data);
 

@@ -384,6 +384,17 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             }
         }
 
+        // Clamp this iteration's wait to the server's earliest timer
+        // deadline (pacing credit, PTO, ack-delay, ...): parking the
+        // full receive_timeout past a due deadline adds up to 5 ms of
+        // latency to every timer-driven send. Past-due/sub-ms clamps
+        // to 1 ms — never a busy spin, never a blocking overshoot.
+        const iteration_timeout = clampTimeoutToDeadline(
+            per_listener_timeout,
+            if (server.nextTimerDeadline(now_us)) |td| td.at_us else null,
+            now_us,
+        );
+
         // Receive (or timeout) on each listener in turn. The loop
         // checks every listener on each pass:
         // `max_datagrams_per_loop_iteration = 1` caps each listener
@@ -401,7 +412,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 const buf_slice = (&msg)[0..1];
                 const ret = l.sock.receiveManyTimeout(options.io, buf_slice, rx, .{}, .{
                     .duration = .{
-                        .raw = per_listener_timeout,
+                        .raw = iteration_timeout,
                         .clock = .awake,
                     },
                 });
@@ -415,7 +426,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             } else {
                 maybe_msg = l.sock.receiveTimeout(options.io, rx, .{
                     .duration = .{
-                        .raw = per_listener_timeout,
+                        .raw = iteration_timeout,
                         .clock = .awake,
                     },
                 }) catch |err| switch (err) {
@@ -571,6 +582,53 @@ fn drainSlot(
 /// Convert the loop's monotonic-clock origin into a non-negative
 /// microsecond offset suitable for `Server.feed` / `Server.tick`.
 /// Also reused by `runUdpClient`.
+/// Clamp a loop's base receive timeout to an optional timer deadline:
+/// no deadline keeps the base; a due or sub-millisecond deadline
+/// clamps to 1 ms (blocking-recv floor — never a busy spin); anything
+/// else waits exactly until the deadline, rounded up. Shared by
+/// `runUdpServer` and `runUdpClient` (INTERNAL).
+pub fn clampTimeoutToDeadline(
+    base: std.Io.Duration,
+    deadline_us: ?u64,
+    now_us: u64,
+) std.Io.Duration {
+    const at_us = deadline_us orelse return base;
+    if (at_us <= now_us) return std.Io.Duration.fromMilliseconds(1);
+    const until_ms: u64 = ((at_us - now_us) + 999) / 1000; // round up
+    const base_ms_i = base.toMilliseconds();
+    const base_ms: u64 = if (base_ms_i < 1) 1 else @intCast(base_ms_i);
+    const ms = @min(base_ms, @max(until_ms, 1));
+    return std.Io.Duration.fromMilliseconds(@intCast(ms));
+}
+
+test clampTimeoutToDeadline {
+    const five = std.Io.Duration.fromMilliseconds(5);
+    // No deadline: base unchanged.
+    try std.testing.expectEqual(
+        @as(i64, 5),
+        clampTimeoutToDeadline(five, null, 1_000).toMilliseconds(),
+    );
+    // Far deadline: base still wins.
+    try std.testing.expectEqual(
+        @as(i64, 5),
+        clampTimeoutToDeadline(five, 1_000_000, 1_000).toMilliseconds(),
+    );
+    // Near deadline (2.5 ms away): rounds UP to 3 ms.
+    try std.testing.expectEqual(
+        @as(i64, 3),
+        clampTimeoutToDeadline(five, 3_500, 1_000).toMilliseconds(),
+    );
+    // Past-due and sub-ms: 1 ms floor, never 0.
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        clampTimeoutToDeadline(five, 500, 1_000).toMilliseconds(),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        clampTimeoutToDeadline(five, 1_400, 1_000).toMilliseconds(),
+    );
+}
+
 pub fn monotonicNowUs(io: std.Io, start: std.Io.Timestamp) u64 {
     const now = std.Io.Timestamp.now(io, .awake);
     const delta = start.durationTo(now).toMicroseconds();

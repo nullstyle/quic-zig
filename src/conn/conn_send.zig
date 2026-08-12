@@ -146,6 +146,11 @@ pub fn pollDatagram(
     } else {
         out_path.path.onDatagramSent(pos);
     }
+    // Debit the pacer unconditionally: exempt sends (probes, close,
+    // ACK-only) bypass the gate but still spend credit, pushing the
+    // bucket negative so the next data send waits its turn — the rate
+    // accounting stays truthful (RFC 9002 §7.7).
+    if (self.pacing_enabled) out_path.path.pacer.consume(pos);
     return .{
         .len = pos,
         .to = out_addr,
@@ -321,7 +326,12 @@ pub fn pollLevelOnPath(
     // and the validated path's first 1-RTT poll runs against a tiny
     // residual after Initial+Handshake have filled most of the MTU.
     if (max_payload == 0) return null;
-    const congestion_blocked = self.congestionBlockedOnPath(lvl, app_path);
+    // Pacing joins the same boolean that scopes cwnd blocking: ACK
+    // emission, PTO PINGs, PATH_CHALLENGE, and CONNECTION_CLOSE are
+    // outside this gate by construction (they never consult it), so a
+    // paced-blocked poll still keeps the connection responsive.
+    const congestion_blocked = self.congestionBlockedOnPath(lvl, app_path) or
+        self.pacingBlockedOnPath(lvl, app_path, now_us, @min(@as(u64, @intCast(app_path.pmtu)), @as(u64, @intCast(dst.len))));
     const path_response_addr_overrides_current = blk: {
         if (lvl != .application) break :blk false;
         if (self.pending_frames.path_response == null) break :blk false;

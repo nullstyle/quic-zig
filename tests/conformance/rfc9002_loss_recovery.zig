@@ -58,8 +58,9 @@
 //!                              tested in the integration corpus.
 //!
 //! Out of scope here:
-//!   RFC9002 §7.7      Pacing — not implemented by design; quic_zig leaves
-//!                     pacing to the embedder via `sendAllowance`.
+//!   RFC9002 §7.7      Pacing — implemented in `conn.pacing` (token
+//!                     bucket, on by default); tested in
+//!                     rfc9002_pacing.zig + _state_tests_pacing.zig.
 //!   RFC9002 §6.3      Probe packets / PTO firing path — driven by
 //!                     `state.zig`'s timer subsystem; tested at the
 //!                     connection level.

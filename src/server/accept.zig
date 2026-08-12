@@ -50,6 +50,7 @@ pub fn openSlotFromInitial(
     // per-path pmtu / pmtu_state lands consistent with the config.
     conn_ptr.setPmtudConfig(self.pmtud_config);
     conn_ptr.setCongestionAlgorithm(self.congestion_control);
+    conn_ptr.pacing_enabled = self.pacing_enabled;
 
     try conn_ptr.bind();
     if (self.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, self.qlog_user_data);

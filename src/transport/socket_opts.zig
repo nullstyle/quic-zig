@@ -307,10 +307,11 @@ pub const default_server_recv_buffer_bytes: usize = 4 * 1024 * 1024;
 
 /// Recommended `SO_SNDBUF` for a QUIC server on the open internet.
 ///
-/// QUIC sends are paced by the userland congestion controller, so
-/// `SO_SNDBUF` mostly matters for absorbing transient
-/// `EAGAIN`/`ENOBUFS` from a busy NIC. 4 MiB is conservative and
-/// matches what other production stacks use.
+/// QUIC sends are paced in userland (RFC 9002 §7.7 token-bucket
+/// pacing in `conn.pacing`, on by default), so `SO_SNDBUF` mostly
+/// matters for absorbing transient `EAGAIN`/`ENOBUFS` from a busy
+/// NIC. 4 MiB is conservative and matches what other production
+/// stacks use.
 pub const default_server_send_buffer_bytes: usize = 4 * 1024 * 1024;
 
 /// Errors returned by `setRecvBufferSize` / `setSendBufferSize` /

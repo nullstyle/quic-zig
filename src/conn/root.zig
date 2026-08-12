@@ -46,6 +46,8 @@ pub const sent_packets = @import("sent_packets.zig");
 pub const congestion = @import("congestion.zig");
 /// RFC 9002 §6 ACK processing and loss detection primitives.
 pub const loss_recovery = @import("loss_recovery.zig");
+/// RFC 9002 §7.7 token-bucket packet pacing.
+pub const pacing = @import("pacing.zig");
 /// RFC 9000 §4 connection-, stream-, and stream-count flow control.
 pub const flow_control = @import("flow_control.zig");
 /// RFC 9000 §8.2 PATH_CHALLENGE/PATH_RESPONSE state machine.

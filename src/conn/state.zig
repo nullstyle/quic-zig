@@ -73,6 +73,7 @@ pub const pending_frames_mod = @import("pending_frames.zig");
 pub const lifecycle_mod = @import("lifecycle.zig");
 pub const stateless_reset_mod = @import("stateless_reset.zig");
 pub const path_frame_queue = @import("path_frame_queue.zig");
+pub const pacing_mod = @import("pacing.zig");
 pub const socket_opts_mod = @import("../transport/socket_opts.zig");
 pub const _internal = @import("_internal.zig");
 const conn_recv_flow_handlers = @import("conn_recv_flow_handlers.zig");
@@ -764,6 +765,12 @@ pub const TimerKind = enum {
     loss_detection,
     pto,
     idle,
+    /// RFC 9002 §7.7 pacing: application data is waiting on send
+    /// credit; `at_us` is when the pacer's token bucket next covers a
+    /// full datagram. `tick` does nothing for this kind — waking and
+    /// draining the outbox (the loop's normal post-tick step) is the
+    /// action.
+    pacing,
     /// RFC 9000 §10.2.1 closing-state expiry. The connection has sent
     /// a CONNECTION_CLOSE; this timer fires at `now + 3 * PTO` after
     /// the first emit and transitions the connection to terminal
@@ -1360,6 +1367,11 @@ pub const Connection = struct {
     /// right after `initClient`/`initServer`; paths created later
     /// (multipath, migration) inherit it at construction.
     cc_algorithm: congestion_mod.Algorithm = .new_reno,
+
+    /// RFC 9002 §7.7 packet pacing. On by default; `false` restores
+    /// the pre-0.11 burst-a-full-cwnd emission timing exactly (the
+    /// rollback lever). Wrappers thread `Config.enable_pacing` here.
+    pacing_enabled: bool = true,
 
     /// Local parameters handed to BoringSSL. Kept here too so ACK
     /// delay and idle timers can use the negotiated local values.
@@ -3536,12 +3548,39 @@ pub const Connection = struct {
         return app_path.path.cc.sendAllowance(app_path.sent.bytes_in_flight) == 0;
     }
 
+    // INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+    // Pacing twin of `congestionBlockedOnPath`, sharing its exemption
+    // structure exactly: non-application levels, PTO probes, and
+    // pending PINGs are never paced (RFC 9002 §7.7 applies to normal
+    // data emission; probes and handshake latency stay untouched).
+    // Refills the path's bucket lazily as a side effect.
+    pub fn pacingBlockedOnPath(
+        self: *Connection,
+        lvl: EncryptionLevel,
+        app_path: *PathState,
+        now_us: u64,
+        datagram_bytes: u64,
+    ) bool {
+        if (!self.pacing_enabled) return false;
+        if (lvl != .application and lvl != .early_data) return false;
+        if (app_path.pending_ping) return false;
+        if (app_path.pto_probe_count > 0) return false;
+        const cc = &app_path.path.cc;
+        app_path.path.pacer.refill(
+            now_us,
+            cc.cwndBytes(),
+            app_path.path.rtt.smoothed_rtt_us,
+            cc.isSlowStart(),
+            cc.config().max_datagram_size,
+        );
+        return !app_path.path.pacer.canSend(datagram_bytes);
+    }
+
     /// Soonest timer deadline among ack-delay, loss detection, PTO,
     /// idle, draining, path retirement, and key-discard. Embedders
     /// can park their event loop on this until `tick` should fire.
     /// Returns null when no timer is currently armed.
     pub fn nextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline {
-        _ = now_us;
         var best: ?TimerDeadline = null;
 
         if (self.lifecycle.draining_deadline_us) |at_us| {
@@ -3629,6 +3668,34 @@ pub const Connection = struct {
                     .level = .application,
                     .path_id = path.id,
                 });
+            }
+            // RFC 9002 §7.7: surface "send credit at T" only when a
+            // wake would actually unblock a send — the path must not
+            // be cwnd-blocked (only an ACK arrival clears that, an fd
+            // event, not a timer) and data must be pending. Checks
+            // ordered cheap-first; `canSend` (a bounded field sweep)
+            // runs last and only when the pacer is actually short.
+            if (self.pacing_enabled and path.path.state != .retiring) {
+                const cc = &path.path.cc;
+                if (cc.sendAllowance(path.sent.bytes_in_flight) > 0) {
+                    if (path.path.pacer.nextReadyUs(
+                        now_us,
+                        @min(@as(u64, @intCast(path.pmtu)), default_mtu),
+                        cc.cwndBytes(),
+                        path.path.rtt.smoothed_rtt_us,
+                        cc.isSlowStart(),
+                        cc.config().max_datagram_size,
+                    )) |at_us| {
+                        if (self.canSend()) {
+                            considerDeadline(&best, .{
+                                .kind = .pacing,
+                                .at_us = at_us,
+                                .level = .application,
+                                .path_id = path.id,
+                            });
+                        }
+                    }
+                }
             }
         }
         if (self.app_read_previous) |epoch| {

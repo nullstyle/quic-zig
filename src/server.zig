@@ -517,6 +517,7 @@ pub const Server = struct {
     /// true; flip to false in environments known to bleach ECN bits.
     ecn_enabled: bool,
     congestion_control: conn_mod.CongestionAlgorithm,
+    pacing_enabled: bool,
     /// Captured `Config.pmtud` — applied to every Connection at
     /// slot-open time. RFC 8899 DPLPMTUD.
     pmtud_config: conn_mod.PmtudConfig,
@@ -893,6 +894,7 @@ pub const Server = struct {
             .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
             .ecn_enabled = config.enable_ecn,
             .congestion_control = config.congestion_control,
+            .pacing_enabled = config.enable_pacing,
             // The listener and bandwidth limiters recommend "off"
             // (envelope-dependent), so `.default` resolves through a
             // zero default cap to null.

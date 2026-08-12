@@ -18,6 +18,7 @@
 const std = @import("std");
 
 const congestion_mod = @import("congestion.zig");
+const pacing_mod = @import("pacing.zig");
 const pn_space_mod = @import("pn_space.zig");
 const path_validator_mod = @import("path_validator.zig");
 const rtt_mod = @import("rtt.zig");
@@ -186,6 +187,9 @@ pub const Path = struct {
     validator: PathValidator = .{},
     rtt: RttEstimator = .{},
     cc: CongestionController,
+    /// RFC 9002 §7.7 token-bucket pacer; refilled lazily on the send
+    /// path from this path's cwnd/srtt.
+    pacer: pacing_mod.Pacer = .{},
 
     /// True once this path has been validated (or validation is
     /// implicit because we initiated it and completed the handshake
@@ -545,6 +549,7 @@ pub const PathState = struct {
     ) void {
         self.path.rtt = .{};
         self.path.cc = CongestionController.init(cc_cfg);
+        self.path.pacer = .{};
         self.pending_ping = false;
         self.pto_probe_count = 0;
         self.pto_count = 0;

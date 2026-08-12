@@ -291,6 +291,15 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
         // path-aware shape as the server's drainSlot.
         try drainOutbound(client.conn, tx, now_us, sock, options.io, target_addr);
 
+        // Clamp the wait to the connection's earliest timer deadline
+        // (pacing credit, PTO, ack-delay, ...) — see
+        // `udp_server.clampTimeoutToDeadline`.
+        const iteration_timeout = udp_server.clampTimeoutToDeadline(
+            options.receive_timeout,
+            if (client.conn.nextTimerDeadline(now_us)) |td| td.at_us else null,
+            now_us,
+        );
+
         // Receive (or timeout). When ECN is active we use
         // `receiveManyTimeout` so we can hand the kernel a control
         // buffer for IP_TOS / IPV6_TCLASS cmsgs; otherwise the
@@ -303,7 +312,7 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
             const buf_slice = (&msg)[0..1];
             const ret = sock.receiveManyTimeout(options.io, buf_slice, rx, .{}, .{
                 .duration = .{
-                    .raw = options.receive_timeout,
+                    .raw = iteration_timeout,
                     .clock = .awake,
                 },
             });
@@ -317,7 +326,7 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
         } else {
             maybe_msg = sock.receiveTimeout(options.io, rx, .{
                 .duration = .{
-                    .raw = options.receive_timeout,
+                    .raw = iteration_timeout,
                     .clock = .awake,
                 },
             }) catch |err| switch (err) {
