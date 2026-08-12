@@ -7,6 +7,36 @@ changes.
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **A `Connection` now has one address for its whole life** — the
+  init-then-move-then-`bind()` dance is gone, and with it the window
+  where moving a bound Connection silently dangled the `*Connection`
+  stashed in SSL ex-data. Construction wires TLS immediately:
+  - `Connection.initClient(alloc, ctx, name) !Connection` + `bind()`
+    → `Connection.createClient(alloc, ctx, name) !*Connection`,
+    paired with `conn.destroy()` (replaces `deinit()` + freeing your
+    own box).
+  - `Connection.initServer(alloc, ctx)` + `bind()` →
+    `Connection.createServer(alloc, ctx) !*Connection` + `destroy()`.
+  - Caller-owned storage (arenas, pools, embedding a Connection in a
+    heap-allocated parent) uses `Connection.initClientAt(&slot, ...)`
+    / `initServerAt(&slot, ...)`, which construct in place at the
+    final address and pair with `deinit()`.
+  - `bind()` no longer exists; delete the call. Migration is
+    mechanical: both wrappers already heap-boxed their Connection and
+    are unchanged (`Client`/`Server` APIs are not affected).
+  - qlog's `connection_started` now fires from `setQlogCallback` (the
+    first moment a sink exists). Previously the client-side event was
+    emitted during `bind()`, which ran before wrapper users installed
+    their callback — it was silently dropped for them.
+  This is the structural counterpart of 0.10.0's naming shakeout:
+  the last known API-shape debt closed before new surface (multipath
+  productization, completion-based transports — both of which need
+  pinned addresses) is built on top. `@sizeOf(Connection)` is 152,224
+  bytes; it was never a by-value type in practice, and now the type
+  system says so.
+
 ### Added
 
 - **BBRv3 congestion control (opt-in)** — `congestion_control = .bbr`

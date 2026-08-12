@@ -1583,8 +1583,8 @@ test "Connection rejects CRYPTO bytes that would exceed max_connection_memory" {
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
 
-    var conn = try quic_zig.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.max_connection_memory = 1024;
 
     // Push 1500 bytes of out-of-order CRYPTO at offset 5000 — this
@@ -1608,8 +1608,8 @@ test "Stream recv reassembly past max_connection_memory closes the connection" {
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
 
-    var conn = try quic_zig.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.max_connection_memory = 1024;
     // Allow the stream + connection-level data to land — flow control
     // and stream-count limits must not gate before the resident-bytes
@@ -1647,8 +1647,8 @@ test "Frees release resident bytes so the cap is reusable" {
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
 
-    var conn = try quic_zig.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.max_connection_memory = 800;
 
     // Need DATAGRAM transport param so handleDatagram doesn't reject.
@@ -2451,7 +2451,7 @@ test "Server.Config.preferred_address: client sees the parameter on a completed 
 
 test "Connection.acceptInitial: qns code path preserves preferred_address through to client" {
     // The qns interop endpoint (`interop/qns_endpoint.zig`) uses
-    // `Connection.initServer` + `bind` + `setLocalScid` +
+    // `Connection.createServer` + `setLocalScid` +
     // `replenishConnectionIds` (to pre-queue NEW_CONNECTION_ID seq=1)
     // BEFORE the first `acceptInitial`. The public `Server.feed` path
     // does NOT pre-queue the NEW_CONNECTION_ID — it queues seq=1
@@ -2486,13 +2486,10 @@ test "Connection.acceptInitial: qns code path preserves preferred_address throug
     });
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
 
     // Mirror the qns sequencing precisely:
     //   1. setLocalScid(initial_server_cid)

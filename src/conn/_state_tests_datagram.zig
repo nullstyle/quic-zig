@@ -24,8 +24,8 @@ test "closing and draining ignore incoming datagrams" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.close(false, 0x42, "closing");
     var random_short = [_]u8{ 0x40, 0, 1, 2, 3, 4, 5 };
@@ -36,8 +36,8 @@ test "closing and draining ignore incoming datagrams" {
 
     var peer_ctx = try boringssl.tls.Context.initClient(.{});
     defer peer_ctx.deinit();
-    var peer_closed = try Connection.initClient(allocator, peer_ctx, "x");
-    defer peer_closed.deinit();
+    const peer_closed = try Connection.createClient(allocator, peer_ctx, "x");
+    defer peer_closed.destroy();
     var payload: [128]u8 = undefined;
     const n = try frame_mod.encode(&payload, .{
         .connection_close = .{
@@ -60,8 +60,8 @@ test "setTransportParams advertises bounded UDP payload limits" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setTransportParams(.{ .max_datagram_frame_size = 9000 });
     try std.testing.expectEqual(@as(u64, max_supported_udp_payload_size), conn.local_transport_params.max_udp_payload_size);
@@ -74,8 +74,8 @@ test "handle rejects UDP datagrams above local payload limit before path credit"
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setTransportParams(.{ .max_udp_payload_size = default_mtu });
 
@@ -92,8 +92,8 @@ test "sendDatagram enforces peer support and bounded queue" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .max_datagram_frame_size = 0 };
     try std.testing.expectError(Error.DatagramUnavailable, conn.sendDatagram("x"));
@@ -114,8 +114,8 @@ test "maxDatagramPayload tracks the live PMTU and the peer frame-size cap" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Peer hasn't enabled DATAGRAM yet.
     conn.cached_peer_transport_params = .{ .max_datagram_frame_size = 0 };
@@ -144,10 +144,10 @@ test "tracked DATAGRAM emits ack event when packet is acknowledged" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
 
     const id = try conn.sendDatagramTracked("ack-me");
@@ -182,10 +182,10 @@ test "tracked DATAGRAM emits loss event without retransmission" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
 
     const id = try conn.sendDatagramTracked("lost");
@@ -211,8 +211,8 @@ test "handleDatagram enforces local DATAGRAM limit and queue budget" {
     defer ctx.deinit();
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         try conn.handleDatagram(.application, .{ .data = "x", .has_length = true });
         try std.testing.expect(conn.lifecycle.pending_close != null);
         try std.testing.expectEqual(transport_error_protocol_violation, conn.lifecycle.pending_close.?.error_code);
@@ -220,8 +220,8 @@ test "handleDatagram enforces local DATAGRAM limit and queue budget" {
     }
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         conn.local_transport_params.max_datagram_frame_size = max_supported_udp_payload_size;
         while (conn.pending_frames.recv_datagrams.items.len < max_pending_datagram_count) {
             try conn.handleDatagram(.application, .{ .data = "x", .has_length = true });
@@ -246,12 +246,12 @@ test "0-RTT rejection requeues STREAM data but not DATAGRAM payloads" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     try conn.setLocalScid(&.{ 9, 9, 9, 9 });
-    installTestEarlyDataWriteSecret(&conn);
+    installTestEarlyDataWriteSecret(conn);
     conn.setEarlyDataEnabled(true);
 
     const datagram_id = try conn.sendDatagramTracked("early-datagram");
@@ -282,12 +282,12 @@ test "0-RTT DATAGRAM ack event carries early-data metadata" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     try conn.setLocalScid(&.{ 9, 9, 9, 9 });
-    installTestEarlyDataWriteSecret(&conn);
+    installTestEarlyDataWriteSecret(conn);
     conn.setEarlyDataEnabled(true);
 
     const datagram_id = try conn.sendDatagramTracked("early-ack");
@@ -318,12 +318,12 @@ test "0-RTT DATAGRAM packet-threshold loss carries early-data metadata" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     try conn.setLocalScid(&.{ 9, 9, 9, 9 });
-    installTestEarlyDataWriteSecret(&conn);
+    installTestEarlyDataWriteSecret(conn);
     conn.setEarlyDataEnabled(true);
 
     var datagram_ids: [4]u64 = undefined;
@@ -361,10 +361,10 @@ test "server marks accepted 0-RTT DATAGRAM frames" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    installTestEarlyDataReadSecret(&conn);
+    installTestEarlyDataReadSecret(conn);
     conn.local_transport_params.max_datagram_frame_size = max_supported_udp_payload_size;
     const keys = try testEarlyDataPacketKeys();
 
@@ -397,10 +397,10 @@ test "pollDatagram can select a non-zero application path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.{ .ipv4 = .{ .addr = .{ 1, 2, 3, 4 }, .port = 0 } }, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));

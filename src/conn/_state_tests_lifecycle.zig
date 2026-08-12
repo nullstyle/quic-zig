@@ -16,8 +16,8 @@ test "peer close records transport error details" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var payload: [128]u8 = undefined;
     const n = try frame_mod.encode(&payload, .{
@@ -46,8 +46,8 @@ test "beginGracefulShutdown refuses local opens but stays open" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.peer_max_streams_bidi = 100;
     conn.peer_max_streams_uni = 100;
 
@@ -71,8 +71,8 @@ test "phase() reports initial before keys and closing after close()" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Fresh connection: no handshake/application keys yet.
     try std.testing.expectEqual(ConnectionPhase.initial, conn.phase());

@@ -38,8 +38,8 @@ test "congestionBlocked gates application data but allows PTO probes" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.ccForApplication().setCwndForTest(1200);
     try conn.sentForLevel(.application).record(.{
@@ -65,8 +65,8 @@ test "peer transport parameter limit violations use transport parameter error" {
     defer ctx.deinit();
 
     {
-        var conn = try Connection.initClient(allocator, ctx, "x");
-        defer conn.deinit();
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
         conn.cached_peer_transport_params = .{ .max_udp_payload_size = min_quic_udp_payload_size - 1 };
         conn.validatePeerTransportLimits();
         try std.testing.expect(conn.lifecycle.pending_close != null);
@@ -75,8 +75,8 @@ test "peer transport parameter limit violations use transport parameter error" {
     }
 
     {
-        var conn = try Connection.initClient(allocator, ctx, "x");
-        defer conn.deinit();
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
         conn.cached_peer_transport_params = .{ .initial_max_streams_bidi = max_stream_count_limit + 1 };
         conn.validatePeerTransportLimits();
         try std.testing.expect(conn.lifecycle.pending_close != null);
@@ -89,8 +89,8 @@ test "local transport params reject allocation policy overflows" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try std.testing.expectError(error.InvalidValue, conn.setTransportParams(.{
         .initial_max_streams_bidi = max_streams_per_connection + 1,
@@ -122,8 +122,8 @@ test "bounded policy clamps MAX_STREAMS MAX_PATH_ID and peer CID fanout" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.peer_max_streams_bidi = 0;
     conn.peer_max_streams_uni = 0;
@@ -158,8 +158,8 @@ test "STREAM_DATA_BLOCKED tracking is bounded and validates stream space" {
     defer ctx.deinit();
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         try conn.setTransportParams(.{ .initial_max_streams_bidi = 1 });
         try conn.handleStreamDataBlocked(.{ .stream_id = 0, .maximum_stream_data = 7 });
         try std.testing.expect(conn.lifecycle.pending_close == null);
@@ -172,8 +172,8 @@ test "STREAM_DATA_BLOCKED tracking is bounded and validates stream space" {
     }
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         try conn.handleStreamDataBlocked(.{ .stream_id = 3, .maximum_stream_data = 7 });
         try std.testing.expect(conn.lifecycle.pending_close != null);
         try std.testing.expectEqual(transport_error_stream_state, conn.lifecycle.pending_close.?.error_code);
@@ -204,8 +204,8 @@ test "STREAM receive enforces stream and connection flow control" {
     defer ctx.deinit();
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         try conn.setTransportParams(.{
             .initial_max_data = 16,
             .initial_max_stream_data_bidi_remote = 3,
@@ -223,8 +223,8 @@ test "STREAM receive enforces stream and connection flow control" {
     }
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         try conn.setTransportParams(.{
             .initial_max_data = 5,
             .initial_max_stream_data_bidi_remote = 8,
@@ -254,8 +254,8 @@ test "MAX_DATA MAX_STREAM_DATA and MAX_STREAMS raise send-side limits" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.peer_max_data = 4;
     conn.peer_max_streams_bidi = 1;
@@ -281,8 +281,8 @@ test "openNextBidi / openNextUni choose client-initiated ids automatically" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.peer_max_streams_bidi = 100;
     conn.peer_max_streams_uni = 100;
 
@@ -300,8 +300,8 @@ test "openNext* choose server-initiated ids for a server" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
     conn.peer_max_streams_bidi = 100;
     conn.peer_max_streams_uni = 100;
 
@@ -315,8 +315,8 @@ test "peekNextBidi / peekNextUni return the next id without consuming it" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.peer_max_streams_bidi = 100;
     conn.peer_max_streams_uni = 100;
 
@@ -338,8 +338,8 @@ test "beginGracefulShutdown withholds MAX_STREAMS credit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.local_max_streams_bidi = 10;
     // Normally, granting more credit advances the limit and queues a frame.
@@ -359,8 +359,8 @@ test "send-side STREAM emission is capped by flow-control allowance" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.peer_max_data = 4;
     conn.peer_max_streams_bidi = 1;
@@ -418,8 +418,8 @@ test "receive flow-control MAX updates are paced by half-window" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{
         .initial_max_data = default_connection_receive_window,
@@ -443,8 +443,8 @@ test "stream flow block queues STREAM_DATA_BLOCKED and clears on MAX_STREAM_DATA
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.peer_max_data = 16;
     conn.peer_max_streams_bidi = 1;
@@ -475,8 +475,8 @@ test "STREAMS_BLOCKED is queued when local stream opening hits peer limit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.peer_max_streams_bidi = 0;
     try std.testing.expectError(Error.StreamLimitExceeded, conn.openBidi(0));
@@ -498,10 +498,10 @@ test "blocked frames emit with retransmit metadata and requeue on loss" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
 
     conn.noteDataBlocked(7);
@@ -529,8 +529,8 @@ test "stale blocked frames are not requeued after peer raises limits" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.noteDataBlocked(7);
     try conn.noteStreamDataBlocked(0, 11);
@@ -567,8 +567,8 @@ test "inbound blocked frames update peer state and pollable events" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{ .initial_max_streams_bidi = 2 });
     conn.handleDataBlocked(.{ .maximum_data = 10 });
@@ -599,8 +599,8 @@ test "draining a peer-initiated stream returns MAX_STREAMS credit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{
         .initial_max_data = 16,
@@ -634,8 +634,8 @@ test "MAX_STREAMS replenishes early enough for pipelining peers" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     const initial_limit: u64 = 1000;
     try conn.setTransportParams(.{
@@ -689,8 +689,8 @@ test "draining at stream cap does not queue duplicate MAX_STREAMS" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{
         .initial_max_data = 16,
@@ -715,10 +715,10 @@ test "PATH_CIDS_BLOCKED cannot skip local cid sequence numbers" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     conn.handlePathCidsBlocked(.{ .path_id = path_id, .next_sequence_number = 2 });
     try std.testing.expect(conn.lifecycle.pending_close != null);
@@ -729,10 +729,10 @@ test "PATH_CIDS_BLOCKED can be surfaced and replenished within peer active cid l
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     conn.cached_peer_transport_params = .{
         .initial_max_path_id = 1,
         .active_connection_id_limit = 3,
@@ -777,10 +777,10 @@ test "PATHS_BLOCKED below current local limit is ignored" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 2);
+    markTestMultipathNegotiated(conn, 2);
     conn.handlePathsBlocked(.{ .maximum_path_id = 1 });
     try std.testing.expectEqual(@as(?u32, null), conn.peer_paths_blocked_at);
     conn.handlePathsBlocked(.{ .maximum_path_id = 2 });

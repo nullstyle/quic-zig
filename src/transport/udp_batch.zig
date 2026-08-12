@@ -139,9 +139,9 @@ test "fillGsoBatch packs equal-size segments and stops on the short tail" {
     const allocator = testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try prepareSender(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareSender(conn);
 
     // Queue ~6 full packets of stream data plus a partial tail.
     var data: [4096]u8 = undefined;
@@ -153,7 +153,7 @@ test "fillGsoBatch packs equal-size segments and stops on the short tail" {
     }
 
     var buf: [64 * 1500]u8 = undefined;
-    const batch = try fillGsoBatch(&conn, &buf, socket_opts.default_gso_max_segments, 1_000_000);
+    const batch = try fillGsoBatch(conn, &buf, socket_opts.default_gso_max_segments, 1_000_000);
     try testing.expect(batch.count >= 2);
     try testing.expect(batch.seg_size > 0 and batch.seg_size <= conn.pmtu());
     // All middles are exactly seg_size; only the tail may be short:
@@ -166,7 +166,7 @@ test "fillGsoBatch packs equal-size segments and stops on the short tail" {
     // Draining the rest eventually returns an empty batch.
     var guard: u32 = 0;
     while (guard < 32) : (guard += 1) {
-        const more = try fillGsoBatch(&conn, &buf, socket_opts.default_gso_max_segments, 1_000_000);
+        const more = try fillGsoBatch(conn, &buf, socket_opts.default_gso_max_segments, 1_000_000);
         if (more.count == 0) break;
     }
     try testing.expect(guard < 32);
@@ -176,9 +176,9 @@ test "fillGsoBatch respects max_segments" {
     const allocator = testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try prepareSender(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareSender(conn);
 
     var data: [4096]u8 = undefined;
     for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
@@ -189,7 +189,7 @@ test "fillGsoBatch respects max_segments" {
     }
 
     var buf: [64 * 1500]u8 = undefined;
-    const batch = try fillGsoBatch(&conn, &buf, 3, 1_000_000);
+    const batch = try fillGsoBatch(conn, &buf, 3, 1_000_000);
     try testing.expect(batch.count <= 3);
     try testing.expect(batch.count >= 2);
 }
@@ -198,12 +198,12 @@ test "fillGsoBatch on an idle connection returns an empty batch" {
     const allocator = testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try prepareSender(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareSender(conn);
 
     var buf: [4 * 1500]u8 = undefined;
-    const batch = try fillGsoBatch(&conn, &buf, 64, 1_000_000);
+    const batch = try fillGsoBatch(conn, &buf, 64, 1_000_000);
     try testing.expectEqual(@as(u32, 0), batch.count);
     try testing.expectEqual(@as(usize, 0), batch.total_len);
 }

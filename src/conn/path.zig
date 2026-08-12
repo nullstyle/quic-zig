@@ -1136,7 +1136,7 @@ test "PathSet starts with active, unvalidated path 0" {
     try testing.expectEqual(@as(u32, 0), set.primary().id);
     try testing.expectEqual(State.active, set.primary().path.state);
     // ensurePrimary leaves the path unvalidated; each role decides when to
-    // flip it (see PathSet.ensurePrimary docs and Connection.initClient /
+    // flip it (see PathSet.ensurePrimary docs and Connection.initClientAt /
     // handleHandshake for the matching policies).
     try testing.expect(!set.primary().path.isValidated());
     try testing.expectEqual(@as(u32, 0), set.selectForSending().id);

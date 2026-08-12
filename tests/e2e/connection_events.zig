@@ -66,13 +66,10 @@ fn establishPair(
     server_tls: boringssl.tls.Context,
     client_tls: boringssl.tls.Context,
 ) !void {
-    pair.client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
+    try quic_zig.Connection.initClientAt(&pair.client, allocator, client_tls, "localhost");
     errdefer pair.client.deinit();
-    pair.server = try quic_zig.Connection.initServer(allocator, server_tls);
+    try quic_zig.Connection.initServerAt(&pair.server, allocator, server_tls);
     errdefer pair.server.deinit();
-
-    try pair.client.bind();
-    try pair.server.bind();
     pair.client.peer = &pair.server;
     pair.server.peer = &pair.client;
 

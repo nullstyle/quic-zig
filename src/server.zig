@@ -992,8 +992,7 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         for (self.slots.items) |slot| {
-            slot.conn.deinit();
-            self.allocator.destroy(slot.conn);
+            slot.conn.destroy();
             if (slot.pending_upgrade) |pu| self.allocator.destroy(pu);
             self.allocator.destroy(slot);
         }
@@ -1537,15 +1536,14 @@ pub const Server = struct {
                 callback(self.on_connection_will_close_user_data, slot);
             }
             // Capture the close-event source and peer address before
-            // we tear the connection down — once `slot.conn.deinit`
+            // we tear the connection down — once `slot.conn.destroy`
             // has run, both pointers are dead.
             const close_source: ?lifecycle.CloseSource =
                 if (slot.conn.closeEvent()) |ev| ev.source else null;
             const close_peer: ?Address = slot.peer_addr;
             self.dropAllCidsFromTable(slot);
             const generation = slot.tls_generation;
-            slot.conn.deinit();
-            self.allocator.destroy(slot.conn);
+            slot.conn.destroy();
             if (slot.pending_upgrade) |pu| self.allocator.destroy(pu);
             self.allocator.destroy(slot);
             _ = self.slots.swapRemove(i);

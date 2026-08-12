@@ -53,15 +53,15 @@ test "paced sender emits the burst then blocks; deadline surfaces as TimerKind.p
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try preparePacedClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try preparePacedClient(conn);
 
     // Give cwnd plenty of headroom (100 MSS) so the PACER is the
     // binding constraint: bucket = max(10 x MSS, ~1 ms of rate) stays
     // ~10 packets while the window would allow far more.
     conn.ccForApplication().setCwndForTest(120_000);
-    try queueBulkStream(&conn, 256 * 1024);
+    try queueBulkStream(conn, 256 * 1024);
 
     var pkt: [2048]u8 = undefined;
     var now_us: u64 = 1_000_000;
@@ -91,13 +91,13 @@ test "enable_pacing=false restores unpaced draining (the kill switch)" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try preparePacedClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try preparePacedClient(conn);
     conn.pacing_enabled = false;
     conn.ccForApplication().setCwndForTest(120_000);
 
-    try queueBulkStream(&conn, 64 * 1024);
+    try queueBulkStream(conn, 64 * 1024);
 
     // Unpaced: the whole cwnd drains in one poll loop (bounded by the
     // congestion window, not the pacer), and no pacing deadline ever
@@ -118,9 +118,9 @@ test "no pacing deadline without pending data or while cwnd-blocked" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try preparePacedClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try preparePacedClient(conn);
 
     // Nothing queued: even with a drained pacer there is nothing a
     // pacing wake could do.
@@ -133,7 +133,7 @@ test "no pacing deadline without pending data or while cwnd-blocked" {
     // Drain the full window so the connection is cwnd-blocked, with
     // data still pending: a timer wake cannot unblock cwnd (only an
     // ACK can), so no pacing deadline may surface.
-    try queueBulkStream(&conn, 256 * 1024);
+    try queueBulkStream(conn, 256 * 1024);
     while (try conn.pollDatagram(&pkt, now_us)) |_| now_us += 100;
     var drain_guard: u32 = 0;
     while (drain_guard < 100) : (drain_guard += 1) {
@@ -154,12 +154,12 @@ test "probe debt: PTO probes bypass the gate but delay the next data send" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try preparePacedClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try preparePacedClient(conn);
 
     conn.ccForApplication().setCwndForTest(120_000);
-    try queueBulkStream(&conn, 256 * 1024);
+    try queueBulkStream(conn, 256 * 1024);
     var pkt: [2048]u8 = undefined;
     var now_us: u64 = 1_000_000;
     while (try conn.pollDatagram(&pkt, now_us)) |_| {}

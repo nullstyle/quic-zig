@@ -16,8 +16,8 @@ test "ACKed in-flight packets grow congestion window" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // The §7.8 app-limited gate only grows cwnd off a full pipe:
     // shrink the window to what this single 1200-byte packet fills.
@@ -49,12 +49,12 @@ test "0-RTT poll emits long-header packet in Application PN space" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     try conn.setLocalScid(&.{ 9, 9, 9, 9 });
-    installTestEarlyDataWriteSecret(&conn);
+    installTestEarlyDataWriteSecret(conn);
     conn.setEarlyDataEnabled(true);
 
     const s = try conn.openBidi(0);
@@ -74,10 +74,10 @@ test "pollLevel caps ACK ranges to packet budget" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     try std.testing.expect(conn.markPathValidated(0));
 

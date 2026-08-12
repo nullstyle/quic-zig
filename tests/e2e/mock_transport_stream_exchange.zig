@@ -365,15 +365,12 @@ test "client streams 16 KiB to server through poll/handle" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
@@ -384,7 +381,7 @@ test "client streams 16 KiB to server through poll/handle" {
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     // Wire CIDs. Client writes packets with peer-DCID = ServerCid;
     // server expects to see ServerCid at the matching length on
@@ -464,15 +461,12 @@ test "DATAGRAM round-trips through the 1-RTT path" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
@@ -484,7 +478,7 @@ test "DATAGRAM round-trips through the 1-RTT path" {
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -521,15 +515,12 @@ test "CONNECTION_CLOSE wire-redacts the reason by default (hardening §9 / §12)
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
@@ -539,7 +530,7 @@ test "CONNECTION_CLOSE wire-redacts the reason by default (hardening §9 / §12)
     };
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -587,19 +578,16 @@ test "CONNECTION_CLOSE wire-includes reason when reveal_close_reason_on_wire is 
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
 
     // Embedder opt-in: dev/debug builds want the reason on the wire
     // for cross-side diagnostics.
     client.reveal_close_reason_on_wire = true;
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
@@ -609,7 +597,7 @@ test "CONNECTION_CLOSE wire-includes reason when reveal_close_reason_on_wire is 
     };
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -641,15 +629,12 @@ test "CONNECTION_CLOSE propagates from sender to receiver" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
@@ -659,7 +644,7 @@ test "CONNECTION_CLOSE propagates from sender to receiver" {
     };
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -693,15 +678,12 @@ test "STOP_SENDING propagates and resets the sender's stream" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
@@ -711,7 +693,7 @@ test "STOP_SENDING propagates and resets the sender's stream" {
     };
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -748,15 +730,12 @@ test "client streams 512 KiB to server (regression for upload stall)" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     // Use the same TPs nullq-peer advertises so we exercise the same
     // flow-control limits the dev's go-quic-peer interop uses.
@@ -772,7 +751,7 @@ test "client streams 512 KiB to server (regression for upload stall)" {
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -824,15 +803,12 @@ test "PATH_CHALLENGE → PATH_RESPONSE validates the path round-trip" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
@@ -843,7 +819,7 @@ test "PATH_CHALLENGE → PATH_RESPONSE validates the path round-trip" {
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -877,15 +853,12 @@ test "client streams 16 KiB to server with 10% simulated loss" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
@@ -896,7 +869,7 @@ test "client streams 16 KiB to server with 10% simulated loss" {
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -972,15 +945,12 @@ test "loss recovery: a dropped 1-RTT packet is retransmitted and cwnd shrinks (L
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
@@ -991,7 +961,7 @@ test "loss recovery: a dropped 1-RTT packet is retransmitted and cwnd shrinks (L
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
 
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
@@ -1084,15 +1054,12 @@ test "single-path NAT rebinding survives loss and reordering" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .max_idle_timeout_ms = 30_000,
@@ -1104,8 +1071,8 @@ test "single-path NAT rebinding survives loss and reordering" {
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
-    try configurePrimaryCids(&client, &server);
+    try handshake(allocator, client, server);
+    try configurePrimaryCids(client, server);
 
     var net = RebindingNet.init(
         allocator,
@@ -1142,12 +1109,12 @@ test "single-path NAT rebinding survives loss and reordering" {
     while (iters < 700_000) : (iters += 1) {
         try client.tick(now_us);
         try server.tick(now_us);
-        try net.deliverDue(&client, &server, now_us);
-        try net.pollEndpoint(true, &client, now_us);
-        try net.pollEndpoint(false, &server, now_us);
+        try net.deliverDue(client, server, now_us);
+        try net.pollEndpoint(true, client, now_us);
+        try net.pollEndpoint(false, server, now_us);
 
-        try drainExpectedStream(&server, 0, client_data, &server_consumed, &sbuf);
-        try drainExpectedStream(&client, 1, server_data, &client_consumed, &cbuf);
+        try drainExpectedStream(server, 0, client_data, &server_consumed, &sbuf);
+        try drainExpectedStream(client, 1, server_data, &client_consumed, &cbuf);
 
         if (!rebound_started and server_consumed >= total / 4 and client_consumed >= total / 4) {
             net.client_rebound = true;
@@ -1189,15 +1156,12 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
@@ -1211,12 +1175,12 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
     try client.setTransportParams(tp);
     try server.setTransportParams(tp);
 
-    try handshake(allocator, &client, &server);
+    try handshake(allocator, client, server);
     try std.testing.expect(client.multipathNegotiated());
     try std.testing.expect(server.multipathNegotiated());
 
-    try configurePrimaryCids(&client, &server);
-    const path1 = try openSecondPath(&client, &server);
+    try configurePrimaryCids(client, server);
+    const path1 = try openSecondPath(client, server);
     try std.testing.expectEqual(@as(u32, 1), path1);
 
     var net = MultipathNet.init(allocator);
@@ -1228,17 +1192,17 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
 
     try std.testing.expect(client.setActivePath(0));
     try client.sendDatagram("client-dg-p0");
-    try net.pollEndpoint(true, &client, now_us);
+    try net.pollEndpoint(true, client, now_us);
     try std.testing.expect(client.setActivePath(path1));
     try client.sendDatagram("client-dg-p1");
-    try net.pollEndpoint(true, &client, now_us);
+    try net.pollEndpoint(true, client, now_us);
 
     try std.testing.expect(server.setActivePath(0));
     try server.sendDatagram("server-dg-p0");
-    try net.pollEndpoint(false, &server, now_us);
+    try net.pollEndpoint(false, server, now_us);
     try std.testing.expect(server.setActivePath(path1));
     try server.sendDatagram("server-dg-p1");
-    try net.pollEndpoint(false, &server, now_us);
+    try net.pollEndpoint(false, server, now_us);
 
     var client_dg_p0 = false;
     var client_dg_p1 = false;
@@ -1248,9 +1212,9 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
     var dg_iters: u32 = 0;
     while (!(client_dg_p0 and client_dg_p1 and server_dg_p0 and server_dg_p1)) : (dg_iters += 1) {
         try std.testing.expect(dg_iters < 200);
-        try net.deliverDue(&client, &server, now_us);
-        try net.pollEndpoint(true, &client, now_us);
-        try net.pollEndpoint(false, &server, now_us);
+        try net.deliverDue(client, server, now_us);
+        try net.pollEndpoint(true, client, now_us);
+        try net.pollEndpoint(false, server, now_us);
 
         while (client.receiveDatagram(&dg_buf)) |n| {
             noteDatagram(dg_buf[0..n], &client_dg_p0, &client_dg_p1);
@@ -1293,12 +1257,12 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
     while (iters < 700_000) : (iters += 1) {
         try client.tick(now_us);
         try server.tick(now_us);
-        try net.deliverDue(&client, &server, now_us);
-        try net.pollEndpoint(true, &client, now_us);
-        try net.pollEndpoint(false, &server, now_us);
+        try net.deliverDue(client, server, now_us);
+        try net.pollEndpoint(true, client, now_us);
+        try net.pollEndpoint(false, server, now_us);
 
-        try drainExpectedStream(&server, 0, client_data, &server_consumed, &sbuf);
-        try drainExpectedStream(&client, 1, server_data, &client_consumed, &cbuf);
+        try drainExpectedStream(server, 0, client_data, &server_consumed, &sbuf);
+        try drainExpectedStream(client, 1, server_data, &client_consumed, &cbuf);
 
         if (!abandoned and server_consumed >= total / 3 and client_consumed >= total / 3) {
             try std.testing.expect(client.abandonPathAt(path1, 0x51, now_us));

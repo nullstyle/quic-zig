@@ -747,7 +747,7 @@ const ServerConn = struct {
         errdefer allocator.destroy(self);
         self.* = undefined;
 
-        self.conn = try quic_zig.Connection.initServer(allocator, server_tls);
+        try quic_zig.Connection.initServerAt(&self.conn, allocator, server_tls);
         errdefer self.conn.deinit();
 
         self.app = Http09App.init(allocator, io, try openDir(io, www));
@@ -808,7 +808,6 @@ const ServerConn = struct {
         }
 
         if (qlog_sink) |sink| self.conn.setQlogCallback(QlogSink.callback, sink);
-        try self.conn.bind();
         try self.conn.setLocalScid(&self.initial_server_cid);
         try queueServerConnectionIds(&self.conn, &self.next_cid_seq, endpoint_server_cid_desired_last_seq, self);
         return self;
@@ -1840,8 +1839,8 @@ fn runClientConnection(
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(750), .awake) catch {};
     }
 
-    var conn = try quic_zig.Connection.initClient(allocator, client_tls, server_name_z);
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, client_tls, server_name_z);
+    defer conn.destroy();
     if (conn_opts.qlog_sink) |sink| conn.setQlogCallback(QlogSink.callback, sink);
     if (conn_opts.session) |session| try conn.setSession(session);
     if (conn_opts.early_data) conn.setEarlyDataEnabled(true);
@@ -1851,7 +1850,6 @@ fn runClientConnection(
     if (conn_opts.initial_token) |token_bytes| {
         try conn.setInitialToken(token_bytes);
     }
-    try conn.bind();
 
     var initial_dcid: [8]u8 = undefined;
     var client_scid: [8]u8 = undefined;
@@ -1888,7 +1886,7 @@ fn runClientConnection(
 
     var requests_enabled = false;
     if (conn_opts.early_data) {
-        _ = try startClientRequests(allocator, &conn, downloads);
+        _ = try startClientRequests(allocator, conn, downloads);
         requests_enabled = true;
     }
     try conn.advance();
@@ -2061,7 +2059,7 @@ fn runClientConnection(
         // in a tight loop.
         if (conn.handshakeDone() and client_cid_lifetime_issued < endpoint_client_cid_max_lifetime_count) {
             try queueClientConnectionIds(
-                &conn,
+                conn,
                 &client_cid_lifetime_issued,
                 endpoint_client_cid_max_lifetime_count,
                 &client_scid,
@@ -2069,8 +2067,8 @@ fn runClientConnection(
         }
 
         if (requests_enabled) {
-            if (try startClientRequests(allocator, &conn, downloads)) progressed = true;
-            if (try drainClientResponses(allocator, &conn, downloads)) progressed = true;
+            if (try startClientRequests(allocator, conn, downloads)) progressed = true;
+            if (try drainClientResponses(allocator, conn, downloads)) progressed = true;
             try writeCompletedDownloads(io, downloads_dir, downloads);
         }
 
@@ -3372,8 +3370,8 @@ test "queueClientConnectionIds issues a fresh CID once handshake completes" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try quic_zig.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // The peer's `active_connection_id_limit` governs how many of
     // OUR CIDs we may issue. The qns endpoint advertises 2, matching
@@ -3388,7 +3386,7 @@ test "queueClientConnectionIds issues a fresh CID once handshake completes" {
     // 0 already active, budget is 1 and we expect exactly one
     // additional SCID (seq 1) on the wire.
     var lifetime_issued: u8 = 0;
-    try queueClientConnectionIds(&conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
+    try queueClientConnectionIds(conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
     try std.testing.expectEqual(@as(u8, 1), lifetime_issued);
 
     // One NEW_CONNECTION_ID frame queued for emission.
@@ -3401,7 +3399,7 @@ test "queueClientConnectionIds issues a fresh CID once handshake completes" {
     // Idempotent on second call when budget is still 0: cursor
     // doesn't advance, queue doesn't grow. The peer hasn't retired
     // anything yet, so we have no headroom to issue more.
-    try queueClientConnectionIds(&conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
+    try queueClientConnectionIds(conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
     try std.testing.expectEqual(@as(u8, 1), lifetime_issued);
     try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.new_connection_ids.items.len);
 }
@@ -3414,8 +3412,8 @@ test "queueClientConnectionIds no-ops when peer's CID limit is saturated" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try quic_zig.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Peer permits exactly one active CID at a time — the initial
     // one. Any call to issue a sequence >0 is over-budget.
@@ -3425,7 +3423,7 @@ test "queueClientConnectionIds no-ops when peer's CID limit is saturated" {
     try conn.setLocalScid(&base_cid);
 
     var lifetime_issued: u8 = 0;
-    try queueClientConnectionIds(&conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
+    try queueClientConnectionIds(conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
 
     // No frame queued; cursor unchanged.
     try std.testing.expectEqual(@as(u8, 0), lifetime_issued);
@@ -3451,8 +3449,8 @@ test "queueClientConnectionIds replenishes after peer aggressively retires SCIDs
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try quic_zig.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .active_connection_id_limit = 2 };
 
@@ -3462,7 +3460,7 @@ test "queueClientConnectionIds replenishes after peer aggressively retires SCIDs
     // First top-up: initial budget is `limit - active = 2 - 1 = 1`,
     // so we issue exactly one extra SCID at seq 1.
     var lifetime_issued: u8 = 0;
-    try queueClientConnectionIds(&conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
+    try queueClientConnectionIds(conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
     try std.testing.expectEqual(@as(u8, 1), lifetime_issued);
     try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.new_connection_ids.items.len);
 
@@ -3477,7 +3475,7 @@ test "queueClientConnectionIds replenishes after peer aggressively retires SCIDs
     // the runner's `rebind-addr` cell against quic-go / quiche
     // hangs because the server runs out of fresh client-SCIDs at
     // exactly the moment the next rebind arrives.
-    try queueClientConnectionIds(&conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
+    try queueClientConnectionIds(conn, &lifetime_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
     try std.testing.expectEqual(@as(u8, 2), lifetime_issued);
     try std.testing.expectEqual(@as(usize, 2), conn.pending_frames.new_connection_ids.items.len);
     const second = conn.pending_frames.new_connection_ids.items[1];
@@ -3490,7 +3488,7 @@ test "queueClientConnectionIds replenishes after peer aggressively retires SCIDs
     // through `quic_zig.conn.stateless_reset.derive`.
     var saturated_issued: u8 = endpoint_client_cid_max_lifetime_count;
     const queue_len_before = conn.pending_frames.new_connection_ids.items.len;
-    try queueClientConnectionIds(&conn, &saturated_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
+    try queueClientConnectionIds(conn, &saturated_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
     try std.testing.expectEqual(@as(u8, endpoint_client_cid_max_lifetime_count), saturated_issued);
     try std.testing.expectEqual(queue_len_before, conn.pending_frames.new_connection_ids.items.len);
 }
@@ -3745,7 +3743,7 @@ test "shouldArmStalledPeerKeepalive short-circuits on a fresh pre-handshake serv
     // We deliberately do NOT call `maybeArmStalledPeerKeepalive`
     // through a `ServerConn` literal here: storing a `Connection`
     // by value inside the literal aliases the AutoHashMap +
-    // ArrayList pointer headers, and the deferred `conn.deinit()`
+    // ArrayList pointer headers, and the deferred `conn.destroy()`
     // would then free buckets the literal still references — a
     // double-free path easy to introduce by mistake. Reading the
     // same fields off `conn` directly into `StalledPeerKeepaliveInputs`
@@ -3757,8 +3755,8 @@ test "shouldArmStalledPeerKeepalive short-circuits on a fresh pre-handshake serv
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try quic_zig.Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Pre-handshake invariants. `handshakeDone()` MUST be false
     // and `streamCount()` MUST be 0 on a fresh server Connection;
@@ -3842,8 +3840,8 @@ test "Connection.requestPing arms the application-level pending PING" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try quic_zig.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try std.testing.expect(!conn.primaryPath().pending_ping);
     conn.requestPing();

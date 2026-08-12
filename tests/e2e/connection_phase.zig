@@ -76,17 +76,13 @@ fn buildPair(
 
     const client = try allocator.create(quic_zig.Connection);
     errdefer allocator.destroy(client);
-    client.* = try quic_zig.Connection.initClient(allocator, client_tls.*, "localhost");
+    try quic_zig.Connection.initClientAt(client, allocator, client_tls.*, "localhost");
     errdefer client.deinit();
 
     const server = try allocator.create(quic_zig.Connection);
     errdefer allocator.destroy(server);
-    server.* = try quic_zig.Connection.initServer(allocator, server_tls.*);
+    try quic_zig.Connection.initServerAt(server, allocator, server_tls.*);
     errdefer server.deinit();
-
-    try client.bind();
-    try server.bind();
-
     try client.setLocalScid(&ClientScid);
     try client.setInitialDcid(&InitialDcid);
     try client.setPeerDcid(&InitialDcid);

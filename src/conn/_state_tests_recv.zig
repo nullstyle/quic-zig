@@ -19,8 +19,8 @@ test "stateless reset token closes without CONNECTION_CLOSE" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const token: [16]u8 = .{
         0x10, 0x11, 0x12, 0x13,
@@ -57,8 +57,8 @@ test "stateless reset matcher requires short packet with known token" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const token: [16]u8 = .{
         0x20, 0x21, 0x22, 0x23,
@@ -151,8 +151,8 @@ test "CRYPTO reassembly: out-of-order fragments delivered in order" {
     var ctx = try boringssl_tls.Context.initClient(.{});
     defer ctx.deinit();
 
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     // Don't bind/handshake — we're only testing reassembly, which
     // doesn't need TLS.
 
@@ -191,8 +191,8 @@ test "CRYPTO reassembly: out-of-order fragment count is bounded (M1: O(n^2) drai
     const boringssl_tls = boringssl.tls;
     var ctx = try boringssl_tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const lvl: EncryptionLevel = .initial;
     const idx = lvl.idx();
@@ -228,8 +228,8 @@ test "CRYPTO reassembly: duplicate fragment is silently ignored" {
     const boringssl_tls = boringssl.tls;
     var ctx = try boringssl_tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const lvl: EncryptionLevel = .initial;
     const idx = lvl.idx();
@@ -251,8 +251,8 @@ test "CRYPTO reassembly: deterministic shuffled fragment smoke" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const lvl: EncryptionLevel = .initial;
     const idx = lvl.idx();
@@ -290,8 +290,8 @@ test "ACK with largest_acked == next_pn is a PROTOCOL_VIOLATION" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.sentForLevel(.application).record(.{
         .pn = 0,
@@ -322,8 +322,8 @@ test "handleCrypto bounds out-of-order reassembly" {
     defer ctx.deinit();
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         try conn.handleCrypto(.initial, .{ .offset = max_crypto_reassembly_gap + 1, .data = "x" });
         try std.testing.expect(conn.lifecycle.pending_close != null);
         try std.testing.expectEqual(@as(usize, 0), conn.crypto_pending[0].items.len);
@@ -331,8 +331,8 @@ test "handleCrypto bounds out-of-order reassembly" {
     }
 
     {
-        var conn = try Connection.initServer(allocator, ctx);
-        defer conn.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
         var huge: [max_pending_crypto_bytes_per_level + 1]u8 = @splat(0);
         try conn.handleCrypto(.initial, .{ .offset = 1, .data = &huge });
         try std.testing.expect(conn.lifecycle.pending_close != null);

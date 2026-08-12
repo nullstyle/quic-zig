@@ -30,8 +30,8 @@ test "streamReset publicly aborts the send half" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     _ = try conn.openBidi(0);
     try std.testing.expectEqual(@as(usize, 5), try conn.streamWrite(0, "hello"));
@@ -50,8 +50,8 @@ test "streamSendStats snapshots the send half; null for missing streams" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Unopened stream → null (same signal a reaped stream gives).
     try std.testing.expectEqual(@as(?StreamSendStats, null), conn.streamSendStats(0));
@@ -73,8 +73,8 @@ test "send scheduler orders ready streams by RFC 9218 priority (urgency then id)
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     try conn.setTransportParams(.{
         .initial_max_data = 4096,
         .initial_max_stream_data_bidi_local = 4096,
@@ -125,8 +125,8 @@ test "send scheduler: non-incremental leads its band, incremental streams round-
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     try conn.setTransportParams(.{
         .initial_max_data = 4096,
         .initial_max_stream_data_bidi_local = 4096,
@@ -167,8 +167,8 @@ test "streamReadFin reports FIN inline with the last read; streamRecvState track
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     try conn.setTransportParams(.{
         .initial_max_data = 64,
         .initial_max_stream_data_bidi_local = 64,
@@ -212,8 +212,8 @@ test "streamRecvState distinguishes a peer RESET from a clean FIN" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     try conn.setTransportParams(.{
         .initial_max_data = 64,
         .initial_max_stream_data_bidi_local = 64,
@@ -233,8 +233,8 @@ test "peer-created streams respect advertised stream count" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{
         .initial_max_data = 16,
@@ -291,8 +291,8 @@ test "openNextBidi surfaces StreamLimitExceeded without consuming the id" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.peer_max_streams_bidi = 0;
 
     try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextBidi());
@@ -305,10 +305,10 @@ test "server handles accepted 0-RTT STREAM frames" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    installTestEarlyDataReadSecret(&conn);
+    installTestEarlyDataReadSecret(conn);
     try conn.setTransportParams(.{
         .initial_max_data = 1024,
         .initial_max_stream_data_bidi_remote = 1024,
@@ -354,8 +354,8 @@ test "gcClosedStreams reclaims bidi streams whose send + recv halves are both te
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const n: u64 = 100;
     var i: u64 = 0;
@@ -385,8 +385,8 @@ test "gcClosedStreams reclaims bidi streams whose send is reset_recvd and recv i
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     _ = try conn.openBidi(0);
     const s = conn.stream(0).?;
@@ -406,8 +406,8 @@ test "gcClosedStreams keeps streams where only the send half is terminal" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     _ = try conn.openBidi(0);
     const s = conn.stream(0).?;
@@ -428,8 +428,8 @@ test "gcClosedStreams keeps streams where only the recv half is terminal" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     _ = try conn.openBidi(0);
     const s = conn.stream(0).?;
@@ -448,8 +448,8 @@ test "gcClosedStreams reclaims local-initiated uni streams once send is terminal
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Client-initiated uni: low bits 0b10 (id 2, 6, 10, ...).
     const id: u64 = 2;
@@ -471,8 +471,8 @@ test "gcClosedStreams reclaims peer-initiated uni streams once recv is terminal 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Server-initiated uni from a client connection's POV: low bits 0b11.
     const id: u64 = 3;
@@ -504,8 +504,8 @@ test "gcClosedStreams: a reaped peer stream is not resurrected by a replayed fra
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{
         .initial_max_data = default_connection_receive_window,
@@ -566,8 +566,8 @@ test "gcClosedStreams: an out-of-order reaped peer stream above the watermark is
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{
         .initial_max_data = default_connection_receive_window,
@@ -631,8 +631,8 @@ test "initialSendStreamLimit: remembered 0-RTT params bound the pre-params send 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // A plain (non-0-RTT) client with no params and no early-data keys
     // grants no pre-params send window (previously an unbounded maxInt).

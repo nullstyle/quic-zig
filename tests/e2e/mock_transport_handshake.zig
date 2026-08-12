@@ -35,19 +35,16 @@ test "two quic_zig.Connections handshake to TLS 1.3 finished with application ke
     });
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
 
     // Bind after the Connection values are at their final stack
     // address — bind() stashes &self in SSL ex-data, so it has to
     // happen post-move.
-    try client.bind();
-    try server.bind();
-
-    client.peer = &server;
-    server.peer = &client;
+    client.peer = server;
+    server.peer = client;
 
     // Both sides advertise typed transport parameters per RFC 9000 §18.
     const params: quic_zig.tls.TransportParams = .{

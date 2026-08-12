@@ -1,7 +1,7 @@
 //! quic_zig.Client — convenience wrapper for embedding quic_zig as a
 //! QUIC client.
 //!
-//! `Connection.initClient` is intentionally low-level: the embedder
+//! `Connection.createClient` is intentionally low-level: the embedder
 //! has to build a client-mode `boringssl.tls.Context` with the right
 //! SNI hostname, generate a random initial DCID and SCID, call
 //! `bind` / `setLocalScid` / `setInitialDcid` / `setPeerDcid` /
@@ -317,7 +317,7 @@ const ErrorImpl = error{
 ///
 /// Lifecycle:
 ///   1. `connect(config)` builds the TLS context, mints random
-///      DCID/SCID per RFC 9000 §7.2, calls `Connection.initClient`,
+///      DCID/SCID per RFC 9000 §7.2, calls `Connection.createClient`,
 ///      runs `bind` / `setLocalScid` / `setInitialDcid` /
 ///      `setPeerDcid` / `setTransportParams`, optionally installs a
 ///      0-RTT session ticket, and returns a ready-to-tick `Client`.
@@ -469,19 +469,15 @@ pub const Client = struct {
         }
 
         // BoringSSL's hostname API needs a sentinel-terminated
-        // string; copy under the caller's allocator. Ownership stays
-        // with us until either `Connection.bind` consumes it (after
-        // which we can free it) or we hit an early errdefer.
+        // string; copy under the caller's allocator. `createClient`
+        // hands it to BoringSSL, which copies — freeing on every exit
+        // from this function is correct.
         const server_name_z = config.allocator.dupeSentinel(u8, config.server_name, 0) catch
             return Error.OutOfMemory;
         defer config.allocator.free(server_name_z);
 
-        const conn_ptr = config.allocator.create(Connection) catch
-            return Error.OutOfMemory;
-        errdefer config.allocator.destroy(conn_ptr);
-
-        conn_ptr.* = try Connection.initClient(config.allocator, tls_ctx, server_name_z);
-        errdefer conn_ptr.deinit();
+        const conn_ptr = try Connection.createClient(config.allocator, tls_ctx, server_name_z);
+        errdefer conn_ptr.destroy();
         conn_ptr.reveal_close_reason_on_wire = config.reveal_close_reason_on_wire;
         conn_ptr.delayed_ack_packet_threshold = config.delayed_ack_packet_threshold;
         // RFC 9368 §3 / §5: pick the wire-format version *before*
@@ -519,8 +515,8 @@ pub const Client = struct {
             try conn_ptr.setInitialToken(nt_bytes);
         }
 
-        // Attach the resumption session before `bind` so BoringSSL
-        // sees it during handshake initiation. `setSession` upref's
+        // Attach the resumption session before the first `advance`
+        // kicks off the handshake, so BoringSSL sees it at initiation. `setSession` upref's
         // the underlying SSL_SESSION, so we can deinit our local
         // handle immediately.
         if (config.resumption_state) |state_bytes| {
@@ -535,8 +531,6 @@ pub const Client = struct {
             // params (BoringSSL doesn't remember them for us).
             conn_ptr.setRememberedPeerTransportParams(state.transport_params);
         }
-
-        try conn_ptr.bind();
 
         // RFC 9000 §7.2: the client picks an unpredictable DCID for
         // its first Initial; that DCID is what the server uses to
@@ -605,8 +599,7 @@ pub const Client = struct {
     /// Tear down the connection and (if owned) the TLS context.
     /// After this returns, `self` is invalid.
     pub fn deinit(self: *Client) void {
-        self.conn.deinit();
-        self.allocator.destroy(self.conn);
+        self.conn.destroy();
         if (self.owns_tls) self.tls_ctx.deinit();
         // After the context is gone no new-session callback can fire;
         // only now is the holder safe to release.

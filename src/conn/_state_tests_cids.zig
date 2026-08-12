@@ -68,8 +68,8 @@ test "setTransportParams fills initial_source_connection_id from the local SCID 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const scid = [_]u8{ 0xc3, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 };
     try conn.setLocalScid(&scid);
@@ -92,8 +92,8 @@ test "setLocalScid after setTransportParams back-fills the ISCID (order-independ
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Params first, no SCID latched — ISCID is absent at this point.
     try conn.setTransportParams(.{ .initial_max_data = 1024 * 1024, .max_udp_payload_size = 65527 });
@@ -114,8 +114,8 @@ test "setLocalScid does not clobber a caller-supplied ISCID" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const explicit = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
     try conn.setTransportParams(.{
@@ -137,11 +137,11 @@ test "retiring paths retain peer CIDs and emit PATH_ACK during drain" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
-    markTestMultipathNegotiated(&conn, 1);
+    try installTestApplicationWriteSecret(conn);
+    markTestMultipathNegotiated(conn, 1);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
@@ -196,11 +196,11 @@ test "incoming short packets are routed by local CID before multipath nonce open
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
-    markTestMultipathNegotiated(&conn, 1);
+    try installTestApplicationReadSecret(conn);
+    markTestMultipathNegotiated(conn, 1);
     try conn.setLocalScid(&.{0xa0});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     const path = conn.paths.get(path_id).?;
@@ -227,8 +227,8 @@ test "queued path CIDs participate in incoming short-header routing and retireme
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     try conn.queuePathNewConnectionId(path_id, 1, 0, &.{0xc2}, @splat(0));
@@ -247,10 +247,10 @@ test "openPath requires common path id capacity and CIDs when multipath is negot
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     try std.testing.expectError(
         Error.ConnectionIdRequired,
         conn.openPath(.unspecified, .unspecified, ConnectionId{}, ConnectionId.fromSlice(&.{0xd1})),
@@ -272,10 +272,10 @@ test "local CID issuance rejects reuse across paths and sequences" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 2);
+    markTestMultipathNegotiated(conn, 2);
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try std.testing.expectError(
         Error.ConnectionIdAlreadyInUse,
@@ -298,8 +298,8 @@ test "RETIRE_CONNECTION_ID surfaces replacement CID budget to embedders" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .active_connection_id_limit = 3 };
     try conn.setLocalScid(&.{0xa0});
@@ -334,8 +334,8 @@ test "RETIRE_CONNECTION_ID with sequence we never issued is a PROTOCOL_VIOLATION
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .active_connection_id_limit = 4 };
     // We've issued sequences 0, 1, and 2 to the peer.
@@ -355,8 +355,8 @@ test "RETIRE_CONNECTION_ID for an already-retired sequence is allowed" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .active_connection_id_limit = 4 };
     try conn.setLocalScid(&.{0xa0});
@@ -378,8 +378,8 @@ test "retiring CID sequence 0 does not change long-header source CID" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Server primary starts unvalidated (RFC 9000 §8.1). This test
     // exercises long-header SCID selection on a late Initial; not the
@@ -415,10 +415,10 @@ test "PATH_NEW_CONNECTION_ID rejects sequence reuse with different cid" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try conn.handlePathNewConnectionId(.{
         .path_id = path_id,
@@ -442,10 +442,10 @@ test "PATH_NEW_CONNECTION_ID rejects path ids above local limit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     try conn.handlePathNewConnectionId(.{
         .path_id = 2,
         .sequence_number = 0,
@@ -461,10 +461,10 @@ test "unused negotiated path ids can be pre-provisioned with PATH_NEW_CONNECTION
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 3);
+    markTestMultipathNegotiated(conn, 3);
     conn.cached_peer_transport_params = .{
         .initial_max_path_id = 3,
         .active_connection_id_limit = 2,
@@ -491,10 +491,10 @@ test "PATH_RETIRE_CONNECTION_ID drops pending advertisements and allows replenis
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     conn.cached_peer_transport_params = .{
         .initial_max_path_id = 1,
         .active_connection_id_limit = 3,
@@ -532,10 +532,10 @@ test "RETIRE_CONNECTION_ID emits with retransmit metadata and requeues on loss" 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     try conn.queueRetireConnectionId(7);
     try std.testing.expect(conn.canSend());
@@ -568,10 +568,10 @@ test "peer cid registration enforces active cid limit per path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     conn.local_transport_params.active_connection_id_limit = 2;
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try conn.handlePathNewConnectionId(.{
@@ -603,10 +603,10 @@ test "retire_prior_to retires peer cids only on the indicated path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try conn.handleNewConnectionId(.{
         .sequence_number = 0,
@@ -650,8 +650,8 @@ test "RETIRE_CONNECTION_ID flood beyond per-cycle cap closes with PROTOCOL_VIOLA
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .active_connection_id_limit = 8 };
     try conn.setLocalScid(&.{0xb0});
@@ -679,8 +679,8 @@ test "RETIRE_CONNECTION_ID fast-path skips sequences already retired" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .active_connection_id_limit = 8 };
     try conn.setLocalScid(&.{0xc0});

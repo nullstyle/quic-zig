@@ -29,8 +29,8 @@ test "local close is exposed as sticky and pollable event" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.close(false, 0x42, "shutting down");
     try std.testing.expectEqual(CloseState.closing, conn.closeState());
@@ -54,8 +54,8 @@ test "local close truncates long reason and keeps sticky event" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var reason: [max_close_reason_len + 32]u8 = undefined;
     @memset(&reason, 'x');
@@ -86,8 +86,8 @@ test "timer deadline reports ACK delay" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setTransportParams(.{ .max_ack_delay_ms = 10 });
     conn.pnSpaceForLevel(.application).recordReceived(7, 1000);
@@ -102,8 +102,8 @@ test "delayed_ack_packet_threshold tunes the immediate-ACK gate" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Threshold = 1: every ack-eliciting packet forces an immediate
     // ACK with no delayed-ACK arming.
@@ -136,8 +136,8 @@ test "application delayed ACK waits for configured threshold or timer" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setTransportParams(.{ .max_ack_delay_ms = 10 });
     const tracker = &conn.primaryPath().app_pn_space.received;
@@ -165,8 +165,8 @@ test "PTO requeues application stream data and arms a probe" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const s = try conn.openBidi(0);
     _ = try s.send.write("hello");
@@ -197,8 +197,8 @@ test "PTO requeues retransmittable control frames" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var packet: sent_packets_mod.SentPacket = .{
         .pn = 8,
@@ -220,8 +220,8 @@ test "PTO arms PING when no retransmittable data can be requeued" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const app_sent = conn.sentForLevel(.application);
     try app_sent.record(.{
@@ -242,8 +242,8 @@ test "PTO requeues CRYPTO bytes at original offsets" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const level: EncryptionLevel = .initial;
     const level_idx = level.idx();
@@ -276,8 +276,8 @@ test "ACK of ack-eliciting packet resets PTO count and updates RTT" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.ptoCountForLevel(.application).* = 3;
     try conn.sentForLevel(.application).record(.{
@@ -313,8 +313,8 @@ test "ACK with largest_acked >= next_pn is a PROTOCOL_VIOLATION" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // We have two in-flight packets at PNs 0 and 1.
     try conn.sentForLevel(.application).record(.{
@@ -360,8 +360,8 @@ test "packet-threshold loss reduces congestion window" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const initial_cwnd = conn.congestionWindow();
     var pn: u64 = 0;
@@ -393,8 +393,8 @@ test "persistent congestion resets congestion window to minimum" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.ccForApplication().setCwndForTest(30_000);
     conn.rttForLevel(.application).smoothed_rtt_us = 10_000;
@@ -508,12 +508,12 @@ test "0-RTT STREAM packet-threshold loss requeues early bytes" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     try conn.setLocalScid(&.{ 9, 9, 9, 9 });
-    installTestEarlyDataWriteSecret(&conn);
+    installTestEarlyDataWriteSecret(conn);
     conn.setEarlyDataEnabled(true);
 
     const s = try conn.openBidi(0);
@@ -548,10 +548,10 @@ test "pollLevel coalesces multiple STREAM frames with distinct loss keys" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     try std.testing.expect(conn.markPathValidated(0));
 
@@ -589,10 +589,10 @@ test "server HANDSHAKE_DONE emits with retransmit metadata and requeues on loss"
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     conn.primaryPath().path.markValidated();
     conn.pending_handshake_done = true;
@@ -624,8 +624,8 @@ test "idle timer closes and enters draining" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Per RFC 9000 §10.1 ¶2 the effective idle timeout is the min of
     // local and peer; either side advertising 0 means no timeout. Set
@@ -666,7 +666,7 @@ test "idle timer disabled when either endpoint advertises 0 [RFC9000 §10.1 ¶2]
         ) !?TimerDeadline {
             const conn_ptr = try a.create(Connection);
             defer a.destroy(conn_ptr);
-            conn_ptr.* = try Connection.initClient(a, tls_ctx, "x");
+            try Connection.initClientAt(conn_ptr, a, tls_ctx, "x");
             defer conn_ptr.deinit();
             try conn_ptr.setTransportParams(.{ .max_idle_timeout_ms = local_ms });
             conn_ptr.cached_peer_transport_params = .{ .max_idle_timeout_ms = peer_ms };
@@ -701,8 +701,8 @@ test "tick skips handshake-level PTO once handshake_keys_discarded latches" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Stage a pre-discard packet to confirm the gate flips correctly:
     // record an in-flight ack-eliciting Handshake packet that would
@@ -766,8 +766,8 @@ test "gcClosedStreams batch cap rolls surplus to the next tick" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Open one more than the per-pass GC batch cap. The first `tick`
     // should reclaim exactly the cap; the next `tick` mops up the

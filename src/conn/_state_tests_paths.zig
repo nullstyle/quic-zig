@@ -29,8 +29,8 @@ test "poll helper emits one draft multipath control frame with retransmit metada
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.queuePathStatus(2, false, 7);
     var packet: sent_packets_mod.SentPacket = .{
@@ -59,8 +59,8 @@ test "poll helper coalesces draft multipath control frames with retransmit metad
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.queuePathStatus(2, true, 7);
     conn.queueMaxPathId(4);
@@ -100,8 +100,8 @@ test "PTO requeues retransmittable draft multipath control frames" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var packet: sent_packets_mod.SentPacket = .{
         .pn = 11,
@@ -128,10 +128,10 @@ test "requestPing queues application PING on primary path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
 
     conn.requestPing();
@@ -149,11 +149,11 @@ test "requestPathPing queues application PING on non-primary path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
-    markTestMultipathNegotiated(&conn, 1);
+    try installTestApplicationWriteSecret(conn);
+    markTestMultipathNegotiated(conn, 1);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
@@ -174,8 +174,8 @@ test "PathSet API exposes path lifecycle and application recovery state" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.enableMultipath(true);
     try std.testing.expect(conn.multipathEnabled());
@@ -213,8 +213,8 @@ test "abandoned paths keep recovery until three largest PTOs elapse" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
     const path = conn.paths.get(path_id).?;
@@ -252,8 +252,8 @@ test "PATH_ACK routes ACK processing to the indicated application path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{1}), ConnectionId.fromSlice(&.{2}));
     const path = conn.paths.get(path_id).?;
@@ -292,8 +292,8 @@ test "ACK / PATH_ACK range-count sum is bounded per handle cycle" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Pre-record sent packets so handleAckAtLevel doesn't bail with
     // "ack of unsent packet". We'll only ack pn=0 from each frame,
@@ -335,12 +335,12 @@ test "0-RTT send path requires explicit per-connection opt-in" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     try conn.setLocalScid(&.{ 9, 9, 9, 9 });
-    installTestEarlyDataWriteSecret(&conn);
+    installTestEarlyDataWriteSecret(conn);
 
     const s = try conn.openBidi(0);
     _ = try s.send.write("hello");
@@ -354,10 +354,10 @@ test "pollLevel emits PATH_ACK for non-zero application path ACKs" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
@@ -386,11 +386,11 @@ test "multipath-negotiated non-zero path packets use draft-21 nonce" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
-    markTestMultipathNegotiated(&conn, 1);
+    try installTestApplicationWriteSecret(conn);
+    markTestMultipathNegotiated(conn, 1);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
@@ -425,10 +425,10 @@ test "unvalidated rebound path obeys anti-amplification before polling" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     const old_addr = Address{ .ipv4 = .{ .addr = .{ 1, 1, 1, 1 }, .port = 0 } };
     const new_addr = Address{ .ipv4 = .{ .addr = .{ 2, 2, 2, 2 }, .port = 0 } };
@@ -449,8 +449,8 @@ test "unvalidated path enforces anti-amplification on Initial sends" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Force the primary path to be unvalidated and simulate the peer
     // having sent us only a small Initial. RFC 9000 §8.1 caps the
@@ -491,8 +491,8 @@ test "validated path is not constrained by anti-amplification" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Server primary starts unvalidated (RFC 9000 §8.1). Force-validate
     // it so we can exercise the "validated path bypasses anti-amp"
@@ -525,8 +525,8 @@ test "old address packets during pending rebinding do not lift new path anti-amp
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const old_addr = Address{ .ipv4 = .{ .addr = .{ 7, 7, 7, 7 }, .port = 0 } };
     const new_addr = Address{ .ipv4 = .{ .addr = .{ 8, 8, 8, 8 }, .port = 0 } };
@@ -551,10 +551,10 @@ test "PATH_RESPONSE during pending rebinding is sent to the challenge address" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     const old_addr = Address{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } };
     const new_addr = Address{ .ipv4 = .{ .addr = .{ 1, 0, 1, 0 }, .port = 0 } };
@@ -596,8 +596,8 @@ test "multipath frames are rejected unless draft-21 was negotiated" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var payload: [16]u8 = undefined;
     const payload_len = try frame_mod.encode(payload[0..], .{ .max_path_id = .{ .maximum_path_id = 1 } });
@@ -610,8 +610,8 @@ test "setTransportParams advertises local multipath limit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setTransportParams(.{ .initial_max_path_id = 2 });
     try std.testing.expect(conn.multipathEnabled());
@@ -622,10 +622,10 @@ test "openPath respects peer MAX_PATH_ID when multipath is negotiated" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     _ = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
     try std.testing.expectError(
         Error.PathLimitExceeded,
@@ -638,10 +638,10 @@ test "MAX_PATH_ID cannot reduce the peer initial path limit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    markTestMultipathNegotiated(&conn, 2);
+    markTestMultipathNegotiated(conn, 2);
     conn.handleMaxPathId(.{ .maximum_path_id = 1 });
     try std.testing.expect(conn.lifecycle.pending_close != null);
     try std.testing.expectEqual(transport_error_protocol_violation, conn.lifecycle.pending_close.?.error_code);
@@ -651,10 +651,10 @@ test "STREAM send tracking survives duplicate application PNs across paths" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     // See the companion test above: no handshake here, so seed a peer
     // send window so 1-RTT stream data can be emitted.
@@ -688,8 +688,8 @@ test "timer deadline reports non-zero application path ACK delay" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try conn.setTransportParams(.{ .max_ack_delay_ms = 10 });
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
@@ -707,8 +707,8 @@ test "PTO requeues retransmittable controls on non-zero application path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
     const path = conn.paths.get(path_id).?;

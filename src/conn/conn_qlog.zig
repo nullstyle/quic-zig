@@ -240,6 +240,12 @@ pub fn setQlogCallback(
 ) void {
     self.qlog_callback = callback;
     self.qlog_user_data = user_data;
+    // The earliest moment a sink exists is the right moment for
+    // `connection_started` (once-guarded; a null install is a no-op).
+    // Historically the client side emitted this from bind(), which
+    // ran before the wrapper installed its callback — the event was
+    // silently dropped for every wrapper user.
+    if (callback != null) emitConnectionStartedOnce(self);
 }
 
 // Doc comment lives on the `Connection.setQlogPacketEvents` thunk in state.zig.

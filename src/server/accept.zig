@@ -35,11 +35,8 @@ pub fn openSlotFromInitial(
     const slot = try self.allocator.create(Slot);
     errdefer self.allocator.destroy(slot);
 
-    const conn_ptr = try self.allocator.create(Connection);
-    errdefer self.allocator.destroy(conn_ptr);
-
-    conn_ptr.* = try Connection.initServer(self.allocator, self.tls_ctx);
-    errdefer conn_ptr.deinit();
+    const conn_ptr = try Connection.createServer(self.allocator, self.tls_ctx);
+    errdefer conn_ptr.destroy();
     conn_ptr.reveal_close_reason_on_wire = self.reveal_close_reason_on_wire;
     conn_ptr.max_connection_memory = self.max_connection_memory;
     conn_ptr.delayed_ack_packet_threshold = self.delayed_ack_packet_threshold;
@@ -53,7 +50,6 @@ pub fn openSlotFromInitial(
     conn_ptr.pacing_enabled = self.pacing_enabled;
     conn_ptr.setHyStartEnabled(self.hystart_enabled);
 
-    try conn_ptr.bind();
     if (self.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, self.qlog_user_data);
 
     // Post-Retry connections use the SCID we minted in the Retry

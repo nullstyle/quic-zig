@@ -29,13 +29,13 @@ test "qlog callback records application key update lifecycle" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
-    try installTestApplicationReadSecret(&conn);
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationReadSecret(conn);
+    try installTestApplicationWriteSecret(conn);
     try std.testing.expect(recorder.contains(.application_read_key_installed));
     try std.testing.expect(recorder.contains(.application_write_key_installed));
 
@@ -67,12 +67,12 @@ test "qlog records AEAD confidentiality-limit close" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     conn.setApplicationKeyUpdateLimitsForTesting(.{
         .confidentiality_limit = 1,
         .proactive_update_threshold = 99,
@@ -102,20 +102,17 @@ test "qlog: connection_started and connection_state_updated fire on bind+close" 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
-
-    try conn.bind();
     // Client `bind` should have fired exactly one `connection_started`.
     try std.testing.expectEqual(@as(usize, 1), recorder.countOf(.connection_started));
     const started = recorder.first(.connection_started).?;
     try std.testing.expectEqual(@as(?Role, .client), started.role);
 
     // Re-bind shouldn't double-fire.
-    try conn.bind();
     try std.testing.expectEqual(@as(usize, 1), recorder.countOf(.connection_started));
 
     // Closing transitions open → closing → draining → closed across the close pipeline.
@@ -137,8 +134,8 @@ test "qlog: parameters_set carries top-level peer transport-parameter fields" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
@@ -176,11 +173,11 @@ test "qlog: packet_sent / packet_received are gated by setQlogPacketEvents" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationReadSecret(conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{});
     // Server primary starts unvalidated (RFC 9000 §8.1). This test
     // exercises the qlog gating, not the anti-amp path; force-validate
@@ -214,10 +211,10 @@ test "qlog: packet_dropped fires on AEAD authentication failure" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
+    try installTestApplicationReadSecret(conn);
 
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
@@ -245,8 +242,8 @@ test "qlog: loss_detected fires from packet-threshold loss detection" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var recorder: TestQlogRecorder = .{};
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
@@ -292,11 +289,11 @@ test "qlog: pathStats exposes the new connection-level counters" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationReadSecret(conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{});
     // Server primary starts unvalidated (RFC 9000 §8.1). This test
     // exercises pathStats counters, not the anti-amp path; force-validate

@@ -24,8 +24,8 @@ test "Version Negotiation with no compatible version closes terminally" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const odcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
     const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
@@ -57,8 +57,8 @@ test "Version Negotiation is ignored when it lists QUIC v1 or has wrong CID echo
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const odcid = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
     const client_scid = [_]u8{ 8, 7, 6, 5 };
@@ -93,8 +93,8 @@ test "Version Negotiation is ignored with wrong SCID echo or malformed versions"
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const odcid = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
     const client_scid = [_]u8{ 8, 7, 6, 5 };
@@ -137,8 +137,8 @@ test "Version Negotiation packets are ignored by servers" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     const other_versions = [_]u8{ 0x6b, 0x33, 0x43, 0xcf };
     var packet: [128]u8 = undefined;
@@ -157,8 +157,8 @@ test "Retry is accepted once and re-arms Initial crypto with token" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const odcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
     const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
@@ -213,8 +213,8 @@ test "Retry with invalid integrity tag is ignored" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const odcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
     const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
@@ -243,8 +243,8 @@ test "Retry source CID transport parameter is validated" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const odcid = [_]u8{ 1, 1, 2, 3, 5, 8, 13, 21 };
     const retry_scid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3 };
@@ -268,8 +268,8 @@ test "server writeRetry emits a Retry addressed to the client Initial SCID" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     const odcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
     const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
@@ -306,8 +306,8 @@ test "server writeVersionNegotiation echoes client CIDs and versions" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     const client_dcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
     const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5 };
@@ -343,8 +343,8 @@ test "peekNextBidi returns the id a limit-blocked retry will reuse" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
     conn.peer_max_streams_bidi = 0;
 
     // A limit-blocked open doesn't consume the id, so peek still points at it
@@ -359,8 +359,8 @@ test "clientAcceptCompatibleVersion flips to an advertised candidate [RFC9368 §
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // The client-style local transport params advertise both the
     // wire version (v1) and a compatible upgrade target (v2).
@@ -376,8 +376,8 @@ test "clientAcceptCompatibleVersion rejects a candidate not on the client's list
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Client only advertises v1; the server choosing v2 is unsolicited
     // and MUST be ignored (the inbound packet then fails AEAD auth
@@ -394,8 +394,8 @@ test "clientAcceptCompatibleVersion is a no-op for the active version [RFC9368 �
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var params: TransportParams = .{};
     try params.setCompatibleVersions(&.{ quic_version_1, quic_version_2 });
@@ -410,8 +410,8 @@ test "clientAcceptCompatibleVersion rejects unknown wire versions [RFC9368 §6]"
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var params: TransportParams = .{};
     try params.setCompatibleVersions(&.{ quic_version_1, 0xdeadbeef });
@@ -429,8 +429,8 @@ test "clientAcceptCompatibleVersion rejects upgrade after Initial keys discarded
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var params: TransportParams = .{};
     try params.setCompatibleVersions(&.{ quic_version_1, quic_version_2 });
@@ -449,8 +449,8 @@ test "clientAcceptCompatibleVersion is server-role inert [RFC9368 §6]" {
     // is client-only.
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     var params: TransportParams = .{};
     try params.setCompatibleVersions(&.{ quic_version_1, quic_version_2 });
@@ -464,8 +464,8 @@ test "validatePeerTransportRole closes when chosen_version mismatches wire [RFC9
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Active wire version is v1, but the (forged) peer params
     // advertise chosen_version=v2 first. Per RFC 9368 §6 ¶6/¶7
@@ -487,8 +487,8 @@ test "validatePeerTransportRole accepts matching chosen_version [RFC9368 §6]" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Active wire version is v1 and the server's chosen_version
     // matches — the §6 downgrade guard is silent.
@@ -506,8 +506,8 @@ test "validatePeerTransportRole accepts absent version_information [RFC9368 §6]
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // No compatible_versions on the peer side — a v0.x server that
     // never advertises version_information. The §6 downgrade guard
@@ -528,8 +528,8 @@ test "server validatePeerTransportRole accepts matching client chosen_version [R
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Server `versions = [v1]`, client sent its first Initial under
     // v1 with `chosen_version = v1`. `initial_wire_version` matches
@@ -551,8 +551,8 @@ test "server validatePeerTransportRole accepts wire-version chosen after compati
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Server `versions = [v2, v1]`. Client sent its first Initial
     // under v1 with `chosen_version = v1, available_versions =
@@ -579,8 +579,8 @@ test "server validatePeerTransportRole closes when client chosen_version mismatc
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Server `versions = [v1]`, client's first Initial arrived on
     // the wire under v1 (`initial_wire_version = v1`), but a
@@ -611,8 +611,8 @@ test "server validatePeerTransportRole accepts when initial_wire_version is unse
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Graceful fallback: when the snapshot wasn't captured (e.g.
     // a handshake started before this code was active, or a test

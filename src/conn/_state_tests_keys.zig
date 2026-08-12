@@ -30,10 +30,10 @@ test "ACK-only application packets do not consume sent tracker slots" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     try std.testing.expect(conn.markPathValidated(0));
 
@@ -52,11 +52,11 @@ test "peer key update promotes next read keys and keeps previous until discard d
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationReadSecret(conn);
+    try installTestApplicationWriteSecret(conn);
     const old_epoch = conn.app_read_current.?;
     const next_epoch = conn.app_read_next.?;
 
@@ -114,10 +114,10 @@ test "local key update waits for ACK and three PTOs before the next update" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{});
 
     try conn.requestKeyUpdate(1_000_000);
@@ -153,10 +153,10 @@ test "automatic write key update happens before configured packet limit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     conn.setApplicationKeyUpdateLimitsForTesting(.{
         .confidentiality_limit = 4,
         .proactive_update_threshold = 1,
@@ -182,16 +182,16 @@ test "application packet limit counts across paths before proactive key update" 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     conn.setApplicationKeyUpdateLimitsForTesting(.{
         .confidentiality_limit = 8,
         .proactive_update_threshold = 2,
         .integrity_limit = 8,
     });
-    markTestMultipathNegotiated(&conn, 1);
+    markTestMultipathNegotiated(conn, 1);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
@@ -222,10 +222,10 @@ test "non-zero path ACK clears local key update gate" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
@@ -253,10 +253,10 @@ test "AEAD authentication failure limit closes the connection" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
+    try installTestApplicationReadSecret(conn);
     conn.setApplicationKeyUpdateLimitsForTesting(.{
         .confidentiality_limit = 4,
         .proactive_update_threshold = 3,
@@ -284,10 +284,10 @@ test "server rejects forbidden frames in 0-RTT" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    installTestEarlyDataReadSecret(&conn);
+    installTestEarlyDataReadSecret(conn);
     const keys = try testEarlyDataPacketKeys();
 
     var payload: [32]u8 = undefined;
@@ -319,10 +319,10 @@ test "application ACK ranges use bounded emission budget" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     try std.testing.expect(conn.markPathValidated(0));
 
@@ -351,8 +351,8 @@ test "client discards Handshake keys when HANDSHAKE_DONE arrives [RFC9001 §4.9.
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Plant Handshake-level secret material so we can observe the
     // discard zeroing it out. The cipher protocol id matches the
@@ -418,8 +418,8 @@ test "server discards Handshake keys at handshake-complete [RFC9001 §4.1.2 ¶1]
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     const hsk_idx = EncryptionLevel.handshake.idx();
     var material: SecretMaterial = .{ .cipher_protocol_id = 0x1301 };

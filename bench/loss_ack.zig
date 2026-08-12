@@ -272,7 +272,7 @@ pub const ConnectionAckLossDispatchCtx = struct {
 
         const conn = try allocator.create(Connection);
         errdefer allocator.destroy(conn);
-        conn.* = try Connection.initClient(allocator, tls_ctx, "bench.invalid");
+        try Connection.initClientAt(conn, allocator, tls_ctx, "bench.invalid");
         errdefer conn.deinit();
 
         var ctx: ConnectionAckLossDispatchCtx = .{

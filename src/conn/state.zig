@@ -1111,11 +1111,6 @@ pub const Connection = struct {
     /// the counter clamps at zero and asserts in debug builds.
     bytes_resident: u64 = 0,
 
-    /// Pending hostname for client connections; applied during
-    /// `bind` because we can't safely call `setHostname` before
-    /// the Connection has a stable address.
-    pending_hostname: ?[:0]const u8 = null,
-
     /// Connection-level packet-number bookkeeping for Initial and
     /// Handshake (RFC 9000 §12.3). Application PN spaces live in
     /// `paths` so multipath can allocate one space per active path.
@@ -1379,7 +1374,7 @@ pub const Connection = struct {
 
     /// RFC 8899 DPLPMTUD configuration. Threaded onto every
     /// `PathState` at creation time. The Connection-level field
-    /// defaults to `enable = false` so direct `Connection.initClient
+    /// defaults to `enable = false` so direct `Connection.createClient
     /// / initServer` callers (mainly internal test fixtures) keep the
     /// static-MTU behaviour. The public `Server.Config
     /// .pmtud` and `Client.Config.pmtud` wrappers default to enabled
@@ -1583,25 +1578,33 @@ pub const Connection = struct {
     new_token_callback: ?NewTokenCallback = null,
     new_token_user_data: ?*anyopaque = null,
 
-    /// Build a client-side `Connection`. `tls_ctx` must be a
-    /// client-mode `boringssl.tls.Context` and stays caller-owned;
-    /// `server_name` becomes the SNI hostname. The returned
-    /// `Connection` must be `bind()`ed once it lives at its final
-    /// memory address (`bind` stashes `&self` in SSL ex-data, so
-    /// it has to happen post-move).
-    pub fn initClient(
+    /// Construct a client-side `Connection` in place at `conn` and
+    /// wire it to its TLS state immediately — `conn` must already sit
+    /// at its final, stable address (the TLS callbacks keep
+    /// `*Connection` in SSL ex-data, and completion-style transports
+    /// hand Connection-owned buffers to the kernel; a Connection
+    /// NEVER moves after this call). Most embedders want
+    /// `createClient`, which pairs this with heap placement; this
+    /// entry point exists for caller-owned storage (arenas, pools,
+    /// static slots) and pairs with `deinit`.
+    ///
+    /// `tls_ctx` must be a client-mode `boringssl.tls.Context` and
+    /// stays caller-owned; `server_name` becomes the SNI hostname
+    /// (copied by BoringSSL — the slice does not need to outlive this
+    /// call).
+    pub fn initClientAt(
+        conn: *Connection,
         allocator: std.mem.Allocator,
         tls_ctx: boringssl.tls.Context,
         server_name: [:0]const u8,
-    ) !Connection {
+    ) !void {
         const sent_slab = try allocator.create([2]SentPacketTracker);
         errdefer allocator.destroy(sent_slab);
         sent_slab.* = .{ .{}, .{} };
-        var conn: Connection = .{
+        conn.* = .{
             .allocator = allocator,
             .role = .client,
             .inner = try tls_ctx.newQuicClient(),
-            .pending_hostname = server_name,
             .sent = sent_slab,
         };
         errdefer conn.inner.deinit();
@@ -1618,26 +1621,27 @@ pub const Connection = struct {
         conn.primaryPath().path.markValidated();
         // RFC 8899 DPLPMTUD: install the default config on the primary
         // path. Embedders that supply a non-default config must call
-        // `setPmtudConfig` after `init*` (the wrapper helpers
+        // `setPmtudConfig` after construction (the wrapper helpers
         // `Server.Config.pmtud` / `Client.Config.pmtud` thread it
         // automatically). `setPmtudConfig` does the matching lift on
         // `self.mtu` for us.
         conn.setPmtudConfig(conn.pmtud_config);
-        return conn;
+        try conn.installTls(server_name);
     }
 
-    /// Build a server-side `Connection`. `tls_ctx` must be a
+    /// Construct a server-side `Connection` in place at `conn` — the
+    /// caller-owned-storage twin of `createServer`; see `initClientAt`
+    /// for the stable-address contract. `tls_ctx` must be a
     /// server-mode `boringssl.tls.Context` and stays caller-owned.
-    /// Like `initClient`, `bind()` must be called once the
-    /// `Connection` lives at its final memory address.
-    pub fn initServer(
+    pub fn initServerAt(
+        conn: *Connection,
         allocator: std.mem.Allocator,
         tls_ctx: boringssl.tls.Context,
-    ) !Connection {
+    ) !void {
         const sent_slab = try allocator.create([2]SentPacketTracker);
         errdefer allocator.destroy(sent_slab);
         sent_slab.* = .{ .{}, .{} };
-        var conn: Connection = .{
+        conn.* = .{
             .allocator = allocator,
             .role = .server,
             .inner = try tls_ctx.newQuicServer(),
@@ -1649,9 +1653,38 @@ pub const Connection = struct {
             .algorithm = conn.cc_algorithm,
             .hystart = conn.cc_hystart,
         });
-        // RFC 8899 DPLPMTUD on the primary path. See `initClient` for
-        // the embedder-config plumbing path.
+        // RFC 8899 DPLPMTUD on the primary path. See `initClientAt`
+        // for the embedder-config plumbing path.
         conn.setPmtudConfig(conn.pmtud_config);
+        try conn.installTls(null);
+    }
+
+    /// Build a client-side `Connection` on the heap and return its
+    /// stable address, fully wired to TLS and ready to `advance`.
+    /// Pair with `destroy`. This replaces the old
+    /// initClient-then-move-then-bind() dance — a Connection now has
+    /// one address for its whole life, so there is no window where a
+    /// move silently dangles the SSL ex-data pointer.
+    pub fn createClient(
+        allocator: std.mem.Allocator,
+        tls_ctx: boringssl.tls.Context,
+        server_name: [:0]const u8,
+    ) !*Connection {
+        const conn = try allocator.create(Connection);
+        errdefer allocator.destroy(conn);
+        try initClientAt(conn, allocator, tls_ctx, server_name);
+        return conn;
+    }
+
+    /// Build a server-side `Connection` on the heap and return its
+    /// stable address. Pair with `destroy`. See `createClient`.
+    pub fn createServer(
+        allocator: std.mem.Allocator,
+        tls_ctx: boringssl.tls.Context,
+    ) !*Connection {
+        const conn = try allocator.create(Connection);
+        errdefer allocator.destroy(conn);
+        try initServerAt(conn, allocator, tls_ctx);
         return conn;
     }
 
@@ -1711,26 +1744,26 @@ pub const Connection = struct {
         return self.paths.activeConst().pmtu;
     }
 
-    /// Bind this Connection to its underlying SSL. Must be called
-    /// once the Connection sits at its final stable address (after
-    /// any `return` copies). Installs the `tls.quic.Method`
-    /// callbacks and stashes `*Connection` in SSL ex-data so the
-    /// callbacks can recover the right state.
-    ///
-    /// Calling `advance` before `bind` is undefined.
-    pub fn bind(self: *Connection) !void {
+    /// Wire this Connection to its underlying SSL: install the
+    /// `tls.quic.Method` callbacks and stash `*Connection` in SSL
+    /// ex-data so the callbacks can recover the right state. Runs as
+    /// the last step of `init*At` — the address is final at
+    /// construction, so there is no bind-later window. (qlog's
+    /// `connection_started` is emitted by `setQlogCallback`, the
+    /// first moment a sink exists to receive it.)
+    fn installTls(self: *Connection, hostname: ?[:0]const u8) !void {
         try self.inner.setUserData(self);
         try self.inner.setQuicMethod(&method);
-        if (self.pending_hostname) |h| {
-            try self.inner.setHostname(h);
-            self.pending_hostname = null;
-        }
-        // For clients, `bind` is the moment we kick off the handshake;
-        // emit `connection_started` here. Servers fire it from
-        // `handleInitial` once they have a peer SCID.
-        if (self.role == .client) conn_qlog.emitConnectionStartedOnce(
-            self,
-        );
+        if (hostname) |h| try self.inner.setHostname(h);
+    }
+
+    /// Tear down a Connection built by `createClient`/`createServer`:
+    /// `deinit` plus freeing the heap slot. Connections constructed
+    /// with `init*At` into caller-owned storage call `deinit` instead.
+    pub fn destroy(self: *Connection) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
     }
 
     /// Free all per-connection allocations, including stream

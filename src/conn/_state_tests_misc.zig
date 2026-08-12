@@ -17,8 +17,8 @@ test "Connection.stats snapshots counters, active path, and gauges" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try state.Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try state.Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const fresh = conn.stats();
     try std.testing.expectEqual(@as(u64, 0), fresh.bytes_sent);

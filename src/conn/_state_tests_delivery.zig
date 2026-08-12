@@ -55,11 +55,11 @@ test "polled packets carry delivery-rate stamps; idle restart seeds the clocks" 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try prepareClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareClient(conn);
     conn.ccForApplication().setCwndForTest(120_000);
-    try queueBulkStream(&conn, 8 * 1024);
+    try queueBulkStream(conn, 8 * 1024);
 
     var pkt: [2048]u8 = undefined;
     const now_us: u64 = 1_000_000;
@@ -87,11 +87,11 @@ test "empty poll with headroom marks app-limited; a cwnd-blocked poll does not" 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try prepareClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareClient(conn);
     conn.ccForApplication().setCwndForTest(120_000);
-    try queueBulkStream(&conn, 2_000);
+    try queueBulkStream(conn, 2_000);
 
     var pkt: [2048]u8 = undefined;
     var now_us: u64 = 1_000_000;
@@ -107,7 +107,7 @@ test "empty poll with headroom marks app-limited; a cwnd-blocked poll does not" 
     );
 
     // Packets sent while marked carry the taint.
-    try queueBulkStream(&conn, 1_000);
+    try queueBulkStream(conn, 1_000);
     const live_before = conn.sentForLevel(.application).liveCount();
     try std.testing.expect((try conn.pollDatagram(&pkt, now_us)) != null);
     const sent = conn.sentForLevel(.application);
@@ -118,11 +118,11 @@ test "empty poll with headroom marks app-limited; a cwnd-blocked poll does not" 
     // poll must NOT mark (that is congestion-, not app-limited).
     var ctx2 = try boringssl.tls.Context.initClient(.{});
     defer ctx2.deinit();
-    var conn2 = try Connection.initClient(allocator, ctx2, "x");
-    defer conn2.deinit();
-    try prepareClient(&conn2);
+    const conn2 = try Connection.createClient(allocator, ctx2, "x");
+    defer conn2.destroy();
+    try prepareClient(conn2);
     conn2.ccForApplication().setCwndForTest(2_400);
-    try queueBulkStream(&conn2, 256 * 1024);
+    try queueBulkStream(conn2, 256 * 1024);
     var now2: u64 = 1_000_000;
     while (try conn2.pollDatagram(&pkt, now2)) |_| now2 += 100;
     try std.testing.expect(conn2.congestionBlocked(.application));
@@ -133,13 +133,13 @@ test "an ACK advances the sampler and retires a passed app-limited marker" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try prepareClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareClient(conn);
     conn.ccForApplication().setCwndForTest(120_000);
 
     // First flight, then the app runs dry -> marker at b0.
-    try queueBulkStream(&conn, 900);
+    try queueBulkStream(conn, 900);
     var pkt: [2048]u8 = undefined;
     var now_us: u64 = 1_000_000;
     while (try conn.pollDatagram(&pkt, now_us)) |_| now_us += 100;
@@ -148,7 +148,7 @@ test "an ACK advances the sampler and retires a passed app-limited marker" {
     const b0 = conn.sentForLevel(.application).packets[0].bytes;
 
     // Second flight while marked (tainted).
-    try queueBulkStream(&conn, 900);
+    try queueBulkStream(conn, 900);
     try std.testing.expect((try conn.pollDatagram(&pkt, now_us)) != null);
     const b1 = conn.sentForLevel(.application).packets[1].bytes;
 
@@ -172,11 +172,11 @@ test "PTO-expired packets reach the sampler's loss ledger" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
-    try prepareClient(&conn);
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareClient(conn);
     conn.ccForApplication().setCwndForTest(120_000);
-    try queueBulkStream(&conn, 900);
+    try queueBulkStream(conn, 900);
 
     var pkt: [2048]u8 = undefined;
     const now_us: u64 = 1_000_000;

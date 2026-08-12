@@ -42,14 +42,11 @@ test "client + server handshake via real datagram exchange" {
     });
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    // Crucially: NO `client.peer = &server` here. Bytes only move
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    // Crucially: NO `client.peer = server` here. Bytes only move
     // through poll/handle.
 
     // Client picks an initial random DCID (used to derive Initial

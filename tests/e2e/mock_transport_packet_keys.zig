@@ -33,15 +33,12 @@ test "1-RTT keys derive cross-consistently and round-trip a packet" {
     });
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const params: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
@@ -143,15 +140,12 @@ test "frames round-trip end-to-end through 1-RTT seal/open" {
     });
     defer client_tls.deinit();
 
-    var client = try quic_zig.Connection.initClient(allocator, client_tls, "localhost");
-    defer client.deinit();
-    var server = try quic_zig.Connection.initServer(allocator, server_tls);
-    defer server.deinit();
-
-    try client.bind();
-    try server.bind();
-    client.peer = &server;
-    server.peer = &client;
+    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    defer client.destroy();
+    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    defer server.destroy();
+    client.peer = server;
+    server.peer = client;
 
     const tp: quic_zig.tls.TransportParams = .{
         .initial_max_data = 1 << 20,

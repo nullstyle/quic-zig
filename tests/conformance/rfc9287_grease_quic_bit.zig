@@ -301,8 +301,8 @@ test "NORMATIVE peerSupportsGreaseQuicBit() requires both sides to advertise [RF
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Neither side advertised — predicate is false.
     conn.local_transport_params.grease_quic_bit = false;

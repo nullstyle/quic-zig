@@ -33,8 +33,8 @@ fn expectServerOnlyPeerTransportParamRejected(params: TransportParams, reason: [
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = params;
     conn.validatePeerTransportRole();
@@ -107,10 +107,10 @@ test "authenticated NAT rebinding starts validation and resets recovery after re
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
+    try installTestApplicationReadSecret(conn);
     // The migration gate enforces handshakeDone() before honoring a
     // peer-address change. This test exercises post-handshake NAT
     // rebinding without driving an actual TLS handshake; opt out of
@@ -186,11 +186,11 @@ test "client peer-address rebind: pollDatagram exposes the new server tuple afte
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
-    try installTestApplicationReadSecret(&conn);
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationReadSecret(conn);
+    try installTestApplicationWriteSecret(conn);
     // Same `test_only_force_handshake_for_migration` opt-in as
     // "authenticated NAT rebinding ...": this test exercises the
     // post-handshake migration window without driving an actual TLS
@@ -247,8 +247,8 @@ test "failed NAT rebinding validation rolls back to the previous address" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const old_addr = Address{ .ipv4 = .{ .addr = .{ 3, 3, 3, 3 }, .port = 0 } };
     const new_addr = Address{ .ipv4 = .{ .addr = .{ 4, 4, 4, 4 }, .port = 0 } };
@@ -301,10 +301,10 @@ test "peer-initiated migration emits PATH_CHALLENGE as the first frame even with
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     try conn.setLocalScid(&.{0xc1});
     conn.test_only_force_handshake_for_migration = true;
@@ -395,10 +395,10 @@ test "non-migration polls do not pad short-header datagrams to 1200 bytes" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{0xaa});
     try conn.setLocalScid(&.{0xc1});
 
@@ -426,8 +426,8 @@ test "migration callback: allow lets path validation start as usual" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Bypass the handshake-done migration gate; this test verifies
     // post-handshake migration-callback behavior without driving TLS.
@@ -474,8 +474,8 @@ test "migration callback: deny skips PATH_CHALLENGE and keeps the old 4-tuple li
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Bypass the handshake-done migration gate (post-handshake-only
     // behavior is exercised here without driving the actual TLS).
@@ -535,8 +535,8 @@ test "migration callback: no callback installed preserves prior migration behavi
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Bypass the handshake-done migration gate; the post-handshake
     // no-callback path is what's under test here.
@@ -571,8 +571,8 @@ test "pre-handshake migration: peer-address change is dropped, no PATH_CHALLENGE
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Note: NOT setting test_only_force_handshake_for_migration here
     // — the gate is what we're testing.
@@ -615,8 +615,8 @@ test "post-handshake migration: PATH_CHALLENGE rate-limit blocks rapid-fire prob
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.test_only_force_handshake_for_migration = true;
 
@@ -664,8 +664,8 @@ test "migration callback: setMigrationCallback installs and clears the hook" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     var policy: TestMigrationPolicy = .{ .decision = .deny };
     conn.setMigrationCallback(TestMigrationPolicy.callback, &policy);
@@ -681,8 +681,8 @@ test "client active migration: rotates DCID, queues PATH_CHALLENGE, snapshots ro
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // The migration gate enforces handshakeDone() before honoring an
     // active migration request; flip the test-only override since we
@@ -740,8 +740,8 @@ test "client active migration: refuses without a fresh peer CID" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.test_only_force_handshake_for_migration = true;
     try conn.setLocalScid(&.{0xa0});
@@ -776,8 +776,8 @@ test "client active migration: refuses before handshake completion" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Note: NOT setting test_only_force_handshake_for_migration; the
     // gate is what we're testing. handshakeDone() returns false on a
@@ -801,8 +801,8 @@ test "client active migration: server-role connection is rejected" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
@@ -815,8 +815,8 @@ test "client active migration: PATH_RESPONSE clears migration state and resets r
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.test_only_force_handshake_for_migration = true;
     try conn.setLocalScid(&.{0xa0});
@@ -855,8 +855,8 @@ test "noteServerLocalAddressChanged: queues PATH_CHALLENGE and arms validator on
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Mark the server as having advertised a preferred_address. The
     // gate inside `noteServerLocalAddressChanged` only checks that
@@ -905,8 +905,8 @@ test "noteServerLocalAddressChanged: refuses before handshake completion" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     conn.local_transport_params.preferred_address = testServerPreferredAddress();
     // Note: NOT setting test_only_force_handshake_for_migration; the
@@ -940,8 +940,8 @@ test "noteServerLocalAddressChanged: rejects when no preferred_address advertise
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Deliberately leave local_transport_params.preferred_address null.
     conn.test_only_force_handshake_for_migration = true;
@@ -958,8 +958,8 @@ test "noteServerLocalAddressChanged: client-role connection is rejected" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const new_local = Address{ .ipv4 = .{ .addr = .{ 5, 6, 7, 8 }, .port = 0 } };
     try std.testing.expectError(
@@ -972,8 +972,8 @@ test "noteServerLocalAddressChanged: idempotent on the same local address" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     conn.local_transport_params.preferred_address = testServerPreferredAddress();
     conn.test_only_force_handshake_for_migration = true;
@@ -1001,8 +1001,8 @@ test "noteServerLocalAddressChanged: refuses while a different migration is pend
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     conn.local_transport_params.preferred_address = testServerPreferredAddress();
     conn.test_only_force_handshake_for_migration = true;
@@ -1035,15 +1035,15 @@ test "noteServerLocalAddressChanged: PATH_CHALLENGE-first emit on the freshly-mi
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     conn.local_transport_params.preferred_address = testServerPreferredAddress();
     conn.test_only_force_handshake_for_migration = true;
 
     // Install application write keys and a peer DCID so pollLevel
     // can actually seal a 1-RTT packet.
-    try installTestApplicationWriteSecret(&conn);
+    try installTestApplicationWriteSecret(conn);
     try conn.setPeerDcid(&.{ 0xaa, 0xbb });
     try conn.setLocalScid(&.{0xcc});
 
@@ -1110,7 +1110,7 @@ test "noteServerLocalAddressChanged: PATH_CHALLENGE-first emit on the freshly-mi
 // `max_connection_memory`, peer-state stream-count gating, and the
 // per-path migration rate limiter / validator wiring.
 //
-// Each harness uses `std.testing.allocator` and `defer conn.deinit()`
+// Each harness uses `std.testing.allocator` and `defer conn.destroy()`
 // so a failed assertion still cleans up; aborting on uninteresting
 // input is `return` (not `error`) to keep the corpus tight.
 
@@ -1118,8 +1118,8 @@ test "advertiseAlternativeV4Address rejects client role" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     try std.testing.expectError(
         Error.NotServerContext,
@@ -1135,8 +1135,8 @@ test "advertiseAlternative*Address rejects when peer hasn't advertised support" 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // No peer transport params at all → predicate returns false.
     try std.testing.expect(!conn.peerSupportsAlternativeAddress());
@@ -1158,8 +1158,8 @@ test "advertiseAlternativeV4Address queues a frame and increments the shared seq
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .alternative_address = true };
     try std.testing.expect(conn.peerSupportsAlternativeAddress());
@@ -1206,8 +1206,8 @@ test "lost ALTERNATIVE_V4_ADDRESS frame is requeued for retransmission" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     var packet: sent_packets_mod.SentPacket = .{
         .pn = 0,
@@ -1243,8 +1243,8 @@ test "lost ALTERNATIVE_V6_ADDRESS frame is requeued for retransmission" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     var packet: sent_packets_mod.SentPacket = .{
         .pn = 0,
@@ -1282,8 +1282,8 @@ test "advertise errors with AlternativeAddressSequenceExhausted at the u64 bound
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .alternative_address = true };
     // Pre-position the counter one short of u64::max so the next
@@ -1316,8 +1316,8 @@ test "handleAlternativeAddressV4 surfaces a typed event for a fresh sequence" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.handleAlternativeAddressV4(.{
         .preferred = true,
@@ -1346,8 +1346,8 @@ test "handleAlternativeAddressV6 surfaces a typed event with the IPv6 address by
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const ipv6: [16]u8 = .{
         0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
@@ -1375,8 +1375,8 @@ test "handleAlternativeAddressV4 ignores a duplicate Status Sequence Number" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const original: frame_types.AlternativeV4Address = .{
         .preferred = false,
@@ -1398,8 +1398,8 @@ test "handleAlternativeAddressV4 drops a stale (lower) sequence as out-of-order 
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.handleAlternativeAddressV4(.{
         .preferred = false,
@@ -1430,8 +1430,8 @@ test "monotonicity tracker shares the sequence space across V4 and V6" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.handleAlternativeAddressV4(.{
         .preferred = false,

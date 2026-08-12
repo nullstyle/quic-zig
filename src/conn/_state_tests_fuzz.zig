@@ -32,8 +32,8 @@ fn fuzzConnHandleCryptoImpl(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Tiny cap so the resident-bytes path (`tryReserveResidentBytes`
     // → `error.ExcessiveLoad` → close with EXCESSIVE_LOAD) is
@@ -106,8 +106,8 @@ fn fuzzConnHandleStreamImpl(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     // Tiny memory cap so the resident-bytes path is reachable, plus
     // matching small per-stream / per-conn flow control windows so
@@ -221,8 +221,8 @@ fn fuzzConnMigrationImpl(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Bypass the pre-handshake gate so the validator + rate-limit
     // paths are reachable. (Without this, the very first migration
@@ -311,8 +311,8 @@ fn fuzzCidLifecycle(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     // Tight `active_connection_id_limit` so the
     // "peer_cids exceeds limit" close path is reachable in a 32-op
@@ -474,8 +474,8 @@ fn fuzzConnPathChallenge(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     const path = conn.primaryPath();
     path.setPeerAddress(.{ .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0 } });
@@ -566,8 +566,8 @@ fn fuzzConnFlowControlWindow(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try Connection.initClient(allocator, ctx, "x");
-    defer conn.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
 
     conn.peer_max_data = 0;
     conn.peer_max_streams_bidi = 0;
@@ -635,8 +635,8 @@ fn fuzzConnBlockedFrames(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     try conn.setTransportParams(.{
         .initial_max_streams_bidi = 8,
@@ -709,8 +709,8 @@ fn fuzzConnCloseAtInitial(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    var conn = try Connection.initServer(allocator, ctx);
-    defer conn.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
 
     const op = smith.valueRangeAtMost(u8, 0, 7);
     const lvl: EncryptionLevel = if (smith.valueRangeAtMost(u8, 0, 1) == 0) .initial else .handshake;

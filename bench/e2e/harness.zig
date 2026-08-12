@@ -73,13 +73,14 @@ pub const Pair = struct {
         });
         errdefer pair.client_tls.deinit();
 
-        pair.client = try quic_zig.Connection.initClient(allocator, pair.client_tls, "localhost");
+        // Pair is heap-allocated, so the embedded Connections sit at
+        // their final addresses — the in-place constructors wire TLS
+        // immediately (there is no bind-later step anymore).
+        try quic_zig.Connection.initClientAt(&pair.client, allocator, pair.client_tls, "localhost");
         errdefer pair.client.deinit();
-        pair.server = try quic_zig.Connection.initServer(allocator, pair.server_tls);
+        try quic_zig.Connection.initServerAt(&pair.server, allocator, pair.server_tls);
         errdefer pair.server.deinit();
 
-        try pair.client.bind();
-        try pair.server.bind();
         pair.client.peer = &pair.server;
         pair.server.peer = &pair.client;
 

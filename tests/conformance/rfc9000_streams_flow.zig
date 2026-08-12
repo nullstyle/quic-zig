@@ -1377,12 +1377,12 @@ test "MUST convert app CONNECTION_CLOSE to APPLICATION_ERROR transport close at 
     // records the embedder's application error code.
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try quic_zig.Connection.initClient(test_alloc, ctx, "localhost");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(test_alloc, ctx, "localhost");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{0xaa});
     try conn.setLocalScid(&.{0xbb});
-    installTestHandshakeWriteSecret(&conn);
+    installTestHandshakeWriteSecret(conn);
     try std.testing.expect((try conn.packetKeys(.application, .write)) == null);
 
     conn.close(false, 0x42, "h3 gone");
@@ -1390,7 +1390,7 @@ test "MUST convert app CONNECTION_CLOSE to APPLICATION_ERROR transport close at 
     const n = (try conn.pollLevel(.handshake, &packet_buf, 1_000_000)) orelse
         return error.NoHandshakeCloseEmitted;
 
-    const decoded = try decodeHandshakeConnectionClose(&conn, packet_buf[0..n]);
+    const decoded = try decodeHandshakeConnectionClose(conn, packet_buf[0..n]);
     try std.testing.expectEqual(true, decoded.is_transport);
     try std.testing.expectEqual(TRANSPORT_ERROR_APPLICATION_ERROR, decoded.error_code);
     try std.testing.expectEqual(@as(u64, 0), decoded.frame_type);
@@ -1409,14 +1409,14 @@ test "SHOULD defer app CONNECTION_CLOSE to 1-RTT when application write keys exi
     // 0x1c/APPLICATION_ERROR conversion tested above.
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    var conn = try quic_zig.Connection.initClient(test_alloc, ctx, "localhost");
-    defer conn.deinit();
+    const conn = try quic_zig.Connection.createClient(test_alloc, ctx, "localhost");
+    defer conn.destroy();
 
     try conn.setPeerDcid(&.{0xaa});
     try conn.setLocalScid(&.{0xbb});
     try std.testing.expect(conn.markPathValidated(0));
-    installTestHandshakeWriteSecret(&conn);
-    try installTestApplicationWriteSecret(&conn);
+    installTestHandshakeWriteSecret(conn);
+    try installTestApplicationWriteSecret(conn);
     try std.testing.expect(!conn.handshakeDone());
 
     conn.close(false, 0x42, "h3 gone");
@@ -1428,7 +1428,7 @@ test "SHOULD defer app CONNECTION_CLOSE to 1-RTT when application write keys exi
 
     const n = (try conn.pollLevel(.application, &packet_buf, 1_001_000)) orelse
         return error.NoApplicationCloseEmitted;
-    const decoded = try decodeApplicationConnectionClose(&conn, packet_buf[0..n], 1, 0);
+    const decoded = try decodeApplicationConnectionClose(conn, packet_buf[0..n], 1, 0);
     try std.testing.expectEqual(false, decoded.close.is_transport);
     try std.testing.expectEqual(@as(u64, 0x42), decoded.close.error_code);
     try std.testing.expectEqual(@as(u64, 0), decoded.close.frame_type);
