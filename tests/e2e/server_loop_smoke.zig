@@ -119,6 +119,9 @@ test "runUdpServer rejects zero-byte buffers" {
 }
 
 test "runUdpServer with shutdown_flag already set returns immediately" {
+    // Untested on Windows, not known-broken: the recorded cause for
+    // this skip no longer matches the pinned std. See the platform
+    // tier notes in docs/RELEASE_READINESS.md before deleting it.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     // This is the closest we get to exercising the loop body
@@ -175,6 +178,7 @@ test "runUdpServer with shutdown_flag already set returns immediately" {
 }
 
 test "runUdpServer binds preferred-address alt listener and returns cleanly" {
+    // See the skip note in the shutdown-flag test above.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     // Same shape as the shutdown-flag-already-set test, but with a

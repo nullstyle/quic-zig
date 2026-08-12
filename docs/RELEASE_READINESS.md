@@ -24,9 +24,31 @@ Other architectures and BSDs fall here.
 
 Windows has been promoted to tier-1 after the native `windows-latest`
 `zig build` and `zig build test` leg passed on the v0.7.5 release line.
-Real-socket std.Io loopback smoke tests that currently hit
-`ConcurrencyUnavailable` on native Windows stay skipped in-tree, but the
-package build/test gate itself is blocking.
+The protocol engine, wire codecs, conformance suite, and in-memory TLS
+handshakes therefore genuinely execute on native Windows — this is not
+a cross-compile-only claim.
+
+Three real-socket loopback smoke tests are the exception (two in
+`tests/e2e/server_loop_smoke.zig`, one in `client_loop_smoke.zig`):
+the ones that enter `runUdpServer` / `runUdpClient`. They carry an
+unconditional `builtin.os.tag == .windows` skip, so **native Windows
+real-socket operation is untested, not known-broken.**
+
+The skip predates the current toolchain pin and its recorded cause no
+longer holds: it was attributed to `error.ConcurrencyUnavailable` from
+std's `batchAwaitConcurrent`, but at 0.17.0-dev.1252 that function
+takes a dedicated Windows branch (`batchDrainSubmittedWindows` +
+`NtDelayExecution`) that never returns it — the `ConcurrencyUnavailable`
+path is reachable only on wasi and on platforms without `poll`. Note
+also that a timed receive needs the same machinery whether it asks for
+one datagram or many: `receiveTimeout` and `receiveManyTimeout` both
+lower to `Io.operateTimeout`, which is `batch.awaitConcurrent`. So
+`enable_ecn = false` was never a Windows escape hatch, and 0.11.0's
+move to an always-batched receive did not remove one.
+
+Resolving this means deleting the three skips and reading the
+`windows-latest` leg. It is deliberately not bundled into a release
+commit, since it can only turn red in CI.
 
 ## 1.0 graduation checklist
 
