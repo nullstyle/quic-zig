@@ -527,6 +527,28 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run quic_zig microbenchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    // End-to-end benchmarks: whole-Connection goodput, handshakes/sec,
+    // and deterministic impairment goodput. Same ReleaseSafe policy and
+    // module graph as `bench`; rooted at bench/e2e_main.zig so it can
+    // file-import the shared report writer.
+    const bench_e2e_mod = b.createModule(.{
+        .root_source_file = b.path("bench/e2e_main.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+        .sanitize_c = sanitize_c,
+    });
+    bench_e2e_mod.addImport("quic_zig", bench_quic_zig_mod);
+    bench_e2e_mod.addImport("boringssl", bench_boringssl_mod);
+
+    const bench_e2e_exe = b.addExecutable(.{
+        .name = "quic-zig-bench-e2e",
+        .root_module = bench_e2e_mod,
+    });
+    const run_bench_e2e = b.addRunArtifact(bench_e2e_exe);
+    run_bench_e2e.addPassthruArgs();
+    const bench_e2e_step = b.step("bench-e2e", "Run quic_zig end-to-end benchmarks (goodput, handshakes, impairment)");
+    bench_e2e_step.dependOn(&run_bench_e2e.step);
+
     const bench_tests_mod = b.createModule(.{
         .root_source_file = b.path("bench/root.zig"),
         .target = target,
