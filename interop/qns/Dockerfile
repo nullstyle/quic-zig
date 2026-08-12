@@ -12,13 +12,17 @@ ARG TARGETPLATFORM
 # Dev tarballs live under /builds/ (no per-version subdirectory), unlike
 # tagged releases which are served from /download/<version>/.
 #
-# ziglang.org keeps only the CURRENT master dev tarball, so any pin here
-# 404s there the moment upstream master moves on. That is not a
-# hypothetical: it happened, and it turned this image — and the interop
-# gate that builds it — red, while the rest of CI stayed green purely
-# because jdx/mise-action restores a warm cache and never re-downloads.
-# The Docker jobs, having no such cache, were the canary rather than the
-# cause.
+# ziglang.org garbage-collects older master dev tarballs, so any pin
+# here eventually 404s. Retention is finite but not one-deep: measured
+# 2026-08-12, dev.1683 (then current) and dev.1509 (174 commits back)
+# both served, while dev.1252 and dev.1158 were gone. So a pin survives
+# some hundreds of commits of master, then dies.
+#
+# That is not a hypothetical: dev.1252 outlived its shelf life, which
+# turned this image — and the interop gate that builds it — red, while
+# the rest of CI stayed green purely because jdx/mise-action restores a
+# warm cache and never re-downloads. The Docker jobs, having no such
+# cache, were the canary rather than the cause.
 #
 # Tracking current master (as this pin now does) makes the tarball
 # available again but does not make it durable; it only restarts the

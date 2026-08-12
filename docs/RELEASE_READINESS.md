@@ -113,10 +113,15 @@ is safe to embed in production. The gates:
       known pair is deleted from the lint.
 
 - [ ] **The pinned toolchain is durably obtainable.** It is obtainable
-      today but not durably, because the pin tracks Zig *master*.
-      ziglang.org retains only the current master dev tarball, so any
-      such pin 404s the moment upstream master moves on. That already
-      happened once at `0.17.0-dev.1252`: it went missing, the Docker
+      today but not durably, because the pin tracks Zig *master* and
+      ziglang.org garbage-collects older master dev tarballs. Retention
+      is finite but not one-deep — measured 2026-08-12, `dev.1683`
+      (then current) and `dev.1509` (174 commits back) both returned
+      200 while `dev.1252` and `dev.1158` were 404 — so a pin does not
+      die the instant master advances; it has a shelf life of some
+      hundreds of commits.
+
+      `0.17.0-dev.1252` outlived its. When it went missing the Docker
       jobs (which have no toolchain cache) went red, and every other
       leg kept passing only because `jdx/mise-action` restores a warm
       cache and never re-downloads — meaning an Actions cache eviction
