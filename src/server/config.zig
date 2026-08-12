@@ -560,10 +560,10 @@ pub const Config = struct {
     /// (PMTU stays at `initial_mtu`).
     pmtud: conn_mod.PmtudConfig = .{},
 
-    /// Congestion-control algorithm for every accepted connection
-    /// (Unstable tier while CUBIC soaks): `.new_reno` (RFC 9002, the
-    /// long-standing default) or `.cubic` (RFC 9438).
-    congestion_control: conn_mod.CongestionAlgorithm = .new_reno,
+    /// Congestion-control algorithm for every accepted connection:
+    /// `.cubic` (RFC 9438, the default as of 0.11.0) or `.new_reno`
+    /// (RFC 9002, the historical default — the one-line rollback).
+    congestion_control: conn_mod.CongestionAlgorithm = .cubic,
 
     /// RFC 9002 §7.7 packet pacing for every accepted connection (on
     /// by default): spreads sends at gain x cwnd/RTT instead of

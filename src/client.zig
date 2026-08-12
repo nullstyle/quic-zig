@@ -243,11 +243,11 @@ const ConfigImpl = struct {
     /// Set `enable = false` to keep the static-MTU behaviour.
     pmtud: conn_mod.PmtudConfig = .{},
 
-    /// Congestion-control algorithm (Unstable tier while CUBIC
-    /// soaks): `.new_reno` (RFC 9002, the long-standing default) or
-    /// `.cubic` (RFC 9438). Applies to every path the connection
-    /// uses, including post-migration paths.
-    congestion_control: conn_mod.CongestionAlgorithm = .new_reno,
+    /// Congestion-control algorithm: `.cubic` (RFC 9438, the
+    /// default as of 0.11.0) or `.new_reno` (RFC 9002, the historical
+    /// default — the one-line rollback). Applies to every path the
+    /// connection uses, including post-migration paths.
+    congestion_control: conn_mod.CongestionAlgorithm = .cubic,
 
     /// RFC 9002 §7.7 packet pacing (on by default): spreads sends at
     /// gain x cwnd/RTT instead of bursting a full window. `false`

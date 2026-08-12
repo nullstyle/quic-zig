@@ -1366,7 +1366,7 @@ pub const Connection = struct {
     /// `Config.congestion_control` through `setCongestionAlgorithm`
     /// right after `initClient`/`initServer`; paths created later
     /// (multipath, migration) inherit it at construction.
-    cc_algorithm: congestion_mod.Algorithm = .new_reno,
+    cc_algorithm: congestion_mod.Algorithm = .cubic,
 
     /// RFC 9002 §7.7 packet pacing. On by default; `false` restores
     /// the pre-0.11 burst-a-full-cwnd emission timing exactly (the

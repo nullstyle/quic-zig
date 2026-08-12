@@ -198,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
 
     var scenario: Scenario = .all;
     var samples: usize = default_samples;
-    var cc: quic_zig.CongestionAlgorithm = .new_reno;
+    var cc: quic_zig.CongestionAlgorithm = .cubic;
     var json_path: ?[]const u8 = null;
     var json_dir: ?[]const u8 = null;
 

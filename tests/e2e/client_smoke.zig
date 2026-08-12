@@ -40,14 +40,14 @@ test "Client.connect succeeds and yields a tickable Connection" {
     // SCID as a routable CID.
     try std.testing.expect(client.conn.localScidCount() >= 1);
 
-    // Default congestion controller is NewReno until the 0.12 flip.
+    // CUBIC is the default congestion controller as of 0.11.0.
     try std.testing.expectEqual(
-        quic_zig.CongestionAlgorithm.new_reno,
+        quic_zig.CongestionAlgorithm.cubic,
         client.conn.ccForApplication().algorithm(),
     );
 }
 
-test "Client.Config.congestion_control threads CUBIC to every path controller" {
+test "Client.Config.congestion_control = .new_reno is the one-line rollback" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic_zig.Client.connect(.{
@@ -56,17 +56,17 @@ test "Client.Config.congestion_control threads CUBIC to every path controller" {
         .server_name = "example.com",
         .alpn_protocols = &protos,
         .transport_params = defaultParams(),
-        .congestion_control = .cubic,
+        .congestion_control = .new_reno,
     });
     defer client.deinit();
 
     try std.testing.expectEqual(
-        quic_zig.CongestionAlgorithm.cubic,
+        quic_zig.CongestionAlgorithm.new_reno,
         client.conn.ccForApplication().algorithm(),
     );
     // The posture switch is recorded so later paths (migration,
     // multipath) inherit the same algorithm.
-    try std.testing.expectEqual(quic_zig.CongestionAlgorithm.cubic, client.conn.cc_algorithm);
+    try std.testing.expectEqual(quic_zig.CongestionAlgorithm.new_reno, client.conn.cc_algorithm);
 }
 
 test "Client.connect drives the first Initial out via poll" {

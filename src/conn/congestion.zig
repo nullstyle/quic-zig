@@ -8,10 +8,11 @@
 //! limits.
 //!
 //! `CongestionController` is the dispatch layer: a tagged union over
-//! the available algorithms (NewReno today; the tag is chosen by
-//! `Config.algorithm` and dispatched with zero indirection via inline
-//! switches). Everything outside this file talks to the union; the
-//! concrete controllers stay exported for tests and direct embedding.
+//! the available algorithms (CUBIC — the default — and NewReno; the
+//! tag is chosen by `Config.algorithm` and dispatched with zero
+//! indirection via inline switches). Everything outside this file
+//! talks to the union; the concrete controllers stay exported for
+//! tests and direct embedding.
 
 const std = @import("std");
 const cubic_mod = @import("congestion_cubic.zig");
@@ -54,8 +55,10 @@ pub const Config = struct {
     /// Maximum UDP datagram size we'll send. Conservatively 1200
     /// per the QUIC v1 minimum; raised by PMTU discovery later.
     max_datagram_size: u64 = 1200,
-    /// Which controller `CongestionController.init` builds.
-    algorithm: Algorithm = .new_reno,
+    /// Which controller `CongestionController.init` builds. CUBIC
+    /// (RFC 9438) is the default as of 0.11.0 — the industry-standard
+    /// curve; NewReno remains available as the conservative fallback.
+    algorithm: Algorithm = .cubic,
 
     /// Minimum congestion window: 2 * max_datagram_size.
     pub fn minWindow(self: Config) u64 {
@@ -504,7 +507,7 @@ test "CongestionController dispatch is observably identical to direct NewReno" {
     // Drive the same ack/loss/CE script through a bare NewReno and
     // through the union; every observable must match at every step —
     // the zero-delta guarantee of the dispatch layer.
-    const cfg: Config = .{ .max_datagram_size = 1200 };
+    const cfg: Config = .{ .max_datagram_size = 1200, .algorithm = .new_reno };
     var direct = NewReno.init(cfg);
     var boxed = CongestionController.init(cfg);
     try std.testing.expectEqual(Algorithm.new_reno, boxed.algorithm());

@@ -39,8 +39,8 @@ pub const PairOptions = struct {
     initial_max_stream_data: u64 = 1 << 22,
     initial_max_streams_bidi: u64 = 16,
     /// Congestion controller for both endpoints — the A/B lever the
-    /// CUBIC-default flip gate drives.
-    congestion_control: quic_zig.CongestionAlgorithm = .new_reno,
+    /// CUBIC-default flip gate drives. Follows the library default.
+    congestion_control: quic_zig.CongestionAlgorithm = .cubic,
 };
 
 /// Heap-allocated so the `peer` cross-pointers stay valid.
@@ -125,7 +125,7 @@ pub const Pair = struct {
 pub const GoodputOptions = struct {
     total_bytes: usize = 64 << 20,
     chunk_bytes: usize = 256 << 10,
-    congestion_control: quic_zig.CongestionAlgorithm = .new_reno,
+    congestion_control: quic_zig.CongestionAlgorithm = .cubic,
     /// Virtual-clock step per shuttle iteration.
     tick_us: u64 = 100,
     /// Cap on collected per-poll latency samples (8 bytes each).
@@ -317,7 +317,7 @@ pub const ImpairmentOptions = struct {
     total_bytes: usize = 8 << 20,
     chunk_bytes: usize = 256 << 10,
     tick_us: u64 = 100,
-    congestion_control: quic_zig.CongestionAlgorithm = .new_reno,
+    congestion_control: quic_zig.CongestionAlgorithm = .cubic,
     seed: u64 = 0xbe9c4,
     loss_permille: u16 = 0,
     reorder_permille: u16 = 0,
