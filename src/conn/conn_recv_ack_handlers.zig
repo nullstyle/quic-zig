@@ -6,6 +6,9 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_datagram = @import("conn_datagram.zig");
+const conn_qlog = @import("conn_qlog.zig");
+const conn_loss = @import("conn_loss.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const EncryptionLevel = state_mod.EncryptionLevel;
@@ -121,11 +124,11 @@ fn dispatchAckedAtLevel(
             ctx.any_regular_acked.* = true;
         }
         ctx.self.onApplicationPacketAckedForKeys(acked, ctx.now_us);
-        try ctx.self.dispatchAckedPacketToStreams(acked);
+        try conn_loss.dispatchAckedPacketToStreams(ctx.self, acked);
     }
-    ctx.self.discardSentCryptoForPacket(ctx.lvl, acked.pn);
-    ctx.self.dispatchAckedControlFrames(acked);
-    ctx.self.recordDatagramAcked(acked);
+    conn_loss.discardSentCryptoForPacket(ctx.self, ctx.lvl, acked.pn);
+    conn_loss.dispatchAckedControlFrames(ctx.self, acked);
+    conn_datagram.recordDatagramAcked(ctx.self, acked);
 }
 
 const PathAckDispatchCtx = struct {
@@ -168,11 +171,11 @@ fn dispatchAckedOnPath(
     } else {
         ctx.any_regular_acked.* = true;
     }
-    try ctx.self.dispatchAckedPacketToStreams(acked);
+    try conn_loss.dispatchAckedPacketToStreams(ctx.self, acked);
     ctx.self.onApplicationPacketAckedForKeys(acked, ctx.now_us);
-    ctx.self.discardSentCryptoForPacket(.application, acked.pn);
-    ctx.self.dispatchAckedControlFrames(acked);
-    ctx.self.recordDatagramAcked(acked);
+    conn_loss.discardSentCryptoForPacket(ctx.self, .application, acked.pn);
+    conn_loss.dispatchAckedControlFrames(ctx.self, acked);
+    conn_datagram.recordDatagramAcked(ctx.self, acked);
 }
 
 pub fn handleAckAtLevel(
@@ -304,12 +307,12 @@ pub fn handleAckAtLevel(
 
     // Loss detection at the same level — packet-threshold only
     // (time-threshold lives in `tick`).
-    try self.detectLossesByPacketThresholdAtLevel(lvl);
+    try conn_loss.detectLossesByPacketThresholdAtLevel(self, lvl);
 
     // Snapshot metrics + congestion phase after a meaningful ACK.
     if (any_ack_eliciting_newly_acked or in_flight_bytes_acked > 0) {
-        self.emitCongestionStateIfChanged(now_us);
-        self.emitMetricsSnapshot(now_us);
+        conn_qlog.emitCongestionStateIfChanged(self, now_us);
+        conn_qlog.emitMetricsSnapshot(self, now_us);
     }
 }
 
@@ -406,8 +409,8 @@ pub fn handleApplicationAckOnPath(
 
     // Snapshot metrics + congestion phase after a meaningful ACK.
     if (any_ack_eliciting_newly_acked or in_flight_bytes_acked > 0) {
-        self.emitCongestionStateIfChanged(now_us);
-        self.emitMetricsSnapshot(now_us);
+        conn_qlog.emitCongestionStateIfChanged(self, now_us);
+        conn_qlog.emitMetricsSnapshot(self, now_us);
     }
 }
 

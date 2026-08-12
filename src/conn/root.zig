@@ -6,9 +6,12 @@
 //! split across submodules.
 //!
 //! Submodules:
-//!  - `state` — the `Connection` state machine; ~106 public methods
-//!    spanning bind/handshake, send/receive, stream open/close,
-//!    multipath, close + draining, and event polling.
+//!  - `state` — the `Connection` struct: fields, construction,
+//!    negotiated config, close/draining lifecycle, timers, the TLS
+//!    handshake driver, and thin delegating methods. The method
+//!    bodies live in the `conn_*` sibling files (see the directory
+//!    map at the top of state.zig); methods annotated `INTERNAL` are
+//!    cross-file scaffolding, not embedder API.
 //!  - `ack_tracker` / `pn_space` / `sent_packets` — packet-number
 //!    bookkeeping that drives ACK emission and loss detection.
 //!  - `rtt` / `congestion` / `loss_recovery` — RFC 9002 recovery

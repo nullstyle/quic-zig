@@ -14,6 +14,10 @@
 const std = @import("std");
 const boringssl = @import("boringssl");
 const state_mod = @import("state.zig");
+const conn_paths = @import("conn_paths.zig");
+const conn_keys = @import("conn_keys.zig");
+const conn_qlog = @import("conn_qlog.zig");
+const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const ConnectionId = state_mod.ConnectionId;
@@ -49,7 +53,7 @@ pub fn handleVersionNegotiation(
     // when it does NOT support our version. If our version is listed,
     // we silently ignore the VN per the same spec text (this includes
     // the v1↔v2 case where a server happens to support both).
-    if (Connection.versionListContains(vn, self.version)) return bytes.len;
+    if (conn_recv_dispatch.versionListContains(vn, self.version)) return bytes.len;
 
     self.enterClosed(
         .version_negotiation,
@@ -73,23 +77,24 @@ pub fn handleShort(
     now_us: u64,
 ) Error!usize {
     const app_path = self.incomingShortPath(bytes) orelse
-        self.pathForId(self.current_incoming_path_id);
+        conn_paths.pathForId(self, self.current_incoming_path_id);
     self.current_incoming_path_id = app_path.id;
     const app_pn_space = &app_path.app_pn_space;
     const largest_received = if (app_pn_space.received.largest) |l| l else 0;
     const multipath_path_id: ?u32 = if (self.multipathNegotiated()) app_path.id else null;
     if (self.app_read_current == null) {
         if (self.isKnownStatelessReset(bytes)) {
-            self.emitPacketDropped(.application, @intCast(bytes.len), .stateless_reset);
+            conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .stateless_reset);
             self.enterStatelessReset(now_us);
         } else {
-            self.emitPacketDropped(.application, @intCast(bytes.len), .keys_unavailable);
+            conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .keys_unavailable);
         }
         return bytes.len;
     }
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
-    const open_result = (try self.openApplicationPacket(
+    const open_result = (try conn_recv_dispatch.openApplicationPacket(
+        self,
         &pt_buf,
         bytes,
         app_path,
@@ -97,17 +102,19 @@ pub fn handleShort(
         multipath_path_id,
     )) orelse {
         if (self.isKnownStatelessReset(bytes)) {
-            self.emitPacketDropped(.application, @intCast(bytes.len), .stateless_reset);
+            conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .stateless_reset);
             self.enterStatelessReset(now_us);
             return bytes.len;
         }
-        self.emitPacketDropped(.application, @intCast(bytes.len), .decryption_failure);
-        self.noteApplicationAuthFailure();
+        conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .decryption_failure);
+        conn_keys.noteApplicationAuthFailure(
+            self,
+        );
         return bytes.len;
     };
     if (open_result.slot == .next) {
         try self.promoteApplicationReadKeys(now_us);
-        try self.maybeRespondToPeerKeyUpdate(now_us);
+        try conn_keys.maybeRespondToPeerKeyUpdate(self, now_us);
     }
     const opened = open_result.opened;
 
@@ -121,14 +128,16 @@ pub fn handleShort(
     }
 
     self.last_authenticated_path_id = app_path.id;
-    if (self.closingAttributionOnly()) {
+    if (conn_recv_dispatch.closingAttributionOnly(
+        self,
+    )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. Decrypt has
         // succeeded; mark the observation, scan for a peer CC,
         // and skip everything else (no ACK tracker update, no
         // dispatchFrames). The outer `handle` re-arms a CC
         // retransmit subject to the SHOULD-rate-limit.
         self.closing_state_attribution_observed = true;
-        self.scanForPeerCloseFrame(opened.payload, now_us);
+        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
         return bytes.len;
     }
     // Detect a duplicate application PN *before* recording it. A
@@ -140,10 +149,10 @@ pub fn handleShort(
     // idempotent, so only DATAGRAM is actually harmed — but skipping the
     // whole dispatch on a duplicate is both correct and cheaper.
     const duplicate_pn = app_pn_space.received.contains(opened.pn);
-    Connection.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, self.delayed_ack_packet_threshold);
+    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, self.delayed_ack_packet_threshold);
     app_pn_space.onPacketReceivedWithEcn(self.last_recv_ecn);
     self.qlog_packets_received +|= 1;
-    self.emitPacketReceived(.application, opened.pn, @intCast(bytes.len), Connection.countFrames(opened.payload));
+    conn_qlog.emitPacketReceived(self, .application, opened.pn, @intCast(bytes.len), conn_recv_dispatch.countFrames(opened.payload));
     if (!duplicate_pn) {
         try self.dispatchFrames(.application, opened.payload, now_us);
     }
@@ -165,16 +174,16 @@ pub fn handleInitial(
     // the client put on its first Initial.
     if (self.role == .server and !self.initial_dcid_set) {
         if (bytes.len < 6) {
-            self.emitPacketDropped(.initial, @intCast(bytes.len), .header_decode_failure);
+            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .header_decode_failure);
             return bytes.len;
         }
         const dcid_len = bytes[5];
         if (dcid_len > path_mod.max_cid_len) {
-            self.emitPacketDropped(.initial, @intCast(bytes.len), .header_decode_failure);
+            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .header_decode_failure);
             return bytes.len;
         }
         if (bytes.len < @as(usize, 6) + dcid_len) {
-            self.emitPacketDropped(.initial, @intCast(bytes.len), .header_decode_failure);
+            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .header_decode_failure);
             return bytes.len;
         }
         try self.setInitialDcid(bytes[6 .. 6 + dcid_len]);
@@ -201,10 +210,12 @@ pub fn handleInitial(
             _ = self.clientAcceptCompatibleVersion(inbound_version);
         }
     }
-    try self.ensureInitialKeys();
+    try conn_keys.ensureInitialKeys(
+        self,
+    );
     const r_keys_opt = self.initial_keys_read;
     const r_keys = r_keys_opt orelse {
-        self.emitPacketDropped(.initial, @intCast(bytes.len), .keys_unavailable);
+        conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     };
 
@@ -214,7 +225,7 @@ pub fn handleInitial(
         .largest_received = if (self.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
     }) catch |e| switch (e) {
         boringssl.crypto.aead.Error.Auth => {
-            self.emitPacketDropped(.initial, @intCast(bytes.len), .decryption_failure);
+            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .decryption_failure);
             return bytes.len;
         },
         else => return e,
@@ -238,9 +249,13 @@ pub fn handleInitial(
         if (!self.initial_dcid_set) {
             self.initial_dcid = ConnectionId.fromSlice(opened.dcid.slice());
             self.initial_dcid_set = true;
-            try self.ensureInitialKeys();
+            try conn_keys.ensureInitialKeys(
+                self,
+            );
         }
-        self.emitConnectionStartedOnce();
+        conn_qlog.emitConnectionStartedOnce(
+            self,
+        );
     }
     if (self.role == .client) {
         const server_scid = ConnectionId.fromSlice(opened.scid.slice());
@@ -250,10 +265,12 @@ pub fn handleInitial(
     }
 
     self.last_authenticated_path_id = self.current_incoming_path_id;
-    if (self.closingAttributionOnly()) {
+    if (conn_recv_dispatch.closingAttributionOnly(
+        self,
+    )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
         self.closing_state_attribution_observed = true;
-        self.scanForPeerCloseFrame(opened.payload, now_us);
+        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
         return opened.bytes_consumed;
     }
     {
@@ -262,7 +279,7 @@ pub fn handleInitial(
         initial_space.onPacketReceivedWithEcn(self.last_recv_ecn);
     }
     self.qlog_packets_received +|= 1;
-    self.emitPacketReceived(.initial, opened.pn, @intCast(opened.bytes_consumed), Connection.countFrames(opened.payload));
+    conn_qlog.emitPacketReceived(self, .initial, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
     try self.dispatchFrames(.initial, opened.payload, now_us);
     return opened.bytes_consumed;
 }
@@ -327,20 +344,20 @@ pub fn handleZeroRtt(
     now_us: u64,
 ) Error!usize {
     if (self.role != .server) {
-        self.emitPacketDropped(.early_data, @intCast(bytes.len), .other);
+        conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .other);
         return bytes.len;
     }
     if (self.inner.earlyDataStatus() == .rejected) {
-        self.emitPacketDropped(.early_data, @intCast(bytes.len), .keys_unavailable);
+        conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     }
 
     const r_keys_opt = try self.packetKeys(.early_data, .read);
     const r_keys = r_keys_opt orelse {
-        self.emitPacketDropped(.early_data, @intCast(bytes.len), .keys_unavailable);
+        conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     };
-    const app_path = self.pathForId(self.current_incoming_path_id);
+    const app_path = conn_paths.pathForId(self, self.current_incoming_path_id);
     const app_pn_space = &app_path.app_pn_space;
     const largest_received = if (app_pn_space.received.largest) |l| l else 0;
 
@@ -350,7 +367,7 @@ pub fn handleZeroRtt(
         .largest_received = largest_received,
     }) catch |e| switch (e) {
         boringssl.crypto.aead.Error.Auth => {
-            self.emitPacketDropped(.early_data, @intCast(bytes.len), .decryption_failure);
+            conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .decryption_failure);
             return bytes.len;
         },
         else => return e,
@@ -363,16 +380,18 @@ pub fn handleZeroRtt(
     }
 
     self.last_authenticated_path_id = app_path.id;
-    if (self.closingAttributionOnly()) {
+    if (conn_recv_dispatch.closingAttributionOnly(
+        self,
+    )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
         self.closing_state_attribution_observed = true;
-        self.scanForPeerCloseFrame(opened.payload, now_us);
+        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
         return opened.bytes_consumed;
     }
-    Connection.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, self.delayed_ack_packet_threshold);
+    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, self.delayed_ack_packet_threshold);
     app_pn_space.onPacketReceivedWithEcn(self.last_recv_ecn);
     self.qlog_packets_received +|= 1;
-    self.emitPacketReceived(.early_data, opened.pn, @intCast(opened.bytes_consumed), Connection.countFrames(opened.payload));
+    conn_qlog.emitPacketReceived(self, .early_data, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
     try self.dispatchFrames(.early_data, opened.payload, now_us);
     return opened.bytes_consumed;
 }
@@ -387,7 +406,7 @@ pub fn handleHandshake(
 ) Error!usize {
     const r_keys_opt = try self.packetKeys(.handshake, .read);
     const r_keys = r_keys_opt orelse {
-        self.emitPacketDropped(.handshake, @intCast(bytes.len), .keys_unavailable);
+        conn_qlog.emitPacketDropped(self, .handshake, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     };
 
@@ -397,7 +416,7 @@ pub fn handleHandshake(
         .largest_received = if (self.pnSpaceForLevel(.handshake).received.largest) |l| l else 0,
     }) catch |e| switch (e) {
         boringssl.crypto.aead.Error.Auth => {
-            self.emitPacketDropped(.handshake, @intCast(bytes.len), .decryption_failure);
+            conn_qlog.emitPacketDropped(self, .handshake, @intCast(bytes.len), .decryption_failure);
             return bytes.len;
         },
         else => return e,
@@ -416,12 +435,14 @@ pub fn handleHandshake(
     // anti-amplification cap on the path. Idempotent if already
     // validated (e.g. via PATH_RESPONSE during migration).
     if (self.role == .server) {
-        self.pathForId(self.current_incoming_path_id).path.markValidated();
+        conn_paths.pathForId(self, self.current_incoming_path_id).path.markValidated();
     }
-    if (self.closingAttributionOnly()) {
+    if (conn_recv_dispatch.closingAttributionOnly(
+        self,
+    )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
         self.closing_state_attribution_observed = true;
-        self.scanForPeerCloseFrame(opened.payload, now_us);
+        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
         return opened.bytes_consumed;
     }
     {
@@ -430,7 +451,7 @@ pub fn handleHandshake(
         handshake_space.onPacketReceivedWithEcn(self.last_recv_ecn);
     }
     self.qlog_packets_received +|= 1;
-    self.emitPacketReceived(.handshake, opened.pn, @intCast(opened.bytes_consumed), Connection.countFrames(opened.payload));
+    conn_qlog.emitPacketReceived(self, .handshake, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
     try self.dispatchFrames(.handshake, opened.payload, now_us);
     return opened.bytes_consumed;
 }

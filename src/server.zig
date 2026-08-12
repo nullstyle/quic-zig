@@ -118,208 +118,21 @@ pub const StatelessResponseKind = enum {
     retry,
 };
 
-/// Structured observability events emitted by the `Server` at
-/// well-defined choice points. Embedders install a `LogCallback` via
-/// `Config.log_callback` to forward these to their logger of choice;
-/// the server emits them synchronously and never holds any internal
-/// lock while the callback runs. Re-exported as `Server.LogEvent`.
-///
-/// The variants are intentionally narrow — one struct per choice
-/// point — so the embedder can pattern-match on the discriminator and
-/// pick out only the fields they care about. Adding a new variant is
-/// a non-breaking change at the source level (existing callers'
-/// `else =>` arms still type-check) but is a wire/behavior change for
-/// any embedder logging the variants verbatim, so each addition
-/// should land in a CHANGELOG entry.
-const LogEventImpl = union(enum) {
-    /// A new connection slot was opened from an Initial datagram. The
-    /// `slot_count` field is the live-slot count *after* this accept,
-    /// which embedders can use to alert on saturation.
-    connection_accepted: struct { peer: Address, slot_count: usize },
-    /// A previously-live slot was reaped. `peer` is the last source
-    /// address observed for that slot (or null if the embedder never
-    /// passed `from` on `feed`); `source` is the close reason from
-    /// the connection's sticky `closeEvent` (or null for slots torn
-    /// down before they ever transitioned through the close pipeline).
-    connection_closed: struct { peer: ?Address, source: ?lifecycle.CloseSource },
-    /// The per-source rate limiter rejected an Initial. `recent_count`
-    /// is the source's tally inside the current window at the moment
-    /// of rejection, surfaced so embedders can tune
-    /// `initial_source_rate_limit`.
-    feed_rate_limited: struct { peer: Address, recent_count: u32 },
-    /// A Retry packet was successfully minted and queued for `peer`.
-    /// `scid_len` is the length of the server-issued SCID embedded in
-    /// the Retry — currently always equal to `Config.local_cid_len`.
-    retry_minted: struct { peer: Address, scid_len: u8 },
-    /// A long-header packet declared an unsupported version and a
-    /// Version Negotiation response was queued. `requested_version` is
-    /// the version field the peer asked for; embedders can correlate
-    /// this with their version-deployment posture.
-    version_negotiated: struct { peer: Address, requested_version: u32 },
-    /// The bounded stateless-response queue was full when a fresh
-    /// response (VN or Retry) arrived; the indicated entry was
-    /// evicted to make room. `kind` is the kind of the *evicted*
-    /// entry, not the new one.
-    stateless_queue_evicted: struct { kind: StatelessResponseKind },
-    /// `feed` rejected an Initial because the slot table was at
-    /// `max_concurrent_connections`. `peer` is the source address (or
-    /// null when the embedder didn't pass `from`).
-    table_full: struct { peer: ?Address },
-};
-
-/// Embedder-supplied logging hook. The `user_data` pointer is the
-/// `Config.log_user_data` the server stashed at init time and is
-/// passed back verbatim. Re-exported as `Server.LogCallback`.
-///
-/// The callback is invoked synchronously from inside `feed` / `reap` /
-/// `queueStatelessResponse` and must not call back into the server it
-/// was registered with (no `feed`, no `drainStatelessResponse`,
-/// nothing else that mutates server state). Returning an error is not
-/// supported — the callback's job is to push the event into a buffer,
-/// log line, or counter and return.
-const LogCallbackImpl = *const fn (user_data: ?*anyopaque, ev: LogEventImpl) void;
-
-/// Callback invoked from `Server.reap` for each slot whose connection
-/// reached `.closed`, immediately *before* the connection and slot are
-/// destroyed. Inside the callback the slot — including `slot.conn` and
-/// `slot.user_data` — is still fully valid; the moment it returns, both
-/// are dead. This is the ordered-teardown hook for per-connection
-/// application state that borrows `slot.conn` (an HTTP/3 session, an
-/// app-side context keyed by `slot.slot_id`): tear it down here and the
-/// use-after-free window between reap and app-side cleanup disappears.
-/// Runs synchronously on the embedder's thread inside `reap` and must
-/// not call back into the Server (same re-entrancy rule as
-/// `log_callback`).
-const ConnectionWillCloseCallbackImpl = *const fn (user_data: ?*anyopaque, slot: *SlotImpl) void;
-
-/// By-value snapshot of the server's instrumentation counters and
-/// gauges. Returned from `Server.metricsSnapshot`; the snapshot is
-/// taken atomically (no mutation between fields) because all reads
-/// run on the embedder's thread. Re-exported as
-/// `Server.MetricsSnapshot`.
-///
-/// Fields divide into two groups:
-///   * Gauges describe *current* state — table sizes, queue depth,
-///     the post-init high-water mark for the stateless queue.
-///   * Counters monotonically increase from `init` to `deinit` and
-///     cover every lifecycle event the embedder might want to chart.
-///
-/// Counters wrap at `u64` overflow, which is decades of traffic on
-/// any realistic deployment. The embedder is responsible for
-/// computing per-second rates if they want a flow chart.
-const MetricsSnapshotImpl = struct {
-    // Gauges (current state).
-    /// Current number of live connection slots. Mirrors
-    /// `Server.connectionCount`.
-    live_connections: u64,
-    /// Current number of routing CIDs across all live slots. Mirrors
-    /// `Server.routingTableSize`.
-    routing_table_size: u64,
-    /// Number of distinct sources the rate limiter currently tracks.
-    /// Zero when the limiter is disabled.
-    source_rate_table_size: u64,
-    /// Number of distinct peers with Retry-pending state. Zero when
-    /// Retry is disabled.
-    retry_state_table_size: u64,
-    /// Current depth of the stateless-response (VN/Retry) queue.
-    /// Mirrors `Server.statelessResponseCount`.
-    stateless_queue_depth: u64,
-    /// All-time maximum value of `stateless_queue_depth` since
-    /// `init`. Sticky — it does not decrease when the queue drains.
-    /// Useful for sizing the queue capacity for production load.
-    stateless_queue_high_water: u64,
-
-    // Counters (monotonic since init).
-    /// Datagrams routed to an existing slot.
-    feeds_routed: u64,
-    /// Initials that opened a new slot (`.accepted`).
-    feeds_accepted: u64,
-    /// Datagrams rejected with `.dropped` for any reason — empty,
-    /// malformed, slot creation failed, expired token, etc.
-    feeds_dropped: u64,
-    /// Initials rejected by the per-source rate limiter
-    /// (`.rate_limited`).
-    feeds_rate_limited: u64,
-    /// Initials rejected because `max_concurrent_connections` was
-    /// reached (`.table_full`).
-    feeds_table_full: u64,
-    /// Long-header packets that triggered a Version Negotiation
-    /// response (`.version_negotiated`).
-    feeds_version_negotiated: u64,
-    /// Initials that triggered a Retry packet (`.retry_sent`).
-    feeds_retry_sent: u64,
-    /// Initial-bearing UDP datagrams discarded because the datagram
-    /// payload was smaller than the RFC 9000 §14 minimum (1200
-    /// bytes). A subset of `feeds_dropped` — incremented in addition
-    /// to it. Spiking values point at amplification probes.
-    feeds_initial_too_small: u64,
-    /// Non-v1 long-header datagrams that would have triggered a
-    /// Version Negotiation response but were dropped because the
-    /// per-source VN rate limit (`vn_source_rate_limit`)
-    /// fired. A subset of `feeds_dropped`. Spiking values point at
-    /// VN-flood probes.
-    feeds_vn_rate_limited: u64,
-    /// Datagrams dropped at the listener-level packet rate limit
-    /// (`Config.listener_datagram_rate_limit`). Subset of `feeds_dropped`.
-    /// Hardening guide §4.1.
-    feeds_listener_rate_limited: u64,
-    /// Datagrams dropped at the listener-level byte rate limit
-    /// (`Config.listener_byte_rate_limit`). Subset of `feeds_dropped`.
-    /// Tracks bandwidth-flavored floods that the packet-count cap
-    /// would let through (few-but-large datagrams). Hardening guide §4.1.
-    feeds_listener_byte_rate_limited: u64,
-    /// Datagrams dropped at the per-source bandwidth shaper
-    /// (`Config.source_byte_rate_limit`). Subset of
-    /// `feeds_dropped`. Distinct from `feeds_listener_byte_rate_limited`:
-    /// the listener cap protects the aggregate firehose, this protects
-    /// against any single source consuming more than its fair share.
-    /// Hardening guide §4.1 token-bucket.
-    feeds_source_bandwidth_limited: u64,
-    /// LogEvents the server dropped under the per-source log rate
-    /// limit (`Config.log_source_rate_limit`).
-    /// Distinct from `feeds_dropped` — feeding a datagram and emitting
-    /// a log are separate side effects. Hardening guide §9.4.
-    feeds_log_rate_limited: u64,
-    /// Echoed Retry tokens that successfully validated and led to a
-    /// post-Retry `.accepted`. Always less than or equal to
-    /// `feeds_retry_sent`.
-    retries_validated: u64,
-    /// Stateless responses dropped on queue overflow.
-    stateless_responses_evicted: u64,
-    /// Slots reclaimed by `reap()` (one per closed connection).
-    slots_reaped: u64,
-};
-
-/// By-value snapshot of the per-source rate limiter, ranked by
-/// recent activity. Returned from `Server.rateLimitSnapshot`; the
-/// top-N list is sorted in descending order by `recent_count`. When
-/// the rate limiter is disabled, the snapshot is all-zero.
-/// Re-exported as `Server.RateLimitSnapshot`.
-const RateLimitSnapshotImpl = struct {
-    /// One row in the top-N table.
-    pub const SourceRow = struct {
-        addr: Address,
-        recent_count: u32,
-        window_start_us: u64,
-    };
-
-    /// Maximum number of top-offender rows the snapshot returns.
-    pub const top_n: usize = 16;
-
-    /// Total number of distinct sources currently tracked. May be
-    /// larger than `top_offender_count` when the table holds more
-    /// than `top_n` sources.
-    table_size: usize,
-    /// Cumulative count of `.rate_limited` returns since `init`.
-    /// Mirrors `MetricsSnapshot.feeds_rate_limited`.
-    cumulative_rejections: u64,
-    /// Top offenders, sorted descending by `recent_count`. Slots
-    /// past `top_offender_count` are zero-initialized and should be
-    /// ignored.
-    top_offenders: [top_n]SourceRow,
-    /// Number of valid rows in `top_offenders`.
-    top_offender_count: usize,
-};
+const server_observability = @import("server/observability.zig");
+const server_dos = @import("server/dos.zig");
+const server_vneg = @import("server/vneg.zig");
+const server_accept = @import("server/accept.zig");
+const server_tls = @import("server/tls_lifecycle.zig");
+const server_routing = @import("server/routing.zig");
+const RetryStateEntry = server_dos.RetryStateEntry;
+const RetryDecision = server_dos.RetryDecision;
+const RetryEcho = server_dos.RetryEcho;
+const SourceRateEntry = server_dos.SourceRateEntry;
+const LogEventImpl = server_observability.LogEvent;
+const LogCallbackImpl = server_observability.LogCallback;
+const ConnectionWillCloseCallbackImpl = server_observability.ConnectionWillCloseCallback;
+const MetricsSnapshotImpl = server_observability.MetricsSnapshot;
+const RateLimitSnapshotImpl = server_observability.RateLimitSnapshot;
 
 /// One queued stateless server response (VN or Retry), held by
 /// value so the embedder can drain across multiple `feed` calls.
@@ -343,27 +156,6 @@ const StatelessResponseImpl = struct {
     }
 };
 
-/// Per-source Retry bookkeeping. Created when the server queues a
-/// Retry packet for a source; consulted on the next Initial from
-/// that source to decide whether to validate the echoed token or
-/// re-send Retry. Bound on the table size mirrors the rate-limit
-/// table so a flood of distinct addresses cannot grow this
-/// unbounded.
-const RetryStateEntry = struct {
-    /// Server-issued SCID embedded in the Retry packet — the peer
-    /// must echo this DCID in subsequent Initials and the token
-    /// HMAC binds it.
-    retry_scid: [20]u8 = @splat(0),
-    retry_scid_len: u8 = 0,
-    /// The DCID from the client's first Initial — the
-    /// `original_destination_connection_id` transport parameter
-    /// must reflect this on the post-Retry connection.
-    original_dcid: ConnectionId = .{},
-    /// Wall-clock microseconds when the Retry was minted; used to
-    /// evict stale entries on overflow.
-    minted_at_us: u64 = 0,
-};
-
 /// Maximum number of routing CIDs a slot tracks at once. Bounded
 /// by the peer's `active_connection_id_limit` (default 8 in quic_zig);
 /// 32 leaves headroom for embedders that lift the limit and for
@@ -372,7 +164,8 @@ const RetryStateEntry = struct {
 /// many active SCIDs, `resyncSlotCids` asserts in debug builds and
 /// truncates in release — bump this constant if you bump
 /// `active_connection_id_limit` toward 32 or beyond.
-const max_tracked_cids_per_slot: usize = 32;
+// INTERNAL: pub for server/ sibling access; not part of the embedder API.
+pub const max_tracked_cids_per_slot: usize = 32;
 
 /// Idle threshold (microseconds) past which a `SourceRateEntry`
 /// whose three counter windows have all elapsed is also considered
@@ -382,668 +175,29 @@ const max_tracked_cids_per_slot: usize = 32;
 /// enough to keep its bucket warm survives `pruneSourceRate` even
 /// when its Initial / VN / log windows have aged out. Hardening
 /// guide §4.1 token-bucket.
-const bandwidth_idle_threshold_us: u64 = 5_000_000;
+// INTERNAL: pub for server/ sibling access; not part of the embedder API.
+pub const bandwidth_idle_threshold_us: u64 = 5_000_000;
 
 /// Length-prefixed packed CID key used as the `cid_table` HashMap
 /// key. Byte 0 is the CID length (1..20); bytes 1..1+len are the
 /// CID material; bytes past `len` are zeroed so the key compares
 /// by value.
-const CidKey = [21]u8;
+// INTERNAL: pub for server/ sibling access; not part of the embedder API.
+pub const CidKey = [21]u8;
 
-fn cidKeyFromSlice(cid: []const u8) CidKey {
-    // Defensive: callers (peekDcidForServer, ConnectionId.slice, etc.)
-    // already bound CID length to ≤ 20 via header parse and config
-    // validation, but we clamp here so a future caller that forgets
-    // can't reach a buffer overflow on a peer-controlled length.
-    const n = @min(cid.len, 20);
-    var k: CidKey = @splat(0);
-    k[0] = @intCast(n);
-    @memcpy(k[1 .. 1 + n], cid[0..n]);
-    return k;
-}
+const cidKeyFromSlice = server_routing.cidKeyFromSlice;
 
-fn cidKeyFromConnectionId(cid: ConnectionId) CidKey {
-    return cidKeyFromSlice(cid.bytes[0..cid.len]);
-}
+// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
+pub const cidKeyFromConnectionId = server_routing.cidKeyFromConnectionId;
 
-/// Per-source rate-limit bookkeeping. One entry per active source
-/// address; entries older than `source_rate_window_us` are pruned
-/// lazily on each `feed`. Three independent (count, window_start)
-/// pairs track Initial-eligible, Version-Negotiation-eligible, and
-/// LogEvent-eligible traffic separately — a peer that spams VN
-/// probes shouldn't burn the per-source Initial budget, a peer that
-/// gets rate-limited shouldn't free up its VN budget, and so on.
-const SourceRateEntry = struct {
-    /// Initial-driven slot creations attributed to this source
-    /// within the current window.
-    count: u32,
-    /// Wall-clock microseconds when the current Initial window started.
-    window_start_us: u64,
-    /// Version-Negotiation responses attributed to this source within
-    /// the current VN window. Gated by
-    /// `Config.vn_source_rate_limit`.
-    vn_count: u32 = 0,
-    /// Wall-clock microseconds when the current VN window started.
-    vn_window_start_us: u64 = 0,
-    /// LogEvents emitted on behalf of this source within the current
-    /// log window. Gated by `Config.log_source_rate_limit`.
-    /// Hardening guide §9.4: a flood of feed-rate-limited /
-    /// table-full / VN-rate-limited / etc. log events from one
-    /// address would otherwise let the peer flood the embedder's
-    /// log pipeline; this counter caps that.
-    log_count: u32 = 0,
-    /// Wall-clock microseconds when the current log window started.
-    log_window_start_us: u64 = 0,
-    /// Token-bucket level (in bytes) for per-source bandwidth shaping.
-    /// Gated by `Config.source_byte_rate_limit`. Refilled at
-    /// the configured rate up to a one-second burst cap; each accepted
-    /// datagram debits `bytes.len`. Hardening guide §4.1 token-bucket.
-    bandwidth_tokens: u64 = 0,
-    /// Wall-clock microseconds at the most recent token-bucket refill.
-    /// Driven by the per-feed `now_us` so the shaper reads the
-    /// embedder's monotonic clock rather than a separate timebase.
-    bandwidth_last_refill_us: u64 = 0,
-};
-
-/// Configuration handed to `Server.init`. Re-exported as
-/// `Server.Config`.
-/// Server `preferred_address` (RFC 9000 §18.2 / §5.1.1) configuration.
-/// When set on `Config.preferred_address`, the server advertises this
-/// alternate IPv4/IPv6 address pair to clients during the handshake,
-/// and (when used with `runUdpServer`) binds an additional listener
-/// socket on each configured address. Clients that complete the
-/// handshake migrate to the preferred address per RFC 9000 §5.1.1.
-///
-/// At least one of `ipv4` / `ipv6` must be non-null. When only one
-/// family is set, the unused-family fields in the on-wire transport
-/// parameter are left zero (the spec sentinel meaning "no preferred
-/// address for this family"). The CID + stateless-reset token the
-/// parameter advertises are derived per-connection at handshake time
-/// using `Config.stateless_reset_key` and `Server.mintLocalScid`; the
-/// embedder does not supply them.
-///
-/// **`Config.stateless_reset_key` is required** when this field is
-/// set. The seq-1 stateless-reset token in the parameter must match
-/// the token a future stateless-reset on the alt-CID would produce,
-/// and the deterministic `conn.stateless_reset.derive` helper is the
-/// only path quic_zig surfaces for that. Setting `preferred_address`
-/// without a key fails `Server.init` with `InvalidConfig`.
-pub const PreferredAddressConfig = struct {
-    /// Alt IPv4 address + port to advertise + bind, or null. The
-    /// 4-byte address bytes are advertised verbatim; an all-zero
-    /// `ipv4` is interpreted by RFC 9000 §18.2 as "no IPv4
-    /// preferred address" and `runUdpServer` will skip the v4 bind.
-    ipv4: ?std.Io.net.Ip4Address = null,
-    /// Alt IPv6 address + port to advertise + bind, or null.
-    /// Same all-zero sentinel semantics as `ipv4`.
-    ipv6: ?std.Io.net.Ip6Address = null,
-};
-
-/// Three-state rate/quota configuration, re-exported as
-/// `Server.RateLimit`. A tagged union instead of `?T` so
-/// "I didn't configure this" (`.default` — the library-recommended
-/// setting applies, which for some limiters is "off") and "turn the
-/// protection off" (`.disabled`) are spelled differently: a consumer
-/// mirroring a `null` default cannot silently disable a protection
-/// the library turned on, and the library can change a recommended
-/// default in a later release without silently overriding embedders
-/// who deliberately opted out.
-///
-/// Every rate/quota knob on `Config` uses this one type, so the
-/// idiom is learned once. Limiters whose recommended setting is a
-/// real cap expose it as a `Config.default_*_cap` constant; the ones
-/// whose recommendation is "off, it depends on your deployment
-/// envelope" say so in their field doc.
-const RateLimitImpl = union(enum) {
-    /// Apply this limiter's library-recommended setting (see the
-    /// `Config.default_*` constants; for the listener and bandwidth
-    /// limiters the recommendation is "off — depends on your
-    /// deployment envelope").
-    default,
-    /// Explicitly disable the limiter, accepting the unbounded rate.
-    disabled,
-    /// Explicit cap, in the unit named by the field's doc comment.
-    /// Zero fails `Server.init` with `InvalidConfig`.
-    limit: u64,
-
-    /// Resolve to the effective cap: null means the limiter is off.
-    /// `default_cap` of 0 expresses "recommended off".
-    pub fn resolve(self: RateLimitImpl, default_cap: u64) ?u64 {
-        return switch (self) {
-            .default => if (default_cap == 0) null else default_cap,
-            .disabled => null,
-            .limit => |cap| cap,
-        };
-    }
-};
-
-/// 0-RTT (early-data) posture for `Server.Config.early_data`,
-/// re-exported as `Server.EarlyData`. A union rather than a
-/// `bool` + `?*AntiReplayTracker` pair because the dangerous
-/// combination — early data on, tracker forgotten — was
-/// representable, valid, and silent. Here it has a name.
-const EarlyDataImpl = union(enum) {
-    /// Refuse 0-RTT: the auto-built TLS context is created with
-    /// early data disabled, and resumed connections complete as
-    /// 1-RTT. The secure default.
-    disabled,
-    /// Accept 0-RTT with TLS-layer replay protection. The Server
-    /// installs a BoringSSL `allow_early_data` callback that hashes
-    /// the resumed-session ticket bytes (`Conn.peerSessionId`) to the
-    /// tracker's 32-byte `Id` and calls `tracker.consume(id, now)`.
-    /// Verdict `.fresh` lets BoringSSL accept 0-RTT; `.replay`
-    /// toggles `early_data_enabled` off for that handshake (the
-    /// connection then completes as 1-RTT). The tracker is owned by
-    /// the embedder and must outlive the `Server`.
-    with_anti_replay: *tls_mod.anti_replay.AntiReplayTracker,
-    /// Accept 0-RTT with NO transport-layer replay protection.
-    /// Correct only when every request the application will accept
-    /// over early data is idempotent, or the application runs its own
-    /// replay defense above quic_zig (RFC 9001 §5.6 leaves the check
-    /// to the application). Spelled out so that shipping unprotected
-    /// 0-RTT is always a deliberate, greppable choice.
-    without_replay_protection,
-
-    /// True when either enabled variant is selected.
-    pub fn enabled(self: EarlyDataImpl) bool {
-        return self != .disabled;
-    }
-
-    /// The embedder's replay tracker, or null when 0-RTT is disabled
-    /// or deliberately unprotected.
-    pub fn antiReplayTracker(self: EarlyDataImpl) ?*tls_mod.anti_replay.AntiReplayTracker {
-        return switch (self) {
-            .with_anti_replay => |t| t,
-            .disabled, .without_replay_protection => null,
-        };
-    }
-};
-
-const ConfigImpl = struct {
-    /// Library-recommended open-internet cap backing
-    /// `initial_source_rate_limit = .default`.
-    pub const default_initial_source_rate_cap: u64 = 32;
-    /// Library-recommended open-internet cap backing
-    /// `vn_source_rate_limit = .default`.
-    pub const default_vn_source_rate_cap: u64 = 8;
-    /// Library-recommended cap backing
-    /// `log_source_rate_limit = .default`.
-    pub const default_log_source_rate_cap: u64 = 16;
-
-    /// Wall-clock allocator used for the connection table and any
-    /// transient per-server allocations. Each `Connection` allocates
-    /// from this allocator as well.
-    allocator: std.mem.Allocator,
-
-    /// Server certificate chain and private key, both PEM-encoded.
-    /// The `Server` does not take ownership; the caller must keep
-    /// these bytes alive for the lifetime of the server.
-    tls_cert_pem: []const u8,
-    tls_key_pem: []const u8,
-
-    /// Optional CA bundle (PEM, one or more certificates) that turns
-    /// on mTLS: when set, the auto-built TLS context **requires** a
-    /// client certificate and verifies it against exactly these
-    /// roots — a client that presents no certificate, or one not
-    /// chaining to this bundle, fails the handshake. Off by default
-    /// (`null`): servers do not verify clients. Only consulted when
-    /// `tls_context_override` is null — an override context owns its
-    /// own verification posture, and combining the two fails
-    /// `Server.init` with `InvalidConfig`. Like `tls_cert_pem`, the
-    /// caller must keep the bytes alive for the lifetime of the
-    /// server: `replaceTlsContext(.{ .pem = ... })` re-installs the
-    /// same bundle on the replacement context.
-    client_ca_pem: ?[]const u8 = null,
-
-    /// ALPN protocols the server is willing to negotiate, in
-    /// preference order. Required — QUIC rejects connections that do
-    /// not negotiate ALPN.
-    alpn_protocols: []const []const u8,
-
-    /// Default transport parameters applied to every accepted
-    /// connection. The `original_destination_connection_id` and
-    /// `initial_source_connection_id` fields are filled in
-    /// automatically per connection; everything else is taken
-    /// verbatim, except `max_idle_timeout_ms` — see
-    /// `allow_no_idle_timeout`.
-    transport_params: TransportParams,
-
-    /// When the supplied `transport_params.max_idle_timeout_ms` is 0
-    /// (the struct default, meaning "no idle timer"), `Server.init`
-    /// substitutes a safe `default_server_idle_timeout_ms` so an
-    /// inattentive embedder does not stand up a server that keeps
-    /// idle / half-open connections alive forever — a resource-exhaustion
-    /// vector on an internet-facing listener. Set this to `true` to
-    /// honor an explicit 0 and genuinely disable the idle timer.
-    allow_no_idle_timeout: bool = false,
-
-    /// Maximum number of concurrent live connections. Excess Initial
-    /// packets are dropped.
-    max_concurrent_connections: u32 = 1000,
-
-    /// Length of the locally-issued connection IDs (the SCIDs the
-    /// server returns to clients). Must be 1..20. Default 8 matches
-    /// the QNS endpoint. **Ignored when `quic_lb` is set** — the
-    /// QUIC-LB configuration determines the CID length
-    /// (`1 + server_id_len + nonce_len`) and `Server.init` overrides
-    /// this field with the resolved value.
-    local_cid_len: u8 = 8,
-
-    /// 32-byte HMAC key used to derive stateless-reset tokens
-    /// (RFC 9000 §10.3) for CIDs the Server auto-issues on
-    /// `installLbConfig` rotation. Off by default — leave null and
-    /// drive replenishment manually via the `connection_ids_needed`
-    /// event flow with embedder-supplied tokens.
-    ///
-    /// When set, `installLbConfig` automatically pushes a
-    /// NEW_CONNECTION_ID frame to every live slot using the new LB
-    /// factory; tokens are derived as
-    /// `HMAC-SHA256(stateless_reset_key, "quic_zig stateless reset
-    /// v1" || cid)` per `quic_zig.conn.stateless_reset.derive`.
-    ///
-    /// **Persist this key across server restarts.** A cold-start
-    /// embedder that forgets the key invalidates every previously
-    /// issued reset token: live connections through the restart will
-    /// no longer drop on stateless reset. The same hardening note in
-    /// the README §"Things you must wire yourself" applies.
-    stateless_reset_key: ?conn_mod.stateless_reset.Key = null,
-
-    /// QUIC-LB connection-ID generation
-    /// (draft-ietf-quic-load-balancers-21). Off by default — leave
-    /// null for pure-CSPRNG SCIDs. Set to opt every locally-issued
-    /// SCID into the routing-encoded format an external layer-4 LB
-    /// can decode.
-    ///
-    /// **Hardening note:** this deliberately inverts the
-    /// "Server SCIDs are CSPRNG draws — no deployment metadata leaks
-    /// on the wire" default (README §"On by default"). Treat the
-    /// load balancer as the trust boundary; in plaintext mode (no
-    /// `LbConfig.key`) any on-path observer between LB and peer can
-    /// read `server_id` directly. Encrypted modes raise the bar to
-    /// "linkability without key" but do not protect against attackers
-    /// between LB and server. Plaintext, single-pass AES, and
-    /// four-pass Feistel modes are implemented.
-    ///
-    /// When set in plaintext mode, `Server.init` also auto-enables
-    /// `transport_params.disable_active_migration` per the draft
-    /// §3 ¶3 SHOULD requirement, unless the embedder already set
-    /// it true.
-    quic_lb: ?lb_mod.LbConfig = null,
-
-    /// If non-null, every accepted `Connection` is wired up to this
-    /// qlog callback for application-key-update telemetry.
-    qlog_callback: ?QlogCallback = null,
-    qlog_user_data: ?*anyopaque = null,
-
-    /// Optional structured-logging hook. When set, the server emits
-    /// a `LogEvent` at every observable choice point (connection
-    /// open / close / reaped, rate-limited Initial, Retry minted,
-    /// VN response, queue eviction, table-full rejection). The
-    /// callback runs synchronously on the embedder's thread inside
-    /// `feed` / `reap` and must not call back into the server.
-    log_callback: ?LogCallbackImpl = null,
-    /// Opaque pointer passed back to `log_callback` on every event.
-    log_user_data: ?*anyopaque = null,
-
-    /// Ordered-teardown hook: runs inside `reap` for each closed slot
-    /// right before the slot and its connection are destroyed, while
-    /// `slot.conn` / `slot.user_data` are still valid. See
-    /// `ConnectionWillCloseCallback` for the contract. Null disables it.
-    on_connection_will_close: ?ConnectionWillCloseCallbackImpl = null,
-    /// Opaque pointer passed back to `on_connection_will_close`.
-    on_connection_will_close_user_data: ?*anyopaque = null,
-
-    /// Proactively top up each connection's local CID inventory once
-    /// its handshake completes. RFC 9000 §9: a client can only migrate
-    /// to a fresh server-issued CID, and a server that never issues
-    /// spares makes every `beginClientActiveMigration` against it fail
-    /// out of the box (the `connection_ids_needed` event only fires on
-    /// retirement, never proactively). Effective only when
-    /// `stateless_reset_key` is set — each issued CID carries a
-    /// derived §10.3 reset token; without the key this is a no-op
-    /// (advertising CIDs whose reset tokens the server cannot honor
-    /// across restarts would be worse than issuing none).
-    auto_replenish_connection_ids: bool = true,
-    /// Cap on spare CIDs minted per connection by the post-handshake
-    /// auto-replenish, further bounded by the peer's
-    /// `active_connection_id_limit`. Three spares (on top of the
-    /// handshake CID) cover a migration plus rotation headroom without
-    /// bloating the routing table.
-    max_auto_replenish_cids: u8 = 3,
-
-    /// Application bytes bound into the RFC 9001 §4.6.1 0-RTT replay
-    /// context, alongside the replay-relevant transport parameters and
-    /// the primary ALPN (`alpn_protocols[0]`). Only consulted when
-    /// `early_data` is enabled: the accept path installs the resulting
-    /// context digest on every fresh slot *before* the ClientHello is
-    /// processed, which is what lets BoringSSL accept early data on
-    /// resumption at all. Change this string across deployments whose
-    /// application semantics make previously-issued 0-RTT tickets
-    /// unsafe to replay — a changed context invalidates every
-    /// outstanding ticket's early-data capability (the session still
-    /// resumes; only 0-RTT is refused). An HTTP/3 layer would put a
-    /// canonicalized SETTINGS digest here.
-    early_data_application_context: []const u8 = "quic-zig Server wrapper v1",
-
-    /// Optional override of the underlying `boringssl.tls.Context`.
-    /// When null, `Server.init` constructs a TLS-1.3-only server
-    /// context with the supplied ALPN list and `verify=.none` —
-    /// unless `client_ca_pem` is set, which turns on required client
-    /// -certificate verification (mTLS). The auto-built context's
-    /// early-data posture is gated by `Config.early_data` (off by
-    /// default; §5.2 / §12 hardening). Pass your own to enable
-    /// session-ticket callbacks or any other TLS-context behavior the
-    /// auto-built path doesn't expose; combining an override with
-    /// `client_ca_pem` fails `init` with `InvalidConfig`.
-    tls_context_override: ?boringssl.tls.Context = null,
-
-    /// Per-source-address Initial-acceptance cap (was
-    /// `max_initials_per_source_per_window: ?u32` before 0.10.0 —
-    /// renamed so the `null`-disables sentinel could not silently
-    /// switch off a default-on protection). `.default` applies
-    /// `default_initial_source_rate_cap` (32, the recommended
-    /// open-internet value): fresh Initials from a source whose
-    /// recent count is at or above the cap within
-    /// `source_rate_window_us` are rejected before any Retry / TLS /
-    /// Connection setup, bounding a per-source Initial flood that
-    /// would otherwise allocate connection state. Datagrams to
-    /// existing slots are unaffected. Set `.disabled` to opt out —
-    /// e.g. behind a trusted front-end that already polices source
-    /// rate, or when the embedder supplies `from = null`
-    /// (unattributed) datagrams, for which the gate is a no-op
-    /// anyway. `.{ .limit = 0 }` fails `Server.init` with
-    /// `InvalidConfig`.
-    initial_source_rate_limit: RateLimitImpl = .default,
-
-    /// Sliding-window size for `initial_source_rate_limit`,
-    /// in microseconds. Default is one second. Shared by the VN
-    /// rate-limit window (`vn_source_rate_limit`).
-    source_rate_window_us: u64 = 1_000_000,
-
-    /// Maximum number of distinct source addresses the rate limiter
-    /// tracks at once. Excess sources rotate out the oldest entry.
-    /// Only consulted when the limiter is enabled.
-    source_rate_table_capacity: u32 = 4096,
-
-    /// Per-source-address Version-Negotiation-emission cap (was
-    /// `max_vn_per_source_per_window: ?u32` before 0.10.0; renamed
-    /// for the same reason as `initial_source_rate_limit`).
-    /// `.disabled` turns the limiter off (every non-v1 long-header
-    /// packet earns a VN response, subject only to the bounded
-    /// global stateless queue). Hardening guide §4.4: a peer
-    /// flooding non-v1 long-header probes from a single address can
-    /// otherwise force up to `stateless_response_queue_capacity`
-    /// outbound bytes per drain cycle. `.default` applies
-    /// `default_vn_source_rate_cap` (8, the open-internet
-    /// recommendation) — legitimate clients fix their version after
-    /// one VN response and retry with v1.
-    vn_source_rate_limit: RateLimitImpl = .default,
-
-    /// 32-byte HMAC key used to mint and validate stateless Retry
-    /// tokens (RFC 9000 §8.1.2). When null, Retry is disabled and
-    /// every well-formed Initial is accepted directly. When set,
-    /// the first Initial from a peer is answered with a Retry
-    /// packet; the connection is only allocated once the peer
-    /// echoes back a valid token in a follow-up Initial.
-    ///
-    /// The key must be stable across the token lifetime so a Retry
-    /// minted on one packet can be validated on the next. Embedders
-    /// fronting multiple servers behind a load balancer should
-    /// share one key across the pool.
-    retry_token_key: ?RetryTokenKey = null,
-    /// Lifetime of a minted Retry token in microseconds. Tokens
-    /// older than this validate as `expired` and are dropped.
-    /// Default is 10 seconds — the QNS-recommended ceiling, large
-    /// enough to absorb a slow-handshake client and small enough
-    /// that a stolen token expires before it can be replayed.
-    retry_token_lifetime_us: u64 = 10_000_000,
-    /// Maximum number of distinct source addresses for which the
-    /// server holds Retry-pending state at once. Excess sources
-    /// evict the oldest entry. Only consulted when
-    /// `retry_token_key` is non-null.
-    retry_state_table_capacity: u32 = 4096,
-
-    /// AES-GCM-256 key used to mint and validate NEW_TOKEN frames
-    /// (RFC 9000 §8.1.3). When null, NEW_TOKEN issuance is disabled
-    /// and Initial-token validation falls through to the Retry
-    /// token gate. When set, the server emits one NEW_TOKEN per
-    /// successfully-handshake-confirmed connection, and accepts
-    /// returning clients presenting a valid NEW_TOKEN as already
-    /// address-validated (no Retry round-trip).
-    ///
-    /// This key is **distinct from `retry_token_key`** by design:
-    /// NEW_TOKENs typically outlive Retry tokens by orders of
-    /// magnitude (hours/days vs. seconds), so they need their own
-    /// rotation policy. Sharing the key would force NEW_TOKEN
-    /// rotation every time the operator rotated the Retry key.
-    new_token_key: ?conn_mod.NewTokenKey = null,
-    /// Lifetime of a minted NEW_TOKEN in microseconds. Returning
-    /// clients presenting a token older than this fall through to
-    /// the Retry gate (or the no-validation accept path, if Retry
-    /// is also disabled). Default 24 hours — long enough that a
-    /// returning user a day later still skips Retry, short enough
-    /// that a stolen token's window of misuse is bounded.
-    new_token_lifetime_us: u64 = 24 * 3600 * 1_000_000,
-
-    /// QUIC 0-RTT (early data) posture on the auto-built TLS context
-    /// (replaces `enable_0rtt: bool` + `early_data_anti_replay: ?*T`
-    /// as of 0.10.0 — see `EarlyData`). `.disabled` by default to
-    /// satisfy the §5.2 / §12 hardening posture: 0-RTT is replayable
-    /// and unsuitable for state-changing requests without an
-    /// anti-replay mechanism (RFC 9001 §5.6 / RFC 8446 §8).
-    ///
-    /// The two enabled variants differ only in replay protection, and
-    /// the unprotected one has to be named explicitly — the old pair
-    /// let `enable_0rtt = true` with a forgotten tracker ship
-    /// replay-exposed 0-RTT with no error and no log line.
-    ///
-    /// Override-mode embedders must set this too. Supplying your own
-    /// `tls_context_override` means you own that context's
-    /// `early_data_enabled` flag — but this field additionally drives
-    /// the RFC 9001 §4.6.1 early-data *context* install on every fresh
-    /// slot (`setEarlyDataContextForParams`, without which BoringSSL
-    /// refuses 0-RTT and issued tickets are never 0-RTT-capable), the
-    /// anti-replay tracker's clock, and the posture carried across
-    /// `replaceTlsContext`. Leaving it `.disabled` while enabling early
-    /// data on your own context yields a server where 0-RTT silently
-    /// never works.
-    early_data: EarlyDataImpl = .disabled,
-
-    /// Whether to encode the locally-recorded close-reason string into
-    /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
-    /// hardening guide §9 / §12: internal parser-error strings reveal
-    /// implementation detail to the peer (parser fingerprinting,
-    /// internal state names). Local introspection is unaffected; the
-    /// embedder still sees the reason via close events.
-    ///
-    /// Threaded onto every Connection the Server creates. Embedders
-    /// can also set `Connection.reveal_close_reason_on_wire` directly
-    /// for finer-grained control (e.g. dev/debug builds).
-    reveal_close_reason_on_wire: bool = false,
-
-    /// Per-Connection cap on bytes resident in peer-controlled
-    /// reassembly / queue buffers (CRYPTO, DATAGRAM, stream send /
-    /// recv). See `conn.state.default_max_connection_memory` and
-    /// `Connection.max_connection_memory` for the per-buffer
-    /// rationale. Threaded onto every accepted slot at
-    /// `openSlotFromInitial` time. 32 MiB by default — a healthy
-    /// upper bound that still leaves headroom for the per-buffer
-    /// caps to do their job before this aggregate cap fires.
-    max_connection_memory: u64 = conn_mod.state.default_max_connection_memory,
-
-    /// Number of ack-eliciting application packets the server requires
-    /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
-    /// matches `quic_zig.conn.state.application_ack_eliciting_threshold`.
-    /// Lower this to 1 for low-RTT links where every packet should be
-    /// ACKed; raise it to amortize ACK overhead at the cost of more
-    /// peer PTOs. Threaded onto every Connection at slot-open time.
-    delayed_ack_packet_threshold: u8 = conn_mod.state.application_ack_eliciting_threshold,
-
-    /// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168) on every
-    /// Connection the Server creates. Default `true` — production
-    /// QUIC reaps modest goodput wins by reacting to router-driven
-    /// CE marks. Flip to `false` only in environments known to
-    /// bleach ECN bits (some legacy NATs / firewalls). Threaded onto
-    /// every Connection's `ecn_enabled` field at slot-open time.
-    enable_ecn: bool = true,
-
-    /// Listener-level packet rate limit (hardening guide §4.1; was
-    /// `max_datagrams_per_window: ?u32` before 0.10.0 — retyped onto
-    /// the shared `RateLimit` union with its siblings): drop incoming
-    /// UDP datagrams when the global per-window count exceeds this
-    /// cap, in datagrams per window. `.default` is off — the right
-    /// value depends on your deployment envelope, so production opts
-    /// in with `.{ .limit = n }`. The window length is
-    /// `listener_rate_window_us`; the bucket is single-global (no
-    /// per-source bookkeeping) so it shares state with nothing and
-    /// triggers cheaply on a flood from many spoofed sources.
-    ///
-    /// Recommended: scale to ~2x peak observed packets-per-window,
-    /// then alert on `MetricsSnapshot.feeds_listener_rate_limited`
-    /// growing. `.{ .limit = 0 }` fails `Server.init` with
-    /// `InvalidConfig`.
-    listener_datagram_rate_limit: RateLimitImpl = .default,
-
-    /// Listener-level byte rate limit (hardening guide §4.1; was
-    /// `max_bytes_per_window: ?u64` before 0.10.0): drop incoming UDP
-    /// datagrams when the global per-window byte total exceeds this
-    /// cap, in bytes per window. `.default` is off — production opts
-    /// in with `.{ .limit = n }`. Shares
-    /// `listener_rate_window_us` with the packet-count cap; the
-    /// bucket is single-global (no per-source bookkeeping) so a
-    /// flood of few-but-large datagrams from any number of sources
-    /// is gated even when the per-packet cap is generous.
-    ///
-    /// Recommended: scale to ~2x peak observed bytes-per-window,
-    /// then alert on `MetricsSnapshot.feeds_listener_byte_rate_limited`
-    /// growing. `.{ .limit = 0 }` fails `Server.init` with
-    /// `InvalidConfig`.
-    listener_byte_rate_limit: RateLimitImpl = .default,
-
-    /// Window length for `listener_datagram_rate_limit` /
-    /// `listener_byte_rate_limit` in microseconds. Default 1 second.
-    /// Smaller windows make the caps more responsive at the cost of
-    /// more reset jitter; larger windows smooth bursty traffic. Both
-    /// listener-level caps share this single window.
-    listener_rate_window_us: u64 = 1_000_000,
-
-    /// Per-source bandwidth shaping (hardening §4.1 token-bucket; was
-    /// `max_bytes_per_source_per_second: ?u64` before 0.10.0). The cap
-    /// is in **bytes per second**: every accepted datagram from a given
-    /// source charges `bytes.len` against a token bucket that refills
-    /// at that rate, up to the same value as a hard cap (one second's
-    /// burst). When the bucket is empty the datagram is dropped and
-    /// `feeds_source_bandwidth_limited` ticks.
-    ///
-    /// `.default` is off — production opts in with
-    /// `.{ .limit = bytes_per_second }`. Distinct from the global
-    /// sliding-window `listener_byte_rate_limit`: this gates per
-    /// source, the global cap gates aggregate. Charging happens AFTER
-    /// the global gates approve, so the global caps still bound
-    /// aggregate bandwidth even when every individual source has full
-    /// buckets. `.{ .limit = 0 }` fails `Server.init` with
-    /// `InvalidConfig`.
-    source_byte_rate_limit: RateLimitImpl = .default,
-
-    /// Per-source cap on `LogEvent` emissions per window (hardening
-    /// guide §9.4; was `max_log_events_per_source_per_window: ?u32`
-    /// before 0.10.0 — renamed and retyped alongside its two sibling
-    /// limiters so `null` could not silently switch off a
-    /// default-on protection). When the cap fires, the log is
-    /// dropped silently — no nested log about the dropped log.
-    /// `.default` applies `default_log_source_rate_cap` (16 events
-    /// per window per source); `.disabled` opts out, accepting an
-    /// unbounded log-event rate. Reuses `source_rate_window_us` (so
-    /// the Initial / VN / log windows all share one knob).
-    ///
-    /// Log events with `from = null` (no source attribution) bypass
-    /// the limiter — see `acceptLogRate`. Embedders that want a
-    /// global ceiling on null-source events should put one in their
-    /// own log_callback.
-    log_source_rate_limit: RateLimitImpl = .default,
-
-    /// QUIC wire-format versions this server accepts on inbound
-    /// Initials. RFC 9000 §6 / RFC 8999 §6: any long-header packet
-    /// whose declared version isn't in this list earns a Version
-    /// Negotiation response listing the configured set. Must be
-    /// non-empty.
-    ///
-    /// Defaults to `&.{ 0x00000001 }` (QUIC v1 only) so v0.x embedders
-    /// keep the same wire posture they had before RFC 9368 v2 support
-    /// landed. Adding `0x6b3343cf` (`quic_zig.QUIC_VERSION_2`) opts
-    /// the server into v2: incoming v2 Initials are accepted under
-    /// the §3.3.1 salt + §3.3.2 labels, outgoing Retries / VN frames
-    /// echo the negotiated version, and the optional
-    /// `version_information` (codepoint 0x11) transport parameter
-    /// advertises the full list to the peer for compatible-version
-    /// upgrade.
-    accepted_versions: []const u32 = &.{0x00000001},
-
-    /// RFC 8899 DPLPMTUD configuration applied to every accepted
-    /// connection. The default config (1200 floor, 1452 ceiling,
-    /// 64-byte step, 3-strike threshold, enabled) matches the
-    /// QUIC v1 minimum-MTU floor and the typical 1500-byte internet
-    /// MTU. Set `enable = false` to keep the static-MTU behaviour
-    /// (PMTU stays at `initial_mtu`).
-    pmtud: conn_mod.PmtudConfig = .{},
-
-    /// RFC 9000 §18.2 / §5.1.1 server preferred-address advertisement.
-    /// Null disables the feature (default — no `preferred_address`
-    /// transport parameter is sent and clients have no server-driven
-    /// post-handshake migration target).
-    ///
-    /// When set, every accepted connection's outbound transport
-    /// parameters carry a `preferred_address` value pointing at the
-    /// configured IPv4 / IPv6 address pair. The seq-1 server CID +
-    /// stateless reset token the parameter embeds is minted per-
-    /// connection through `mintLocalScid` + `conn.stateless_reset.derive`,
-    /// and queued on the connection as a NEW_CONNECTION_ID(seq=1)
-    /// equivalent so post-migration packets the client addresses
-    /// to the alt-CID authenticate. **Requires
-    /// `Config.stateless_reset_key`**; without it `Server.init`
-    /// returns `InvalidConfig` (the deterministic token derivation
-    /// is the only path quic_zig surfaces for the seq-1 token).
-    ///
-    /// `runUdpServer` consults this field to also bind alt listener
-    /// socket(s) on the configured port(s), poll all bound sockets
-    /// per iteration, and route outbound replies through the socket
-    /// the slot most recently received on. Embedders driving their
-    /// own loop are responsible for the multi-socket plumbing —
-    /// the codec auto-build still applies.
-    preferred_address: ?PreferredAddressConfig = null,
-};
-
-/// Argument to `Server.replaceTlsContext`. Either fresh PEM bytes
-/// (the server rebuilds an internally-owned context with the same
-/// shape `Server.init` produces) or a caller-built context the
-/// embedder hands over wholesale. Re-exported as `Server.TlsReload`.
-const TlsReloadImpl = union(enum) {
-    /// Rebuild a fresh server context from PEM-encoded cert chain
-    /// and private key. The new context is configured identically to
-    /// `Server.init`'s default path: TLS-1.3 only, `verify=.none`,
-    /// the server's currently-cached ALPN list, and the early-data
-    /// posture the Server was originally initialized with via
-    /// `Config.early_data`. The Server takes ownership of the
-    /// resulting context and `deinit`s it (after refcounted draining)
-    /// on `Server.deinit` or on a subsequent `replaceTlsContext`.
-    pem: struct {
-        /// PEM-encoded certificate chain (leaf first, then any
-        /// intermediates). Must outlive only this call — the new
-        /// `boringssl.tls.Context` parses the bytes during construction
-        /// and copies what it needs.
-        cert_pem: []const u8,
-        /// PEM-encoded private key matching the leaf in `cert_pem`.
-        /// Same lifetime constraint as `cert_pem`.
-        key_pem: []const u8,
-    },
-    /// A caller-built context the Server should adopt as the new
-    /// current context. Use this to wire up bespoke options the
-    /// `pem` variant doesn't expose (custom verify modes, session
-    /// ticket callbacks, ALPN protocols different from the
-    /// init-time list, etc.). The Server takes ownership and will
-    /// `deinit` the override when it eventually drains.
-    override: boringssl.tls.Context,
-};
+const server_config = @import("server/config.zig");
+/// Alt-address advertisement config for `Config.preferred_address`;
+/// declared in server/config.zig.
+pub const PreferredAddressConfig = server_config.PreferredAddressConfig;
+const RateLimitImpl = server_config.RateLimit;
+const EarlyDataImpl = server_config.EarlyData;
+const ConfigImpl = server_config.Config;
+const TlsReloadImpl = server_config.TlsReload;
 
 /// One slot in the server's per-connection table. The `Connection`
 /// is heap-allocated so the embedder can hold stable pointers across
@@ -1150,74 +304,9 @@ const SlotImpl = struct {
     }
 };
 
-/// RFC 9368 §6 multi-Initial pre-parse buffer. Owned by the slot;
-/// dropped once the CH completes or the Initial-packet budget runs
-/// out. Sized to hold the largest CH the pre-parse will accept
-/// (`vneg_preparse.max_client_hello_bytes`); together with the
-/// reassembler's bookkeeping that is roughly 4 KiB per pending slot.
-///
-/// DoS posture: the reassembler is created lazily and destroyed
-/// eagerly — a flood of new Initials still pays the global slot
-/// quota and the per-source rate limiter, and each pending state
-/// burns at most `max_initial_packets` packets of decryption work
-/// before falling back to the wire version. There is no unbounded
-/// per-CID accumulation.
-const PendingUpgradeState = struct {
-    /// Maximum number of client Initials we will decrypt to drive
-    /// the upgrade decision before giving up and committing to the
-    /// wire version. Real CHs split across at most 2-3 Initials in
-    /// practice; 4 keeps a margin without letting a peer churn the
-    /// pre-parse path indefinitely.
-    pub const max_initial_packets: u8 = 4;
+const PendingUpgradeState = server_vneg.PendingUpgradeState;
 
-    /// Backing storage for the assembled CH. The reassembler borrows
-    /// this slice via `init`.
-    ch_buf: [wire.vneg_preparse.max_client_hello_bytes]u8 = undefined,
-    /// Per-slot reassembler. Holds segment bookkeeping plus a
-    /// pointer back into `ch_buf`.
-    rc: wire.vneg_preparse.ChReassembler,
-    /// Number of Initials we've already consumed for this slot's
-    /// upgrade decision. Bumps on every routed datagram fed through
-    /// `advancePendingUpgrade` and on the slot-creating Initial when
-    /// `openPendingUpgrade` seeds the reassembler. Bounded by
-    /// `max_initial_packets`.
-    initials_seen: u8 = 0,
-    /// The wire version the FIRST Initial arrived under. Subsequent
-    /// Initials decrypted by the pre-parse use the same Initial-key
-    /// derivation; if the peer flipped versions mid-flight (which
-    /// would be a peer bug), `openInitial` will fail authentication
-    /// and the pre-parse falls back gracefully.
-    wire_version: u32,
-
-    fn init(self: *PendingUpgradeState, wire_version: u32) void {
-        self.* = .{
-            .rc = wire.vneg_preparse.ChReassembler.init(&self.ch_buf),
-            .wire_version = wire_version,
-        };
-    }
-};
-
-/// Bookkeeping for one TLS context that has been swapped out by
-/// `Server.replaceTlsContext` but still has live slots referencing it
-/// via per-connection SSL handles. The entry is `deinit`-ed and
-/// dropped when `refcount` hits zero on reap.
-const DrainingTlsEntry = struct {
-    /// The swapped-out context. Owned — `refcount==0` deinit calls
-    /// `Context.deinit` on this. Per-connection SSL handles created
-    /// against this context already hold their own up-ref via
-    /// `SSL_new`, so deiniting here only drops the Server's reference;
-    /// the underlying SSL_CTX stays alive until every per-connection
-    /// SSL handle is freed.
-    ctx: boringssl.tls.Context,
-    /// Generation tag. Slots opened against this context recorded the
-    /// same value in their `tls_generation` field; reap matches on it.
-    generation: u32,
-    /// Number of live slots still associated with this context. Set
-    /// at swap-time (= count of pre-swap slots whose generation was
-    /// `current_generation`); decremented in `reap` when one of those
-    /// slots is reclaimed.
-    refcount: usize,
-};
+const DrainingTlsEntry = server_tls.DrainingTlsEntry;
 
 /// Outcome of feeding a single datagram to the server. Re-exported
 /// as `Server.FeedOutcome`. The variants distinguish reasons an
@@ -1724,7 +813,7 @@ pub const Server = struct {
             // themselves.
             if (config.early_data.antiReplayTracker()) |tracker| {
                 try tls_ctx.setAllowEarlyDataCallback(
-                    antiReplayEarlyDataTrampoline,
+                    server_tls.antiReplayEarlyDataTrampoline,
                     @ptrCast(tracker),
                 );
             }
@@ -1850,26 +939,7 @@ pub const Server = struct {
     ///     a `quic_lb` configuration (no factory to rotate).
     ///   * `RandFailed` — CSPRNG nonce-counter seed failed.
     pub fn installLbConfig(self: *Server, new_cfg: lb_mod.LbConfig) Error!void {
-        new_cfg.validate() catch return Error.InvalidConfig;
-        if (self.lb_factory == null) return Error.InvalidConfig;
-        if (new_cfg.cidLength() != self.local_cid_len) return Error.InvalidConfig;
-
-        const new_factory = lb_mod.Factory.initUnchecked(new_cfg) catch |err| switch (err) {
-            error.AesKeyInvalid => return Error.InvalidConfig,
-            error.RandFailure => return Error.RandFailed,
-            error.InvalidLbConfig => return Error.InvalidConfig,
-            error.BufferTooSmall, error.NonceExhausted => unreachable,
-        };
-        if (self.lb_factory) |*old| old.deinit();
-        self.lb_factory = new_factory;
-
-        // Auto-push to live peers. No-op without a stateless-reset
-        // key (token derivation needs one); embedders running
-        // without the key drive replenishment manually via
-        // `connection_ids_needed`.
-        if (self.stateless_reset_key != null) {
-            _ = self.rotateLiveSlotCids();
-        }
+        return server_routing.installLbConfig(self, new_cfg);
     }
 
     /// Push a fresh NEW_CONNECTION_ID frame to every live slot using
@@ -1892,37 +962,7 @@ pub const Server = struct {
     /// reach for it directly only when proactively pushing CIDs
     /// without a config swap.
     pub fn rotateLiveSlotCids(self: *Server) usize {
-        const factory_ptr = if (self.lb_factory) |*f| f else return 0;
-        const key = self.stateless_reset_key orelse return 0;
-
-        var rotated: usize = 0;
-        for (self.slots.items) |slot| {
-            if (slot.conn.isClosed()) continue;
-            if (slot.conn.localConnectionIdIssueBudget(0) == 0) continue;
-
-            var cid_buf: [20]u8 = undefined;
-            const cid_slice = cid_buf[0..self.local_cid_len];
-            _ = factory_ptr.mint(cid_slice) catch continue;
-
-            const token = conn_mod.stateless_reset.derive(&key, cid_slice) catch continue;
-            const next_seq = slot.conn.nextLocalConnectionIdSequence(0);
-            const provision = conn_mod.ConnectionIdProvision{
-                .connection_id = cid_slice,
-                .stateless_reset_token = token,
-                .retire_prior_to = next_seq,
-            };
-            _ = slot.conn.replenishConnectionIds(&[_]conn_mod.ConnectionIdProvision{provision}) catch continue;
-
-            // Bring the routing table in line with the slot's new
-            // active-CID set so the new CID becomes routable on
-            // the next inbound datagram. Failures here leave the
-            // CID in the connection but unreachable until the next
-            // organic resync — log via the standard error path
-            // by skipping the rotation count.
-            self.resyncSlotCids(slot) catch continue;
-            rotated += 1;
-        }
-        return rotated;
+        return server_routing.rotateLiveSlotCids(self);
     }
 
     pub fn deinit(self: *Server) void {
@@ -2495,29 +1535,8 @@ pub const Server = struct {
         return reaped;
     }
 
-    /// Decrement the refcount on the draining entry for `generation`,
-    /// if any. When the refcount hits zero, the entry's context is
-    /// torn down and the entry is dropped from
-    /// `draining_tls_contexts`. A `generation` matching
-    /// `current_generation` is a no-op (the current context isn't a
-    /// draining entry until the next `replaceTlsContext`).
     fn releaseGeneration(self: *Server, generation: u32) void {
-        if (generation == self.current_generation) return;
-        var idx: usize = 0;
-        while (idx < self.draining_tls_contexts.items.len) : (idx += 1) {
-            const entry = &self.draining_tls_contexts.items[idx];
-            if (entry.generation != generation) continue;
-            // invariant: refcount > 0 — every live slot at this
-            // generation contributed exactly one. Reaping a slot
-            // can't drop to zero before all its refs are accounted.
-            std.debug.assert(entry.refcount > 0);
-            entry.refcount -= 1;
-            if (entry.refcount == 0) {
-                entry.ctx.deinit();
-                _ = self.draining_tls_contexts.swapRemove(idx);
-            }
-            return;
-        }
+        return server_tls.releaseGeneration(self, generation);
     }
 
     /// Queue `CONNECTION_CLOSE` on every live slot. Embedders should
@@ -2580,94 +1599,13 @@ pub const Server = struct {
     /// The Server is left untouched on every error: the current
     /// context, slot table, and draining list are all unchanged.
     pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
-        var new_ctx: boringssl.tls.Context = switch (reload) {
-            .pem => |pem| blk: {
-                if (pem.cert_pem.len == 0 or pem.key_pem.len == 0) return Error.InvalidConfig;
-                var ctx = try boringssl.tls.Context.initServer(.{
-                    .verify = .none,
-                    .min_version = boringssl.raw.TLS1_3_VERSION,
-                    .max_version = boringssl.raw.TLS1_3_VERSION,
-                    .alpn = self.alpn_protocols,
-                    .early_data_enabled = self.enable_0rtt,
-                });
-                errdefer ctx.deinit();
-                try ctx.loadCertChainAndKey(pem.cert_pem, pem.key_pem);
-                // Carry the init-time mTLS posture onto the
-                // replacement context — a cert rotation must not
-                // silently stop verifying clients.
-                if (self.client_ca_pem) |ca| {
-                    try tls_mod.pem.installTrustAnchors(ctx, ca, .require_peer_cert);
-                }
-                // Same for the 0-RTT anti-replay hook: `Server.init`
-                // installs it on the original context; a rotated
-                // context that re-enables early data without it would
-                // silently accept replayed 0-RTT flights for every
-                // ticket minted after the swap (RFC 9001 §5.6 /
-                // hardening §5.2).
-                if (self.enable_0rtt) {
-                    if (self.early_data_anti_replay) |tracker| {
-                        try ctx.setAllowEarlyDataCallback(
-                            antiReplayEarlyDataTrampoline,
-                            @ptrCast(tracker),
-                        );
-                    }
-                }
-                break :blk ctx;
-            },
-            // Mirror the `Server.init` rule that rejects
-            // `client_ca_pem` + `tls_context_override`: an adopted
-            // context owns its own verification posture, and adopting
-            // one while this Server is configured for mTLS would
-            // silently stop verifying clients (and flip-flop back on
-            // a later `.pem` reload). mTLS servers rotate via `.pem`.
-            .override => |ctx| blk: {
-                if (self.client_ca_pem != null) return Error.InvalidConfig;
-                break :blk ctx;
-            },
-        };
-        // From this point on the new context is logically the
-        // Server's. If the bookkeeping below fails we have to deinit
-        // it ourselves to avoid leaking — the caller already
-        // surrendered ownership of an `.override`, and the `.pem`
-        // branch built it locally.
-        errdefer new_ctx.deinit();
-
-        // Count live slots at the current generation so we know how
-        // many references the about-to-drain context still holds.
-        var refs: usize = 0;
-        const gen_to_drain = self.current_generation;
-        for (self.slots.items) |slot| {
-            if (slot.tls_generation == gen_to_drain) refs += 1;
-        }
-
-        // Reserve a draining slot up-front when the pre-swap context
-        // is owned and still referenced — `appendBounded`-style call
-        // would also work, but doing it now means an OOM here leaves
-        // both the old context and the slot table untouched.
-        if (self.owns_tls and refs > 0) {
-            try self.draining_tls_contexts.append(self.allocator, .{
-                .ctx = self.tls_ctx,
-                .generation = gen_to_drain,
-                .refcount = refs,
-            });
-        } else if (self.owns_tls and refs == 0) {
-            // Owned but no live slots reference it — drop immediately.
-            self.tls_ctx.deinit();
-        }
-        // If !owns_tls, the embedder retains ownership of the
-        // pre-swap context — we just forget the pointer.
-
-        self.tls_ctx = new_ctx;
-        self.owns_tls = true;
-        self.current_generation +%= 1;
+        return server_tls.replaceTlsContext(self, reload);
     }
 
     // -- internals ------------------------------------------------------
 
     fn findSlotForDatagram(self: *Server, bytes: []const u8) ?*Slot {
-        const dcid = peekDcidForServer(bytes, self.local_cid_len) orelse return null;
-        const key = cidKeyFromSlice(dcid);
-        return self.cid_table.get(key);
+        return server_routing.findSlotForDatagram(self, bytes);
     }
 
     /// Fill `dst` (length `self.local_cid_len`) with a freshly-minted
@@ -2701,41 +1639,7 @@ pub const Server = struct {
     /// `openSlotFromInitial` and `mintAndQueueRetry` paths route
     /// through here automatically.
     pub fn mintLocalScid(self: *Server, dst: []u8) Error!void {
-        if (self.lb_factory) |*factory| {
-            const n = factory.mint(dst) catch |err| switch (err) {
-                error.RandFailure => return Error.RandFailed,
-                // Per draft §3 ¶3 / §3.1: when the active
-                // configuration can no longer mint distinct CIDs the
-                // server SHOULD switch to a new configuration or use
-                // the unroutable fallback. Until the operator calls
-                // `installLbConfig`, this branch keeps the server
-                // alive by emitting unroutable CIDs that an LB can
-                // route via its configured fallback path.
-                error.NonceExhausted => {
-                    if (dst.len < lb_mod.min_unroutable_cid_len) {
-                        return Error.RandFailed;
-                    }
-                    _ = lb_mod.mintUnroutable(dst, @intCast(dst.len)) catch {
-                        return Error.RandFailed;
-                    };
-                    return;
-                },
-                // `Server.init` already rejected ill-sized
-                // configurations, and `local_cid_len` matches
-                // `Factory.cidLength()` by construction. Reaching any
-                // of these would mean an invariant upstream slipped —
-                // surface as the generic SCID mint-failure code
-                // rather than panicking, since the network-input path
-                // must remain non-fatal.
-                error.BufferTooSmall,
-                error.InvalidLbConfig,
-                error.AesKeyInvalid,
-                => return Error.RandFailed,
-            };
-            std.debug.assert(n == dst.len);
-            return;
-        }
-        try boringssl.crypto.rand.fillBytes(dst);
+        return server_routing.mintLocalScid(self, dst);
     }
 
     fn openSlotFromInitial(
@@ -2745,271 +1649,7 @@ pub const Server = struct {
         now_us: u64,
         retry_ctx: ?RetryEcho,
     ) !*Slot {
-        const ids = peekLongHeaderIds(bytes) orelse return error.InvalidInitial;
-
-        const slot = try self.allocator.create(Slot);
-        errdefer self.allocator.destroy(slot);
-
-        const conn_ptr = try self.allocator.create(Connection);
-        errdefer self.allocator.destroy(conn_ptr);
-
-        conn_ptr.* = try Connection.initServer(self.allocator, self.tls_ctx);
-        errdefer conn_ptr.deinit();
-        conn_ptr.reveal_close_reason_on_wire = self.reveal_close_reason_on_wire;
-        conn_ptr.max_connection_memory = self.max_connection_memory;
-        conn_ptr.delayed_ack_packet_threshold = self.delayed_ack_packet_threshold;
-        conn_ptr.ecn_enabled = self.ecn_enabled;
-        // RFC 8899 DPLPMTUD: thread the embedder config to the
-        // connection. setPmtudConfig also re-initialises every
-        // existing path (only the primary at this point), so the
-        // per-path pmtu / pmtu_state lands consistent with the config.
-        conn_ptr.setPmtudConfig(self.pmtud_config);
-
-        try conn_ptr.bind();
-        if (self.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, self.qlog_user_data);
-
-        // Post-Retry connections use the SCID we minted in the Retry
-        // packet — that SCID was bound into the token HMAC and is
-        // the DCID the peer is actually addressing. Pre-Retry (or
-        // Retry-disabled) connections use a fresh random SCID.
-        var server_scid: [20]u8 = undefined;
-        var local_scid: []const u8 = undefined;
-        if (retry_ctx) |echo| {
-            local_scid = echo.retry_scid[0..echo.retry_scid_len];
-            @memcpy(server_scid[0..echo.retry_scid_len], local_scid);
-            local_scid = server_scid[0..echo.retry_scid_len];
-        } else {
-            try self.mintLocalScid(server_scid[0..self.local_cid_len]);
-            local_scid = server_scid[0..self.local_cid_len];
-        }
-        try conn_ptr.setLocalScid(local_scid);
-
-        // The original DCID for the transport-parameter binding is
-        // the *first* Initial's DCID. Pre-Retry that's the DCID on
-        // this datagram; post-Retry that was captured before we
-        // emitted the Retry and the on-wire DCID here is our
-        // server-issued retry_scid.
-        const original_dcid = if (retry_ctx) |echo| echo.original_dcid else ConnectionId.fromSlice(ids.dcid);
-        // The DCID the peer is addressing on the wire — which is
-        // also the routing key — is what the Initial header
-        // currently carries.
-        const initial_dcid = ConnectionId.fromSlice(ids.dcid);
-
-        var params = self.transport_params;
-        params.original_destination_connection_id = original_dcid;
-        params.initial_source_connection_id = ConnectionId.fromSlice(local_scid);
-        if (retry_ctx) |_| {
-            params.retry_source_connection_id = ConnectionId.fromSlice(local_scid);
-        }
-
-        // RFC 9000 §18.2 / §5.1.1 `preferred_address` advertise. When
-        // `Config.preferred_address` is set, mint a fresh seq-1 SCID
-        // through the same `mintLocalScid` path as seq-0, derive the
-        // accompanying stateless-reset token from the
-        // `Config.stateless_reset_key` (Server.init's validation
-        // guarantees the key is set whenever `preferred_address` is),
-        // and stamp both into the outbound transport parameter so the
-        // EE BoringSSL serializes carries the value verbatim. The
-        // matching NEW_CONNECTION_ID(seq=1) is queued below, after
-        // `acceptInitial` so the connection's local-CID table is
-        // ready to register a sequence-1 entry.
-        var pa_alt_cid_storage: [20]u8 = undefined;
-        var pa_alt_cid_slice: ?[]u8 = null;
-        var pa_alt_token: [16]u8 = @splat(0);
-        if (self.preferred_address) |pa_cfg| {
-            const slice = pa_alt_cid_storage[0..self.local_cid_len];
-            try self.mintLocalScid(slice);
-            const key = self.stateless_reset_key orelse unreachable;
-            pa_alt_token = conn_mod.stateless_reset.derive(&key, slice) catch
-                return Error.RandFailed;
-            pa_alt_cid_slice = slice;
-            params.preferred_address = buildPreferredAddressParam(pa_cfg, slice, pa_alt_token);
-        }
-
-        // RFC 9368 §5/§6: pre-parse the inbound Initial under wire-
-        // version keys to extract the client's `version_information`
-        // (codepoint 0x11) transport parameter, and intersect with
-        // our configured `versions` list. The first server-preferred
-        // version that also appears in the client's
-        // `available_versions` is our `chosen_version`; if it differs
-        // from the wire version, we upgrade.
-        //
-        // The pre-parse is purely advisory — any failure (auth fail,
-        // fragmented ClientHello, missing extension, malformed
-        // payload) returns `null` and we fall back to "use the wire
-        // version", which is always spec-compliant. We never refuse a
-        // connection because pre-parse failed.
-        //
-        // The decision MUST land BEFORE BoringSSL produces the EE
-        // (which embeds our transport_parameters): RFC 9368 §5
-        // requires `chosen_version` in the EE to match the version
-        // of the server's first Initial response carrying it, so the
-        // outbound transport_params must already say chosen=v_upgrade
-        // when BoringSSL serializes the EE. We arrange that by:
-        //   (a) running the pre-parse here, before `acceptInitial`,
-        //   (b) building `params.compatibleVersions = [chosen, ...]`
-        //       so the EE points at the upgrade target,
-        //   (c) calling `acceptInitial`, which pushes those params to
-        //       BoringSSL and (separately) sets `self.version` to the
-        //       wire version so `handleInitial` opens this datagram
-        //       under wire-version keys,
-        //   (d) flipping `self.version` to `chosen` AFTER the first
-        //       `handleWithEcn` returns (in `dispatchToSlot`), so
-        //       outbound packets sealed by `poll` go out under the
-        //       upgrade-target keys.
-        var ch_complete: bool = false;
-        const upgrade_target = self.preparseUpgradeTarget(bytes, ids.version, &ch_complete);
-        const chosen_version: u32 = upgrade_target orelse ids.version;
-        if (self.versions.len > 1) {
-            var ordered: [16]u32 = undefined;
-            ordered[0] = chosen_version;
-            var n: usize = 1;
-            for (self.versions) |v| {
-                if (v == chosen_version) continue;
-                if (n >= ordered.len) break;
-                ordered[n] = v;
-                n += 1;
-            }
-            try params.setCompatibleVersions(ordered[0..n]);
-        }
-        try conn_ptr.acceptInitial(bytes, params);
-        // RFC 9001 §4.6.1: install the 0-RTT replay context BEFORE the
-        // first `handleWithEcn` processes the ClientHello. BoringSSL
-        // compares a resumed ticket's stored context against the
-        // connection's current one when deciding whether to accept
-        // early data; a context installed after ClientHello processing
-        // is invisible to that check, so early data would always be
-        // rejected (and tickets issued here would never be
-        // 0-RTT-capable). The digest builder deliberately excludes
-        // per-connection identifiers (ODCID/ISCID/preferred-address),
-        // so issuance-time and resumption-time digests match across
-        // connections for a stable config. Failures degrade to
-        // "0-RTT refused, connection proceeds" — except OOM, which the
-        // accept path already treats as fatal.
-        if (self.enable_0rtt and self.alpn_protocols.len > 0) {
-            _ = conn_ptr.setEarlyDataContextForParams(
-                params,
-                self.alpn_protocols[0],
-                self.early_data_application_context,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {},
-            };
-        }
-        // Stash the upgrade target so `dispatchToSlot` can flip
-        // `self.version` after the first `handleWithEcn` consumes the
-        // wire-version Initial under wire-version keys.
-        if (upgrade_target) |upgraded| {
-            if (upgraded != ids.version) {
-                conn_ptr.setPendingVersionUpgrade(upgraded);
-            }
-        }
-
-        // RFC 9368 §6 multi-Initial fallback: when the ClientHello
-        // didn't fit in this single Initial and we're in multi-version
-        // mode, attach a streaming reassembler so subsequent routed
-        // Initials can drive the upgrade decision before BoringSSL
-        // emits the EE. The reassembler is pre-seeded with this first
-        // Initial's CRYPTO bytes so the next call to `feed` only has
-        // to add what arrived later. Allocation or pre-seed failures
-        // are non-fatal — the slot simply commits to the wire
-        // version, which is always spec-compliant.
-        const want_pending = !ch_complete and
-            self.versions.len > 1 and
-            wire.initial.isSupportedVersion(ids.version);
-        var pending_upgrade: ?*PendingUpgradeState = null;
-        if (want_pending) {
-            pending_upgrade = self.openPendingUpgrade(bytes, ids.version);
-        }
-        errdefer if (pending_upgrade) |pu| self.allocator.destroy(pu);
-
-        // Queue NEW_CONNECTION_ID(seq=1) carrying the alt-CID minted
-        // for `preferred_address`. RFC 9000 §5.1.1 ¶6 says the client
-        // treats the preferred-address `connection_id` as if it had
-        // arrived in `NEW_CONNECTION_ID(seq=1)`; the server still
-        // emits the matching frame on the wire, and the client's
-        // `registerPeerCid` idempotently absorbs the duplicate. We
-        // queue it AFTER `acceptInitial` so the connection's local-CID
-        // table has its seq-0 entry already in place.
-        if (pa_alt_cid_slice) |alt_cid| {
-            const provision = conn_mod.ConnectionIdProvision{
-                .connection_id = alt_cid,
-                .stateless_reset_token = pa_alt_token,
-            };
-            // Propagate OOM (the broader feed loop expects to bubble
-            // it). Any other failure (CID-issue budget saturated,
-            // alt-CID collision with the seq-0 mint) silently skips
-            // the queue: the transport parameter is still advertised,
-            // and a post-migration packet bearing the unregistered
-            // alt-CID will simply be dropped — pathological for the
-            // server (a same-connection client whose
-            // `active_connection_id_limit < 2` cannot follow the PA
-            // anyway), no need to fail the handshake.
-            _ = conn_ptr.replenishConnectionIds(&[_]conn_mod.ConnectionIdProvision{provision}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {},
-            };
-        }
-
-        slot.* = .{
-            .conn = conn_ptr,
-            .initial_dcid = initial_dcid,
-            .peer_addr = from,
-            .last_activity_us = now_us,
-            .slot_id = self.next_slot_id,
-            .tls_generation = self.current_generation,
-            .pending_upgrade = pending_upgrade,
-            .last_recv_socket_idx = 0,
-        };
-        self.next_slot_id +%= 1;
-
-        // Reserve a slot in the CID table for the initial DCID. If
-        // this fails, the slot was never made visible to the router
-        // and the deferred errdefer will tear down the Connection.
-        try self.cid_table.put(self.allocator, cidKeyFromConnectionId(initial_dcid), slot);
-        errdefer _ = self.cid_table.remove(cidKeyFromConnectionId(initial_dcid));
-
-        try self.slots.append(self.allocator, slot);
-        return slot;
-    }
-
-    /// Close code + local reason for a per-connection error that
-    /// escaped `Connection.handleWithEcn`. Pure and separately tested
-    /// (`slotErrorCloseCode maps ...` below) because the live path
-    /// almost never observes it: when BoringSSL raises an alert, the
-    /// `send_alert` callback has already closed the connection with
-    /// RFC 9001 §4.8's *specific* CRYPTO_ERROR (0x0100 + alert byte)
-    /// before the error unwinds, and `close` is first-wins — so that
-    /// specific code stands and the caller's `close` is a no-op. What
-    /// this mapping actually decides is the alert-less case, and there
-    /// §4.8's generic `handshake_failure` (0x0128) keeps the close
-    /// inside the CRYPTO_ERROR window: INTERNAL_ERROR would tell the
-    /// peer, and the embedder's metrics, that quic-zig broke when TLS
-    /// simply said no.
-    ///
-    /// Reason strings are local-only by default
-    /// (`reveal_close_reason_on_wire`), so they are for the embedder's
-    /// close event, not the peer.
-    fn slotErrorCloseCode(err: anyerror) struct { code: u64, reason: []const u8 } {
-        return switch (err) {
-            error.HandshakeFailed, error.PeerAlerted => .{
-                .code = conn_mod.state.transport_error_crypto_handshake_failure,
-                .reason = "handshake failed",
-            },
-            // RFC 9000 §20.1 INTERNAL_ERROR (0x01) is the catch-all.
-            // Note this bucket is not purely local-side: peer-driven
-            // resource failures (e.g. a full per-level CRYPTO inbox)
-            // land here too, because they reach this catch without a
-            // more specific code of their own. Routing those to
-            // EXCESSIVE_LOAD (0x09) would be more precise and is
-            // deliberately left for a follow-up — it changes
-            // wire-visible codes for cases this release does not
-            // otherwise touch.
-            else => .{
-                .code = conn_mod.state.transport_error_internal,
-                .reason = "Server.handle failed",
-            },
-        };
+        return server_accept.openSlotFromInitial(self, bytes, from, now_us, retry_ctx);
     }
 
     fn dispatchToSlot(
@@ -3019,294 +1659,35 @@ pub const Server = struct {
         from: ?Address,
         now_us: u64,
     ) Error!void {
-        // RFC 9000 §19.16 ¶3 plumbing: tell the connection which of
-        // its locally-issued CIDs this datagram was addressed to,
-        // so `handleRetireConnectionId` can reject a frame retiring
-        // the in-use CID. `null` (no DCID match) leaves the gate
-        // inert — that path is the pre-routing-table bootstrap case
-        // for a brand-new Initial.
-        const dcid_opt = peekDcidForServer(bytes, self.local_cid_len);
-        const seq_opt: ?u64 = if (dcid_opt) |d| slot.conn.findLocalCidSequence(d) else null;
-        slot.conn.setIncomingLocalCidSeq(seq_opt);
-        defer slot.conn.setIncomingLocalCidSeq(null);
-        slot.conn.handleWithEcn(bytes, from, self.last_feed_ecn, now_us) catch |err| switch (err) {
-            // OOM is fatal for the whole server — propagate. The
-            // surrounding `feed` will return `OutOfMemory` to the
-            // embedder, who can decide whether to retry, scale, or
-            // bail.
-            error.OutOfMemory => return Error.OutOfMemory,
-            // Everything else is a per-connection failure: don't tear
-            // down the server. If `Connection.handle` didn't already
-            // transition the connection to `.closed` with a more
-            // specific code, force it so the slot gets reaped on the
-            // next `reap` call. `slotErrorCloseCode` picks the code;
-            // see it for why this is usually a no-op.
-            else => {
-                if (!slot.conn.isClosed()) {
-                    const close_with = slotErrorCloseCode(err);
-                    slot.conn.close(true, close_with.code, close_with.reason);
-                }
-            },
-        };
-        // RFC 9368 §6 compatible-version-negotiation upgrade: the
-        // wire-version Initial has now been opened under wire-version
-        // keys and BoringSSL has consumed the ClientHello (producing
-        // an EE that already embeds our chosen-version transport
-        // params, since `openSlotFromInitial` set those before the
-        // handshake advanced). Flip `self.version` to the upgrade
-        // target so the next `poll` seals the response Initial under
-        // the upgrade-target keys. Idempotent / no-op when no
-        // upgrade was pending.
-        _ = slot.conn.applyPendingVersionUpgrade();
+        return server_accept.dispatchToSlot(self, slot, bytes, from, now_us);
     }
 
-    /// Diff the slot's currently-tracked CIDs against the
-    /// connection's authoritative `localScids` list and patch
-    /// `cid_table` accordingly. Called after every `feed` so that
-    /// an SCID issued during this datagram (NEW_CONNECTION_ID) is
-    /// routable from the *next* datagram on, and a retired SCID
-    /// (RETIRE_CONNECTION_ID consumed during this datagram) stops
-    /// accepting traffic.
-    ///
-    /// Algorithm: O(K + L) where K = current local SCID count and
-    /// L = previously-tracked CID count. Both are bounded by
-    /// `max_tracked_cids_per_slot`; in practice K ≈ L ≈ peer's
-    /// `active_connection_id_limit` (default 8).
     fn resyncSlotCids(self: *Server, slot: *Slot) Error!void {
-        var snapshot_buf: [max_tracked_cids_per_slot]ConnectionId = undefined;
-        const total = slot.conn.localScidCount();
-        // Default `active_connection_id_limit=8` keeps `total` well
-        // under the bound. If an embedder lifts the limit beyond
-        // `max_tracked_cids_per_slot`, the router will silently miss
-        // SCIDs past the cap and the peer could lose connectivity
-        // after a CID rotation. Surface the misconfiguration loudly
-        // in debug builds; release builds still truncate (no
-        // panic), but the configuration is broken either way.
-        std.debug.assert(total <= max_tracked_cids_per_slot);
-        const n = slot.conn.localScids(snapshot_buf[0..@min(total, max_tracked_cids_per_slot)]);
-        const snapshot = snapshot_buf[0..n];
-
-        // Drop tracked CIDs that are no longer in the connection's
-        // active set. `tracked_cids` is small and the inner loop is
-        // a byte compare, so the nominal O(K*L) is fine.
-        var i: usize = 0;
-        while (i < slot.tracked_cid_count) {
-            const tracked = slot.tracked_cids[i];
-            if (!containsConnectionId(snapshot, tracked)) {
-                _ = self.cid_table.remove(cidKeyFromConnectionId(tracked));
-                // Swap-remove to keep the bookkeeping O(1).
-                slot.tracked_cid_count -= 1;
-                slot.tracked_cids[i] = slot.tracked_cids[slot.tracked_cid_count];
-                continue;
-            }
-            i += 1;
-        }
-
-        // Add CIDs that the connection now owns but the table
-        // doesn't yet route. Skip the initial DCID — that one is
-        // peer-chosen, never returned by `localScids`, and it stays
-        // pinned for the lifetime of the slot.
-        for (snapshot) |cid| {
-            if (containsConnectionId(slot.tracked_cids[0..slot.tracked_cid_count], cid)) continue;
-            const gop = try self.cid_table.getOrPut(self.allocator, cidKeyFromConnectionId(cid));
-            if (gop.found_existing and gop.value_ptr.* != slot) {
-                // CID collision with a different live slot (astronomically
-                // unlikely given CID entropy). Do not hijack its routing
-                // or claim the CID: overwriting would silently steal the
-                // other slot's traffic, and reaping either slot would then
-                // un-route the survivor. Leave the existing owner intact.
-                continue;
-            }
-            gop.value_ptr.* = slot;
-            // invariant: snapshot ≤ max_tracked_cids_per_slot, so
-            // we always have room.
-            std.debug.assert(slot.tracked_cid_count < max_tracked_cids_per_slot);
-            slot.tracked_cids[slot.tracked_cid_count] = cid;
-            slot.tracked_cid_count += 1;
-        }
+        return server_routing.resyncSlotCids(self, slot);
     }
 
-    /// Remove every routing entry owned by `slot` from `cid_table`.
-    /// Called from `reap` after the slot is observed `.closed`.
     fn dropAllCidsFromTable(self: *Server, slot: *Slot) void {
-        self.removeCidIfOwnedBy(slot.initial_dcid, slot);
-        for (slot.tracked_cids[0..slot.tracked_cid_count]) |cid| {
-            self.removeCidIfOwnedBy(cid, slot);
-        }
-        slot.tracked_cid_count = 0;
+        return server_routing.dropAllCidsFromTable(self, slot);
     }
 
-    /// Remove a CID's routing entry only if it still points at `slot`.
-    /// Guards against a CID collision (see `resyncSlotCids`) causing a
-    /// reaped slot to un-route a CID another live slot now owns.
-    fn removeCidIfOwnedBy(self: *Server, cid: ConnectionId, slot: *Slot) void {
-        const key = cidKeyFromConnectionId(cid);
-        if (self.cid_table.getPtr(key)) |vp| {
-            if (vp.* == slot) _ = self.cid_table.remove(key);
-        }
-    }
-
-    /// Token-bucket gate for per-source Initial acceptance. Returns
-    /// true if `addr` is under its cap and the caller may proceed
-    /// with slot creation; in that case, the source's count is
-    /// incremented. Returns false if the cap is exceeded — caller
-    /// should drop the datagram.
-    ///
-    /// The window is sliding-by-reset: when an entry's
-    /// `window_start_us` is older than `source_rate_window_us`, the
-    /// count resets. This is cheaper than a true sliding window and
-    /// good enough for DoS-deflecting purposes; it allows up to 2x
-    /// the cap across two adjacent windows in pathological timing.
     fn acceptSourceRate(
         self: *Server,
         addr: Address,
         cap: u64,
         now_us: u64,
     ) bool {
-        // Lazy eviction when the table is at capacity. Pruning
-        // every call is wasteful; only pay the O(table) cost when
-        // we're about to add an entry that would overflow.
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-            self.pruneSourceRate(now_us);
-            // If pruning didn't make room, drop the most stale
-            // entry to guarantee progress.
-            if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-                self.evictOldestSourceRate();
-            }
-        }
-
-        const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
-            // OOM on the rate table is a cheap soft fail: deny the
-            // accept rather than continue without protection.
-            return false;
-        };
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .{ .count = 1, .window_start_us = now_us };
-            return true;
-        }
-
-        const elapsed = now_us -% gop.value_ptr.window_start_us;
-        if (elapsed >= self.source_rate_window_us) {
-            gop.value_ptr.* = .{ .count = 1, .window_start_us = now_us };
-            return true;
-        }
-
-        if (gop.value_ptr.count >= cap) return false;
-        gop.value_ptr.count += 1;
-        return true;
+        return server_dos.acceptSourceRate(self, addr, cap, now_us);
     }
 
-    /// Per-source VN-emission rate gate. Mirrors `acceptSourceRate`
-    /// but uses the entry's secondary `vn_count` / `vn_window_start_us`
-    /// pair so VN floods don't burn the per-source Initial budget
-    /// (and vice versa). Returns `true` when emission is permitted.
     fn acceptVnRate(
         self: *Server,
         addr: Address,
         cap: u64,
         now_us: u64,
     ) bool {
-        // Lazy eviction shared with `acceptSourceRate`.
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-            self.pruneSourceRate(now_us);
-            if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-                self.evictOldestSourceRate();
-            }
-        }
-
-        const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
-            // OOM on the rate table: deny the VN rather than continue
-            // unprotected. Mirrors `acceptSourceRate` policy.
-            return false;
-        };
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .{
-                .count = 0,
-                .window_start_us = 0,
-                .vn_count = 1,
-                .vn_window_start_us = now_us,
-            };
-            return true;
-        }
-
-        const elapsed = now_us -% gop.value_ptr.vn_window_start_us;
-        if (elapsed >= self.source_rate_window_us) {
-            gop.value_ptr.vn_count = 1;
-            gop.value_ptr.vn_window_start_us = now_us;
-            return true;
-        }
-
-        if (gop.value_ptr.vn_count >= cap) return false;
-        gop.value_ptr.vn_count += 1;
-        return true;
+        return server_dos.acceptVnRate(self, addr, cap, now_us);
     }
 
-    /// Per-source log-emission rate gate. Mirrors `acceptSourceRate`
-    /// and `acceptVnRate` but uses the entry's tertiary
-    /// `log_count` / `log_window_start_us` pair so log floods don't
-    /// burn the Initial / VN budgets and vice versa. Returns `true`
-    /// when emission is permitted.
-    ///
-    /// Hardening guide §9.4: a peer that triggers many feed-rate-limit
-    /// or table-full or VN-rate-limit events from a single address
-    /// would otherwise let the attacker flood the embedder's log
-    /// pipeline (disk, stdout, structured-logging dependency, etc.).
-    /// On a denial of `false`, the caller drops the LogEvent silently
-    /// — there is no nested log about the dropped log.
-    fn acceptLogRate(
-        self: *Server,
-        addr: Address,
-        cap: u64,
-        now_us: u64,
-    ) bool {
-        // Lazy eviction shared with `acceptSourceRate` / `acceptVnRate`.
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-            self.pruneSourceRate(now_us);
-            if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-                self.evictOldestSourceRate();
-            }
-        }
-
-        const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
-            // OOM on the rate table: deny the log rather than risk
-            // unbounded emission. Mirrors `acceptSourceRate`.
-            return false;
-        };
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .{
-                .count = 0,
-                .window_start_us = 0,
-                .log_count = 1,
-                .log_window_start_us = now_us,
-            };
-            return true;
-        }
-
-        const elapsed = now_us -% gop.value_ptr.log_window_start_us;
-        if (elapsed >= self.source_rate_window_us) {
-            gop.value_ptr.log_count = 1;
-            gop.value_ptr.log_window_start_us = now_us;
-            return true;
-        }
-
-        if (gop.value_ptr.log_count >= cap) return false;
-        gop.value_ptr.log_count += 1;
-        return true;
-    }
-
-    /// Per-source bandwidth gate (token-bucket). Returns true when the
-    /// `bytes_charged`-byte datagram is permitted; false when the
-    /// bucket is empty. Mirrors `acceptSourceRate` / `acceptVnRate` /
-    /// `acceptLogRate` in shape (lazy eviction, OOM-fail-closed) and
-    /// shares the `source_rate_table`.
-    ///
-    /// The bucket is sized to one second of `cap_per_second`, refills
-    /// at `cap_per_second` bytes/s up to that ceiling, and debits
-    /// `bytes_charged` per accepted datagram. Hardening guide §4.1
-    /// token-bucket: this is the per-source companion to the global
-    /// sliding-window byte-rate cap. The shaper sits AFTER the global
-    /// listener gates so the global aggregate ceiling still bounds
-    /// total bandwidth even with every source's bucket full.
     fn acceptSourceBandwidth(
         self: *Server,
         addr: Address,
@@ -3314,439 +1695,52 @@ pub const Server = struct {
         cap_per_second: u64,
         now_us: u64,
     ) bool {
-        // Lazy eviction shared with the rest of the per-source helpers.
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-            self.pruneSourceRate(now_us);
-            if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-                self.evictOldestSourceRate();
-            }
-        }
-
-        const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
-            // OOM on the rate table: deny the datagram rather than
-            // continue unprotected. Mirrors `acceptSourceRate` policy.
-            return false;
-        };
-        if (!gop.found_existing) {
-            // Bootstrap: full bucket, charge immediately. A first
-            // datagram larger than one full second's burst is dropped
-            // here (the bucket starts at `cap_per_second`, not at
-            // `cap_per_second + bytes_charged`).
-            const tokens_after_charge: u64 = if (cap_per_second >= bytes_charged)
-                cap_per_second - bytes_charged
-            else
-                0;
-            gop.value_ptr.* = .{
-                .count = 0,
-                .window_start_us = 0,
-                .vn_count = 0,
-                .vn_window_start_us = 0,
-                .log_count = 0,
-                .log_window_start_us = 0,
-                .bandwidth_tokens = tokens_after_charge,
-                .bandwidth_last_refill_us = now_us,
-            };
-            return cap_per_second >= bytes_charged;
-        }
-
-        // Refill: tokens += elapsed_us * cap / 1_000_000, capped at cap.
-        // `mulWide` keeps the intermediate product in u128 so a long
-        // idle gap on a high cap can't overflow u64 mid-divide.
-        const elapsed = now_us -% gop.value_ptr.bandwidth_last_refill_us;
-        const refill: u64 = @intCast(std.math.mulWide(u64, elapsed, cap_per_second) / std.time.us_per_s);
-        const refilled = std.math.add(u64, gop.value_ptr.bandwidth_tokens, refill) catch cap_per_second;
-        gop.value_ptr.bandwidth_tokens = @min(refilled, cap_per_second);
-        gop.value_ptr.bandwidth_last_refill_us = now_us;
-
-        if (gop.value_ptr.bandwidth_tokens < bytes_charged) return false;
-        gop.value_ptr.bandwidth_tokens -= bytes_charged;
-        return true;
+        return server_dos.acceptSourceBandwidth(self, addr, bytes_charged, cap_per_second, now_us);
     }
 
-    fn pruneSourceRate(self: *Server, now_us: u64) void {
-        var it = self.source_rate_table.iterator();
-        while (it.next()) |entry| {
-            const init_elapsed = now_us -% entry.value_ptr.window_start_us;
-            const vn_elapsed = now_us -% entry.value_ptr.vn_window_start_us;
-            const log_elapsed = now_us -% entry.value_ptr.log_window_start_us;
-            const bandwidth_elapsed = now_us -% entry.value_ptr.bandwidth_last_refill_us;
-            // Only prune when *all four* per-counter / per-bucket axes
-            // have gone idle — otherwise an entry that's only stale on
-            // one axis would lose its still-active counters on the
-            // others. The bandwidth-bucket survival threshold is held
-            // separately so a long-idle source still pays the
-            // refill-from-empty bootstrap rather than getting a free
-            // full-bucket reset on its next packet.
-            if (init_elapsed >= self.source_rate_window_us and
-                vn_elapsed >= self.source_rate_window_us and
-                log_elapsed >= self.source_rate_window_us and
-                bandwidth_elapsed >= bandwidth_idle_threshold_us)
-            {
-                _ = self.source_rate_table.remove(entry.key_ptr.*);
-            }
-        }
+    pub fn pruneSourceRate(self: *Server, now_us: u64) void {
+        return server_dos.pruneSourceRate(self, now_us);
     }
 
-    fn evictOldestSourceRate(self: *Server) void {
-        var it = self.source_rate_table.iterator();
-        var oldest_addr: ?Address = null;
-        var oldest_start: u64 = std.math.maxInt(u64);
-        while (it.next()) |entry| {
-            if (entry.value_ptr.window_start_us < oldest_start) {
-                oldest_start = entry.value_ptr.window_start_us;
-                oldest_addr = entry.key_ptr.*;
-            }
-        }
-        if (oldest_addr) |addr| _ = self.source_rate_table.remove(addr);
+    pub fn evictOldestSourceRate(self: *Server) void {
+        return server_dos.evictOldestSourceRate(self);
     }
 
-    // -- Version Negotiation -------------------------------------------
-
-    /// True if `version` is one of the wire-format versions this
-    /// server is configured to accept. Drives the VN gate in `feed`.
     fn versionAccepted(self: *const Server, version: u32) bool {
-        for (self.versions) |v| {
-            if (v == version) return true;
-        }
-        return false;
+        return server_vneg.versionAccepted(self, version);
     }
 
-    /// RFC 9368 §5/§6 server-side pre-parse: decide whether to
-    /// upgrade this incoming Initial from `wire_version` to a
-    /// different chosen version.
-    ///
-    /// Decrypts a private copy of the Initial under wire-version
-    /// keys, walks the resulting CRYPTO frames to assemble the
-    /// ClientHello, looks for `quic_transport_parameters` and inside
-    /// that for `version_information` (codepoint 0x11). Intersects
-    /// the client's advertised `available_versions` with the server's
-    /// configured `Config.accepted_versions` and returns the first server-
-    /// preferred entry that also appears in the client's list.
-    ///
-    /// Returns:
-    ///   - `null` when the pre-parse failed at any step (decrypt
-    ///     auth, malformed/fragmented ClientHello, missing extension,
-    ///     no overlap with the client's list). The caller falls back
-    ///     to the wire version, which is always spec-compliant.
-    ///   - `wire_version` when the decision is "no upgrade" (the
-    ///     wire version is the highest-priority overlap). Cheap to
-    ///     handle as a no-op upstream.
-    ///   - The upgrade target version when the decision is to
-    ///     upgrade. The caller MUST advertise this as `chosen_version`
-    ///     in the outbound transport_params and (after the first
-    ///     wire-version Initial is processed) flip the connection's
-    ///     active version to it for outbound packet protection.
-    ///
-    /// Sets `*ch_complete` to false when the reassembled CH was
-    /// incomplete on this Initial (i.e. the ClientHello is fragmented
-    /// across multiple Initials). Callers that want to drive a
-    /// streaming reassembler use that signal to attach a per-slot
-    /// `PendingUpgradeState`.
-    ///
-    /// Defensive posture: any error path returns `null`. The pre-
-    /// parse never closes the connection or surfaces an error to the
-    /// caller — it is purely advisory.
     fn preparseUpgradeTarget(
         self: *const Server,
         bytes: []const u8,
         wire_version: u32,
         ch_complete: *bool,
     ) ?u32 {
-        ch_complete.* = false;
-        // Multi-version mode is the only case where an upgrade is
-        // possible. With a single configured version there is nothing
-        // to choose between.
-        if (self.versions.len <= 1) return null;
-        // Only Initial-key-derivable wire versions support compatible
-        // version negotiation. Higher layers reject everything else
-        // via `versionAccepted` upstream, but stay defensive.
-        if (!wire.initial.isSupportedVersion(wire_version)) return null;
-
-        var pt_buf: [conn_mod.state.max_recv_plaintext]u8 = undefined;
-        const plaintext = decryptInitialPreparse(bytes, wire_version, &pt_buf) orelse return null;
-
-        // Reassemble the ClientHello bytes from the decrypted payload's
-        // CRYPTO frames. Single-Initial fast path; on fragmentation we
-        // leave `ch_complete=false` and the caller falls into the
-        // streaming `PendingUpgradeState` path.
-        var ch_buf: [wire.vneg_preparse.max_client_hello_bytes]u8 = undefined;
-        const ch = wire.vneg_preparse.reassembleClientHello(&ch_buf, plaintext) orelse return null;
-        ch_complete.* = true;
-
-        return self.upgradeTargetFromCh(ch);
+        return server_vneg.preparseUpgradeTarget(self, bytes, wire_version, ch_complete);
     }
 
-    /// Steps 3-5 of the §6 pre-parse: walk a contiguous ClientHello
-    /// looking for `quic_transport_parameters` → `version_information`,
-    /// then intersect the advertised `available_versions` with the
-    /// server's configured preference list. Shared by the single-shot
-    /// `preparseUpgradeTarget` and the streaming `advancePendingUpgrade`
-    /// paths so both produce bit-identical decisions for any given CH.
-    fn upgradeTargetFromCh(self: *const Server, ch: []const u8) ?u32 {
-        const qtp = wire.vneg_preparse.findQuicTransportParamsExt(ch) orelse return null;
-        const info = wire.vneg_preparse.findVersionInformation(qtp) orelse return null;
-        return wire.vneg_preparse.chooseUpgradeVersion(self.versions, info.available());
-    }
-
-    /// Decrypt a single inbound Initial under the wire-version keys,
-    /// returning a borrowed slice into `pt_buf` that holds the
-    /// decrypted plaintext payload (frame stream). Stateless — the
-    /// caller's normal `handleInitial` flow is the source of truth for
-    /// `largest_received` etc.; the pre-parse just needs the
-    /// frame-stream bytes once. Returns null on any decrypt failure
-    /// (truncated header, key-derivation error, AEAD authentication
-    /// failure, oversize buffer); callers treat null identically to
-    /// "skip the upgrade".
-    fn decryptInitialPreparse(
-        bytes: []const u8,
-        wire_version: u32,
-        pt_buf: *[conn_mod.state.max_recv_plaintext]u8,
-    ) ?[]const u8 {
-        const ids = peekLongHeaderIds(bytes) orelse return null;
-
-        // Make a private copy of the inbound bytes — `openInitial`
-        // strips header protection in-place, and the caller will
-        // re-decrypt the same buffer through the normal
-        // `handleInitial` flow.
-        var pkt_copy: [conn_mod.state.max_recv_plaintext]u8 = undefined;
-        if (bytes.len > pkt_copy.len) return null;
-        @memcpy(pkt_copy[0..bytes.len], bytes);
-
-        const init_keys = wire.initial.deriveInitialKeysFor(wire_version, ids.dcid, false) catch return null;
-        const r_keys = wire.short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret) catch return null;
-
-        const opened = wire.long_packet.openInitial(pt_buf, pkt_copy[0..bytes.len], .{
-            .keys = &r_keys,
-            .largest_received = 0,
-        }) catch return null;
-        return opened.payload;
-    }
-
-    /// Allocate and seed a `PendingUpgradeState` for a freshly-opened
-    /// slot whose first Initial carried only a CH prefix. Decrypts
-    /// the first Initial again (the cost is one AEAD open per slot
-    /// in the multi-Initial path; the single-Initial fast path
-    /// doesn't enter here) and feeds its CRYPTO bytes through the
-    /// reassembler so subsequent routed Initials can complete the
-    /// CH. Returns null on allocation failure or a malformed first-
-    /// Initial frame stream — in either case the slot commits to
-    /// the wire version.
     fn openPendingUpgrade(
         self: *Server,
         bytes: []const u8,
         wire_version: u32,
     ) ?*PendingUpgradeState {
-        const pu = self.allocator.create(PendingUpgradeState) catch return null;
-        pu.init(wire_version);
-        pu.initials_seen = 1;
-        var pt_buf: [conn_mod.state.max_recv_plaintext]u8 = undefined;
-        const plain = decryptInitialPreparse(bytes, wire_version, &pt_buf) orelse {
-            self.allocator.destroy(pu);
-            return null;
-        };
-        _ = pu.rc.feed(plain) catch {
-            self.allocator.destroy(pu);
-            return null;
-        };
-        return pu;
+        return server_vneg.openPendingUpgrade(self, bytes, wire_version);
     }
 
-    /// Apply a routed Initial datagram to the slot's pending §6
-    /// upgrade reassembler. Decrypt under the cached wire version,
-    /// feed the frame stream into the `ChReassembler`, and on a
-    /// completed CH:
-    ///   - run the same `upgradeTargetFromCh` decision the single-
-    ///     shot path uses,
-    ///   - if the chosen version differs from the wire version,
-    ///     update the connection's outbound transport_params (so the
-    ///     EE BoringSSL is about to write advertises the upgrade)
-    ///     and stash a pending version flip for `dispatchToSlot` to
-    ///     apply once `handleWithEcn` returns,
-    ///   - drop the pending state so future routed datagrams don't
-    ///     re-decrypt this Initial.
-    ///
-    /// Bounded by `PendingUpgradeState.max_initial_packets`: if the
-    /// CH is still not complete after that many Initials, give up and
-    /// commit to the wire version (same outcome as the
-    /// `error.Invalid` / decrypt-failure paths). The CH is also never
-    /// allowed to arrive on the upgrade target's keys — only the wire
-    /// version's — and any frame the reassembler rejects (overflow,
-    /// unexpected frame type, conflicting overlap) drops the pending
-    /// state immediately.
     fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void {
-        const pu = slot.pending_upgrade orelse return;
-
-        // Only Initial-typed long-header datagrams advance the
-        // reassembler. Routed Handshake / 1-RTT datagrams ride in via
-        // the same path but are not part of CH reassembly. If we ever
-        // see a non-Initial here it almost certainly means the peer
-        // has already moved past Initial — drop pending state and
-        // commit to the wire version.
-        const ids = peekLongHeaderIds(bytes) orelse {
-            self.dropPendingUpgrade(slot);
-            return;
-        };
-        if (!isInitialLongHeader(bytes, ids.version) or ids.version != pu.wire_version) {
-            self.dropPendingUpgrade(slot);
-            return;
-        }
-
-        // Hard cap on pre-parse work per slot. A peer that keeps
-        // sending fragmented Initials past this budget gets the wire-
-        // version commitment (still spec-compliant) so we don't
-        // accumulate unbounded decrypt CPU under their control.
-        if (pu.initials_seen >= PendingUpgradeState.max_initial_packets) {
-            self.dropPendingUpgrade(slot);
-            return;
-        }
-        pu.initials_seen += 1;
-
-        var pt_buf: [conn_mod.state.max_recv_plaintext]u8 = undefined;
-        const plaintext = decryptInitialPreparse(bytes, pu.wire_version, &pt_buf) orelse {
-            // Decrypt failure — likely a stale retransmit or a packet
-            // the connection's normal flow will reject too. Don't
-            // tear down pending state on a single failure; future
-            // Initials may still drive the upgrade.
-            return;
-        };
-
-        const got_or_err = pu.rc.feed(plaintext);
-        const maybe_ch = got_or_err catch {
-            // Malformed frame stream or oversize CH. Falls back to
-            // wire version — drop pending state so we don't keep
-            // re-evaluating broken inputs.
-            self.dropPendingUpgrade(slot);
-            return;
-        };
-        const ch = maybe_ch orelse return; // Still waiting for more bytes.
-
-        // CH complete — make the §6 decision. Whether we upgrade or
-        // commit to the wire version, the pending state can be
-        // dropped: the decision is final.
-        const upgrade_target = self.upgradeTargetFromCh(ch);
-        const wire_version = pu.wire_version;
-        self.dropPendingUpgrade(slot);
-
-        const chosen = upgrade_target orelse wire_version;
-        if (chosen == wire_version) return; // No upgrade.
-
-        // Rebuild the local transport_params with the upgraded
-        // chosen version listed first, then push them to BoringSSL.
-        // BoringSSL serializes these only when it actually emits the
-        // EE; that hasn't happened yet because the CH it has so far
-        // is still fragmented (the very datagram we're about to feed
-        // into `dispatchToSlot` carries the missing tail). The
-        // `setTransportParams` call wins the race and the EE goes
-        // out advertising chosen=upgrade.
-        var params = slot.conn.localTransportParams();
-        var ordered: [16]u32 = undefined;
-        ordered[0] = chosen;
-        var n: usize = 1;
-        for (self.versions) |v| {
-            if (v == chosen) continue;
-            if (n >= ordered.len) break;
-            ordered[n] = v;
-            n += 1;
-        }
-        params.setCompatibleVersions(ordered[0..n]) catch return;
-        slot.conn.setTransportParams(params) catch return;
-        slot.conn.setPendingVersionUpgrade(chosen);
+        return server_vneg.advancePendingUpgrade(self, slot, bytes);
     }
 
-    /// Free and unhook the per-slot multi-Initial pre-parse buffer.
-    /// Idempotent. Called once the upgrade decision is final or when
-    /// the per-slot Initial budget is exhausted.
-    fn dropPendingUpgrade(self: *Server, slot: *Slot) void {
-        const pu = slot.pending_upgrade orelse return;
-        slot.pending_upgrade = null;
-        self.allocator.destroy(pu);
-    }
-
-    /// Encode a Version Negotiation packet into the response queue.
-    /// Errors propagate from the encoder (`InsufficientBytes`) or
-    /// the queue allocator (`OutOfMemory`); on either, `feed` falls
-    /// back to `.dropped`. The supported_versions list mirrors
-    /// `Config.accepted_versions`; the response echoes the client's CIDs
-    /// swapped (RFC 8999 §6) and the unused bits are left as the
-    /// encoder default.
     fn queueVersionNegotiation(
         self: *Server,
         dst_addr: Address,
         client_packet: []const u8,
     ) !void {
-        const ids = peekLongHeaderIds(client_packet) orelse return error.InvalidVersionNegotiation;
-        var entry: StatelessResponse = .{ .dst = dst_addr, .len = 0, .kind = .version_negotiation };
-
-        // Pack our configured versions into a u32-aligned buffer; the
-        // wire-level VN encoder handles the rest. Capped at 16 entries
-        // so we don't overflow the inline `entry.bytes` budget.
-        var versions_bytes: [16 * 4]u8 = undefined;
-        const count = @min(self.versions.len, 16);
-        for (self.versions[0..count], 0..) |v, i| {
-            std.mem.writeInt(u32, versions_bytes[i * 4 ..][0..4], v, .big);
-        }
-
-        const written = try wire.header.encode(&entry.bytes, .{ .version_negotiation = .{
-            .dcid = try wire.header.ConnId.fromSlice(ids.scid),
-            .scid = try wire.header.ConnId.fromSlice(ids.dcid),
-            .versions_bytes = versions_bytes[0 .. count * 4],
-        } });
-        entry.len = written;
-        try self.queueStatelessResponse(entry);
+        return server_vneg.queueVersionNegotiation(self, dst_addr, client_packet);
     }
 
-    // -- NEW_TOKEN ------------------------------------------------------
-
-    /// Mint and queue a single NEW_TOKEN on `slot`'s connection if all
-    /// prerequisites are satisfied:
-    ///  - `Server.new_token_key` is non-null (feature opt-in).
-    ///  - The slot's connection has confirmed the handshake.
-    ///  - This slot has not already emitted its NEW_TOKEN.
-    ///  - We have a peer address to bind into the token (no `from`,
-    ///    no NEW_TOKEN — the embedder is in a hermetic-test path).
-    ///
-    /// Called from the routed and accepted feed paths; idempotent
-    /// across retries via the slot's `new_token_emitted` latch.
-    /// Post-handshake CID inventory top-up (RFC 9000 §5.1.1 / §9).
-    /// Runs once per slot from the feed paths, next to
-    /// `maybeIssueNewToken`. Mints up to
-    /// `min(local issue budget, max_auto_replenish_cids)` fresh SCIDs
-    /// through the same `mintLocalScid` path as the handshake CID,
-    /// derives each one's §10.3 stateless-reset token from
-    /// `stateless_reset_key`, and queues NEW_CONNECTION_ID frames via
-    /// `replenishConnectionIds`. The post-feed `resyncSlotCids` pass
-    /// picks the new CIDs up into the routing table. Failures skip the
-    /// top-up (the latch stays set): migration then degrades to the
-    /// pre-replenish behavior instead of failing the connection.
     fn maybeReplenishConnectionIds(self: *Server, slot: *Slot) void {
-        if (!self.auto_replenish_connection_ids) return;
-        if (slot.cids_replenished) return;
-        const key = if (self.stateless_reset_key) |*k| k else return;
-        if (!slot.conn.handshakeDone()) return;
-        slot.cids_replenished = true;
-
-        var cid_storage: [8][20]u8 = undefined;
-        var provisions: [8]conn_mod.ConnectionIdProvision = undefined;
-        const budget = @min(
-            @min(
-                slot.conn.localConnectionIdIssueBudget(0),
-                @as(usize, self.max_auto_replenish_cids),
-            ),
-            provisions.len,
-        );
-        if (budget == 0) return;
-
-        var n: usize = 0;
-        while (n < budget) : (n += 1) {
-            const cid = cid_storage[n][0..self.local_cid_len];
-            self.mintLocalScid(cid) catch return;
-            const token = conn_mod.stateless_reset.derive(key, cid) catch return;
-            provisions[n] = .{
-                .connection_id = cid,
-                .stateless_reset_token = token,
-            };
-        }
-        _ = slot.conn.replenishConnectionIds(provisions[0..n]) catch {};
+        return server_routing.maybeReplenishConnectionIds(self, slot);
     }
 
     fn maybeIssueNewToken(
@@ -3755,304 +1749,20 @@ pub const Server = struct {
         from: ?Address,
         now_us: u64,
     ) void {
-        const key_ptr = if (self.new_token_key) |*k| k else return;
-        if (slot.new_token_emitted) return;
-        if (!slot.conn.handshakeDone()) return;
-        const addr = from orelse return;
-
-        var addr_buf: [Address.context_max_len]u8 = undefined;
-        const ctx = addressContext(&addr_buf, addr);
-        var token: new_token_mod.Token = undefined;
-        _ = new_token_mod.mint(&token, .{
-            .key = key_ptr,
-            .now_us = now_us,
-            .lifetime_us = self.new_token_lifetime_us,
-            .client_address = ctx,
-            // Bind the connection's negotiated version. Validation on a
-            // returning Initial checks against that Initial's wire
-            // version; for a single-version deployment both are v1, so
-            // this is a no-op there and provides real cross-version
-            // separation once a v2-capable server is configured.
-            .quic_version = slot.conn.version,
-        }) catch {
-            // Mint can only fail on a BoringSSL CSPRNG hiccup here: the
-            // output buffer is fixed-size, and `new_token.max_address_len`
-            // is comptime-coupled to `Address.context_max_len`, so the
-            // address context (IPv6 included) can no longer exceed the
-            // field cap — the ContextTooLong path that silently denied
-            // every IPv6 peer a NEW_TOKEN is closed. Skip issuance for
-            // this slot; the slot stays usable, and future Initials from
-            // the same address fall through to the Retry gate as if
-            // NEW_TOKEN was never issued.
-            return;
-        };
-
-        slot.conn.queueNewToken(&token) catch {
-            // Same not-peer-reachable rationale; the queue holds at
-            // most one entry, the bytes are fixed-size, and the
-            // role check has already passed (we minted on a
-            // server-role slot).
-            return;
-        };
-        slot.new_token_emitted = true;
+        return server_dos.maybeIssueNewToken(self, slot, from, now_us);
     }
 
-    // -- Retry ----------------------------------------------------------
-
-    /// What `applyRetryGate` decided. `none` means proceed with the
-    /// normal accept path (this Initial carried no token and Retry
-    /// is disabled, or the source already passed validation in a
-    /// prior datagram). `sent` means we queued a Retry. `drop` means
-    /// the echoed token was malformed/expired/wrong-source. `echo`
-    /// means the Retry token validated and the caller should accept
-    /// this Initial as the post-Retry continuation.
-    /// `new_token_skip` means a valid NEW_TOKEN was presented, so
-    /// the source is treated as already address-validated and the
-    /// caller skips the Retry round-trip (RFC 9000 §8.1.3).
-    const RetryDecision = union(enum) {
-        none,
-        sent,
-        drop,
-        echo: RetryEcho,
-        new_token_skip,
-    };
-
-    /// Captured server-side context for an Initial that successfully
-    /// echoed a Retry token. The slot opener uses these to set the
-    /// post-Retry transport parameters.
-    const RetryEcho = struct {
-        retry_scid: [20]u8,
-        retry_scid_len: u8,
-        original_dcid: ConnectionId,
-    };
-
-    /// Run the Retry / NEW_TOKEN gate for an Initial from `addr`.
-    /// Either queues a Retry (`.sent`), validates an echoed Retry
-    /// token (`.echo`), validates an echoed NEW_TOKEN
-    /// (`.new_token_skip`, accept directly), or returns `.drop` for
-    /// a malformed/expired/wrong-source token. Returns `.none` only
-    /// if both gates are disabled (caller checks before invoking).
-    ///
-    /// Token-disambiguation: if `new_token_key` is set, NEW_TOKEN
-    /// validation runs first; on `.valid` we skip Retry. On
-    /// `.malformed` (also covers a Retry-token blob in a fresh
-    /// session — distinct domain separator), we fall through to
-    /// Retry. Other NEW_TOKEN failures (`.expired`, `.invalid`,
-    /// etc.) ALSO fall through so a stale stored token sends the
-    /// peer through a fresh Retry round-trip rather than dropping
-    /// the connection.
     fn applyRetryGate(
         self: *Server,
         addr: Address,
         bytes: []const u8,
         now_us: u64,
     ) Error!RetryDecision {
-        const retry_key = if (self.retry_token_key) |*k| k else null;
-        const new_token_key = if (self.new_token_key) |*k| k else null;
-        if (retry_key == null and new_token_key == null) return .none;
-
-        const ids = peekLongHeaderIds(bytes) orelse return .drop;
-        const token = peekInitialToken(bytes);
-
-        // NEW_TOKEN check first — if a returning client presents a
-        // valid NEW_TOKEN, we want to accept it directly without
-        // burning a Retry round-trip. On any failure we fall
-        // through; a stale or wrong-address NEW_TOKEN should never
-        // close the connection (the peer expected to be accepted
-        // and would re-handshake gracefully on a Retry).
-        if (token != null and token.?.len > 0) {
-            if (new_token_key) |nt_key| {
-                var addr_buf: [Address.context_max_len]u8 = undefined;
-                const ctx = addressContext(&addr_buf, addr);
-                const result = new_token_mod.validate(token.?, .{
-                    .key = nt_key,
-                    .now_us = now_us,
-                    .client_address = ctx,
-                    .quic_version = ids.version,
-                });
-                if (result == .valid) return .new_token_skip;
-                // Fall through to Retry validation on malformed,
-                // expired, invalid, etc.
-            }
-        }
-
-        // Retry-token path. If Retry is disabled, an Initial
-        // carrying a non-NEW_TOKEN token is treated as if no token
-        // were present (we can't validate it; falling back to
-        // accept-without-validation is the only safe move when the
-        // operator opted out of Retry).
-        const key_ptr = retry_key orelse return .none;
-
-        const existing = self.retry_state_table.get(addr);
-
-        // No echoed token: the peer is on its first Initial. Mint a
-        // Retry, queue it, and require the next Initial to echo.
-        if (token == null or token.?.len == 0) {
-            self.mintAndQueueRetry(addr, ids, now_us, key_ptr) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return .drop,
-            };
-            return .sent;
-        }
-
-        // Echoed token but no per-source state: stale (we evicted on
-        // overflow, restarted, etc.). Re-mint a fresh Retry; the peer
-        // will retry with a new round-trip.
-        const state = existing orelse {
-            self.mintAndQueueRetry(addr, ids, now_us, key_ptr) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return .drop,
-            };
-            return .sent;
-        };
-
-        // Echoed token: validate against the per-source retry_scid
-        // we minted. The SCID binding ties the token to a specific
-        // Retry round-trip — a token minted for some other peer
-        // can't be replayed here even if the source IP collides.
-        var addr_buf: [Address.context_max_len]u8 = undefined;
-        const ctx = addressContext(&addr_buf, addr);
-        const result = retry_token_mod.validate(token.?, .{
-            .key = key_ptr,
-            .now_us = now_us,
-            .client_address = ctx,
-            .original_dcid = state.original_dcid.slice(),
-            .retry_scid = state.retry_scid[0..state.retry_scid_len],
-            // Bind the inbound Initial's wire version; the peer echoes
-            // the same version on the follow-up Initial the Retry token
-            // rides in, so mint and validate stay consistent.
-            .quic_version = ids.version,
-        });
-        if (result != .valid) return .drop;
-
-        // Validated: bubble up the per-source context so the slot
-        // opener knows which SCID to bind and which odcid to set in
-        // transport params.
-        return .{ .echo = .{
-            .retry_scid = state.retry_scid,
-            .retry_scid_len = state.retry_scid_len,
-            .original_dcid = state.original_dcid,
-        } };
+        return server_dos.applyRetryGate(self, addr, bytes, now_us);
     }
 
-    /// Sentinel returned from `mintAndQueueRetry` when token mint or
-    /// Retry seal fails for a reason that isn't peer-induced (DCID
-    /// length already bounded by `peekLongHeaderIds`, address ctx
-    /// is fixed-size, dst buf is fixed-size). Any peer-reachable
-    /// path that lands here means an invariant slipped, so the
-    /// caller drops the datagram silently.
-    const RetryMintError = Error || error{RetryEncodeFailed};
-
-    fn mintAndQueueRetry(
-        self: *Server,
-        addr: Address,
-        ids: LongHeaderIds,
-        now_us: u64,
-        key_ptr: *const RetryTokenKey,
-    ) RetryMintError!void {
-        // Bound the table without letting forged-source floods
-        // evict legitimate-peer Retry round-trips. First sweep
-        // anything older than the token lifetime — those entries
-        // are already useless because their tokens won't validate.
-        // Only fall back to oldest-eviction if the table is still
-        // at capacity (i.e., every entry is within its lifetime).
-        if (self.retry_state_table.count() >= self.retry_state_table_capacity) {
-            self.pruneExpiredRetryState(now_us);
-            if (self.retry_state_table.count() >= self.retry_state_table_capacity) {
-                self.evictOldestRetryState();
-            }
-        }
-
-        // Pick a fresh server-issued SCID for this Retry. The peer
-        // will echo this DCID in its post-Retry Initial, and the
-        // token HMAC binds to it so a replayed Retry can't authorize
-        // a different connection.
-        var retry_scid: [20]u8 = @splat(0);
-        const retry_scid_len = self.local_cid_len;
-        try self.mintLocalScid(retry_scid[0..retry_scid_len]);
-
-        var addr_buf: [Address.context_max_len]u8 = undefined;
-        const ctx = addressContext(&addr_buf, addr);
-        var token: retry_token_mod.Token = undefined;
-        _ = retry_token_mod.mint(&token, .{
-            .key = key_ptr,
-            .now_us = now_us,
-            .lifetime_us = self.retry_token_lifetime_us,
-            .client_address = ctx,
-            .original_dcid = ids.dcid,
-            .retry_scid = retry_scid[0..retry_scid_len],
-            // Bind the inbound Initial's wire version (see the matching
-            // validate call). v1 for the default single-version server.
-            .quic_version = ids.version,
-        }) catch return error.RetryEncodeFailed;
-
-        var entry: StatelessResponse = .{ .dst = addr, .len = 0, .kind = .retry };
-        const written = wire.long_packet.sealRetry(&entry.bytes, .{
-            .original_dcid = ids.dcid,
-            .dcid = ids.scid,
-            .scid = retry_scid[0..retry_scid_len],
-            .retry_token = &token,
-        }) catch return error.RetryEncodeFailed;
-        entry.len = written;
-
-        try self.queueStatelessResponse(entry);
-
-        // Record the retry state so we can validate the echoed
-        // token in the peer's next Initial.
-        const gop = try self.retry_state_table.getOrPut(self.allocator, addr);
-        gop.value_ptr.* = .{
-            .retry_scid = retry_scid,
-            .retry_scid_len = retry_scid_len,
-            .original_dcid = ConnectionId.fromSlice(ids.dcid),
-            .minted_at_us = now_us,
-        };
-    }
-
-    fn evictOldestRetryState(self: *Server) void {
-        var it = self.retry_state_table.iterator();
-        var oldest_addr: ?Address = null;
-        var oldest_us: u64 = std.math.maxInt(u64);
-        while (it.next()) |entry| {
-            if (entry.value_ptr.minted_at_us < oldest_us) {
-                oldest_us = entry.value_ptr.minted_at_us;
-                oldest_addr = entry.key_ptr.*;
-            }
-        }
-        if (oldest_addr) |a| _ = self.retry_state_table.remove(a);
-    }
-
-    /// Drop every retry-state entry whose token has expired
-    /// (`now_us - minted_at_us > retry_token_lifetime_us`).
-    /// Expired entries can never validate a peer's echoed token,
-    /// so freeing their slot is always safe and means the table
-    /// fills with usable round-trips before any eviction policy
-    /// has to fire.
-    fn pruneExpiredRetryState(self: *Server, now_us: u64) void {
-        const lifetime = self.retry_token_lifetime_us;
-        var stale_buf: [32]Address = undefined;
-        while (true) {
-            var n: usize = 0;
-            var it = self.retry_state_table.iterator();
-            while (it.next()) |entry| {
-                if (n >= stale_buf.len) break;
-                const age = now_us -% entry.value_ptr.minted_at_us;
-                if (age > lifetime) {
-                    stale_buf[n] = entry.key_ptr.*;
-                    n += 1;
-                }
-            }
-            if (n == 0) return;
-            for (stale_buf[0..n]) |addr| _ = self.retry_state_table.remove(addr);
-            // If we evicted a full batch there may be more — loop
-            // to keep sweeping. Bounded by the table size, so
-            // this terminates.
-            if (n < stale_buf.len) return;
-        }
-    }
-
-    // -- stateless response queue --------------------------------------
-
-    fn queueStatelessResponse(self: *Server, entry: StatelessResponse) Error!void {
+    // INTERNAL: pub for server/ sibling access; not part of the embedder API.
+    pub fn queueStatelessResponse(self: *Server, entry: StatelessResponse) Error!void {
         // Bound the queue: on overflow, prefer evicting the oldest
         // VN entry over any Retry. This stops a flood of
         // unsupported-version probes from starving Retry responses
@@ -4084,36 +1794,8 @@ pub const Server = struct {
 
     // -- observability -------------------------------------------------
 
-    /// Internal helper: invoke `log_callback` if installed. Mediated
-    /// by the per-source log rate limit (hardening guide §9.4) when
-    /// the event carries a source address — events with `from = null`
-    /// (or a variant that doesn't bind to a peer) bypass the gate.
     fn emitLog(self: *Server, ev: LogEvent) void {
-        if (self.log_callback == null) return;
-        if (self.max_log_events_per_source) |cap| {
-            if (logEventSource(ev)) |addr| {
-                // `acceptLogRate` allocates on first hit per source —
-                // OOM there denies the log rather than crash. We pass
-                // the most recent timestamp the caller surfaced via
-                // the in-flight feed; emitLog doesn't take a clock so
-                // we use the limiter's own `log_window_start_us`
-                // semantics where the comparison is against `now_us`
-                // captured at call time. Callers that want strict
-                // timing pass `now_us` to whichever feed-side gate
-                // upstream of this; here we use the source's most
-                // recent log-window start as a stand-in for "now".
-                //
-                // The simplest correct implementation: hand
-                // `acceptLogRate` an in-feed `now_us` via a ledger
-                // captured at feed entry. We do that via
-                // `last_feed_now_us`, set at the top of every `feed`.
-                if (!self.acceptLogRate(addr, cap, self.last_feed_now_us)) {
-                    self.feeds_log_rate_limited += 1;
-                    return;
-                }
-            }
-        }
-        self.log_callback.?(self.log_user_data, ev);
+        return server_observability.emitLog(self, ev);
     }
 
     /// Snapshot the server's instrumentation gauges and counters.
@@ -4123,30 +1805,7 @@ pub const Server = struct {
     /// schedule and forward to their metrics pipeline (Prometheus,
     /// statsd, OpenTelemetry).
     pub fn metricsSnapshot(self: *const Server) MetricsSnapshot {
-        return .{
-            .live_connections = @intCast(self.slots.items.len),
-            .routing_table_size = @intCast(self.cid_table.count()),
-            .source_rate_table_size = @intCast(self.source_rate_table.count()),
-            .retry_state_table_size = @intCast(self.retry_state_table.count()),
-            .stateless_queue_depth = @intCast(self.stateless_responses.items.len),
-            .stateless_queue_high_water = self.stateless_queue_high_water,
-            .feeds_routed = self.feeds_routed,
-            .feeds_accepted = self.feeds_accepted,
-            .feeds_dropped = self.feeds_dropped,
-            .feeds_rate_limited = self.feeds_rate_limited,
-            .feeds_table_full = self.feeds_table_full,
-            .feeds_version_negotiated = self.feeds_version_negotiated,
-            .feeds_retry_sent = self.feeds_retry_sent,
-            .feeds_initial_too_small = self.feeds_initial_too_small,
-            .feeds_vn_rate_limited = self.feeds_vn_rate_limited,
-            .feeds_listener_rate_limited = self.feeds_listener_rate_limited,
-            .feeds_listener_byte_rate_limited = self.feeds_listener_byte_rate_limited,
-            .feeds_source_bandwidth_limited = self.feeds_source_bandwidth_limited,
-            .feeds_log_rate_limited = self.feeds_log_rate_limited,
-            .retries_validated = self.retries_validated,
-            .stateless_responses_evicted = self.stateless_responses_evicted,
-            .slots_reaped = self.slots_reaped,
-        };
+        return server_observability.metricsSnapshot(self);
     }
 
     /// Snapshot the rate-limiter table, returning the top
@@ -4163,68 +1822,9 @@ pub const Server = struct {
     /// occasional polling (every few seconds), not the per-packet
     /// hot path.
     pub fn rateLimitSnapshot(self: *const Server) RateLimitSnapshot {
-        var snap: RateLimitSnapshot = .{
-            .table_size = self.source_rate_table.count(),
-            .cumulative_rejections = self.feeds_rate_limited,
-            .top_offenders = @splat(.{ .addr = .unspecified, .recent_count = 0, .window_start_us = 0 }),
-            .top_offender_count = 0,
-        };
-
-        // Insertion-sort across the live table. For each entry, find
-        // the first position whose count is below ours and shift
-        // everything after it down by one. Bounded scan because the
-        // top-N array is fixed at 16.
-        var it = self.source_rate_table.iterator();
-        while (it.next()) |entry| {
-            const row: RateLimitSnapshot.SourceRow = .{
-                .addr = entry.key_ptr.*,
-                .recent_count = entry.value_ptr.count,
-                .window_start_us = entry.value_ptr.window_start_us,
-            };
-
-            // Find insertion point in the descending-by-count list.
-            var insert_idx: usize = snap.top_offender_count;
-            for (0..snap.top_offender_count) |i| {
-                if (row.recent_count > snap.top_offenders[i].recent_count) {
-                    insert_idx = i;
-                    break;
-                }
-            }
-            if (insert_idx >= RateLimitSnapshot.top_n) continue;
-
-            // Shift down to make room. If the array is already at
-            // capacity, the last entry falls off the bottom.
-            const last = @min(snap.top_offender_count, RateLimitSnapshot.top_n - 1);
-            var j: usize = last;
-            while (j > insert_idx) : (j -= 1) {
-                snap.top_offenders[j] = snap.top_offenders[j - 1];
-            }
-            snap.top_offenders[insert_idx] = row;
-            if (snap.top_offender_count < RateLimitSnapshot.top_n) {
-                snap.top_offender_count += 1;
-            }
-        }
-        return snap;
+        return server_observability.rateLimitSnapshot(self);
     }
 };
-
-/// Extract the source address from a `LogEvent` for the per-source log
-/// rate limit. Returns null when the event has no source attribution
-/// (e.g. `stateless_queue_evicted`) or the source is itself null
-/// (`connection_closed` / `table_full` paths where the embedder
-/// didn't pass `from`). Hardening guide §9.4: events with no source
-/// bypass the limiter.
-fn logEventSource(ev: LogEventImpl) ?Address {
-    return switch (ev) {
-        .connection_accepted => |e| e.peer,
-        .connection_closed => |e| e.peer,
-        .feed_rate_limited => |e| e.peer,
-        .retry_minted => |e| e.peer,
-        .version_negotiated => |e| e.peer,
-        .stateless_queue_evicted => null,
-        .table_full => |e| e.peer,
-    };
-}
 
 /// Project a `PreferredAddressConfig` into the on-wire transport-
 /// parameter struct. The seq-1 CID + token are minted by the caller
@@ -4236,7 +1836,8 @@ fn logEventSource(ev: LogEventImpl) ?Address {
 /// `cfg.ipv6` is null, the corresponding output bytes / port stay
 /// zero — clients reading the parameter see no v4 / v6 address as
 /// expected.
-fn buildPreferredAddressParam(
+// INTERNAL: pub for server/ sibling access; not part of the embedder API.
+pub fn buildPreferredAddressParam(
     cfg: PreferredAddressConfig,
     cid: []const u8,
     stateless_reset_token: [16]u8,
@@ -4258,127 +1859,22 @@ fn buildPreferredAddressParam(
 
 // -- header-peek helpers ------------------------------------------------
 
-const LongHeaderIds = struct {
-    version: u32,
-    dcid: []const u8,
-    scid: []const u8,
-};
+// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
+pub const LongHeaderIds = server_routing.LongHeaderIds;
 
-fn peekLongHeaderIds(bytes: []const u8) ?LongHeaderIds {
-    if (bytes.len < 6) return null;
-    if ((bytes[0] & 0x80) == 0) return null;
-    const version = std.mem.readInt(u32, bytes[1..5], .big);
-    const dcid_len = bytes[5];
-    if (dcid_len > 20) return null;
-    var pos: usize = 6;
-    if (bytes.len < pos + @as(usize, dcid_len) + 1) return null;
-    const dcid = bytes[pos .. pos + dcid_len];
-    pos += dcid_len;
+// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
+pub const peekLongHeaderIds = server_routing.peekLongHeaderIds;
 
-    const scid_len = bytes[pos];
-    if (scid_len > 20) return null;
-    pos += 1;
-    if (bytes.len < pos + @as(usize, scid_len)) return null;
-    const scid = bytes[pos .. pos + scid_len];
+// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
+pub const isInitialLongHeader = server_routing.isInitialLongHeader;
 
-    return .{ .version = version, .dcid = dcid, .scid = scid };
-}
+// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
+pub const peekDcidForServer = server_routing.peekDcidForServer;
 
-/// True if `bytes` looks like a long-header Initial under the
-/// supplied wire-format version. RFC 9368 §3.2 puts Initial at
-/// 0b01 under v2 vs 0b00 under v1, so the caller has to pre-resolve
-/// the version field — typically via `peekLongHeaderIds`.
-fn isInitialLongHeader(bytes: []const u8, version: u32) bool {
-    if (bytes.len == 0 or (bytes[0] & 0x80) == 0) return false;
-    if (bytes.len < 5) return false;
-    if (version == 0) return false; // version negotiation
-    const long_type_bits: u2 = @intCast((bytes[0] >> 4) & 0x03);
-    return wire.header.longTypeFromBits(version, long_type_bits) == .initial;
-}
+const containsConnectionId = server_routing.containsConnectionId;
 
-/// Peek the DCID from either header form. Long headers carry an
-/// explicit length; short headers use the server's local-CID length.
-fn peekDcidForServer(bytes: []const u8, local_cid_len: u8) ?[]const u8 {
-    if (bytes.len == 0) return null;
-    if ((bytes[0] & 0x80) != 0) {
-        const ids = peekLongHeaderIds(bytes) orelse return null;
-        return ids.dcid;
-    }
-    if (bytes.len < 1 + @as(usize, local_cid_len)) return null;
-    return bytes[1 .. 1 + local_cid_len];
-}
-
-fn containsConnectionId(haystack: []const ConnectionId, needle: ConnectionId) bool {
-    for (haystack) |cid| {
-        if (ConnectionId.eql(cid, needle)) return true;
-    }
-    return false;
-}
-
-/// Extract the token slice from an Initial header, or null if the
-/// packet didn't parse cleanly as one. The bytes returned are
-/// borrowed from `bytes`.
-fn peekInitialToken(bytes: []const u8) ?[]const u8 {
-    const parsed = wire.header.parse(bytes, 0) catch return null;
-    return switch (parsed.header) {
-        .initial => |initial| initial.token,
-        else => null,
-    };
-}
-
-/// BoringSSL `allow_early_data` callback installed by `Server.init`
-/// when an `AntiReplayTracker` is supplied via Config. Hashes the
-/// resumed-session ticket bytes (`Conn.peerSessionId`) to a 32-byte
-/// tracker `Id` and consults `tracker.consume` for a verdict.
-///
-/// Return contract (mirrors `boringssl.tls.AllowEarlyDataCallback`):
-///   - `true`  → BoringSSL proceeds with 0-RTT for this handshake.
-///   - `false` → BoringSSL toggles `early_data_enabled = false` on
-///               this `SSL` so the handshake completes as 1-RTT.
-///
-/// Defensive defaults: any plumbing failure (null user_data, hash
-/// failure, OOM in the tracker) returns `false` — denying 0-RTT
-/// rather than risking a replay window where the tracker can't see
-/// the attempt. Hash failures are not peer-reachable in practice.
-fn antiReplayEarlyDataTrampoline(
-    user_data: ?*anyopaque,
-    ssl: *boringssl.tls.Conn,
-) bool {
-    const raw_ptr = user_data orelse return false;
-    const tracker: *tls_mod.anti_replay.AntiReplayTracker =
-        @ptrCast(@alignCast(raw_ptr));
-
-    // No resumed session attached → no replay risk to gate on. Return
-    // true; BoringSSL will refuse 0-RTT anyway because there's no
-    // ticket to bind it to.
-    const ticket = ssl.peerSessionId() orelse return true;
-
-    const id_full = boringssl.crypto.hash.Sha256.hash(ticket) catch return false;
-    var id: tls_mod.anti_replay.Id = undefined;
-    @memcpy(&id, id_full[0..tls_mod.anti_replay.id_len]);
-
-    // The tracker exposes an internal-clock variant of `consume` so
-    // this callback (which has no path to the Server's monotonic
-    // clock) can defer to the most recent `now_us` that
-    // `Server.feed` cached via `bumpClock`. The age-out window then
-    // tracks Server-driven time exactly the way the application-
-    // layer `consume(id, now_us)` callers see.
-    const verdict = tracker.consumeUsingInternalClock(id) catch return false;
-    return switch (verdict) {
-        .fresh => true,
-        .replay => false,
-    };
-}
-
-/// Canonicalize an `Address` into the byte string the Retry-token
-/// HMAC binds against. Delegates to `Address.writeContext`, which
-/// produces a length-tagged form (family byte + variant fields in
-/// network byte order). The binding stays tight as long as both
-/// peers project the same client tuple into the same canonical
-/// bytes.
-fn addressContext(dst: []u8, addr: Address) []const u8 {
-    return addr.writeContext(dst);
-}
+// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
+pub const peekInitialToken = server_routing.peekInitialToken;
 
 // -- tests --------------------------------------------------------------
 //
@@ -4394,7 +1890,7 @@ test "slotErrorCloseCode maps TLS failures to CRYPTO_ERROR and everything else t
     // error unwinds — so this mapping is the only place the
     // alert-less decision is observable, and without this test a
     // revert to INTERNAL_ERROR passes the entire suite (it did).
-    const crypto = Server.slotErrorCloseCode(error.HandshakeFailed);
+    const crypto = server_accept.slotErrorCloseCode(error.HandshakeFailed);
     try std.testing.expectEqual(
         conn_mod.state.transport_error_crypto_handshake_failure,
         crypto.code,
@@ -4404,7 +1900,7 @@ test "slotErrorCloseCode maps TLS failures to CRYPTO_ERROR and everything else t
     try std.testing.expect(crypto.code >= 0x0100 and crypto.code <= 0x01ff);
     try std.testing.expectEqual(
         conn_mod.state.transport_error_crypto_handshake_failure,
-        Server.slotErrorCloseCode(error.PeerAlerted).code,
+        server_accept.slotErrorCloseCode(error.PeerAlerted).code,
     );
 
     // Everything else keeps the RFC 9000 §20.1 catch-all.
@@ -4415,7 +1911,7 @@ test "slotErrorCloseCode maps TLS failures to CRYPTO_ERROR and everything else t
     }) |err| {
         try std.testing.expectEqual(
             conn_mod.state.transport_error_internal,
-            Server.slotErrorCloseCode(err).code,
+            server_accept.slotErrorCloseCode(err).code,
         );
     }
 }

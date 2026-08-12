@@ -5,6 +5,8 @@
 // delegate here.
 
 const state_mod = @import("state.zig");
+const conn_streams = @import("conn_streams.zig");
+const conn_flow = @import("conn_flow.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const Stream = state_mod.Stream;
@@ -24,18 +26,18 @@ pub fn handleStopSending(
 }
 
 pub fn handleResetStream(self: *Connection, rs: frame_types.ResetStream) Error!void {
-    if (!self.peerMaySendOnStream(rs.stream_id)) {
+    if (!conn_streams.peerMaySendOnStream(self, rs.stream_id)) {
         self.close(true, transport_error_stream_state, "reset stream on receive-only stream");
         return;
     }
     const existing = self.streams.get(rs.stream_id);
-    if (existing == null and self.streamInitiatedByLocal(rs.stream_id)) {
+    if (existing == null and conn_streams.streamInitiatedByLocal(self, rs.stream_id)) {
         self.close(true, transport_error_stream_state, "peer reset unopened local stream");
         return;
     }
     // RFC 9000 §3.2: a RESET_STREAM for an already-reaped peer stream is
     // post-terminal — ignore it rather than resurrecting the stream.
-    if (existing == null and self.peerStreamAlreadyReaped(rs.stream_id)) return;
+    if (existing == null and conn_streams.peerStreamAlreadyReaped(self, rs.stream_id)) return;
     if (existing == null and !self.recordPeerStreamOpenOrClose(rs.stream_id)) return;
     const ptr = existing orelse blk: {
         const new_ptr = try self.allocator.create(Stream);
@@ -80,5 +82,5 @@ pub fn handleResetStream(self: *Connection, rs: frame_types.ResetStream) Error!v
         self.releaseResidentBytes(recv_before - ptr.recv.bytes.items.len);
     }
     self.peer_sent_stream_data += delta;
-    self.maybeReturnPeerStreamCredit(ptr);
+    conn_flow.maybeReturnPeerStreamCredit(self, ptr);
 }
