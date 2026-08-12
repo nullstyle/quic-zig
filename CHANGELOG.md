@@ -17,7 +17,8 @@ impairment) with committed baselines and a regression-compare tool, so
 every claim below has a number behind it. All changes are additive:
 the Stable API surface is unchanged and no `Config` field was renamed.
 
-Verified toolchain: zig 0.17.0-dev.1252+e4b325c19 (unchanged).
+Verified toolchain: zig 0.17.0-dev.1683+5ceec001b (moved up from
+0.17.0-dev.1252 during the release — see Changed).
 
 Headline numbers (m5max dev machine; loopback for the real-socket
 figure, in-process virtual time for impairment — deterministic per
@@ -106,6 +107,13 @@ seed and machine-independent):
   documented 10M was never runnable under GitHub's job cap); a Linux
   aarch64 test leg is added; the weekly interop matrix gains goodput
   and loss-conditioned cells with a job-summary readout.
+- **Toolchain moved to `0.17.0-dev.1683+5ceec001b`** (from
+  `0.17.0-dev.1252`), and `minimum_zig_version` with it. The previous
+  pin had been garbage-collected from ziglang.org — which keeps only
+  the current master tarball — so it was no longer installable from
+  its nominal source. Embedders must move up: the tree now uses
+  `std.lang.Optimize`'s lowercase field names, which do not exist on
+  the old pin.
 - The QNS interop image no longer depends on ziglang.org retaining a
   dev tarball. It tries the Zig project's community mirrors in order
   and pins the exact SHA-256 per architecture (digests verified

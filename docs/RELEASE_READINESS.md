@@ -36,7 +36,7 @@ real-socket operation is untested, not known-broken.**
 
 The skip predates the current toolchain pin and its recorded cause no
 longer holds: it was attributed to `error.ConcurrencyUnavailable` from
-std's `batchAwaitConcurrent`, but at 0.17.0-dev.1252 that function
+std's `batchAwaitConcurrent`, but at 0.17.0-dev.1683 that function
 takes a dedicated Windows branch (`batchDrainSubmittedWindows` +
 `NtDelayExecution`) that never returns it — the `ConcurrencyUnavailable`
 path is reachable only on wasi and on platforms without `poll`. Note
@@ -112,20 +112,28 @@ is safe to embed in production. The gates:
       when boringssl-zig tags v0.6.5, both repos repin to the tag, and the
       known pair is deleted from the lint.
 
-- [ ] **The pinned toolchain is obtainable.** It currently is not.
-      `mise.toml` pins `0.17.0-dev.1252+e4b325c19`, and ziglang.org
-      retains only the *current* master dev tarball, so that version
-      404s there (master is well past it). `mise ls-remote zig` lists no
-      `0.17.0-dev` builds at all. Every green CI leg today is green
-      because `jdx/mise-action` restores a warm cache and never
-      re-downloads — **an Actions cache eviction would take all of CI
-      red with no in-repo remedy.** The Docker jobs, having no cache,
-      already went red and were the first symptom; they are fixed
-      (mirror list + per-arch SHA-256 pin, see `interop/qns/Dockerfile`)
-      but that only removes the symptom. Close this by either moving the
-      pin to a version that still exists upstream — a real toolchain
-      migration, not a release-boundary change — or by vendoring the
-      tarball somewhere the project controls.
+- [ ] **The pinned toolchain is durably obtainable.** It is obtainable
+      today but not durably, because the pin tracks Zig *master*.
+      ziglang.org retains only the current master dev tarball, so any
+      such pin 404s the moment upstream master moves on. That already
+      happened once at `0.17.0-dev.1252`: it went missing, the Docker
+      jobs (which have no toolchain cache) went red, and every other
+      leg kept passing only because `jdx/mise-action` restores a warm
+      cache and never re-downloads — meaning an Actions cache eviction
+      would have taken all of CI red with no in-repo remedy.
+
+      Two mitigations are in place. The pin moved up to
+      `0.17.0-dev.1683+5ceec001b`, which ziglang.org currently serves,
+      and `interop/qns/Dockerfile` now walks Zig's community mirror
+      list with per-architecture SHA-256 pins so it survives the source
+      disappearing again. Neither makes the pin permanent: moving up
+      only restarts the same clock.
+
+      Close this properly by pinning a *tagged* Zig release once one
+      exists that quic-zig can build against (0.16.0 cannot — HEAD uses
+      0.17-only forms), or by vendoring the tarball somewhere the
+      project controls. Tagged releases are retained indefinitely,
+      which is the only version of this that stays true.
 
 ### Platforms
 - [x] Windows `windows-latest` job is green and `continue-on-error` is

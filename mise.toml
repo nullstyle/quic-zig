@@ -15,9 +15,9 @@
 #
 # To move: bump this, re-verify (full test suite + examples + echo smoke +
 # consumer smoke + a deep fuzz run), then update the floor in
-# build.zig.zon `minimum_zig_version` (currently 0.17.0-dev.1158) and the
+# build.zig.zon `minimum_zig_version` (currently 0.17.0-dev.1683) and the
 # "Verified toolchain" line in the CHANGELOG entry together.
-zig = "0.17.0-dev.1252+e4b325c19"
+zig = "0.17.0-dev.1683+5ceec001b"
 just = "1.49.0"
 python = "3.12.13"
 uv = "0.11.3"

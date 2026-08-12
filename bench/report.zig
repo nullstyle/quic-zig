@@ -245,7 +245,7 @@ pub fn renderReport(
     try out.print(
         allocator,
         "  \"bench_unsafe_release_fast\": {},\n",
-        .{builtin.mode == .ReleaseFast},
+        .{builtin.mode == .fast},
     );
     try out.appendSlice(allocator, "  \"report_path\": ");
     try appendJsonString(out, allocator, meta.report_path);

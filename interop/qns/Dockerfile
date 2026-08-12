@@ -12,23 +12,26 @@ ARG TARGETPLATFORM
 # Dev tarballs live under /builds/ (no per-version subdirectory), unlike
 # tagged releases which are served from /download/<version>/.
 #
-# ziglang.org keeps only the CURRENT master dev tarball, so this pin 404s
-# there the moment upstream master moves on — which is exactly what
-# happened and what turned this image (and the interop gate that builds
-# it) red. CI's other legs kept passing only because jdx/mise-action
-# restores a warm cache and never re-downloads; the Docker jobs have no
-# such cache, so they were the canary rather than the cause.
+# ziglang.org keeps only the CURRENT master dev tarball, so any pin here
+# 404s there the moment upstream master moves on. That is not a
+# hypothetical: it happened, and it turned this image — and the interop
+# gate that builds it — red, while the rest of CI stayed green purely
+# because jdx/mise-action restores a warm cache and never re-downloads.
+# The Docker jobs, having no such cache, were the canary rather than the
+# cause.
 #
-# The fix is not another single source that can vanish: fetch from the
-# Zig project's own community mirror list, try mirrors in order, and pin
-# the exact bytes. The digests below were verified locally against Zig's
-# well-known minisign public key
-# (RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U) and
-# independently agreed on by two mirrors, so the hash check here needs no
-# signing tooling in the image and still fails closed on a bad mirror.
-ARG ZIG_VERSION=0.17.0-dev.1252+e4b325c19
-ARG ZIG_SHA256_X86_64=d9e60749c52e17464d41b7a1dc5da46c4bffb7b3171b1fac6782bc2ec3e28977
-ARG ZIG_SHA256_AARCH64=ec424f513db49ac34137a139145bb92d322a065d366fa259e7a931c161a27a67
+# Tracking current master (as this pin now does) makes the tarball
+# available again but does not make it durable; it only restarts the
+# same clock. So the fetch below does not trust any single source: it
+# walks the Zig project's own community mirror list and pins the exact
+# bytes. The digests were verified locally against Zig's well-known
+# minisign public key
+# (RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U), so the
+# check needs no signing tooling in the image and still fails closed on
+# a bad mirror as well as a missing one.
+ARG ZIG_VERSION=0.17.0-dev.1683+5ceec001b
+ARG ZIG_SHA256_X86_64=e6e5c7e0834626bded90cd786d148bebf211dc80b013afefd631472b57b41f77
+ARG ZIG_SHA256_AARCH64=b18bd9c61b751ec64982359f85c3d4aec3347f4988b9edbfc15a14c055452eee
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils cmake ninja-build clang git python3 perl \
