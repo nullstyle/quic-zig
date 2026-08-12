@@ -112,10 +112,30 @@ is safe to embed in production. The gates:
       when boringssl-zig tags v0.6.5, both repos repin to the tag, and the
       known pair is deleted from the lint.
 
+- [ ] **The pinned toolchain is obtainable.** It currently is not.
+      `mise.toml` pins `0.17.0-dev.1252+e4b325c19`, and ziglang.org
+      retains only the *current* master dev tarball, so that version
+      404s there (master is well past it). `mise ls-remote zig` lists no
+      `0.17.0-dev` builds at all. Every green CI leg today is green
+      because `jdx/mise-action` restores a warm cache and never
+      re-downloads — **an Actions cache eviction would take all of CI
+      red with no in-repo remedy.** The Docker jobs, having no cache,
+      already went red and were the first symptom; they are fixed
+      (mirror list + per-arch SHA-256 pin, see `interop/qns/Dockerfile`)
+      but that only removes the symptom. Close this by either moving the
+      pin to a version that still exists upstream — a real toolchain
+      migration, not a release-boundary change — or by vendoring the
+      tarball somewhere the project controls.
+
 ### Platforms
 - [x] Windows `windows-latest` job is green and `continue-on-error` is
       removed (promotes Windows to a hard tier-1 gate). Verified green on
       `main` at commit `6bbc43280383df2f901528a426d6698e78446308`.
+      Regressed during 0.11.0 (the GSO/GRO cmsg helpers do not compile
+      where `std.c.cmsghdr` is `void`) and was fixed in `53c84be`, which
+      also added `just check-windows` — the local gate that would have
+      caught it, since `zig build -Dtarget=…` alone never compiles the
+      test binaries.
 
 ### Docs & policy
 - [x] `SECURITY.md` present with a disclosure process.
