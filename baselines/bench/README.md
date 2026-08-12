@@ -2,15 +2,22 @@
 
 Tracked reference points for `zig build bench-compare`. Each file is a
 benchmark JSON report (the `bench/report.zig` schema, v3+) captured on a
-named machine class; the filename is the machine class:
+named machine class. Two files per machine class — `<machine>.json`
+(microbenchmarks, `zig build bench`) and `<machine>-e2e.json`
+(`zig build bench-e2e`):
 
-- `github-ubuntu-x64.json` — GitHub-hosted `ubuntu-latest` runners; what
-  `.github/workflows/benchmark.yml` compares against (advisory).
-- `<local-machine>.json` — optional developer baselines for same-machine
-  A/B during perf work (name them after `BENCH_MACHINE_ID`).
+- `m5max{,-e2e}.json` — the maintainer's development machine; the
+  same-machine A/B reference for perf commits (captured at 9 samples).
+- `github-ubuntu-x64{,-e2e}.json` — GitHub-hosted `ubuntu-latest`
+  runners; what `.github/workflows/benchmark.yml` compares against
+  (advisory). Committed from a benchmark.yml artifact after the first
+  run on a runner; until then the workflow's compare step notes the
+  missing baseline in its summary.
 
 Comparisons are only meaningful within a machine class — never compare a
-laptop run against the CI baseline.
+laptop run against the CI baseline. (Exception: the `impairment` kind is
+measured in deterministic virtual time and is machine-independent by
+construction.)
 
 ## Comparing
 

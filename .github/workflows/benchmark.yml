@@ -6,11 +6,19 @@ on:
     # so report history stays comparable.
     - cron: "0 8 * * 1"
   workflow_dispatch:
+  # Advisory on-demand PR runs: add the `run-bench` label to a PR.
+  pull_request:
+    types: [labeled]
 
 jobs:
   bench:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-bench')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    # Everything here is advisory: numbers inform, they never gate a
+    # merge. Hard perf claims come from same-machine A/B recorded in
+    # commit messages (see baselines/bench/README.md).
+    continue-on-error: true
     steps:
       - name: Checkout quic-zig
         uses: actions/checkout@v7
@@ -49,11 +57,36 @@ jobs:
           zig version
           uname -a
 
-      - name: Run benchmarks
+      - name: Run microbenchmarks
         shell: bash
+        env:
+          BENCH_MACHINE_ID: github-ubuntu-x64
         run: |
           set -o pipefail
-          zig build bench -- --json-dir benchmark-reports 2>&1 | tee benchmark-output.txt
+          zig build bench -- --samples 9 --json benchmark-reports/micro.json 2>&1 | tee benchmark-output.txt
+
+      - name: Run e2e benchmarks
+        shell: bash
+        env:
+          BENCH_MACHINE_ID: github-ubuntu-x64
+        run: |
+          set -o pipefail
+          zig build bench-e2e -- --samples 9 --json benchmark-reports/e2e.json 2>&1 | tee -a benchmark-output.txt
+
+      # Advisory regression check against the committed runner-class
+      # baseline, when one exists. The markdown lands in the job summary.
+      # Refresh policy: baselines/bench/README.md.
+      - name: Compare against committed baseline (advisory)
+        shell: bash
+        run: |
+          for pair in "github-ubuntu-x64.json micro.json" "github-ubuntu-x64-e2e.json e2e.json"; do
+            set -- $pair
+            if [ -f "baselines/bench/$1" ]; then
+              zig build bench-compare -- --baseline "baselines/bench/$1" --new "benchmark-reports/$2" --advisory
+            else
+              echo "### bench-compare: no committed baseline baselines/bench/$1 yet (see baselines/bench/README.md)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
       - name: Upload benchmark report
         if: always()
