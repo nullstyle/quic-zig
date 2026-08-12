@@ -442,6 +442,24 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
     }
 }
 
+/// Send one datagram, tolerating peer-provoked failures.
+///
+/// Every egress site in this file goes through here so the policy is
+/// stated once: an ICMP provoked by a peer that went away must not end
+/// the client loop, while a local fault still reaches the embedder.
+/// See `udp_server.classifySendError`.
+fn sendTolerant(
+    io: std.Io,
+    sock: Net.Socket,
+    dest: *const Net.IpAddress,
+    data: []const u8,
+) !void {
+    sock.send(io, dest, data) catch |err| switch (udp_server.classifySendError(err)) {
+        .tolerate => {},
+        .fatal => return err,
+    };
+}
+
 fn drainOutbound(
     conn: *Connection,
     batch: *udp_server.SendBatch,
@@ -465,7 +483,7 @@ fn drainOutbound(
                 if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| dest = resolved;
             }
             if (filled.count == 1) {
-                try sock.send(io, &dest, gso.buf[0..filled.total_len]);
+                try sendTolerant(io, sock, &dest, gso.buf[0..filled.total_len]);
             } else {
                 var cmsg: [64]u8 = undefined;
                 const cmsg_len = socket_opts.writeUdpSegmentCmsg(&cmsg, @intCast(filled.seg_size));
@@ -482,7 +500,7 @@ fn drainOutbound(
                     var off: usize = 0;
                     while (off < filled.total_len) {
                         const end = @min(off + filled.seg_size, filled.total_len);
-                        try sock.send(io, &dest, gso.buf[off..end]);
+                        try sendTolerant(io, sock, &dest, gso.buf[off..end]);
                         off = end;
                     }
                 };
@@ -492,7 +510,7 @@ fn drainOutbound(
                 if (filled.carry_to) |path_addr| {
                     if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| carry_dest = resolved;
                 }
-                try sock.send(io, &carry_dest, gso.buf[filled.carry_offset..][0..filled.carry_len]);
+                try sendTolerant(io, sock, &carry_dest, gso.buf[filled.carry_offset..][0..filled.carry_len]);
             }
         }
     }
@@ -515,9 +533,17 @@ fn drainOutbound(
         };
         batch.commit(dest, out.len);
     }
-    // Client posture: egress failures propagate (parity with the
-    // historical per-datagram `try sock.send`).
-    try batch.flush(io, sock);
+    // Client posture: *local* egress faults propagate, so an embedder
+    // whose interface died hears about it. Peer-provoked failures do
+    // not — a peer that stopped listening produces an ICMP that the
+    // kernel reports on our next send, and letting that end the loop
+    // would hand any peer a kill switch. The datagram is simply lost;
+    // loss recovery retransmits, and a peer that is really gone is
+    // closed out by the idle timeout, which is the clean path.
+    batch.flush(io, sock) catch |err| switch (udp_server.classifySendError(err)) {
+        .tolerate => {},
+        .fatal => return err,
+    };
 }
 
 // ---- Tests --------------------------------------------------------------

@@ -638,6 +638,25 @@ pub const Server = struct {
     /// bandwidth abuser that the global listener cap is wide enough
     /// to let through. Hardening guide §4.1 token-bucket.
     feeds_source_bandwidth_limited: u64 = 0,
+    /// Egress attempts abandoned because the socket reported a *local*
+    /// fault — no interface (`NetworkDown`), no buffers
+    /// (`SystemResources`), no permission (`AccessDenied`). Bumped by
+    /// `transport.runUdpServer`; embedders driving their own loop own
+    /// their own accounting.
+    ///
+    /// This is the counter to alert on. The loop deliberately does not
+    /// exit on these — a server that limps is usually better than one
+    /// that dies, and the condition is often transient — but a server
+    /// that cannot send is not serving, and before this existed that
+    /// state was completely silent. Any sustained nonzero rate here
+    /// means the host, not the peers.
+    ///
+    /// Peer-provoked failures (ICMP unreachable from a peer that went
+    /// away, oversized datagrams) are NOT counted here: they are
+    /// normal on the open internet, QUIC loss recovery covers them,
+    /// and mixing them in would bury the signal. See
+    /// `transport.classifySendError`.
+    egress_local_faults: u64 = 0,
     /// LogEvents dropped by the per-source log rate limiter
     /// (`Config.log_source_rate_limit`). NOT a subset
     /// of `feeds_dropped` — log emission is a separate side effect

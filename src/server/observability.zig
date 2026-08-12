@@ -172,6 +172,12 @@ pub const MetricsSnapshot = struct {
     /// against any single source consuming more than its fair share.
     /// Hardening guide §4.1 token-bucket.
     feeds_source_bandwidth_limited: u64,
+    /// Egress attempts abandoned on a *local* socket fault
+    /// (NetworkDown / SystemResources / AccessDenied) inside
+    /// `transport.runUdpServer`. Peer-provoked failures are
+    /// excluded by design — see `Server.egress_local_faults`.
+    /// A sustained nonzero rate means the host, not the peers.
+    egress_local_faults: u64,
     /// LogEvents the server dropped under the per-source log rate
     /// limit (`Config.log_source_rate_limit`).
     /// Distinct from `feeds_dropped` — feeding a datagram and emitting
@@ -329,6 +335,7 @@ pub fn metricsSnapshot(self: *const Server) MetricsSnapshot {
         .feeds_listener_rate_limited = self.feeds_listener_rate_limited,
         .feeds_listener_byte_rate_limited = self.feeds_listener_byte_rate_limited,
         .feeds_source_bandwidth_limited = self.feeds_source_bandwidth_limited,
+        .egress_local_faults = self.egress_local_faults,
         .feeds_log_rate_limited = self.feeds_log_rate_limited,
         .retries_validated = self.retries_validated,
         .stateless_responses_evicted = self.stateless_responses_evicted,

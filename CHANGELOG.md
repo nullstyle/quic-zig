@@ -7,6 +7,18 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`MetricsSnapshot.egress_local_faults`** — counts send attempts
+  abandoned on a *local* socket fault (`NetworkDown`,
+  `SystemResources`, `AccessDenied`) inside `runUdpServer`. The server
+  loop deliberately does not exit on egress failure, but until now it
+  also never mentioned one, so a host with no interface or no socket
+  buffers served nothing while reporting perfect health. Peer-provoked
+  failures are excluded by design — they are routine on the open
+  internet and would bury the signal. Any sustained nonzero rate here
+  means the host, not the peers.
+
 ### Fixed
 
 - **A peer could end the bundled UDP loops.** `runUdpServer` /
@@ -23,6 +35,18 @@ changes.
   Classification is pinned by `transport.classifyReceiveError` and its
   test. Thanks to the capnp-zig team, who hit the Windows half of this
   in their own receive bridge and flagged the pattern.
+- **The same hole existed on the send path**, and the client loop was
+  the exposed one: a peer that stops listening provokes an ICMP
+  port-unreachable, which the kernel reports as `ConnectionRefused` on
+  the *next send* — and the client propagated it, so any peer could
+  end the loop. Now `ConnectionRefused`, `ConnectionResetByPeer`,
+  `HostUnreachable`, `NetworkUnreachable`, and `MessageOversize` are
+  tolerated on both loops (the datagram is lost; loss recovery
+  retransmits, and a peer that is genuinely gone is closed out by the
+  idle timeout, which is the clean path). Local faults still reach the
+  embedder on the client and are counted on the server. All client
+  egress, including the GSO path, now routes through one policy,
+  pinned by `transport.classifySendError` and its test.
 
 ### Changed
 

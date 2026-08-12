@@ -645,7 +645,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 socket_opts.default_gso_max_segments,
                 now_us,
                 options.io,
-            ) catch {};
+            ) catch |err| countEgressFault(server, err);
             slot.conn.tick(now_us) catch {};
         }
         // Ship whatever the drain pass accumulated — one syscall per
@@ -653,7 +653,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
         // ALL slots (best-effort, matching the historical per-datagram
         // posture).
         for (send_batches, 0..) |*b, li| {
-            b.flush(options.io, listeners[li].sock) catch {};
+            b.flush(options.io, listeners[li].sock) catch |err| countEgressFault(server, err);
         }
 
         iteration_count +%= 1;
@@ -977,6 +977,97 @@ test "remote-influenced receive errors never end the loop" {
         error.SystemFdQuotaExceeded,
     }) |err| {
         try std.testing.expectEqual(ReceiveDisposition.fatal, classifyReceiveError(err));
+    }
+}
+
+/// Record a drain/flush failure against the server's metrics.
+///
+/// The server loop never exits on egress failure — a server that
+/// limps is better than one that dies, and QUIC loss recovery covers
+/// dropped tails. But "never exits" used to mean "never mentions it
+/// either", so a host with no interface or no socket buffers served
+/// nothing while reporting perfect health. Local faults now land on
+/// `MetricsSnapshot.egress_local_faults`, which embedders already
+/// forward to their metrics pipeline.
+///
+/// Peer-provoked failures stay uncounted on purpose: they are routine
+/// on the open internet, and counting them would bury the signal that
+/// matters. `drainSlot` can also surface non-send errors (a
+/// `pollDatagram` fault); those are local by definition and counted.
+fn countEgressFault(server: *Server, err: anyerror) void {
+    switch (classifySendError(err)) {
+        .tolerate => {},
+        .fatal => server.egress_local_faults +%= 1,
+    }
+}
+
+/// What the loop should do about a failed send. Same two-way split as
+/// `ReceiveDisposition`, and for the same reason.
+pub const SendDisposition = enum {
+    /// This datagram is lost; the loop is fine. QUIC loss recovery
+    /// retransmits, and if the peer really is gone the idle timeout
+    /// closes the connection cleanly — which is a better outcome than
+    /// handing the embedder an error and skipping the close.
+    tolerate,
+    /// A genuine local fault. The socket cannot send at all.
+    fatal,
+};
+
+/// Classify a send failure.
+///
+/// The remote side, or a path change, can provoke every error in the
+/// first group. `ConnectionRefused` is the one that bites: a peer that
+/// stops listening produces an ICMP port-unreachable, which the kernel
+/// queues against the socket and reports on the *next send*. Treating
+/// that as fatal lets any peer terminate the loop — the send-side twin
+/// of the receive bug fixed alongside this.
+///
+/// `MessageOversize` belongs here too: a datagram we could not fit is
+/// a datagram to drop, not a reason to stop.
+///
+/// The second group is local — no interface, no buffers, no
+/// permission. Nothing the loop does next will work, so callers that
+/// can act on it should see it.
+///
+/// Takes `anyerror` rather than `Net.Socket.SendError` so the server's
+/// drain path — whose inferred error set also carries `pollDatagram`
+/// faults — can share this one definition. Anything unrecognised
+/// classifies as `.fatal`, which is the safe default: an error nobody
+/// anticipated should be surfaced, not swallowed.
+pub fn classifySendError(err: anyerror) SendDisposition {
+    return switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.HostUnreachable,
+        error.NetworkUnreachable,
+        error.MessageOversize,
+        => .tolerate,
+        else => .fatal,
+    };
+}
+
+test "a peer cannot end a loop through the send path" {
+    // Remote-influenced, and all reachable by ICMP from a peer that
+    // went away or a path that changed.
+    for ([_]Net.Socket.SendError{
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.HostUnreachable,
+        error.NetworkUnreachable,
+        error.MessageOversize,
+    }) |err| {
+        try std.testing.expectEqual(SendDisposition.tolerate, classifySendError(err));
+    }
+
+    // Local faults: the socket is not going to start working.
+    for ([_]Net.Socket.SendError{
+        error.SystemResources,
+        error.NetworkDown,
+        error.AccessDenied,
+        error.SocketUnconnected,
+        error.AddressFamilyUnsupported,
+    }) |err| {
+        try std.testing.expectEqual(SendDisposition.fatal, classifySendError(err));
     }
 }
 
