@@ -30,6 +30,31 @@ test:
 fuzz iters="1M":
     zig build test -Duse-llvm=true --fuzz={{iters}}
 
+# Compile-only check against a tier-1 platform we can't run locally.
+#
+# `zig build -Dtarget=...` alone is NOT this check: it builds the
+# library and examples but never compiles the test binaries, so
+# platform-specific code reachable only from a test is invisible to
+# it. That gap shipped a broken windows-latest leg once already (the
+# GSO/GRO cmsg helpers, whose `std.c.cmsghdr` is `void` on Windows).
+# The `run test` steps are expected to fail here — a macOS or Linux
+# host cannot execute a Windows binary — so only compile errors count.
+check-windows:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    zig build -Dtarget=x86_64-windows --summary all || exit 1
+    echo "--- test binaries: compile-only ---"
+    # The only tolerated error is the host refusing to run a foreign
+    # binary; anything else is a real compile failure.
+    errs=$(zig build test -Dtarget=x86_64-windows 2>&1 \
+        | grep "error:" | grep -v "unable to execute binaries")
+    if [ -n "$errs" ]; then
+        echo "$errs"
+        echo "WINDOWS COMPILE ERRORS (above)"
+        exit 1
+    fi
+    echo "windows cross-compile clean"
+
 clean:
     rm -rf .zig-cache zig-out
 

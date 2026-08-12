@@ -88,6 +88,14 @@ const has_ip_ecn_sockopts: bool = builtin.os.tag == .linux or builtin.os.tag.isD
 /// the Unix-only tuning helpers as unsupported there.
 const has_posix_buffer_sockopts: bool = builtin.os.tag != .windows;
 
+/// True iff `std.c.cmsghdr` is a real struct on this target, so the
+/// cmsg byte-math helpers below can project field offsets from it.
+/// Windows has no ancillary-data layout and std declares the type as
+/// `void` there, which makes `@offsetOf` a compile error rather than a
+/// runtime failure — hence a comptime gate, and hence structural
+/// rather than an OS list, so it tracks std instead of guessing.
+const has_cmsg_layout: bool = @typeInfo(std.c.cmsghdr) == .@"struct";
+
 /// Underlying socket handle type; matches `std.Io.net.Socket.Handle`.
 pub const Handle = posix.socket_t;
 
@@ -803,8 +811,11 @@ pub fn setUdpGroEnabled(handle: Handle) SetEcnError!void {
 /// `buf`, returning the number of bytes written (header + u16 payload,
 /// aligned like the kernel's CMSG_SPACE). Pure byte math — mirrors the
 /// layout projection `parseEcnFromControl` uses, so it is testable on
-/// every platform.
+/// every platform that has a cmsg layout at all (Windows does not; see
+/// `has_cmsg_layout`). Writes nothing there, which is unreachable in
+/// practice since GSO is Linux-only.
 pub fn writeUdpSegmentCmsg(buf: []u8, segment_size: u16) usize {
+    if (comptime !has_cmsg_layout) return 0;
     const Cmsg = std.c.cmsghdr;
     const header_size: usize = @sizeOf(Cmsg);
     const len_off: usize = @offsetOf(Cmsg, "len");
@@ -832,8 +843,10 @@ pub fn writeUdpSegmentCmsg(buf: []u8, segment_size: u16) usize {
 /// Walk a populated `recvmsg` control buffer for the kernel's
 /// `UDP_GRO` cmsg: the original segment size of a coalesced datagram.
 /// Null when absent (not coalesced, or GRO off). Same tolerant walker
-/// posture as `parseEcnFromControl`.
+/// posture as `parseEcnFromControl`, including its comptime layout
+/// gate: platforms without a cmsg layout can never see a GRO cmsg.
 pub fn parseGroSegmentFromControl(control: []const u8) ?u16 {
+    if (comptime !has_cmsg_layout) return null;
     const Cmsg = std.c.cmsghdr;
     const header_size: usize = @sizeOf(Cmsg);
     const len_off: usize = @offsetOf(Cmsg, "len");
@@ -880,6 +893,7 @@ pub fn parseGroSegmentFromControl(control: []const u8) ?u16 {
 }
 
 test "writeUdpSegmentCmsg round-trips through the GRO parser layout" {
+    if (comptime !has_cmsg_layout) return error.SkipZigTest;
     // The builder and parser share the projected cmsghdr layout, so a
     // built UDP_SEGMENT cmsg re-labeled as UDP_GRO must parse back.
     var buf: [64]u8 = undefined;
@@ -895,6 +909,7 @@ test "writeUdpSegmentCmsg round-trips through the GRO parser layout" {
 }
 
 test "parseGroSegmentFromControl tolerates junk and empty buffers" {
+    if (comptime !has_cmsg_layout) return error.SkipZigTest;
     try std.testing.expectEqual(@as(?u16, null), parseGroSegmentFromControl(&.{}));
     var junk: [24]u8 = @splat(0xff);
     try std.testing.expectEqual(@as(?u16, null), parseGroSegmentFromControl(&junk));

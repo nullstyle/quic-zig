@@ -31,6 +31,26 @@ deterministic fuzz-smoke coverage. `zig build conformance` runs the
 auditor-facing RFC corpus directly. `zig build bench` runs the
 microbenchmark harness.
 
+### Cross-platform code
+
+If you touch anything platform-conditional — sockopts, cmsg layouts,
+the UDP loops — also run:
+
+```sh
+just check-windows
+```
+
+Windows is tier-1 and release-gating, but only CI can run it natively,
+so a break there costs a full round trip. Note that a bare
+`zig build -Dtarget=x86_64-windows` is **not** sufficient: it builds
+the library and examples without ever compiling the test binaries, so
+platform-specific code reachable only from a test compiles nowhere
+locally. That exact gap turned the windows-latest leg red during
+0.11.0 — `std.c.cmsghdr` is `void` on Windows, and the new GSO/GRO
+helpers were pulled in by their own tests. The recipe compiles the
+test binaries too; a host that cannot execute the resulting binaries
+is expected and ignored.
+
 ## Fuzzing
 
 Fuzz targets live inline next to the code they exercise, as
