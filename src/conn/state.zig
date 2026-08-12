@@ -73,6 +73,7 @@ pub const pending_frames_mod = @import("pending_frames.zig");
 pub const lifecycle_mod = @import("lifecycle.zig");
 pub const stateless_reset_mod = @import("stateless_reset.zig");
 pub const path_frame_queue = @import("path_frame_queue.zig");
+pub const pacing_mod = @import("pacing.zig");
 pub const socket_opts_mod = @import("../transport/socket_opts.zig");
 pub const _internal = @import("_internal.zig");
 const conn_recv_flow_handlers = @import("conn_recv_flow_handlers.zig");
@@ -94,6 +95,7 @@ const conn_loss = @import("conn_loss.zig");
 const conn_recv_data_handlers = @import("conn_recv_data_handlers.zig");
 const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
 const conn_send = @import("conn_send.zig");
+const conn_stats = @import("conn_stats.zig");
 
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
@@ -119,6 +121,8 @@ pub const PathSet = path_mod.PathSet;
 pub const PathState = path_mod.PathState;
 /// Per-path counters (datagrams sent/received, loss, RTT inputs).
 pub const PathStats = path_mod.PathStats;
+/// Whole-connection observability snapshot returned by `Connection.stats()`.
+pub const ConnectionStats = conn_stats.ConnectionStats;
 /// RFC 8899 DPLPMTUD probe-state-machine phase (re-export).
 pub const PmtudState = path_mod.PmtudState;
 /// RFC 8899 DPLPMTUD embedder configuration (re-export).
@@ -137,6 +141,10 @@ pub const RttEstimator = rtt_mod.RttEstimator;
 pub const TransportParams = transport_params_mod.Params;
 /// Default congestion controller — NewReno from RFC 9002 §7.
 pub const NewReno = congestion_mod.NewReno;
+/// Algorithm-dispatching congestion controller each path holds.
+pub const CongestionController = congestion_mod.CongestionController;
+/// Selectable congestion-control algorithm.
+pub const CongestionAlgorithm = congestion_mod.Algorithm;
 /// BoringSSL TLS session ticket handle, used for 0-RTT resumption.
 pub const Session = boringssl.tls.Session;
 /// 0-RTT acceptance/rejection status reported by BoringSSL.
@@ -354,7 +362,7 @@ pub const transport_error_transport_parameter: u64 = 0x08;
 /// peer-controlled state (CRYPTO reassembly, DATAGRAM queues, stream
 /// buffers) closes the connection with EXCESSIVE_LOAD (0x09) rather
 /// than spilling unbounded peer input into the host allocator. The
-/// hardening guide §8 calls this out as the "memory cap" backstop.
+/// This is the connection-wide "memory cap" DoS backstop.
 pub const transport_error_excessive_load: u64 = 0x09;
 pub const transport_error_aead_limit_reached: u64 = 0x0f;
 /// RFC 9000 §20.1 / §10.2.3: the generic transport-error code used when
@@ -757,6 +765,12 @@ pub const TimerKind = enum {
     loss_detection,
     pto,
     idle,
+    /// RFC 9002 §7.7 pacing: application data is waiting on send
+    /// credit; `at_us` is when the pacer's token bucket next covers a
+    /// full datagram. `tick` does nothing for this kind — waking and
+    /// draining the outbox (the loop's normal post-tick step) is the
+    /// action.
+    pacing,
     /// RFC 9000 §10.2.1 closing-state expiry. The connection has sent
     /// a CONNECTION_CLOSE; this timer fires at `now + 3 * PTO` after
     /// the first emit and transitions the connection to terminal
@@ -996,7 +1010,7 @@ pub const Connection = struct {
 
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
-    /// hardening guide §9 / §12: internal parser-error strings like
+    /// secure-by-default redaction: internal parser-error strings like
     /// "ack of unsent packet" or "connection id reused across paths"
     /// are useful telemetry for the embedder but reveal implementation
     /// detail to the peer (parser fingerprinting, internal state
@@ -1008,7 +1022,7 @@ pub const Connection = struct {
     /// internal load tests, etc.) can flip this to `true`.
     reveal_close_reason_on_wire: bool = false,
 
-    /// Hard ceiling on `bytes_resident` (hardening guide §3.5 / §8).
+    /// Hard ceiling on `bytes_resident` (per-connection memory DoS cap).
     /// Sums every byte sitting in peer-controlled reassembly /
     /// queue buffers — CRYPTO `crypto_pending`, RFC 9221 inbound
     /// DATAGRAMs, and per-stream send/recv reassembly buffers. When
@@ -1347,6 +1361,18 @@ pub const Connection = struct {
     /// production embedders get DPLPMTUD without any extra wiring.
     pmtud_config: path_mod.PmtudConfig = .{ .enable = false },
 
+    /// Congestion-control algorithm used by every path's controller.
+    /// A mutable posture switch like `ecn_enabled`: wrappers thread
+    /// `Config.congestion_control` through `setCongestionAlgorithm`
+    /// right after `initClient`/`initServer`; paths created later
+    /// (multipath, migration) inherit it at construction.
+    cc_algorithm: congestion_mod.Algorithm = .cubic,
+
+    /// RFC 9002 §7.7 packet pacing. On by default; `false` restores
+    /// the pre-0.11 burst-a-full-cwnd emission timing exactly (the
+    /// rollback lever). Wrappers thread `Config.enable_pacing` here.
+    pacing_enabled: bool = true,
+
     /// Local parameters handed to BoringSSL. Kept here too so ACK
     /// delay and idle timers can use the negotiated local values.
     local_transport_params: TransportParams = .{},
@@ -1543,7 +1569,10 @@ pub const Connection = struct {
             .pending_hostname = server_name,
         };
         errdefer conn.inner.deinit();
-        try conn.paths.ensurePrimary(allocator, .{ .max_datagram_size = default_mtu });
+        try conn.paths.ensurePrimary(allocator, .{
+            .max_datagram_size = default_mtu,
+            .algorithm = conn.cc_algorithm,
+        });
         // Client picked the destination address itself, so the §8.1
         // anti-amplification cap doesn't apply on its outbound. Primary
         // path starts validated. (See `PathSet.ensurePrimary` for the
@@ -1574,7 +1603,10 @@ pub const Connection = struct {
             .inner = try tls_ctx.newQuicServer(),
         };
         errdefer conn.inner.deinit();
-        try conn.paths.ensurePrimary(allocator, .{ .max_datagram_size = default_mtu });
+        try conn.paths.ensurePrimary(allocator, .{
+            .max_datagram_size = default_mtu,
+            .algorithm = conn.cc_algorithm,
+        });
         // RFC 8899 DPLPMTUD on the primary path. See `initClient` for
         // the embedder-config plumbing path.
         conn.setPmtudConfig(conn.pmtud_config);
@@ -1598,6 +1630,21 @@ pub const Connection = struct {
         self.pmtud_config = cfg;
         for (self.paths.paths.items) |*p| {
             p.pmtudInit(cfg);
+        }
+    }
+
+    /// Select the congestion-control algorithm and re-initialise the
+    /// controller on every existing path (each keeps its own
+    /// `max_datagram_size`). Wrappers call this right after
+    /// `initClient`/`initServer`, mirroring `setPmtudConfig`; calling
+    /// it mid-connection is legal but resets all congestion state —
+    /// cwnd returns to the initial window on every path.
+    pub fn setCongestionAlgorithm(self: *Connection, algo: congestion_mod.Algorithm) void {
+        self.cc_algorithm = algo;
+        for (self.paths.paths.items) |*p| {
+            var cfg = p.path.cc.config();
+            cfg.algorithm = algo;
+            p.path.cc = congestion_mod.CongestionController.init(cfg);
         }
     }
 
@@ -1647,6 +1694,8 @@ pub const Connection = struct {
         for (&self.sent) |*tracker| {
             var i: u32 = 0;
             while (i < tracker.count) : (i += 1) {
+                // Tombstones own nothing; deinit would double-free.
+                if (tracker.packets[i].dead) continue;
                 tracker.packets[i].deinit(self.allocator);
             }
         }
@@ -2021,8 +2070,8 @@ pub const Connection = struct {
         return conn_qlog.emitPacketSent(self, lvl, pn, size, frames_count);
     }
 
-    fn emitLossDetected(self: *Connection, lvl: EncryptionLevel, stats: LossStats, reason: QlogLossReason) void {
-        return conn_qlog.emitLossDetected(self, lvl, stats, reason);
+    fn emitLossDetected(self: *Connection, lvl: EncryptionLevel, loss_stats: LossStats, reason: QlogLossReason) void {
+        return conn_qlog.emitLossDetected(self, lvl, loss_stats, reason);
     }
 
     fn emitPacketLost(self: *Connection, lvl: EncryptionLevel, pn: u64, bytes: u32, reason: QlogLossReason) void {
@@ -2702,6 +2751,16 @@ pub const Connection = struct {
         return conn_paths.pathStats(self, path_id);
     }
 
+    /// One-call observability snapshot (Unstable tier): whole-connection
+    /// byte/packet counters, an active-path cwnd/RTT/PMTU snapshot, and
+    /// the open-stream/close-state gauges — the connection-level mirror
+    /// of `Server.metricsSnapshot`. Everything is copied by value, so
+    /// the result is safe to hold across ticks and reaps. Per-path
+    /// detail stays on `pathStats(path_id)`.
+    pub fn stats(self: *const Connection) ConnectionStats {
+        return conn_stats.stats(self);
+    }
+
     pub fn queuePathAbandon(self: *Connection, path_id: u32, error_code: u64) Error!void {
         return path_frame_queue.queuePathAbandon(self, path_id, error_code);
     }
@@ -3187,11 +3246,11 @@ pub const Connection = struct {
         return &self.primaryPathConst().path.rtt;
     }
 
-    pub fn ccForApplication(self: *Connection) *NewReno {
+    pub fn ccForApplication(self: *Connection) *CongestionController {
         return &self.primaryPath().path.cc;
     }
 
-    fn ccForApplicationConst(self: *const Connection) *const NewReno {
+    fn ccForApplicationConst(self: *const Connection) *const CongestionController {
         return &self.primaryPathConst().path.cc;
     }
 
@@ -3250,9 +3309,12 @@ pub const Connection = struct {
     pub fn clearSentTracker(self: *Connection, tracker: *SentPacketTracker) void {
         var i: u32 = 0;
         while (i < tracker.count) : (i += 1) {
+            // Tombstones own nothing; deinit would double-free.
+            if (tracker.packets[i].dead) continue;
             tracker.packets[i].deinit(self.allocator);
         }
         tracker.count = 0;
+        tracker.dead_count = 0;
         tracker.bytes_in_flight = 0;
         tracker.ack_eliciting_in_flight = 0;
     }
@@ -3439,7 +3501,7 @@ pub const Connection = struct {
     /// Current NewReno congestion window in bytes for the active
     /// application-data path. Diagnostic only; there is no setter.
     pub fn congestionWindow(self: *const Connection) u64 {
-        return self.ccForApplicationConst().cwnd;
+        return self.ccForApplicationConst().cwndBytes();
     }
 
     /// Total bytes currently in flight across all packet-number
@@ -3486,12 +3548,39 @@ pub const Connection = struct {
         return app_path.path.cc.sendAllowance(app_path.sent.bytes_in_flight) == 0;
     }
 
+    // INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+    // Pacing twin of `congestionBlockedOnPath`, sharing its exemption
+    // structure exactly: non-application levels, PTO probes, and
+    // pending PINGs are never paced (RFC 9002 §7.7 applies to normal
+    // data emission; probes and handshake latency stay untouched).
+    // Refills the path's bucket lazily as a side effect.
+    pub fn pacingBlockedOnPath(
+        self: *Connection,
+        lvl: EncryptionLevel,
+        app_path: *PathState,
+        now_us: u64,
+        datagram_bytes: u64,
+    ) bool {
+        if (!self.pacing_enabled) return false;
+        if (lvl != .application and lvl != .early_data) return false;
+        if (app_path.pending_ping) return false;
+        if (app_path.pto_probe_count > 0) return false;
+        const cc = &app_path.path.cc;
+        app_path.path.pacer.refill(
+            now_us,
+            cc.cwndBytes(),
+            app_path.path.rtt.smoothed_rtt_us,
+            cc.isSlowStart(),
+            cc.config().max_datagram_size,
+        );
+        return !app_path.path.pacer.canSend(datagram_bytes);
+    }
+
     /// Soonest timer deadline among ack-delay, loss detection, PTO,
     /// idle, draining, path retirement, and key-discard. Embedders
     /// can park their event loop on this until `tick` should fire.
     /// Returns null when no timer is currently armed.
     pub fn nextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline {
-        _ = now_us;
         var best: ?TimerDeadline = null;
 
         if (self.lifecycle.draining_deadline_us) |at_us| {
@@ -3579,6 +3668,34 @@ pub const Connection = struct {
                     .level = .application,
                     .path_id = path.id,
                 });
+            }
+            // RFC 9002 §7.7: surface "send credit at T" only when a
+            // wake would actually unblock a send — the path must not
+            // be cwnd-blocked (only an ACK arrival clears that, an fd
+            // event, not a timer) and data must be pending. Checks
+            // ordered cheap-first; `canSend` (a bounded field sweep)
+            // runs last and only when the pacer is actually short.
+            if (self.pacing_enabled and path.path.state != .retiring) {
+                const cc = &path.path.cc;
+                if (cc.sendAllowance(path.sent.bytes_in_flight) > 0) {
+                    if (path.path.pacer.nextReadyUs(
+                        now_us,
+                        @min(@as(u64, @intCast(path.pmtu)), default_mtu),
+                        cc.cwndBytes(),
+                        path.path.rtt.smoothed_rtt_us,
+                        cc.isSlowStart(),
+                        cc.config().max_datagram_size,
+                    )) |at_us| {
+                        if (self.canSend()) {
+                            considerDeadline(&best, .{
+                                .kind = .pacing,
+                                .at_us = at_us,
+                                .level = .application,
+                                .path_id = path.id,
+                            });
+                        }
+                    }
+                }
             }
         }
         if (self.app_read_previous) |epoch| {
@@ -3920,7 +4037,7 @@ pub const Connection = struct {
     /// then `close(true, transport_error_excessive_load, "...")` and
     /// abandon the in-flight allocation rather than allow it to land.
     /// The reason string is the wire reason: keep it generic
-    /// (`"excessive resource use"`) per hardening guide §9.1 / §14
+    /// (`"excessive resource use"`) — secure-by-default redaction
     /// to avoid leaking which buffer tripped the cap.
     ///
     /// Pair every successful `tryReserveResidentBytes(n)` with a
@@ -4248,8 +4365,8 @@ pub const Connection = struct {
         return conn_loss.requeueLostPacket(self, lvl, packet);
     }
 
-    pub fn isPersistentCongestionFromBasePto(base_pto_us: u64, stats: LossStats) bool {
-        return conn_loss.isPersistentCongestionFromBasePto(base_pto_us, stats);
+    pub fn isPersistentCongestionFromBasePto(base_pto_us: u64, loss_stats: LossStats) bool {
+        return conn_loss.isPersistentCongestionFromBasePto(base_pto_us, loss_stats);
     }
 
     pub fn detectLossesByPacketThresholdOnApplicationPath(

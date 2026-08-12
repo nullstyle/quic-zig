@@ -326,8 +326,8 @@ test "MUST NOT trigger CC reaction when a probe is declared lost [RFC8899 §4.4 
     const probe_pn = path.pmtu_probe_pn orelse return error.TestProbeNotRecorded;
 
     // Snapshot cwnd before any loss event.
-    const cwnd_before = path.path.cc.cwnd;
-    const ssthresh_before = path.path.cc.ssthresh;
+    const cwnd_before = path.path.cc.cwndBytes();
+    const ssthresh_before = path.path.cc.ssthreshBytes();
 
     // Now build 3 PINGs from the client to bump app PNs forward,
     // then deliver them to the server. The server's ACK will cover
@@ -352,8 +352,8 @@ test "MUST NOT trigger CC reaction when a probe is declared lost [RFC8899 §4.4 
     // probe loss carried no LossStats so `onApplicationPathPacketsLost`
     // saw `in_flight_bytes_lost = 0` and skipped both the
     // `onPacketLost` cwnd cut and the persistent-congestion check.
-    try testing.expectEqual(cwnd_before, path.path.cc.cwnd);
-    try testing.expectEqual(ssthresh_before, path.path.cc.ssthresh);
+    try testing.expectEqual(cwnd_before, path.path.cc.cwndBytes());
+    try testing.expectEqual(ssthresh_before, path.path.cc.ssthreshBytes());
 }
 
 test "MUST record upper bound after probe_threshold consecutive probe losses [RFC8899 §5.1.4]" {

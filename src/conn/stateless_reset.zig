@@ -1,5 +1,5 @@
 //! Default-safe stateless-reset token derivation (RFC 9000 §10.3
-//! and hardening guide §4.5).
+//! secure-by-default stateless-reset token derivation).
 //!
 //! A QUIC stateless-reset token is a 16-byte value the server commits
 //! to when issuing a connection ID; if the server later loses the

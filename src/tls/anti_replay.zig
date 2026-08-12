@@ -1,7 +1,7 @@
 //! Bounded single-use cache for 0-RTT replay protection
 //! (RFC 9001 §5.6, RFC 8446 §8 / §E.5).
 //!
-//! Per the hardening guide §5.2: enabling 0-RTT requires "an
+//! Secure-by-default 0-RTT posture: enabling 0-RTT requires "an
 //! anti-replay mechanism" — without it, an attacker who captures a
 //! 0-RTT request can replay it for the lifetime of the resumed
 //! session ticket. BoringSSL's QUIC integration deliberately delegates

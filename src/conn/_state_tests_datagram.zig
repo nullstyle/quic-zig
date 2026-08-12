@@ -262,11 +262,11 @@ test "0-RTT rejection requeues STREAM data but not DATAGRAM payloads" {
     const n = (try conn.pollLevel(.early_data, &out, 1_000)).?;
     try std.testing.expect(n > 0);
     try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.send_datagrams.items.len);
-    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.early_data).count);
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.early_data).liveCount());
 
     try conn.requeueRejectedEarlyData();
 
-    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.early_data).count);
+    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.early_data).liveCount());
     try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.send_datagrams.items.len);
     const chunk = s.send.peekChunk(64).?;
     try std.testing.expectEqual(@as(u64, 0), chunk.offset);
@@ -332,7 +332,7 @@ test "0-RTT DATAGRAM packet-threshold loss carries early-data metadata" {
         id.* = try conn.sendDatagramTracked(if (i == 0) "lost" else "acked");
         _ = (try conn.pollLevel(.early_data, &out, 1_000 + @as(u64, @intCast(i)))).?;
     }
-    try std.testing.expectEqual(@as(u32, 4), conn.sentForLevel(.early_data).count);
+    try std.testing.expectEqual(@as(u32, 4), conn.sentForLevel(.early_data).liveCount());
 
     try conn.handleAckAtLevel(.application, .{
         .largest_acked = 3,
@@ -354,7 +354,7 @@ test "0-RTT DATAGRAM packet-threshold loss carries early-data metadata" {
     try std.testing.expectEqual(datagram_ids[0], event.datagram_lost.id);
     try std.testing.expectEqual(@as(u64, 0), event.datagram_lost.packet_number);
     try std.testing.expect(event.datagram_lost.arrived_in_early_data);
-    try std.testing.expectEqual(@as(u32, 2), conn.sentForLevel(.early_data).count);
+    try std.testing.expectEqual(@as(u32, 2), conn.sentForLevel(.early_data).liveCount());
 }
 
 test "server marks accepted 0-RTT DATAGRAM frames" {
@@ -412,5 +412,5 @@ test "pollDatagram can select a non-zero application path" {
     try std.testing.expectEqual(path_id, datagram.path_id);
     try std.testing.expect(datagram.to != null);
     try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.path_statuses.items.len);
-    try std.testing.expectEqual(@as(u32, 1), conn.paths.get(path_id).?.sent.count);
+    try std.testing.expectEqual(@as(u32, 1), conn.paths.get(path_id).?.sent.liveCount());
 }

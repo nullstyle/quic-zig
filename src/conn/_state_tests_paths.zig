@@ -276,7 +276,7 @@ test "PATH_ACK routes ACK processing to the indicated application path" {
         .ecn_counts = null,
     }, 1_050_000);
 
-    try std.testing.expectEqual(@as(u32, 0), path.sent.count);
+    try std.testing.expectEqual(@as(u32, 0), path.sent.liveCount());
     try std.testing.expectEqual(@as(u64, 0), path.sent.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, 0), path.app_pn_space.largest_acked_sent);
     try std.testing.expectEqual(@as(u64, 50_000), path.path.rtt.latest_rtt_us);
@@ -727,7 +727,7 @@ test "PTO requeues retransmittable controls on non-zero application path" {
 
     try conn.tick(conn.ptoDurationForApplicationPath(path));
 
-    try std.testing.expectEqual(@as(u32, 0), path.sent.count);
+    try std.testing.expectEqual(@as(u32, 0), path.sent.liveCount());
     try std.testing.expect(!path.pending_ping);
     try std.testing.expectEqual(@as(u8, 1), path.pto_probe_count);
     try std.testing.expectEqual(@as(u32, 1), path.pto_count);

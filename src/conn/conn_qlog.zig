@@ -6,6 +6,7 @@
 // path keeps resolving.
 
 const state_mod = @import("state.zig");
+const pacing_mod = @import("pacing.zig");
 const Connection = state_mod.Connection;
 const EncryptionLevel = state_mod.EncryptionLevel;
 const ConnectionId = state_mod.ConnectionId;
@@ -148,7 +149,7 @@ pub const QlogMigrationFailReason = enum {
     /// A `MigrationCallback` returned `.deny`, so PATH_CHALLENGE was
     /// never queued and the candidate 4-tuple was abandoned.
     policy_denied,
-    /// RFC 9000 §9.6 / hardening guide §4.8 — peer attempted to
+    /// RFC 9000 §9.6 (migration before handshake confirmation) — peer attempted to
     /// migrate before the handshake was confirmed. The triggering
     /// authenticated datagram is dropped (no anti-amp credit, no
     /// PATH_CHALLENGE emitted) so the connection state stays
@@ -412,8 +413,8 @@ pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
     const path = self.primaryPath();
     const cc = &path.path.cc;
     const new_state: QlogCongestionState = blk: {
-        if (cc.recovery_start_time_us != null and now_us <= cc.recovery_start_time_us.?) {
-            break :blk .recovery;
+        if (cc.recoveryStartTimeUs()) |rec_start| {
+            if (now_us <= rec_start) break :blk .recovery;
         }
         if (cc.isSlowStart()) break :blk .slow_start;
         break :blk .congestion_avoidance;
@@ -426,8 +427,8 @@ pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
         .name = .congestion_state_updated,
         .at_us = now_us,
         .congestion_state = new_state,
-        .cwnd = cc.cwnd,
-        .ssthresh = cc.ssthresh,
+        .cwnd = cc.cwndBytes(),
+        .ssthresh = cc.ssthreshBytes(),
         .bytes_in_flight = path.sent.bytes_in_flight,
     });
 }
@@ -442,12 +443,20 @@ pub fn emitMetricsSnapshot(self: *Connection, now_us: u64) void {
     emitQlog(self, .{
         .name = .metrics_updated,
         .at_us = now_us,
-        .cwnd = cc.cwnd,
-        .ssthresh = cc.ssthresh,
+        .cwnd = cc.cwndBytes(),
+        .ssthresh = cc.ssthreshBytes(),
         .bytes_in_flight = path.sent.bytes_in_flight,
         .smoothed_rtt_us = rtt.smoothed_rtt_us,
         .rtt_var_us = rtt.rtt_var_us,
         .min_rtt_us = rtt.min_rtt_us,
         .latest_rtt_us = rtt.latest_rtt_us,
+        .pacing_rate = if (self.pacing_enabled)
+            pacing_mod.rateBytesPerSecond(
+                cc.cwndBytes(),
+                rtt.smoothed_rtt_us,
+                cc.isSlowStart(),
+            )
+        else
+            null,
     });
 }

@@ -7,6 +7,102 @@ changes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-12
+
+The performance release, measured. Three long-deferred datapath levers
+land together — modern congestion control with pacing, a batched UDP
+datapath, and an O(1) sent-packet-tracker fix — each backed by a new
+end-to-end benchmark tier (goodput, handshakes/sec, deterministic
+impairment) with committed baselines and a regression-compare tool, so
+every claim below has a number behind it. All changes are additive:
+the Stable API surface is unchanged and no `Config` field was renamed.
+
+Verified toolchain: zig 0.17.0-dev.1252+e4b325c19 (unchanged).
+
+Headline numbers (m5max dev machine; loopback for the real-socket
+figure, in-process virtual time for impairment — deterministic per
+seed and machine-independent):
+
+- Real-socket upload goodput **10.8 → 48.9 MB/s (4.5×)** from the
+  batched datapath (batched ingress, cross-peer `sendmmsg`, Linux
+  GSO/GRO).
+- Sent-packet-tracker removal at high occupancy **6941 → 46.9 ns/op
+  (~148×)**; the old full-tail memmove was a quadratic ACK-processing
+  cliff (~590 KB moved per cumulative ACK at 4096 in flight).
+- Goodput under 1% loss **44.2 → 53.6 vMbps (+21%)** from CUBIC +
+  pacing combined; ~1852 handshakes/sec at 5 allocations each.
+
+### Added
+
+- **CUBIC congestion control (RFC 9438)** — now the default, selectable
+  back to NewReno with `Server.Config` / `Client.Config`
+  `congestion_control = .new_reno` (a one-line rollback; both ship
+  compiled in). Congestion control is now pluggable behind a
+  by-value tagged union (no allocation, no vtable). New
+  `tests/conformance/rfc9438_cubic.zig`.
+- **Packet pacing (RFC 9002 §7.7)** — on by default
+  (`enable_pacing = false` restores the pre-0.11 burst timing exactly).
+  A per-path token bucket that spreads sends at gain × cwnd/RTT;
+  surfaced to foreign event loops as a new `TimerKind.pacing` deadline.
+  New `tests/conformance/rfc9002_pacing.zig`.
+- **RFC 9002 §7.8 application-limited gate** — the window no longer
+  grows off ACKs from an unfilled pipe (both controllers).
+- **Batched UDP datapath** in `runUdpServer` / `runUdpClient`: batched
+  ingress (`RunUdpOptions.max_datagrams_per_iteration`, default 16),
+  cross-peer egress via one `sendMany`/`sendmmsg`
+  (`max_send_batch_datagrams`, default 64), and Linux UDP GSO/GRO
+  (`enable_gso` / `enable_gro`, default on, probe-gated with runtime
+  fallback; no effect off Linux). New public `transport.fillGsoBatch`
+  + GSO cmsg helpers for foreign-loop embedders.
+- **`Connection.stats()`** (`ConnectionStats`, Unstable tier) — a
+  by-value observability snapshot: whole-connection byte/packet
+  counters plus an active-path cwnd/RTT/PMTU snapshot and
+  open-stream/close-state gauges.
+- **`quic_zig.qlog`** — a real JSON Text Sequences (`.sqlog`) qlog
+  writer (qlog_version 0.4) that qvis loads directly; the QNS endpoint
+  emits it in place of the prior ad-hoc JSONL. The `metrics_updated`
+  event now carries the (previously dead) pacing rate.
+- **End-to-end benchmark tier** (`zig build bench-e2e`): in-process
+  goodput, handshakes/sec, and a deterministic loss/reorder impairment
+  matrix, with allocation counts and per-poll latency percentiles.
+  Microbenchmarks (`zig build bench`) now report median ± MAD over N
+  samples. New `zig build bench-compare` regression tool + committed
+  `baselines/bench/`, and a real-socket `zig build run-goodput-smoke`.
+
+### Changed
+
+- **CUBIC and pacing are the defaults** (see Added for the opt-outs) —
+  the one deliberate wire-behavior change this release; validated by
+  the blocking quic-go interop gate and the weekly matrix.
+- `TimerKind` gains a `pacing` variant; embedders with exhaustive
+  switches over it get a compile error (the documented forward-compat
+  signal) — handle unknown kinds generically (wake, tick, drain).
+- `SentPacketTracker` removal is now O(1) tombstoning with amortized
+  compaction; `count` includes tombstones, `liveCount()` is the
+  tracked-packet count (internal API).
+- The undocumented `max_datagrams_per_loop_iteration` transport
+  constant (always 1) is replaced by the configurable
+  `max_datagrams_per_iteration` option.
+- CI: the weekly deep-fuzz budget is corrected to 1M/target (the
+  documented 10M was never runnable under GitHub's job cap); a Linux
+  aarch64 test leg is added; the weekly interop matrix gains goodput
+  and loss-conditioned cells with a job-summary readout.
+
+### Fixed
+
+- Quadratic ACK-processing cost at high bytes-in-flight (the tracker
+  memmove cliff, above).
+- A new version-negotiation-preparse fuzz harness (the 38th fuzz site)
+  covers the multi-Initial ClientHello reassembler + transport-param /
+  version-selection walk — the most complex parser reached before any
+  TLS state exists.
+- Documentation truth-up: the boringssl-zig pin box in
+  `RELEASE_READINESS.md` now matches the actual SHA pin (with a new
+  cross-repo pin-lint workflow), the platform tier table matches CI,
+  the `EMBEDDING.md` Windows clause reflects its tier-1 status, and 27
+  code comments that cited a nonexistent "hardening guide" are
+  repointed to the governing RFC sections.
+
 ## [0.10.0] - 2026-07-29
 
 Consumer-feedback release (thanks to the capnp-zig team for a detailed

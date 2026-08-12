@@ -423,7 +423,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // Phase 1: full handshake completes. We need handshakeDone() on
     // both sides because `recordAuthenticatedDatagramAddress` gates
     // peer-initiated migration on handshake confirmation (RFC 9000
-    // §9.6 / hardening guide §4.8).
+    // §9.6 — migration before handshake confirmation).
     var step: u32 = 0;
     while (step < 32) : (step += 1) {
         const now_us: u64 = @as(u64, step) * 1_000;

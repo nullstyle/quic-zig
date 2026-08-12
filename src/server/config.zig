@@ -424,7 +424,7 @@ pub const Config = struct {
 
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
-    /// hardening guide §9 / §12: internal parser-error strings reveal
+    /// secure-by-default redaction: internal parser-error strings reveal
     /// implementation detail to the peer (parser fingerprinting,
     /// internal state names). Local introspection is unaffected; the
     /// embedder still sees the reason via close events.
@@ -460,7 +460,7 @@ pub const Config = struct {
     /// every Connection's `ecn_enabled` field at slot-open time.
     enable_ecn: bool = true,
 
-    /// Listener-level packet rate limit (hardening guide §4.1; was
+    /// Listener-level packet rate limit (global DoS backstop; was
     /// `max_datagrams_per_window: ?u32` before 0.10.0 — retyped onto
     /// the shared `RateLimit` union with its siblings): drop incoming
     /// UDP datagrams when the global per-window count exceeds this
@@ -477,7 +477,7 @@ pub const Config = struct {
     /// `InvalidConfig`.
     listener_datagram_rate_limit: RateLimit = .default,
 
-    /// Listener-level byte rate limit (hardening guide §4.1; was
+    /// Listener-level byte rate limit (global DoS backstop; was
     /// `max_bytes_per_window: ?u64` before 0.10.0): drop incoming UDP
     /// datagrams when the global per-window byte total exceeds this
     /// cap, in bytes per window. `.default` is off — production opts
@@ -559,6 +559,17 @@ pub const Config = struct {
     /// MTU. Set `enable = false` to keep the static-MTU behaviour
     /// (PMTU stays at `initial_mtu`).
     pmtud: conn_mod.PmtudConfig = .{},
+
+    /// Congestion-control algorithm for every accepted connection:
+    /// `.cubic` (RFC 9438, the default as of 0.11.0) or `.new_reno`
+    /// (RFC 9002, the historical default — the one-line rollback).
+    congestion_control: conn_mod.CongestionAlgorithm = .cubic,
+
+    /// RFC 9002 §7.7 packet pacing for every accepted connection (on
+    /// by default): spreads sends at gain x cwnd/RTT instead of
+    /// bursting a full window. `false` restores the pre-0.11 emission
+    /// timing exactly.
+    enable_pacing: bool = true,
 
     /// RFC 9000 §18.2 / §5.1.1 server preferred-address advertisement.
     /// Null disables the feature (default — no `preferred_address`

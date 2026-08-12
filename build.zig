@@ -94,7 +94,8 @@ fn boringsslDependency(
     });
 }
 
-// Build-mode policy (hardening guide §3.1).
+// Build-mode policy (secure-by-default: ReleaseSafe keeps runtime
+// safety checks on parser surfaces).
 //
 // `b.standardOptimizeOption` defaults to `Debug` so iterative
 // development (`zig build test`, embedder smoke runs, interop
@@ -392,6 +393,27 @@ pub fn build(b: *std.Build) void {
     );
     echo_smoke_step.dependOn(&run_echo_smoke.step);
 
+    // Goodput smoke: bulk-upload counterpart to the echo smoke — the
+    // real-socket wrapper-loop throughput number (informational; the
+    // gate is completion). CI runs it on the Linux leg.
+    const goodput_smoke_mod = b.createModule(.{
+        .root_source_file = b.path("examples/goodput_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    goodput_smoke_mod.addImport("quic_zig", quic_zig_mod);
+    const goodput_smoke_exe = b.addExecutable(.{
+        .name = "goodput-smoke",
+        .root_module = goodput_smoke_mod,
+    });
+    const run_goodput_smoke = b.addRunArtifact(goodput_smoke_exe);
+    const goodput_smoke_step = b.step(
+        "run-goodput-smoke",
+        "Run the goodput smoke (bulk upload over loopback UDP; completion-gated, rate informational)",
+    );
+    goodput_smoke_step.dependOn(&run_goodput_smoke.step);
+
     // Foreign-event-loop embedder: the caller-drives (no-I/O) path
     // wired into a hand-rolled `std.posix.poll` reactor instead of
     // `transport.runUdp*`. Ships as both a runnable example
@@ -457,6 +479,30 @@ pub fn build(b: *std.Build) void {
     const external_interop_step = b.step("external-interop", "Run the external QUIC interop gate helper");
     external_interop_step.dependOn(&run_interop_tool.step);
 
+    // Benchmark report comparison: reads two bench/report.zig JSON
+    // reports and fails on regressions (median beyond tolerance AND
+    // beyond the 3xMAD noise floor). Pure std tool, no quic_zig import.
+    const bench_compare_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench_compare.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    const bench_compare_exe = b.addExecutable(.{
+        .name = "quic-zig-bench-compare",
+        .root_module = bench_compare_mod,
+    });
+    b.installArtifact(bench_compare_exe);
+
+    const bench_compare_tests = b.addTest(.{ .root_module = bench_compare_mod });
+    const run_bench_compare_tests = b.addRunArtifact(bench_compare_tests);
+    test_step.dependOn(&run_bench_compare_tests.step);
+
+    const run_bench_compare = b.addRunArtifact(bench_compare_exe);
+    run_bench_compare.addPassthruArgs();
+    const bench_compare_step = b.step("bench-compare", "Compare a benchmark JSON report against a baseline");
+    bench_compare_step.dependOn(&run_bench_compare.step);
+
     // Microbenchmarks. Built with ReleaseSafe by default, regardless
     // of the user's -Doptimize choice for the rest of the tree. This
     // keeps benchmark fixtures aligned with the production safety
@@ -502,6 +548,28 @@ pub fn build(b: *std.Build) void {
     run_bench.addPassthruArgs();
     const bench_step = b.step("bench", "Run quic_zig microbenchmarks");
     bench_step.dependOn(&run_bench.step);
+
+    // End-to-end benchmarks: whole-Connection goodput, handshakes/sec,
+    // and deterministic impairment goodput. Same ReleaseSafe policy and
+    // module graph as `bench`; rooted at bench/e2e_main.zig so it can
+    // file-import the shared report writer.
+    const bench_e2e_mod = b.createModule(.{
+        .root_source_file = b.path("bench/e2e_main.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+        .sanitize_c = sanitize_c,
+    });
+    bench_e2e_mod.addImport("quic_zig", bench_quic_zig_mod);
+    bench_e2e_mod.addImport("boringssl", bench_boringssl_mod);
+
+    const bench_e2e_exe = b.addExecutable(.{
+        .name = "quic-zig-bench-e2e",
+        .root_module = bench_e2e_mod,
+    });
+    const run_bench_e2e = b.addRunArtifact(bench_e2e_exe);
+    run_bench_e2e.addPassthruArgs();
+    const bench_e2e_step = b.step("bench-e2e", "Run quic_zig end-to-end benchmarks (goodput, handshakes, impairment)");
+    bench_e2e_step.dependOn(&run_bench_e2e.step);
 
     const bench_tests_mod = b.createModule(.{
         .root_source_file = b.path("bench/root.zig"),

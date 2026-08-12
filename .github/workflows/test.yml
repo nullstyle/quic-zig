@@ -15,11 +15,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux, macOS 15, and Windows are tier-1 hard gates for 1.0.
-        # macOS 26 is advisory while the next hosted image generation settles.
-        # See docs/RELEASE_READINESS.md for platform tier policy.
+        # Linux (x86-64 + aarch64), macOS 15, and Windows are tier-1 hard
+        # gates for 1.0. macOS 26 is advisory while the next hosted image
+        # generation settles. See docs/RELEASE_READINESS.md for platform
+        # tier policy.
         include:
           - os: ubuntu-latest
+            advisory: false
+          - os: ubuntu-24.04-arm
             advisory: false
           - os: macos-15
             advisory: false
@@ -85,6 +88,13 @@ jobs:
       - name: zig build run-echo-smoke
         if: matrix.os == 'ubuntu-latest'
         run: zig build run-echo-smoke
+
+      # Bulk-upload counterpart: completion-gated, the MB/s line is
+      # informational (loopback rate on shared runners is too noisy to
+      # assert on).
+      - name: zig build run-goodput-smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build run-goodput-smoke
 
       # Out-of-tree consumer smoke: builds a separate package that
       # depends on quic-zig by path and pins the exported quic_zig +

@@ -184,7 +184,7 @@ test "PTO requeues application stream data and arms a probe" {
 
     try conn.tick(conn.ptoDurationForLevel(.application));
 
-    try std.testing.expectEqual(@as(u32, 0), app_sent.count);
+    try std.testing.expectEqual(@as(u32, 0), app_sent.liveCount());
     try std.testing.expect(!conn.pendingPingForLevel(.application).*);
     try std.testing.expectEqual(@as(u8, 1), conn.primaryPath().pto_probe_count);
     try std.testing.expectEqual(@as(u32, 1), conn.ptoCountForLevel(.application).*);
@@ -299,7 +299,7 @@ test "ACK of ack-eliciting packet resets PTO count and updates RTT" {
 
     try std.testing.expectEqual(@as(u32, 0), conn.ptoCountForLevel(.application).*);
     try std.testing.expectEqual(@as(u64, 50_000), conn.rttForLevel(.application).latest_rtt_us);
-    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.application).count);
+    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.application).liveCount());
 }
 
 test "ACK with largest_acked >= next_pn is a PROTOCOL_VIOLATION" {
@@ -386,7 +386,7 @@ test "packet-threshold loss reduces congestion window" {
     }, 50_000);
 
     try std.testing.expect(conn.congestionWindow() < initial_cwnd);
-    try std.testing.expect(conn.ccForApplication().ssthresh != null);
+    try std.testing.expect(conn.ccForApplication().ssthreshBytes() != null);
 }
 
 test "persistent congestion resets congestion window to minimum" {
@@ -396,7 +396,7 @@ test "persistent congestion resets congestion window to minimum" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    conn.ccForApplication().cwnd = 30_000;
+    conn.ccForApplication().setCwndForTest(30_000);
     conn.rttForLevel(.application).smoothed_rtt_us = 10_000;
     conn.rttForLevel(.application).latest_rtt_us = 10_000;
     conn.rttForLevel(.application).rtt_var_us = 1_000;
@@ -416,7 +416,7 @@ test "persistent congestion resets congestion window to minimum" {
 
     try conn.tick(1_000_000);
 
-    try std.testing.expectEqual(conn.ccForApplication().cfg.minWindow(), conn.congestionWindow());
+    try std.testing.expectEqual(conn.ccForApplication().minWindow(), conn.congestionWindow());
     try std.testing.expectEqual(@as(u64, 0), conn.congestionBytesInFlight());
 }
 
@@ -536,7 +536,7 @@ test "0-RTT STREAM packet-threshold loss requeues early bytes" {
         .ecn_counts = null,
     }, 2_000);
 
-    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.early_data).count);
+    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.early_data).liveCount());
     const chunk = s.send.peekChunk(64).?;
     try std.testing.expectEqual(@as(u64, 0), chunk.offset);
     try std.testing.expectEqual(@as(u64, 10), chunk.length);

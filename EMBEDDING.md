@@ -294,6 +294,21 @@ example isolates into a tested pure function:
 - A **sub-millisecond** deadline must round *up* to 1 ms, or the loop
   spins hot on a 300 µs ACK-delay timer.
 
+Since 0.11.0 the deadline can also be `TimerKind.pacing` (RFC 9002
+§7.7, on by default): application data is waiting on send credit, and
+`pollDatagram` will return null until roughly `at_us`. Treat it like
+any other kind — wake, `tick`, drain the outbox. Two contract notes:
+`pollDatagram` returning null while you still have data queued has
+always been a legal state (flow control, anti-amplification, cwnd);
+pacing just adds one more cause, so loops keyed on the deadline (not on
+"poll returned something") need no changes. Loops that ignore
+`nextTimerDeadline` and wake on a fixed interval still work — each wake
+releases up to one interval's worth of credit (the bucket scales with
+wake granularity) — and `enable_pacing = false` on either `Config`
+restores the pre-0.11 burst behavior exactly. New `TimerKind` variants
+may appear in minors; handle unknown kinds generically (waking and
+draining is always correct).
+
 A null deadline means nothing is armed: block until an fd is readable
 if you have a wake channel, otherwise cap the sleep.
 
@@ -521,4 +536,6 @@ off in low-overhead deployments.
 ## Out Of Scope
 
 quic-zig does not implement HTTP/3, QPACK, WebTransport, MASQUE, FIPS
-validation, BBR, or a platform support guarantee for Windows.
+validation, or BBR. (Windows used to be listed here; it has since been
+promoted to a tier-1 release-gating platform — see
+`docs/RELEASE_READINESS.md`.)

@@ -14,7 +14,8 @@ and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
 ## What It Includes
 
 - QUIC v1 connection state, packet protection, streams, DATAGRAM,
-  loss recovery, NewReno congestion feedback, ECN, and DPLPMTUD.
+  loss recovery, CUBIC congestion control (RFC 9438; NewReno
+  selectable) with RFC 9002 packet pacing, ECN, and DPLPMTUD.
 - High-level `Server` and `Client` wrappers for embedders that want
   quic-zig to own TLS context setup and connection state.
 - Basic `std.Io` loop helpers in `quic_zig.transport.runUdpServer`
@@ -70,10 +71,10 @@ The public Zig module name is `quic_zig`.
 ### Consuming this package
 
 Fetch a tagged release into your `build.zig.zon` — substitute the
-current tag (`v0.10.0` as of this writing):
+current tag (`v0.11.0` as of this writing):
 
 ```sh
-zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.10.0.tar.gz
+zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.11.0.tar.gz
 ```
 
 Then wire the module in `build.zig`:

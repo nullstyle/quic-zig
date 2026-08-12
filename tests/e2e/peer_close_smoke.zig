@@ -52,7 +52,7 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
         // Keep the reason phrase on the wire so the receiver can
-        // observe it (default redacts per hardening guide §9).
+        // observe it (secure-by-default redacts the reason string).
         .reveal_close_reason_on_wire = true,
     });
     defer srv.deinit();

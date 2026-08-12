@@ -92,7 +92,7 @@ pub const ResetInfo = struct {
 /// Default ceiling on `SendStream.bytes` length — i.e. how many
 /// app-written bytes can sit in the per-stream send queue before
 /// `write` short-writes (returning < data.len) to apply local
-/// back-pressure. The cap (hardening guide §8 `max_send_queue_bytes`)
+/// back-pressure. The cap (`max_send_queue_bytes`, a per-stream memory backstop)
 /// prevents an embedder calling `streamWrite` faster than the peer
 /// can ACK from pushing the buffer to arbitrary size. 1 MiB matches
 /// the default per-stream receive window, so the steady-state queue

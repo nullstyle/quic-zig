@@ -424,7 +424,7 @@ test "Server.feed with unsupported version queues a Version Negotiation packet" 
     try std.testing.expectEqual(@as(?quic_zig.Server.StatelessResponse, null), srv.drainStatelessResponse());
 }
 
-test "Server VN per-source rate limiter caps VN responses (hardening guide §4.4)" {
+test "Server VN per-source rate limiter caps VN responses (anti-amplification DoS defense)" {
     // Per-source VN-emission cap. After `vn_source_rate_limit`
     // VN responses to a given source within `source_rate_window_us`,
     // further non-v1 long-header probes from that source are dropped

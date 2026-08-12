@@ -10,14 +10,22 @@
 //!  - ACK range, loss recovery, PTO, and DATAGRAM event surfaces
 //!
 //! Each benchmark auto-tunes its iteration count to roughly
-//! `target_ms` of wall time, then prints one line:
+//! `target_ms` of wall time, then times `--samples` independent hot
+//! runs (default 5) and reports robust statistics, printing one line:
 //!
-//!     name: <ns/op> ns/op (<ops/sec> ops/sec, <iters> iterations)
+//!     name: <median> ns/op ±<MAD> (<ops/sec> ops/sec, <N>x<iters> iters)
+//!
+//! Median + MAD (median absolute deviation) rather than a single run:
+//! shared-runner noise is heavy-tailed, and one preempted sample must
+//! not move the headline number. The JSON report (schema v3, shared
+//! writer in `report.zig`) carries the raw samples alongside the
+//! statistics; `ns_per_op` remains the median for v2 readers.
 //!
 //! Run with: `zig build bench`, or `zig build bench -- --json path`
-//! for a machine-readable report. The build wires this binary at
-//! ReleaseSafe by default; use `-Dbench-unsafe-release-fast=true` for
-//! unsafe ReleaseFast measurements.
+//! for a machine-readable report (`--samples N` to override the sample
+//! count). The build wires this binary at ReleaseSafe by default; use
+//! `-Dbench-unsafe-release-fast=true` for unsafe ReleaseFast
+//! measurements.
 //!
 //! Out of scope:
 //!  - Full Connection.handle / pollDatagram lifecycle
@@ -27,6 +35,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const quic_zig = @import("quic_zig");
 const boringssl = @import("boringssl");
+const report_mod = @import("report.zig");
 const connection_datagram_bench = @import("connection_datagram.zig");
 const loss_ack_bench = @import("loss_ack.zig");
 const packet_crypto_bench = @import("packet_crypto.zig");
@@ -54,6 +63,16 @@ const min_iters: u64 = 1_000;
 /// dead-fast benchmark.
 const max_iters: u64 = 200_000_000;
 
+/// Default and ceiling for the per-benchmark sample count. Five samples
+/// keep a local run near the old single-run wall time; CI passes more.
+const default_samples: usize = 5;
+const max_samples: usize = 32;
+
+/// Set once from `--samples` before any benchmark runs. File-scope
+/// rather than threaded through 30+ `recordBenchmark` call sites — this
+/// is a standalone tool, not library code.
+var configured_samples: usize = default_samples;
+
 /// Read a monotonic clock in nanoseconds. We dodge `std.time` here
 /// because Zig 0.16 moved time to the new I/O API, and these
 /// benchmarks are deliberately Io-free — they exercise pure
@@ -79,75 +98,35 @@ fn hostnameSlice(buf: *[std.posix.HOST_NAME_MAX]u8) ?[]const u8 {
     return std.posix.gethostname(buf) catch null;
 }
 
-fn shortSha(sha: ?[]const u8) ?[]const u8 {
-    const s = sha orelse return null;
-    return s[0..@min(s.len, 12)];
-}
-
-fn appendSanitizedToken(out: *std.ArrayList(u8), allocator: std.mem.Allocator, token: []const u8) !void {
-    var wrote = false;
-    for (token) |c| {
-        const safe = switch (c) {
-            'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => c,
-            else => '-',
-        };
-        try out.append(allocator, safe);
-        wrote = true;
-    }
-    if (!wrote) try out.appendSlice(allocator, "unknown");
-}
-
-fn buildReportPath(
-    out: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    dir: []const u8,
-    generated_unix_ns: u64,
-    machine_id: []const u8,
-    github_sha: ?[]const u8,
-    github_run_id: ?[]const u8,
-) ![]const u8 {
-    out.clearRetainingCapacity();
-    try out.appendSlice(allocator, dir);
-    if (dir.len > 0 and dir[dir.len - 1] != std.fs.path.sep) {
-        try out.append(allocator, std.fs.path.sep);
-    }
-    try out.appendSlice(allocator, "quic-zig-bench-");
-    try out.print(allocator, "{d}-", .{generated_unix_ns});
-    try appendSanitizedToken(out, allocator, machine_id);
-    try out.append(allocator, '-');
-    if (shortSha(github_sha)) |sha| {
-        try appendSanitizedToken(out, allocator, sha);
-    } else {
-        try out.appendSlice(allocator, "local");
-    }
-    try out.append(allocator, '-');
-    if (github_run_id) |run_id| {
-        try appendSanitizedToken(out, allocator, run_id);
-    } else {
-        try out.appendSlice(allocator, "manual");
-    }
-    try out.appendSlice(allocator, ".json");
-    return out.items;
-}
-
 const BenchResult = struct {
     name: []const u8,
+    /// Iterations per sample (all samples run the same count).
     iters: u64,
+    /// Wall time summed across all samples.
     total_ns: u64,
+    /// Legacy headline field, defined as the median since schema v3.
     ns_per_op: f64,
+    /// Derived from the median.
     ops_per_sec: f64,
+    sample_count: usize,
+    /// Raw per-sample ns/op, in run order; only `[0..sample_count]` valid.
+    samples_ns_per_op: [max_samples]f64,
+    median_ns_per_op: f64,
+    mad_ns_per_op: f64,
+    min_ns_per_op: f64,
 };
 
 fn report(r: BenchResult) void {
     std.debug.print(
-        "{s}: {d:.2} ns/op ({d:.2} ops/sec, {d} iterations)\n",
-        .{ r.name, r.ns_per_op, r.ops_per_sec, r.iters },
+        "{s}: {d:.2} ns/op \u{b1}{d:.2} ({d:.2} ops/sec, {d}x{d} iters)\n",
+        .{ r.name, r.median_ns_per_op, r.mad_ns_per_op, r.ops_per_sec, r.sample_count, r.iters },
     );
 }
 
-/// Run `runOnce` repeatedly with auto-tuned iteration count, then
-/// time a final hot pass. `runOnce(iters)` must perform exactly
-/// `iters` work units and return a value to feed `doNotOptimizeAway`.
+/// Run `runOnce` repeatedly with auto-tuned iteration count, then time
+/// `configured_samples` independent hot passes. `runOnce(iters)` must
+/// perform exactly `iters` work units and return a value to feed
+/// `doNotOptimizeAway`. The calibration pass doubles as warmup.
 fn benchmark(
     name: []const u8,
     comptime Ctx: type,
@@ -155,7 +134,7 @@ fn benchmark(
     comptime runOnce: fn (Ctx, u64) u64,
 ) BenchResult {
     // Warmup + calibration: start small and double until we cross
-    // ~10ms, then extrapolate to target_ns.
+    // ~10ms, then extrapolate to target_ns per sample.
     var iters: u64 = min_iters;
     var elapsed_ns: u64 = 0;
     const calibration_floor: u64 = 10 * std.time.ns_per_ms;
@@ -180,26 +159,38 @@ fn benchmark(
         iters = next;
     }
 
-    // Hot run.
-    const start = nowNanos();
-    const sink = runOnce(ctx, iters);
-    const end = nowNanos();
-    std.mem.doNotOptimizeAway(sink);
-    const total_ns: u64 = end - start;
+    // Hot runs: N independent samples at the same iteration count.
+    const sample_count = configured_samples;
+    var samples: [max_samples]f64 = undefined;
+    var total_ns: u64 = 0;
+    for (samples[0..sample_count]) |*sample| {
+        const start = nowNanos();
+        const sink = runOnce(ctx, iters);
+        const end = nowNanos();
+        std.mem.doNotOptimizeAway(sink);
+        const t = end - start;
+        total_ns += t;
+        sample.* = @as(f64, @floatFromInt(t)) / @as(f64, @floatFromInt(iters));
+    }
 
-    const ns_per_op: f64 = @as(f64, @floatFromInt(total_ns)) /
-        @as(f64, @floatFromInt(iters));
-    const ops_per_sec: f64 = if (total_ns == 0)
-        0
-    else
-        @as(f64, @floatFromInt(iters)) * 1e9 / @as(f64, @floatFromInt(total_ns));
+    var sorted: [max_samples]f64 = samples;
+    const median = report_mod.medianInPlace(sorted[0..sample_count]);
+    var scratch: [max_samples]f64 = undefined;
+    const mad = report_mod.medianAbsoluteDeviation(samples[0..sample_count], median, &scratch);
+    const min_ns_per_op = sorted[0];
+    const ops_per_sec: f64 = if (median <= 0) 0 else 1e9 / median;
 
     const result: BenchResult = .{
         .name = name,
         .iters = iters,
         .total_ns = total_ns,
-        .ns_per_op = ns_per_op,
+        .ns_per_op = median,
         .ops_per_sec = ops_per_sec,
+        .sample_count = sample_count,
+        .samples_ns_per_op = samples,
+        .median_ns_per_op = median,
+        .mad_ns_per_op = mad,
+        .min_ns_per_op = min_ns_per_op,
     };
     report(result);
     return result;
@@ -217,167 +208,35 @@ fn recordBenchmark(
     result_count.* += 1;
 }
 
-fn appendJsonString(out: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
-    try out.append(allocator, '"');
-    for (s) |c| switch (c) {
-        '"' => try out.appendSlice(allocator, "\\\""),
-        '\\' => try out.appendSlice(allocator, "\\\\"),
-        '\n' => try out.appendSlice(allocator, "\\n"),
-        '\r' => try out.appendSlice(allocator, "\\r"),
-        '\t' => try out.appendSlice(allocator, "\\t"),
-        0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => try out.print(
-            allocator,
-            "\\u{x:0>4}",
-            .{c},
-        ),
-        else => try out.append(allocator, c),
-    };
-    try out.append(allocator, '"');
-}
-
-fn appendNullableJsonString(
+/// Writes the schema-v3 `"benchmarks"` array elements for the
+/// microbenchmark suite. Passed to `report_mod.writeReport`.
+fn writeMicroEntries(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
-    maybe: ?[]const u8,
-) !void {
-    if (maybe) |s| {
-        try appendJsonString(out, allocator, s);
-    } else {
-        try out.appendSlice(allocator, "null");
-    }
-}
-
-fn appendNullableU64(out: *std.ArrayList(u8), allocator: std.mem.Allocator, maybe: ?u64) !void {
-    if (maybe) |value| {
-        try out.print(allocator, "{d}", .{value});
-    } else {
-        try out.appendSlice(allocator, "null");
-    }
-}
-
-fn ensureParentDir(io: std.Io, path: []const u8) !void {
-    const parent = std.fs.path.dirname(path) orelse return;
-    try std.Io.Dir.cwd().createDirPath(io, parent);
-}
-
-fn writeReportFile(io: std.Io, path: []const u8, data: []const u8) !void {
-    try ensureParentDir(io, path);
-    if (std.fs.path.isAbsolute(path)) {
-        var file = try std.Io.Dir.createFileAbsolute(io, path, .{});
-        defer file.close(io);
-        try file.writeStreamingAll(io, data);
-    } else {
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
-    }
-}
-
-fn writeJsonReport(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    path: []const u8,
-    generated_unix_ns: u64,
-    machine_id: []const u8,
-    hostname: ?[]const u8,
     results: []const BenchResult,
-    github_sha: ?[]const u8,
-    github_run_id: ?[]const u8,
-    github_ref_name: ?[]const u8,
-) !void {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-
-    try out.appendSlice(allocator, "{\n");
-    try out.print(allocator, "  \"schema_version\": 2,\n", .{});
-    try out.appendSlice(allocator, "  \"suite\": \"quic_zig.microbench\",\n");
-    try out.print(allocator, "  \"generated_unix_ns\": {d},\n", .{generated_unix_ns});
-    try out.print(allocator, "  \"target_ns_per_benchmark\": {d},\n", .{target_ns});
-    try out.print(allocator, "  \"min_iters\": {d},\n", .{min_iters});
-    try out.print(allocator, "  \"max_iters\": {d},\n", .{max_iters});
-    try out.appendSlice(allocator, "  \"optimize\": ");
-    try appendJsonString(&out, allocator, @tagName(builtin.mode));
-    try out.appendSlice(allocator, ",\n");
-    try out.print(
-        allocator,
-        "  \"bench_unsafe_release_fast\": {},\n",
-        .{builtin.mode == .ReleaseFast},
-    );
-    try out.appendSlice(allocator, "  \"report_path\": ");
-    try appendJsonString(&out, allocator, path);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "  \"quic_zig_version\": ");
-    try appendJsonString(&out, allocator, quic_zig.version());
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "  \"zig_version\": ");
-    try appendJsonString(&out, allocator, builtin.zig_version_string);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "  \"target\": {\n");
-    try out.appendSlice(allocator, "    \"arch\": ");
-    try appendJsonString(&out, allocator, @tagName(builtin.target.cpu.arch));
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"os\": ");
-    try appendJsonString(&out, allocator, @tagName(builtin.target.os.tag));
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"abi\": ");
-    try appendJsonString(&out, allocator, @tagName(builtin.target.abi));
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"cpu_model\": ");
-    try appendJsonString(&out, allocator, builtin.target.cpu.model.name);
-    try out.appendSlice(allocator, "\n  },\n");
-    const logical_cpu_count: ?u64 = if (std.Thread.getCpuCount()) |n| @intCast(n) else |_| null;
-    const total_memory_bytes: ?u64 = if (std.process.totalSystemMemory()) |n| n else |_| null;
-    const uts = std.posix.uname();
-    try out.appendSlice(allocator, "  \"system\": {\n");
-    try out.appendSlice(allocator, "    \"machine_id\": ");
-    try appendJsonString(&out, allocator, machine_id);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"hostname\": ");
-    try appendNullableJsonString(&out, allocator, hostname);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"logical_cpu_count\": ");
-    try appendNullableU64(&out, allocator, logical_cpu_count);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"total_memory_bytes\": ");
-    try appendNullableU64(&out, allocator, total_memory_bytes);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"uname\": {\n");
-    try out.appendSlice(allocator, "      \"sysname\": ");
-    try appendJsonString(&out, allocator, std.mem.sliceTo(&uts.sysname, 0));
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "      \"release\": ");
-    try appendJsonString(&out, allocator, std.mem.sliceTo(&uts.release, 0));
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "      \"version\": ");
-    try appendJsonString(&out, allocator, std.mem.sliceTo(&uts.version, 0));
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "      \"machine\": ");
-    try appendJsonString(&out, allocator, std.mem.sliceTo(&uts.machine, 0));
-    try out.appendSlice(allocator, "\n    }\n");
-    try out.appendSlice(allocator, "  },\n");
-    try out.appendSlice(allocator, "  \"github\": {\n");
-    try out.appendSlice(allocator, "    \"sha\": ");
-    try appendNullableJsonString(&out, allocator, github_sha);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"run_id\": ");
-    try appendNullableJsonString(&out, allocator, github_run_id);
-    try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "    \"ref_name\": ");
-    try appendNullableJsonString(&out, allocator, github_ref_name);
-    try out.appendSlice(allocator, "\n  },\n");
-    try out.appendSlice(allocator, "  \"benchmarks\": [\n");
+) anyerror!void {
     for (results, 0..) |r, i| {
         try out.appendSlice(allocator, "    {\n");
         try out.appendSlice(allocator, "      \"name\": ");
-        try appendJsonString(&out, allocator, r.name);
+        try report_mod.appendJsonString(out, allocator, r.name);
         try out.appendSlice(allocator, ",\n");
+        try out.appendSlice(allocator, "      \"kind\": \"micro\",\n");
         try out.print(allocator, "      \"iterations\": {d},\n", .{r.iters});
         try out.print(allocator, "      \"total_ns\": {d},\n", .{r.total_ns});
         try out.print(allocator, "      \"ns_per_op\": {d:.6},\n", .{r.ns_per_op});
-        try out.print(allocator, "      \"ops_per_sec\": {d:.6}\n", .{r.ops_per_sec});
+        try out.print(allocator, "      \"ops_per_sec\": {d:.6},\n", .{r.ops_per_sec});
+        try out.print(allocator, "      \"sample_count\": {d},\n", .{r.sample_count});
+        try out.appendSlice(allocator, "      \"samples_ns_per_op\": [");
+        for (r.samples_ns_per_op[0..r.sample_count], 0..) |s, j| {
+            if (j != 0) try out.appendSlice(allocator, ", ");
+            try out.print(allocator, "{d:.6}", .{s});
+        }
+        try out.appendSlice(allocator, "],\n");
+        try out.print(allocator, "      \"median_ns_per_op\": {d:.6},\n", .{r.median_ns_per_op});
+        try out.print(allocator, "      \"mad_ns_per_op\": {d:.6},\n", .{r.mad_ns_per_op});
+        try out.print(allocator, "      \"min_ns_per_op\": {d:.6}\n", .{r.min_ns_per_op});
         try out.appendSlice(allocator, if (i + 1 == results.len) "    }\n" else "    },\n");
     }
-    try out.appendSlice(allocator, "  ]\n}\n");
-
-    try writeReportFile(io, path, out.items);
 }
 
 // -- varint --------------------------------------------------------------
@@ -600,6 +459,12 @@ pub fn main(init: std.process.Init) !void {
             if (i >= args.len) return error.MissingJsonDir;
             if (json_path != null) return error.DuplicateJsonTarget;
             json_dir = args[i];
+        } else if (std.mem.eql(u8, args[i], "--samples")) {
+            i += 1;
+            if (i >= args.len) return error.MissingSampleCount;
+            const n = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidSampleCount;
+            if (n < 1 or n > max_samples) return error.InvalidSampleCount;
+            configured_samples = n;
         } else {
             std.debug.print("unknown benchmark argument: {s}\n", .{args[i]});
             return error.UnknownArgument;
@@ -618,10 +483,11 @@ pub fn main(init: std.process.Init) !void {
     const report_path: ?[]const u8 = if (json_path) |path|
         path
     else if (json_dir) |dir|
-        try buildReportPath(
+        try report_mod.buildReportPath(
             &generated_report_path,
             allocator,
             dir,
+            "quic-zig-bench",
             generated_unix_ns,
             machine_id,
             github_sha,
@@ -630,8 +496,9 @@ pub fn main(init: std.process.Init) !void {
     else
         null;
 
-    std.debug.print("quic_zig microbenchmarks (target ~{d}ms each, {s})\n", .{
+    std.debug.print("quic_zig microbenchmarks (target ~{d}ms/sample, {d} samples, {s})\n", .{
         target_ns / std.time.ns_per_ms,
+        configured_samples,
         @tagName(builtin.mode),
     });
     std.debug.print("---------------------------------------------------------------\n", .{});
@@ -805,6 +672,16 @@ pub fn main(init: std.process.Init) !void {
         &connection_ack_loss_ctx,
         loss_ack_bench.runConnectionAckLossDispatch,
     );
+    var tracker_churn_ctx = try loss_ack_bench.initTrackerChurnHighOccupancyCtx(allocator);
+    defer tracker_churn_ctx.deinit();
+    recordBenchmark(
+        &results,
+        &result_count,
+        loss_ack_bench.tracker_churn_high_occupancy_name,
+        *const loss_ack_bench.TrackerChurnHighOccupancyCtx,
+        &tracker_churn_ctx,
+        loss_ack_bench.runTrackerChurnHighOccupancy,
+    );
 
     // Connection-adjacent DATAGRAM ACK/loss event queue
     const datagram_event_ctx = connection_datagram_bench.initDatagramEventCtx();
@@ -925,17 +802,29 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("---------------------------------------------------------------\n", .{});
     if (report_path) |path| {
-        try writeJsonReport(
+        var extra_header: std.ArrayList(u8) = .empty;
+        defer extra_header.deinit(allocator);
+        try extra_header.print(allocator, "  \"target_ns_per_benchmark\": {d},\n", .{target_ns});
+        try extra_header.print(allocator, "  \"min_iters\": {d},\n", .{min_iters});
+        try extra_header.print(allocator, "  \"max_iters\": {d},\n", .{max_iters});
+        try extra_header.print(allocator, "  \"samples_per_benchmark\": {d},\n", .{configured_samples});
+        try report_mod.writeReport(
             allocator,
             io,
-            path,
-            generated_unix_ns,
-            machine_id,
-            hostname,
+            .{
+                .suite = "quic_zig.microbench",
+                .generated_unix_ns = generated_unix_ns,
+                .machine_id = machine_id,
+                .hostname = hostname,
+                .report_path = path,
+                .github_sha = github_sha,
+                .github_run_id = github_run_id,
+                .github_ref_name = github_ref_name,
+                .extra_header_json = extra_header.items,
+            },
+            []const BenchResult,
             results[0..result_count],
-            github_sha,
-            github_run_id,
-            github_ref_name,
+            writeMicroEntries,
         );
         std.debug.print("wrote benchmark JSON report: {s}\n", .{path});
     }

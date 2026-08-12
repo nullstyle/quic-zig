@@ -46,6 +46,8 @@ pub const sent_packets = @import("sent_packets.zig");
 pub const congestion = @import("congestion.zig");
 /// RFC 9002 §6 ACK processing and loss detection primitives.
 pub const loss_recovery = @import("loss_recovery.zig");
+/// RFC 9002 §7.7 token-bucket packet pacing.
+pub const pacing = @import("pacing.zig");
 /// RFC 9000 §4 connection-, stream-, and stream-count flow control.
 pub const flow_control = @import("flow_control.zig");
 /// RFC 9000 §8.2 PATH_CHALLENGE/PATH_RESPONSE state machine.
@@ -175,6 +177,12 @@ pub const RttEstimator = rtt.RttEstimator;
 pub const SentPacketTracker = sent_packets.SentPacketTracker;
 /// RFC 9002 NewReno congestion controller (re-export).
 pub const NewReno = congestion.NewReno;
+/// RFC 9438 CUBIC congestion controller (re-export).
+pub const Cubic = congestion.Cubic;
+/// Algorithm-dispatching controller each path holds (re-export).
+pub const CongestionController = congestion.CongestionController;
+/// Selectable congestion-control algorithm (`Config.congestion_control`).
+pub const CongestionAlgorithm = congestion.Algorithm;
 /// RFC 9000 §8.2 path-validation state machine (re-export).
 pub const PathValidator = path_validator.PathValidator;
 /// Send-side half-stream (re-export).
@@ -198,6 +206,7 @@ pub const PathSet = path.PathSet;
 pub const PathState = path.PathState;
 /// Snapshot of per-path observability counters.
 pub const PathStats = path.PathStats;
+pub const ConnectionStats = state.ConnectionStats;
 /// Multipath scheduling policy (primary / round-robin / lowest-RTT-cwnd).
 pub const Scheduler = path.Scheduler;
 /// RFC 8899 DPLPMTUD embedder configuration (re-export).

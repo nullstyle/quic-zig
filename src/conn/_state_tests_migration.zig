@@ -124,7 +124,7 @@ test "authenticated NAT rebinding starts validation and resets recovery after re
     path.path.rtt.smoothed_rtt_us = 50_000;
     path.path.rtt.latest_rtt_us = 40_000;
     path.path.rtt.first_sample_taken = true;
-    path.path.cc.cwnd = 30_000;
+    path.path.cc.setCwndForTest(30_000);
 
     var payload: [16]u8 = undefined;
     const payload_len = try frame_mod.encode(payload[0..], .{ .ping = .{} });
@@ -149,7 +149,7 @@ test "authenticated NAT rebinding starts validation and resets recovery after re
     try std.testing.expect(conn.pending_frames.path_challenge != null);
     try std.testing.expectEqual(@as(u32, 0), conn.pending_frames.path_challenge_path_id);
     try std.testing.expectEqual(@as(u64, 50_000), path.path.rtt.smoothed_rtt_us);
-    try std.testing.expectEqual(@as(u64, 30_000), path.path.cc.cwnd);
+    try std.testing.expectEqual(@as(u64, 30_000), path.path.cc.cwndBytes());
 
     conn.recordPathResponse(0, path.path.validator.pending_token);
 
@@ -159,7 +159,7 @@ test "authenticated NAT rebinding starts validation and resets recovery after re
     try std.testing.expectEqual(rtt_mod.initial_rtt_us, path.path.rtt.smoothed_rtt_us);
     try std.testing.expectEqual(@as(u64, 0), path.path.rtt.latest_rtt_us);
     const expected_cwnd = (congestion_mod.Config{ .max_datagram_size = default_mtu }).initialWindow();
-    try std.testing.expectEqual(expected_cwnd, path.path.cc.cwnd);
+    try std.testing.expectEqual(expected_cwnd, path.path.cc.cwndBytes());
     try std.testing.expect(conn.pending_frames.path_challenge == null);
 }
 
@@ -826,7 +826,7 @@ test "client active migration: PATH_RESPONSE clears migration state and resets r
     path.setPeerAddress(.{ .ipv4 = .{ .addr = .{ 9, 9, 9, 9 }, .port = 0 } });
     path.path.markValidated();
     path.path.rtt.smoothed_rtt_us = 50_000;
-    path.path.cc.cwnd = 30_000;
+    path.path.cc.setCwndForTest(30_000);
 
     const fresh_cid = ConnectionId.fromSlice(&.{0xc2});
     try conn.registerPeerCidForTesting(1, 0, fresh_cid, @splat(0));
@@ -846,7 +846,7 @@ test "client active migration: PATH_RESPONSE clears migration state and resets r
     // successful migration.
     try std.testing.expectEqual(rtt_mod.initial_rtt_us, path.path.rtt.smoothed_rtt_us);
     const expected_cwnd = (congestion_mod.Config{ .max_datagram_size = default_mtu }).initialWindow();
-    try std.testing.expectEqual(expected_cwnd, path.path.cc.cwnd);
+    try std.testing.expectEqual(expected_cwnd, path.path.cc.cwndBytes());
 }
 
 // -- noteServerLocalAddressChanged (RFC 9000 §5.1.1 server PA migration) -----
@@ -1099,7 +1099,7 @@ test "noteServerLocalAddressChanged: PATH_CHALLENGE-first emit on the freshly-mi
     }
 }
 
-// -- Connection-level fuzz harnesses (hardening guide §11.1 #8 / #9 / #20) ----
+// -- Connection-level fuzz harnesses (state-machine invariant fuzzing) ----
 //
 // These sit one layer above the per-buffer fuzz harnesses landed in
 // `recv_stream.zig` / `send_stream.zig` / `flow_control.zig` /

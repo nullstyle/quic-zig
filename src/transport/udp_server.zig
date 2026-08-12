@@ -38,6 +38,7 @@ const std = @import("std");
 const Server = @import("../server.zig").Server;
 const path_mod = @import("../conn/path.zig");
 const socket_opts = @import("socket_opts.zig");
+const udp_batch = @import("udp_batch.zig");
 
 const Net = std.Io.net;
 const Address = path_mod.Address;
@@ -47,16 +48,15 @@ const Address = path_mod.Address;
 /// the QNS endpoint's `rx` buffer.
 pub const default_rx_buffer_bytes: usize = 64 * 1024;
 
-/// Hardening guide §8 `max_datagrams_per_event_loop_tick`: the loop
-/// processes exactly one inbound datagram per iteration. After ingest
-/// it drains every slot's outbox before looping back to `recv`. The
-/// 1-per-tick cap is a structural property of `runUdpServer`, not a
-/// configurable knob — it exists primarily so PTO / loss-detection
-/// tick-driven work can't be starved by a hot ingress queue. Embedders
-/// that need batched ingress (e.g. via `recvmmsg`) bypass this loop
-/// and call `Server.feed` directly, taking responsibility for their
-/// own per-tick budget.
-pub const max_datagrams_per_loop_iteration: u32 = 1;
+// Hardening guide §8 `max_datagrams_per_event_loop_tick`: ingress per
+// iteration is BOUNDED — the loop receives at most
+// `RunUdpOptions.max_datagrams_per_iteration` datagrams per listener
+// (one batched `receiveManyTimeout` call), then drains every slot's
+// outbox and ticks before looping back. The bound keeps PTO /
+// loss-detection tick-driven work from being starved by a hot ingress
+// queue while amortizing per-wake loop overhead across the batch.
+// (This replaced the historical hard-wired 1-per-iteration cap,
+// `max_datagrams_per_loop_iteration`.)
 
 /// Default size of the send buffer scratch space used by the loop.
 /// 1500 bytes covers the default QUIC `max_udp_payload_size` plus a
@@ -108,14 +108,41 @@ pub const RunUdpOptions = struct {
     /// recommends ECT(0) for QUIC). `not_ect` disables marking;
     /// `ect1` and `ce` are reserved.
     ecn_send_codepoint: socket_opts.EcnCodepoint = .ect0,
-    /// Per-recv cmsg control buffer size. Each iteration allocates a
-    /// stack-local buffer of this many bytes for the kernel to
-    /// populate with TOS / TCLASS cmsgs. 64 bytes is comfortably
-    /// large enough for both `IP_TOS` and `IPV6_TCLASS` cmsgs in
-    /// the same datagram with alignment slack. Bump only if
-    /// pipelining other ancillary data (PKTINFO, etc.) onto the same
-    /// socket is in scope.
+    /// Per-recv cmsg control buffer size — PER MESSAGE: the loop
+    /// allocates `max_datagrams_per_iteration x cmsg_buffer_bytes` and
+    /// hands each batched message its own slice for the kernel's
+    /// TOS / TCLASS cmsgs. 64 bytes is comfortably large enough for
+    /// both `IP_TOS` and `IPV6_TCLASS` with alignment slack. Bump only
+    /// if pipelining other ancillary data (PKTINFO, etc.) onto the
+    /// same socket is in scope.
     cmsg_buffer_bytes: usize = socket_opts.default_cmsg_buffer_bytes,
+    /// Ingress batch bound: how many datagrams one iteration may
+    /// receive per listener before draining outboxes and ticking
+    /// (a bounded per-iteration ingress budget). One batched receive
+    /// call ingests up to this many; 16 amortizes wake overhead ~an
+    /// order of magnitude while keeping the tick cadence tight.
+    /// Set to 1 to restore the historical datagram-per-iteration
+    /// behavior exactly.
+    max_datagrams_per_iteration: u32 = 16,
+    /// Egress batch bound: outbound datagrams accumulate into a
+    /// per-listener buffer and ship through one `Socket.sendMany`
+    /// call (real `sendmmsg` on Linux, 64 messages per syscall; a
+    /// plain send loop elsewhere). One batch can carry datagrams for
+    /// MANY different peers. 64 matches the kernel chunk size; 1
+    /// restores a syscall per datagram.
+    max_send_batch_datagrams: u32 = 64,
+    /// Linux UDP generic segmentation offload: pack consecutive
+    /// same-size datagrams for one connection into a super-datagram
+    /// the kernel splits (one sendmsg for up to 64 packets). Probed
+    /// per socket at bind; runtime send errors disable it for that
+    /// socket and fall back to plain batched sends. No effect off
+    /// Linux.
+    enable_gso: bool = true,
+    /// Linux UDP generic receive offload: the kernel coalesces
+    /// consecutive same-source datagrams and reports the segment size
+    /// via cmsg; the loop splits and feeds each original datagram.
+    /// Enabled per socket where supported. No effect off Linux.
+    enable_gro: bool = true,
     /// Optional shutdown signal. The loop calls `flag.load(.acquire)`
     /// at the top of every iteration; once it observes `true`, it
     /// calls `Server.shutdown(0, "")`, drains outgoing CONNECTION_CLOSE
@@ -204,6 +231,13 @@ const Listener = struct {
     sock: Net.Socket,
     bind_addr: Net.IpAddress,
     ecn_active: bool,
+    /// UDP_SEGMENT probe passed — GSO cmsgs may be attached to sends
+    /// on this socket. Cleared at runtime on the first GSO send error
+    /// (offload quirks); plain sends take over.
+    gso_active: bool = false,
+    /// UDP_GRO enabled — received datagrams may be kernel-coalesced
+    /// and carry a segment-size cmsg.
+    gro_active: bool = false,
 };
 
 const max_listeners: usize = 3;
@@ -318,12 +352,17 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             l.ecn_active = ok;
         }
     }
+    for (listeners) |*l| {
+        if (options.enable_gso) l.gso_active = socket_opts.probeUdpGso(l.sock.handle);
+        if (options.enable_gro) {
+            socket_opts.setUdpGroEnabled(l.sock.handle) catch continue;
+            l.gro_active = true;
+        }
+    }
 
     const allocator = server.allocator;
     const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
     defer allocator.free(rx);
-    const tx = try allocator.alloc(u8, options.tx_buffer_bytes);
-    defer allocator.free(tx);
     // cmsg buffer is shared across listeners — only one listener is
     // read per inner-loop iteration, so the kernel re-populates the
     // bytes on each `receiveManyTimeout`. Any listener with
@@ -335,13 +374,50 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             break;
         }
     }
-    const cmsg_buf_len: usize = if (any_ecn_active) options.cmsg_buffer_bytes else 0;
+    const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
+    var any_offload_cmsg = any_ecn_active;
+    for (listeners) |l| {
+        if (l.gro_active) any_offload_cmsg = true;
+    }
+    const cmsg_buf_len: usize = if (any_offload_cmsg) options.cmsg_buffer_bytes * batch_len else 0;
     var empty_cmsg_buf: [0]u8 = undefined;
     const cmsg_buf: []u8 = if (cmsg_buf_len > 0)
         try allocator.alloc(u8, cmsg_buf_len)
     else
         empty_cmsg_buf[0..0];
     defer if (cmsg_buf_len > 0) allocator.free(cmsg_buf);
+
+    // Ingress batch: up to `batch_len` messages per listener per
+    // iteration through one `receiveManyTimeout` call. Message data
+    // slices carve from the shared `rx` buffer; each message gets its
+    // own cmsg slice when ECN is active.
+    const batch_msgs = try allocator.alloc(Net.IncomingMessage, batch_len);
+    defer allocator.free(batch_msgs);
+
+    // GSO super-datagram scratch (immediate sends; safe to share
+    // across listeners and slots).
+    const gso_buf = try allocator.alloc(
+        u8,
+        @as(usize, socket_opts.default_gso_max_segments) * options.tx_buffer_bytes,
+    );
+    defer allocator.free(gso_buf);
+
+    // Per-listener egress batches (OutgoingMessage.address points into
+    // the batch's own addrs array, so each listener keeps its own).
+    const send_batches = try allocator.alloc(SendBatch, listeners.len);
+    var batches_ready: usize = 0;
+    defer {
+        for (send_batches[0..batches_ready]) |*b| b.deinit(allocator);
+        allocator.free(send_batches);
+    }
+    for (send_batches) |*b| {
+        b.* = try SendBatch.init(
+            allocator,
+            @max(1, options.max_send_batch_datagrams),
+            options.tx_buffer_bytes,
+        );
+        batches_ready += 1;
+    }
 
     // Split the per-iteration recv timeout across listeners so the
     // worst-case PTO-heartbeat latency stays close to the original
@@ -384,83 +460,117 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             }
         }
 
-        // Receive (or timeout) on each listener in turn. The loop
-        // checks every listener on each pass:
-        // `max_datagrams_per_loop_iteration = 1` caps each listener
-        // at one feed per iteration, so a multi-listener server may
-        // feed once per listener. Each listener still gets a fair
-        // recv-timeout slice so a hot listener can't starve a quiet
-        // one. Sub-second-scale priority inversion is fine; QUIC's
-        // PTO timer fires on millisecond-ish granularity anyway.
+        // Clamp this iteration's wait to the server's earliest timer
+        // deadline (pacing credit, PTO, ack-delay, ...): parking the
+        // full receive_timeout past a due deadline adds up to 5 ms of
+        // latency to every timer-driven send. Past-due/sub-ms clamps
+        // to 1 ms — never a busy spin, never a blocking overshoot.
+        const iteration_timeout = clampTimeoutToDeadline(
+            per_listener_timeout,
+            if (server.nextTimerDeadline(now_us)) |td| td.at_us else null,
+            now_us,
+        );
+
+        // Receive (or timeout) on each listener in turn. Each
+        // listener ingests up to `max_datagrams_per_iteration`
+        // datagrams per pass through one batched receive, and still
+        // gets a fair recv-timeout slice so a hot listener can't
+        // starve a quiet one. Sub-second-scale priority inversion is
+        // fine; QUIC's PTO timer fires on millisecond-ish granularity
+        // anyway.
         for (listeners, 0..) |l, sock_idx| {
-            var maybe_msg: ?Net.IncomingMessage = null;
-            var ecn: socket_opts.EcnCodepoint = .not_ect;
-            if (l.ecn_active) {
-                var msg: Net.IncomingMessage = .init;
-                msg.control = cmsg_buf;
-                const buf_slice = (&msg)[0..1];
-                const ret = l.sock.receiveManyTimeout(options.io, buf_slice, rx, .{}, .{
-                    .duration = .{
-                        .raw = per_listener_timeout,
-                        .clock = .awake,
-                    },
-                });
-                if (ret[0]) |err| switch (err) {
-                    error.Timeout => {},
-                    else => return err,
-                } else if (ret[1] == 1) {
-                    ecn = socket_opts.parseEcnFromControl(msg.control);
-                    maybe_msg = msg;
+            // One batched receive per listener: the first message
+            // waits up to the (deadline-clamped) timeout, the rest
+            // drain whatever is already queued, non-blocking. Data
+            // slices carve from the shared `rx`; a datagram that
+            // doesn't fit the residue is flagged truncated and
+            // dropped below (a truncated QUIC datagram is useless).
+            for (batch_msgs, 0..) |*msg, i| {
+                msg.* = .init;
+                if (l.ecn_active or l.gro_active) {
+                    msg.control =
+                        cmsg_buf[i * options.cmsg_buffer_bytes ..][0..options.cmsg_buffer_bytes];
                 }
-            } else {
-                maybe_msg = l.sock.receiveTimeout(options.io, rx, .{
-                    .duration = .{
-                        .raw = per_listener_timeout,
-                        .clock = .awake,
-                    },
-                }) catch |err| switch (err) {
-                    error.Timeout => null,
-                    else => return err,
-                };
             }
+            const ret = l.sock.receiveManyTimeout(options.io, batch_msgs, rx, .{}, .{
+                .duration = .{
+                    .raw = iteration_timeout,
+                    .clock = .awake,
+                },
+            });
+            var received: usize = ret[1];
+            if (ret[0]) |err| switch (err) {
+                error.Timeout => {},
+                else => return err,
+            };
 
             // Refresh time after the (possibly-blocking) receive call.
             // Don't reuse the pre-receive timestamp: tick / poll need to
             // see the actual now_us so PTO timers fire on schedule.
             now_us = monotonicNowUs(options.io, start);
 
-            const msg = maybe_msg orelse continue;
-            const from_addr = ipAddressToPathAddress(msg.from);
-            // `feed` swallows per-connection errors internally;
-            // OutOfMemory and rarely RandFailed propagate out, and
-            // either is already a hard failure for the loop. The
-            // FeedOutcome is informational —
-            // production embedders may want to plumb it into a metrics
-            // counter, but the default loop just lets it ride.
-            const outcome = try server.feedWithEcn(msg.data, from_addr, ecn, now_us);
-            // Stamp the receiving listener-index on the slot so the
-            // outbound drain below picks the right socket. We look
-            // up the slot by source address (the most recently
-            // touched slot for this peer) — any post-handshake
-            // datagram routes to the same slot regardless of which
-            // listener it arrived on. Pre-handshake retransmits in
-            // the .accepted / .routed buckets are equally fine to
-            // stamp; the field is purely an outbound hint.
-            _ = outcome;
-            stampLastRecvSocket(
-                server,
-                from_addr,
-                @intCast(sock_idx),
-                listeners[sock_idx].bind_addr,
-                now_us,
-            );
+            if (received > batch_msgs.len) received = batch_msgs.len;
+            for (batch_msgs[0..received]) |*msg| {
+                if (msg.flags.trunc) continue;
+                const ecn: socket_opts.EcnCodepoint = if (l.ecn_active)
+                    socket_opts.parseEcnFromControl(msg.control)
+                else
+                    .not_ect;
+                const from_addr = ipAddressToPathAddress(msg.from);
+                // GRO: the kernel may hand us several original
+                // datagrams coalesced into one buffer; the cmsg
+                // carries the split stride. Feed each original
+                // datagram — QUIC coalescing rules apply per datagram.
+                if (l.gro_active) {
+                    if (socket_opts.parseGroSegmentFromControl(msg.control)) |gro_seg| {
+                        if (msg.data.len > gro_seg) {
+                            var off: usize = 0;
+                            while (off < msg.data.len) {
+                                const end = @min(off + @as(usize, gro_seg), msg.data.len);
+                                _ = try server.feedWithEcn(msg.data[off..end], from_addr, ecn, now_us);
+                                off = end;
+                            }
+                            stampLastRecvSocket(
+                                server,
+                                from_addr,
+                                @intCast(sock_idx),
+                                listeners[sock_idx].bind_addr,
+                                now_us,
+                            );
+                            continue;
+                        }
+                    }
+                }
+                // `feed` swallows per-connection errors internally;
+                // OutOfMemory and rarely RandFailed propagate out, and
+                // either is already a hard failure for the loop. The
+                // FeedOutcome is informational — production embedders
+                // may want to plumb it into a metrics counter, but the
+                // default loop just lets it ride.
+                _ = try server.feedWithEcn(msg.data, from_addr, ecn, now_us);
+                // Stamp the receiving listener-index on the slot so the
+                // outbound drain below picks the right socket. We look
+                // up the slot by source address (the most recently
+                // touched slot for this peer) — any post-handshake
+                // datagram routes to the same slot regardless of which
+                // listener it arrived on. Pre-handshake retransmits in
+                // the .accepted / .routed buckets are equally fine to
+                // stamp; the field is purely an outbound hint.
+                stampLastRecvSocket(
+                    server,
+                    from_addr,
+                    @intCast(sock_idx),
+                    listeners[sock_idx].bind_addr,
+                    now_us,
+                );
+            }
 
             // Drain any Version Negotiation / Retry packets that
-            // `feed` queued. Sending these via the same listener the
-            // datagram arrived on is part of the Server contract:
-            // they are stateless responses with no associated slot,
-            // so the per-slot poll loop below would never reach
-            // them.
+            // `feed` queued for this batch. Sending these via the same
+            // listener the datagrams arrived on is part of the Server
+            // contract: they are stateless responses with no
+            // associated slot, so the per-slot poll loop below would
+            // never reach them.
             while (server.drainStatelessResponse()) |response| {
                 const dest = pathAddressToIpAddress(response.dst) orelse continue;
                 l.sock.send(options.io, &dest, response.slice()) catch {
@@ -496,8 +606,23 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             // those states.
             if (slot.conn.closeState() == .closed) continue;
             const idx: usize = @min(@as(usize, slot.last_recv_socket_idx), listeners.len - 1);
-            drainSlot(slot, tx, now_us, listeners[idx].sock, options.io) catch {};
+            drainSlot(
+                slot,
+                &send_batches[idx],
+                &listeners[idx],
+                gso_buf,
+                socket_opts.default_gso_max_segments,
+                now_us,
+                options.io,
+            ) catch {};
             slot.conn.tick(now_us) catch {};
+        }
+        // Ship whatever the drain pass accumulated — one syscall per
+        // listener for up to max_send_batch_datagrams datagrams across
+        // ALL slots (best-effort, matching the historical per-datagram
+        // posture).
+        for (send_batches, 0..) |*b, li| {
+            b.flush(options.io, listeners[li].sock) catch {};
         }
 
         iteration_count +%= 1;
@@ -554,23 +679,209 @@ fn stampLastRecvSocket(
 /// CID exhaustion) doesn't abort the whole server loop. Errors only
 /// propagate when `sock.send` itself fails — that's a real I/O
 /// failure the embedder needs to know about.
+/// Per-listener egress accumulator: outbound datagrams (for any
+/// number of peers) collect here and ship via one `Socket.sendMany`.
+/// `addrs` is parallel stable storage — `OutgoingMessage.address` is a
+/// pointer, so the addresses must not move between fill and flush.
+pub const SendBatch = struct {
+    msgs: []Net.OutgoingMessage,
+    addrs: []Net.IpAddress,
+    buf: []u8,
+    datagram_bytes: usize,
+    len: usize = 0,
+    used: usize = 0,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        capacity: usize,
+        datagram_bytes: usize,
+    ) !SendBatch {
+        const msgs = try allocator.alloc(Net.OutgoingMessage, capacity);
+        errdefer allocator.free(msgs);
+        const addrs = try allocator.alloc(Net.IpAddress, capacity);
+        errdefer allocator.free(addrs);
+        const buf = try allocator.alloc(u8, capacity * datagram_bytes);
+        errdefer allocator.free(buf);
+        return .{
+            .msgs = msgs,
+            .addrs = addrs,
+            .buf = buf,
+            .datagram_bytes = datagram_bytes,
+        };
+    }
+
+    pub fn deinit(self: *SendBatch, allocator: std.mem.Allocator) void {
+        allocator.free(self.msgs);
+        allocator.free(self.addrs);
+        allocator.free(self.buf);
+        self.* = undefined;
+    }
+
+    /// Scratch space for the next datagram, or null when full.
+    pub fn nextSlot(self: *SendBatch) ?[]u8 {
+        if (self.len >= self.msgs.len) return null;
+        return self.buf[self.used..][0..self.datagram_bytes];
+    }
+
+    /// Commit `len` bytes of the slot returned by `nextSlot` for `to`.
+    pub fn commit(self: *SendBatch, to: Net.IpAddress, len: usize) void {
+        std.debug.assert(self.len < self.msgs.len);
+        self.addrs[self.len] = to;
+        self.msgs[self.len] = .{
+            .address = &self.addrs[self.len],
+            .data_ptr = self.buf.ptr + self.used,
+            .data_len = len,
+        };
+        self.len += 1;
+        self.used += len;
+    }
+
+    /// Ship everything accumulated (one sendMany; the std lowers to
+    /// sendmmsg in 64-message chunks on Linux, a send loop elsewhere)
+    /// and reset. Send failures are the caller's policy.
+    pub fn flush(self: *SendBatch, io: std.Io, sock: Net.Socket) !void {
+        if (self.len == 0) return;
+        defer {
+            self.len = 0;
+            self.used = 0;
+        }
+        try sock.sendMany(io, self.msgs[0..self.len], .{});
+    }
+};
+
 fn drainSlot(
     slot: *Server.Slot,
-    tx: []u8,
+    batch: *SendBatch,
+    l: *Listener,
+    gso_buf: []u8,
+    max_gso_segments: u32,
     now_us: u64,
-    sock: Net.Socket,
     io: std.Io,
 ) !void {
-    while (try slot.conn.pollDatagram(tx, now_us)) |out| {
+    if (l.gso_active) return drainSlotGso(slot, l, gso_buf, max_gso_segments, now_us, io);
+    while (true) {
+        const dst = batch.nextSlot() orelse blk: {
+            // Batch full mid-drain: ship it and keep going.
+            batch.flush(io, l.sock) catch |err| {
+                // Parity with the historical per-datagram posture:
+                // egress failures for a slot are non-fatal (QUIC loss
+                // recovery covers dropped tails), but stop this
+                // slot's drain for the iteration.
+                return err;
+            };
+            break :blk batch.nextSlot() orelse return;
+        };
+        const out = (try slot.conn.pollDatagram(dst, now_us)) orelse return;
         const target = out.to orelse slot.peer_addr orelse continue;
         const dest = pathAddressToIpAddress(target) orelse continue;
-        try sock.send(io, &dest, tx[0..out.len]);
+        batch.commit(dest, out.len);
+    }
+}
+
+/// GSO egress: pack the slot's outbox into equal-size super-datagrams
+/// (one sendmsg per up to 64 packets). Bypasses the cross-slot batch —
+/// the syscall saving already happened inside the super-datagram, and
+/// immediate sends sidestep buffer-lifetime coupling with other slots.
+/// A send error clears `gso_active` (kernel/offload quirk) and
+/// re-ships the already-built segments individually before falling
+/// back to plain batching next pass.
+fn drainSlotGso(
+    slot: *Server.Slot,
+    l: *Listener,
+    gso_buf: []u8,
+    max_gso_segments: u32,
+    now_us: u64,
+    io: std.Io,
+) !void {
+    while (true) {
+        const filled = try udp_batch.fillGsoBatch(slot.conn, gso_buf, max_gso_segments, now_us);
+        if (filled.count == 0) return;
+        const target = filled.to orelse slot.peer_addr orelse return;
+        var dest = pathAddressToIpAddress(target) orelse return;
+
+        if (filled.count == 1) {
+            try l.sock.send(io, &dest, gso_buf[0..filled.total_len]);
+        } else {
+            var cmsg: [64]u8 = undefined;
+            const cmsg_len = socket_opts.writeUdpSegmentCmsg(&cmsg, @intCast(filled.seg_size));
+            var msgs = [_]Net.OutgoingMessage{.{
+                .address = &dest,
+                .data_ptr = gso_buf.ptr,
+                .data_len = filled.total_len,
+                .control = cmsg[0..cmsg_len],
+            }};
+            l.sock.sendMany(io, &msgs, .{}) catch {
+                // Offload rejected at runtime (EIO family): disable for
+                // this socket and re-ship the built segments plainly —
+                // they are already segment-aligned in gso_buf.
+                l.gso_active = false;
+                var off: usize = 0;
+                while (off < filled.total_len) {
+                    const end = @min(off + filled.seg_size, filled.total_len);
+                    try l.sock.send(io, &dest, gso_buf[off..end]);
+                    off = end;
+                }
+            };
+        }
+
+        if (filled.hasCarry()) {
+            const carry_target = filled.carry_to orelse slot.peer_addr orelse return;
+            var carry_dest = pathAddressToIpAddress(carry_target) orelse return;
+            try l.sock.send(io, &carry_dest, gso_buf[filled.carry_offset..][0..filled.carry_len]);
+        }
     }
 }
 
 /// Convert the loop's monotonic-clock origin into a non-negative
 /// microsecond offset suitable for `Server.feed` / `Server.tick`.
 /// Also reused by `runUdpClient`.
+/// Clamp a loop's base receive timeout to an optional timer deadline:
+/// no deadline keeps the base; a due or sub-millisecond deadline
+/// clamps to 1 ms (blocking-recv floor — never a busy spin); anything
+/// else waits exactly until the deadline, rounded up. Shared by
+/// `runUdpServer` and `runUdpClient` (INTERNAL).
+pub fn clampTimeoutToDeadline(
+    base: std.Io.Duration,
+    deadline_us: ?u64,
+    now_us: u64,
+) std.Io.Duration {
+    const at_us = deadline_us orelse return base;
+    if (at_us <= now_us) return std.Io.Duration.fromMilliseconds(1);
+    const until_ms: u64 = ((at_us - now_us) + 999) / 1000; // round up
+    const base_ms_i = base.toMilliseconds();
+    const base_ms: u64 = if (base_ms_i < 1) 1 else @intCast(base_ms_i);
+    const ms = @min(base_ms, @max(until_ms, 1));
+    return std.Io.Duration.fromMilliseconds(@intCast(ms));
+}
+
+test clampTimeoutToDeadline {
+    const five = std.Io.Duration.fromMilliseconds(5);
+    // No deadline: base unchanged.
+    try std.testing.expectEqual(
+        @as(i64, 5),
+        clampTimeoutToDeadline(five, null, 1_000).toMilliseconds(),
+    );
+    // Far deadline: base still wins.
+    try std.testing.expectEqual(
+        @as(i64, 5),
+        clampTimeoutToDeadline(five, 1_000_000, 1_000).toMilliseconds(),
+    );
+    // Near deadline (2.5 ms away): rounds UP to 3 ms.
+    try std.testing.expectEqual(
+        @as(i64, 3),
+        clampTimeoutToDeadline(five, 3_500, 1_000).toMilliseconds(),
+    );
+    // Past-due and sub-ms: 1 ms floor, never 0.
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        clampTimeoutToDeadline(five, 500, 1_000).toMilliseconds(),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        clampTimeoutToDeadline(five, 1_400, 1_000).toMilliseconds(),
+    );
+}
+
 pub fn monotonicNowUs(io: std.Io, start: std.Io.Timestamp) u64 {
     const now = std.Io.Timestamp.now(io, .awake);
     const delta = start.durationTo(now).toMicroseconds();

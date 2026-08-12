@@ -1,0 +1,120 @@
+{
+  "schema_version": 3,
+  "suite": "quic_zig.bench_e2e",
+  "generated_unix_ns": 1786528610298419000,
+  "samples_per_benchmark": 9,
+  "optimize": "ReleaseSafe",
+  "bench_unsafe_release_fast": false,
+  "report_path": "baselines/bench/m5max-e2e.json",
+  "quic_zig_version": "0.10.0",
+  "zig_version": "0.17.0-dev.1252+e4b325c19",
+  "target": {
+    "arch": "aarch64",
+    "os": "macos",
+    "abi": "none",
+    "cpu_model": "apple_m5"
+  },
+  "system": {
+    "machine_id": "m5max",
+    "hostname": "Mac.localdomain",
+    "logical_cpu_count": 18,
+    "total_memory_bytes": 137438953472,
+    "uname": {
+      "sysname": "Darwin",
+      "release": "25.5.0",
+      "version": "Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:34 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6050",
+      "machine": "arm64"
+    }
+  },
+  "github": {
+    "sha": null,
+    "run_id": null,
+    "ref_name": null
+  },
+  "benchmarks": [
+    {
+      "name": "goodput_bulk_64mib",
+      "kind": "goodput",
+      "total_bytes": 67108864,
+      "sample_count": 9,
+      "samples_mb_per_sec": [247.304, 272.214, 271.901, 271.579, 271.461, 271.170, 271.647, 270.422, 270.791],
+      "median_mb_per_sec": 271.461,
+      "mad_mb_per_sec": 0.439,
+      "datagrams": 117122,
+      "client_polls": 87350,
+      "transfer_allocs": 142,
+      "transfer_frees": 136,
+      "transfer_bytes_allocated": 3109593,
+      "poll_p50_ns": 0,
+      "poll_p90_ns": 1000,
+      "poll_p99_ns": 1000,
+      "poll_max_ns": 35000
+    }
+    ,
+    {
+      "name": "handshakes_full_tls13",
+      "kind": "handshakes",
+      "sample_count": 9,
+      "samples_handshakes_per_sec": [1837.371, 1844.821, 1851.399, 1849.947, 1850.865, 1853.589, 1850.844, 1852.325, 1846.756],
+      "median_handshakes_per_sec": 1850.844,
+      "mad_handshakes_per_sec": 1.481,
+      "allocs_per_handshake": 5.00
+    }
+    ,
+    {
+      "name": "impairment_loss0pct",
+      "kind": "impairment",
+      "total_bytes": 8388608,
+      "virtual_us": 39600,
+      "virtual_goodput_mbps": 1694.6683,
+      "wall_ns": 20672000,
+      "enqueued": 7451,
+      "dropped": 0,
+      "loss_permille": 0,
+      "reorder_permille": 0,
+      "seed": 780740
+    }
+    ,
+    {
+      "name": "impairment_loss1pct",
+      "kind": "impairment",
+      "total_bytes": 8388608,
+      "virtual_us": 1252700,
+      "virtual_goodput_mbps": 53.5714,
+      "wall_ns": 43565000,
+      "enqueued": 9861,
+      "dropped": 112,
+      "loss_permille": 10,
+      "reorder_permille": 0,
+      "seed": 780740
+    }
+    ,
+    {
+      "name": "impairment_loss5pct",
+      "kind": "impairment",
+      "total_bytes": 8388608,
+      "virtual_us": 4936600,
+      "virtual_goodput_mbps": 13.5941,
+      "wall_ns": 88816000,
+      "enqueued": 9286,
+      "dropped": 475,
+      "loss_permille": 50,
+      "reorder_permille": 0,
+      "seed": 780740
+    }
+    ,
+    {
+      "name": "impairment_reorder10pct",
+      "kind": "impairment",
+      "total_bytes": 8388608,
+      "virtual_us": 4404900,
+      "virtual_goodput_mbps": 15.2350,
+      "wall_ns": 84873000,
+      "enqueued": 10870,
+      "dropped": 0,
+      "loss_permille": 0,
+      "reorder_permille": 100,
+      "seed": 780740
+    }
+  ]
+}

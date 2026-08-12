@@ -41,7 +41,7 @@ test "congestionBlocked gates application data but allows PTO probes" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    conn.ccForApplication().cwnd = 1200;
+    conn.ccForApplication().setCwndForTest(1200);
     try conn.sentForLevel(.application).record(.{
         .pn = 1,
         .sent_time_us = 0,

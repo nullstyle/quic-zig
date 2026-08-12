@@ -162,6 +162,13 @@ pub fn detectLosses(
     // per run instead of once per packet.
     var i: u32 = 0;
     while (i < tracker.count) {
+        // Tombstones must not (re-)match: after a range removal the
+        // loop re-enters at `start`, which is now dead — matching it
+        // again would spin forever.
+        if (tracker.packets[i].dead) {
+            i += 1;
+            continue;
+        }
         if (tracker.packets[i].pn > largest_acked) break;
         if (!isLost(&tracker.packets[i], largest_acked, lost_send_time_cutoff)) {
             i += 1;
@@ -182,6 +189,19 @@ pub fn detectLosses(
 }
 
 // -- tests ---------------------------------------------------------------
+
+/// Live (still-tracked) PNs in order — removal tombstones slots in
+/// place, so the physical array includes dead entries.
+fn testLivePns(tr: *const SentPacketTracker, buf: []u64) []const u64 {
+    var n: usize = 0;
+    var i: u32 = 0;
+    while (i < tr.count) : (i += 1) {
+        if (tr.packets[i].dead) continue;
+        buf[n] = tr.packets[i].pn;
+        n += 1;
+    }
+    return buf[0..n];
+}
 
 const ack_tracker_mod = @import("ack_tracker.zig");
 
@@ -214,10 +234,11 @@ test "processAck removes a single contiguous range from the tracker" {
     try std.testing.expectEqual(@as(u64, 40), result.largest_acked_send_time_us);
     try std.testing.expect(result.any_ack_eliciting_newly_acked);
 
-    // Tracker still has PNs 0 and 1.
-    try std.testing.expectEqual(@as(u32, 2), tr.count);
-    try std.testing.expectEqual(@as(u64, 0), tr.packets[0].pn);
-    try std.testing.expectEqual(@as(u64, 1), tr.packets[1].pn);
+    // Tracker still has PNs 0 and 1 (live view: removal tombstones
+    // slots in place).
+    try std.testing.expectEqual(@as(u32, 2), tr.liveCount());
+    var pn_scratch: [8]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, testLivePns(&tr, &pn_scratch));
     try std.testing.expectEqual(@as(?u64, 4), space.largest_acked_sent);
 }
 
@@ -257,7 +278,7 @@ test "processAck handles an ACK with multiple ranges" {
     // Acked: 10, 5, 4, 3 → 4 packets, 400 bytes.
     try std.testing.expectEqual(@as(u32, 4), result.newly_acked_count);
     try std.testing.expectEqual(@as(u64, 400), result.bytes_acked);
-    try std.testing.expectEqual(@as(u32, 7), tr.count); // 11 - 4
+    try std.testing.expectEqual(@as(u32, 7), tr.liveCount()); // 11 - 4
     try std.testing.expect(result.largest_acked_newly_acked);
 }
 
@@ -277,9 +298,9 @@ test "processAck removes a tracked span with mixed in-flight packets" {
     try std.testing.expectEqual(@as(u64, 600), result.in_flight_bytes_acked);
     try std.testing.expect(result.largest_acked_newly_acked);
     try std.testing.expectEqual(@as(u64, 40), result.largest_acked_send_time_us);
-    try std.testing.expectEqual(@as(u32, 2), tr.count);
-    try std.testing.expectEqual(@as(u64, 0), tr.packets[0].pn);
-    try std.testing.expectEqual(@as(u64, 7), tr.packets[1].pn);
+    try std.testing.expectEqual(@as(u32, 2), tr.liveCount());
+    var pn_scratch: [8]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &.{ 0, 7 }, testLivePns(&tr, &pn_scratch));
     try std.testing.expectEqual(@as(u64, 800), tr.bytes_in_flight);
     try std.testing.expectEqual(@as(u64, 800), tr.ack_eliciting_in_flight);
 }
@@ -313,9 +334,9 @@ test "detectLosses by packet threshold" {
     try std.testing.expectEqual(@as(u32, 2), result.count);
     try std.testing.expectEqual(@as(u64, 2400), result.bytes_lost);
     // Tracker now has only PN 2 and 3.
-    try std.testing.expectEqual(@as(u32, 2), tr.count);
-    try std.testing.expectEqual(@as(u64, 2), tr.packets[0].pn);
-    try std.testing.expectEqual(@as(u64, 3), tr.packets[1].pn);
+    try std.testing.expectEqual(@as(u32, 2), tr.liveCount());
+    var pn_scratch: [8]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &.{ 2, 3 }, testLivePns(&tr, &pn_scratch));
 }
 
 test "detectLosses by time threshold" {
@@ -358,9 +379,9 @@ test "detectLosses skips packets above largest_acked" {
     // Even though PNs 5 and 6 look "old" by time, they're above
     // largest_acked, so they're spared.
     try std.testing.expectEqual(@as(u32, 2), result.count);
-    try std.testing.expectEqual(@as(u32, 2), tr.count);
-    try std.testing.expectEqual(@as(u64, 5), tr.packets[0].pn);
-    try std.testing.expectEqual(@as(u64, 6), tr.packets[1].pn);
+    try std.testing.expectEqual(@as(u32, 2), tr.liveCount());
+    var pn_scratch: [8]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &.{ 5, 6 }, testLivePns(&tr, &pn_scratch));
 }
 
 test "detectLosses batches non-contiguous lost runs" {
@@ -383,10 +404,9 @@ test "detectLosses batches non-contiguous lost runs" {
     try std.testing.expectEqual(@as(u64, 400), result.bytes_lost);
     try std.testing.expectEqual(@as(u64, 400), result.in_flight_bytes_lost);
     try std.testing.expectEqual(@as(u64, 1_000), result.largest_lost_send_time_us);
-    try std.testing.expectEqual(@as(u32, 3), tr.count);
-    try std.testing.expectEqual(@as(u64, 1), tr.packets[0].pn);
-    try std.testing.expectEqual(@as(u64, 3), tr.packets[1].pn);
-    try std.testing.expectEqual(@as(u64, 4), tr.packets[2].pn);
+    try std.testing.expectEqual(@as(u32, 3), tr.liveCount());
+    var pn_scratch: [8]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &.{ 1, 3, 4 }, testLivePns(&tr, &pn_scratch));
     try std.testing.expectEqual(@as(u64, 1_100), tr.bytes_in_flight);
 }
 
@@ -397,7 +417,7 @@ test "detectLosses with no largest_acked_sent is a no-op" {
     var rtt_est: RttEstimator = .{};
     const result = detectLosses(&tr, &space, &rtt_est, 1_000_000);
     try std.testing.expectEqual(@as(u32, 0), result.count);
-    try std.testing.expectEqual(@as(u32, 1), tr.count);
+    try std.testing.expectEqual(@as(u32, 1), tr.liveCount());
 }
 
 // -- fuzz harness --------------------------------------------------------
@@ -474,15 +494,15 @@ fn fuzzProcessAck(_: void, smith: *std.testing.Smith) anyerror!void {
 
     const before_bytes_in_flight = tr.bytes_in_flight;
     const before_eliciting_in_flight = tr.ack_eliciting_in_flight;
-    const before_count = tr.count;
+    const before_count = tr.liveCount();
     const before_largest_acked_sent = space.largest_acked_sent;
 
     if (processAck(&tr, &space, ack)) |result| {
         // bytes_in_flight monotonically decreases under processAck.
         try std.testing.expect(tr.bytes_in_flight <= before_bytes_in_flight);
         try std.testing.expect(tr.ack_eliciting_in_flight <= before_eliciting_in_flight);
-        try std.testing.expect(tr.count <= before_count);
-        try std.testing.expectEqual(before_count - tr.count, result.newly_acked_count);
+        try std.testing.expect(tr.liveCount() <= before_count);
+        try std.testing.expectEqual(before_count - tr.liveCount(), result.newly_acked_count);
         try std.testing.expect(result.in_flight_bytes_acked <= result.bytes_acked);
     } else |_| {
         // Errored ACK frames may leave the tracker partially modified;

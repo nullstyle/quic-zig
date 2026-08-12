@@ -9,8 +9,8 @@ on:
         default: "50000"
 
 # Manual pre-release gate. Blocking: it must be green on the release commit
-# before tagging. The scheduled `fuzz.yml` job (10M budget, weekly) remains
-# advisory and is what carries deep bug-hunting coverage.
+# before tagging. The scheduled `fuzz.yml` job (1M/target budget, weekly)
+# remains advisory and is what carries deep bug-hunting coverage.
 #
 # The budget is 50000 per target (~1.85M executions, ~10 minutes) rather than
 # the 1M it used to be, because the long run measurably buys almost nothing:

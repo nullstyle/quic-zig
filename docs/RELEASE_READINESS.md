@@ -14,8 +14,8 @@ release.
 | Platform | Arch | CI | Status |
 | --- | --- | --- | --- |
 | Linux | x86-64 | `ubuntu-latest` | Gating |
-| Linux | aarch64 | (via `ubuntu-24.04-arm` downstream) | Gating |
-| macOS | aarch64 | `macos-latest` | Gating |
+| Linux | aarch64 | `ubuntu-24.04-arm` | Gating |
+| macOS | aarch64 | `macos-15` (`macos-26` advisory) | Gating |
 | Windows | x86-64 | `windows-latest` | Gating |
 
 **Tier 2 — best-effort.** Builds are expected to work but are not
@@ -52,15 +52,18 @@ is safe to embed in production. The gates:
 - [x] Sanitizer CI scaffold is in place: `-Dsanitize-c=off|trap|full`
       is accepted by quic-zig-owned build modules and Linux CI runs
       `zig build test -Dsanitize-c=full`. The option is forwarded into
-      `boringssl-zig` v0.6.4 so the BoringSSL C/C++ libraries are
-      instrumented consistently with quic-zig's wrapper modules.
+      the pinned `boringssl-zig` revision so the BoringSSL C/C++ libraries
+      are instrumented consistently with quic-zig's wrapper modules.
 - [x] Deep fuzzing has an explicit pre-release gate. Plain
       `zig build test` runs every `std.testing.fuzz` seed as a deterministic
       smoke test on each push; `.github/workflows/fuzz.yml` remains weekly
       advisory coverage. Before tagging v0.8.0 or a later RC/final release,
       `.github/workflows/rc-fuzz.yml` must pass unfiltered
-      `zig build test --fuzz=1M` (or a larger requested budget) and upload
-      `.zig-cache/v` for replay. No open crashers are tracked in-tree.
+      `zig build test --fuzz` at its default budget of 50000 per target
+      (~1.85M executions; raise it for an RC/1.0), assert the coverage
+      file's `pcs_len` is non-zero (an uninstrumented run looks green),
+      and upload `.zig-cache/v` for replay. No open crashers are tracked
+      in-tree.
 
 ### API surface
 - [x] The `Connection` surface is partitioned into Stable / Unstable so
@@ -76,9 +79,16 @@ is safe to embed in production. The gates:
       envelope and `AntiReplayTracker` persistence uses `QZAR`.
 
 ### Cross-repo hygiene
-- [x] `boringssl-zig` is pinned to a tag (not a bare SHA) and a CI lint
-      asserts quic-zig and http3-zig pin it byte-for-byte identically
-      (roadmap H1 #3).
+- [ ] `boringssl-zig` is pinned to a tag (not a bare SHA) in both quic-zig
+      and http3-zig, byte-for-byte identically (roadmap H1 #3). Current
+      reality (2026-08-11): quic-zig deliberately pins bare SHA
+      `292c70a2…` — unreleased 0.6.5 carrying the Windows socket link
+      fix — while http3-zig pins tag `v0.6.4`. The CI lint half of this
+      gate now exists: `.github/workflows/pin-lint.yml` compares the two
+      pins on push/PR and weekly, tolerating exactly this known pair (with
+      a warning) and failing on any other divergence. Re-check this box
+      when boringssl-zig tags v0.6.5, both repos repin to the tag, and the
+      known pair is deleted from the lint.
 
 ### Platforms
 - [x] Windows `windows-latest` job is green and `continue-on-error` is

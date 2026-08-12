@@ -36,7 +36,7 @@ const frame_type_alternative_v6_address: u64 = 0x1d5845e3;
 /// - `PathIdTooLarge` — multipath frame's path_id exceeds `u32` range.
 /// - `AckRangeCountTooLarge` — incoming ACK / PATH_ACK frame declares
 ///   more ranges than `max_incoming_ack_ranges` (RFC 9000 §13.1
-///   recommends bounding ACK range processing; the hardening guide §4.7
+///   recommends bounding ACK range processing; this cap
 ///   classes unbounded ACK-range loops as a DoS surface).
 /// - `OverlappingAckRanges` — incoming ACK / PATH_ACK frame's range
 ///   list contains ranges that overlap or whose gap+length arithmetic

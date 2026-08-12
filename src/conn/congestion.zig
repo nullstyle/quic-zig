@@ -1,4 +1,4 @@
-//! NewReno congestion control (RFC 9002 §7 + Appendix B).
+//! Congestion control (RFC 9002 §7 + Appendix B).
 //!
 //! One controller per Path: the single-path connection has one,
 //! multipath connections have one per active path. The controller
@@ -6,8 +6,24 @@
 //! maintains externally (in `SentPacketTracker`), but the controller
 //! itself tracks `cwnd` and `ssthresh` as authoritative per-path
 //! limits.
+//!
+//! `CongestionController` is the dispatch layer: a tagged union over
+//! the available algorithms (CUBIC — the default — and NewReno; the
+//! tag is chosen by `Config.algorithm` and dispatched with zero
+//! indirection via inline switches). Everything outside this file
+//! talks to the union; the concrete controllers stay exported for
+//! tests and direct embedding.
 
 const std = @import("std");
+const cubic_mod = @import("congestion_cubic.zig");
+
+/// RFC 9438 CUBIC controller (re-export; lives in congestion_cubic.zig).
+pub const Cubic = cubic_mod.Cubic;
+/// CUBIC curve helpers + constants (re-exported for the conformance suite).
+pub const cubicK = cubic_mod.cubicK;
+pub const cubicWindowBytes = cubic_mod.cubicWindowBytes;
+pub const cubic_alpha_num = cubic_mod.alpha_num;
+pub const cubic_alpha_den = cubic_mod.alpha_den;
 
 /// kPersistentCongestionThreshold from RFC 9002 §7.6.1: 3.
 pub const persistent_congestion_threshold: u8 = 3;
@@ -17,12 +33,32 @@ pub const loss_reduction_factor_num: u64 = 1;
 /// kLossReductionFactor denominator from RFC 9002 §B.1 (factor = 1/2).
 pub const loss_reduction_factor_den: u64 = 2;
 
-/// Tunables for the NewReno controller. Held by-value inside the
-/// controller so each path has independent state.
+/// RFC 9002 §7.8: an ACK only justifies window growth if the window
+/// was actually being filled when the acked bytes were in flight.
+/// `bytes_in_flight` is the post-ACK residue the tracker reports, so
+/// utilization at ACK time is `bytes_in_flight + bytes_acked`.
+pub fn ackFillsWindow(cwnd: u64, bytes_acked: u64, bytes_in_flight: u64) bool {
+    return bytes_in_flight +| bytes_acked >= cwnd;
+}
+
+/// Selectable congestion-control algorithm.
+pub const Algorithm = enum {
+    /// RFC 9002 §7 / Appendix B NewReno.
+    new_reno,
+    /// RFC 9438 CUBIC.
+    cubic,
+};
+
+/// Tunables held by-value inside each controller so every path has
+/// independent state.
 pub const Config = struct {
     /// Maximum UDP datagram size we'll send. Conservatively 1200
     /// per the QUIC v1 minimum; raised by PMTU discovery later.
     max_datagram_size: u64 = 1200,
+    /// Which controller `CongestionController.init` builds. CUBIC
+    /// (RFC 9438) is the default as of 0.11.0 — the industry-standard
+    /// curve; NewReno remains available as the conservative fallback.
+    algorithm: Algorithm = .cubic,
 
     /// Minimum congestion window: 2 * max_datagram_size.
     pub fn minWindow(self: Config) u64 {
@@ -35,6 +71,143 @@ pub const Config = struct {
         const ten = 10 * self.max_datagram_size;
         const fourteen720 = @max(self.minWindow(), 14720);
         return @min(ten, fourteen720);
+    }
+};
+
+/// Algorithm-dispatching congestion controller: by-value on each path,
+/// no allocation, no vtable — every method is an inline switch on a
+/// one-byte tag. Concrete controllers must expose the same event
+/// surface plus `cwnd`, `ssthresh`, `recovery_start_time_us`, and
+/// `cfg` fields (the inline-else accessors below reach them
+/// generically).
+pub const CongestionController = union(Algorithm) {
+    new_reno: NewReno,
+    cubic: Cubic,
+
+    pub fn init(cfg: Config) CongestionController {
+        return switch (cfg.algorithm) {
+            .new_reno => .{ .new_reno = NewReno.init(cfg) },
+            .cubic => .{ .cubic = Cubic.init(cfg) },
+        };
+    }
+
+    /// The active algorithm (the union tag).
+    pub fn algorithm(self: *const CongestionController) Algorithm {
+        return std.meta.activeTag(self.*);
+    }
+
+    // -- event surface (forwarded) ----------------------------------------
+
+    pub fn onPacketAcked(
+        self: *CongestionController,
+        bytes_acked: u64,
+        largest_acked_sent_time_us: u64,
+        now_us: u64,
+        srtt_us: u64,
+        bytes_in_flight: u64,
+    ) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPacketAcked(
+                bytes_acked,
+                largest_acked_sent_time_us,
+                now_us,
+                srtt_us,
+                bytes_in_flight,
+            ),
+        }
+    }
+
+    /// RTT-sample hook: call once per RTT estimator update.
+    pub fn onRttSample(self: *CongestionController, latest_rtt_us: u64, now_us: u64) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onRttSample(latest_rtt_us, now_us),
+        }
+    }
+
+    pub fn onPacketLost(
+        self: *CongestionController,
+        bytes_lost: u64,
+        lost_largest_sent_time_us: u64,
+    ) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPacketLost(bytes_lost, lost_largest_sent_time_us),
+        }
+    }
+
+    pub fn onPersistentCongestion(self: *CongestionController) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPersistentCongestion(),
+        }
+    }
+
+    pub fn onCongestionEvent(self: *CongestionController, ce_packet_sent_time_us: u64) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onCongestionEvent(ce_packet_sent_time_us),
+        }
+    }
+
+    // -- read surface --------------------------------------------------------
+
+    pub fn sendAllowance(self: *const CongestionController, bytes_in_flight: u64) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.sendAllowance(bytes_in_flight),
+        };
+    }
+
+    pub fn isSlowStart(self: *const CongestionController) bool {
+        return switch (self.*) {
+            inline else => |*impl| impl.isSlowStart(),
+        };
+    }
+
+    pub fn isInRecovery(self: *const CongestionController, sent_time_us: u64) bool {
+        return switch (self.*) {
+            inline else => |*impl| impl.isInRecovery(sent_time_us),
+        };
+    }
+
+    /// Current congestion window in bytes.
+    pub fn cwndBytes(self: *const CongestionController) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.cwnd,
+        };
+    }
+
+    /// Slow-start threshold; null = infinity (still in initial slow start).
+    pub fn ssthreshBytes(self: *const CongestionController) ?u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.ssthresh,
+        };
+    }
+
+    /// Recovery-period anchor, if currently in recovery.
+    pub fn recoveryStartTimeUs(self: *const CongestionController) ?u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.recovery_start_time_us,
+        };
+    }
+
+    /// The controller's configured minimum window.
+    pub fn minWindow(self: *const CongestionController) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.cfg.minWindow(),
+        };
+    }
+
+    /// The controller's configuration (algorithm tag included).
+    pub fn config(self: *const CongestionController) Config {
+        return switch (self.*) {
+            inline else => |*impl| impl.cfg,
+        };
+    }
+
+    // INTERNAL: direct cwnd override for tests and benchmark fixtures
+    // that need to force a controller into a specific regime. Not part
+    // of any embedder contract.
+    pub fn setCwndForTest(self: *CongestionController, cwnd: u64) void {
+        switch (self.*) {
+            inline else => |*impl| impl.cwnd = cwnd,
+        }
     }
 };
 
@@ -76,15 +249,25 @@ pub const NewReno = struct {
         return self.ssthresh == null or self.cwnd < self.ssthresh.?;
     }
 
-    /// Process an ACK for `bytes_acked` bytes whose newest packet
-    /// was sent at `largest_acked_sent_time_us`. RFC 9002 §B.5.
+    /// Process an ACK for `bytes_acked` bytes whose newest packet was
+    /// sent at `largest_acked_sent_time_us`. RFC 9002 §B.5.
+    /// `bytes_in_flight` is the tracker's post-ACK residue (for the
+    /// §7.8 application-limited gate); `now_us` and `srtt_us` are
+    /// unused by NewReno but part of the shared controller surface
+    /// (CUBIC's growth curve needs both).
     pub fn onPacketAcked(
         self: *NewReno,
         bytes_acked: u64,
         largest_acked_sent_time_us: u64,
+        now_us: u64,
+        srtt_us: u64,
+        bytes_in_flight: u64,
     ) void {
+        _ = now_us;
+        _ = srtt_us;
         // Clear recovery if we've received an ACK for a packet sent
-        // after recovery began.
+        // after recovery began. This runs before the app-limited gate:
+        // exiting recovery is state maintenance, not window growth.
         if (self.recovery_start_time_us) |rec_start| {
             if (largest_acked_sent_time_us > rec_start) {
                 self.recovery_start_time_us = null;
@@ -93,6 +276,10 @@ pub const NewReno = struct {
                 return;
             }
         }
+
+        // RFC 9002 §7.8: SHOULD NOT increase cwnd off ACKs from a pipe
+        // the application never filled.
+        if (!ackFillsWindow(self.cwnd, bytes_acked, bytes_in_flight)) return;
 
         if (self.isSlowStart()) {
             self.cwnd += bytes_acked;
@@ -165,6 +352,15 @@ pub const NewReno = struct {
         self.bytes_acked_in_ca = 0;
     }
 
+    /// RTT-sample hook, called once per RTT estimator update. NewReno
+    /// ignores it; delay-sensitive controllers (CUBIC's HyStart
+    /// successor, BBR) consume it through the shared surface.
+    pub fn onRttSample(self: *NewReno, latest_rtt_us: u64, now_us: u64) void {
+        _ = self;
+        _ = latest_rtt_us;
+        _ = now_us;
+    }
+
     /// Are we allowed to send `bytes_in_flight` worth of data right
     /// now? Returns the cwnd headroom (bytes that can still be sent
     /// before hitting the limit). 0 means "wait."
@@ -190,7 +386,7 @@ test "slow start adds bytes_acked to cwnd" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     const initial = nr.cwnd;
     try std.testing.expect(nr.isSlowStart());
-    nr.onPacketAcked(2400, 100);
+    nr.onPacketAcked(2400, 100, 0, 0, nr.cwnd); // pipe full: growth applies
     try std.testing.expectEqual(initial + 2400, nr.cwnd);
 }
 
@@ -217,13 +413,13 @@ test "recovery period prevents cwnd growth from in-recovery acks" {
     nr.onPacketLost(1200, 1_000_000);
     const cwnd_after_loss = nr.cwnd;
     // ACK for a packet sent before recovery → ignored for cwnd.
-    nr.onPacketAcked(1200, 999_999);
+    nr.onPacketAcked(1200, 999_999, 0, 0, nr.cwnd);
     try std.testing.expectEqual(cwnd_after_loss, nr.cwnd);
     // ACK for a packet sent after recovery → recovery clears, but
     // cwnd is now in CA mode (cwnd == ssthresh after the loss).
     // Acking enough bytes to fill `bytes_acked_in_ca >= cwnd`
     // triggers one MSS bump.
-    nr.onPacketAcked(cwnd_after_loss, 2_000_000);
+    nr.onPacketAcked(cwnd_after_loss, 2_000_000, 0, 0, nr.cwnd);
     try std.testing.expectEqual(@as(?u64, null), nr.recovery_start_time_us);
     try std.testing.expectEqual(cwnd_after_loss + nr.cfg.max_datagram_size, nr.cwnd);
 }
@@ -235,7 +431,7 @@ test "congestion avoidance grows cwnd by ~MSS per RTT" {
     try std.testing.expect(!nr.isSlowStart());
 
     // Accumulate cwnd worth of acks → one MSS bump.
-    nr.onPacketAcked(12000, 100);
+    nr.onPacketAcked(12000, 100, 0, 0, nr.cwnd);
     try std.testing.expectEqual(@as(u64, 13200), nr.cwnd);
 }
 
@@ -273,4 +469,95 @@ test "onCongestionEvent suppresses re-entry within an existing recovery period" 
     // a duplicate signal — shouldn't shrink cwnd further.
     nr.onCongestionEvent(999_999);
     try std.testing.expectEqual(cwnd_after_first, nr.cwnd);
+}
+
+test "app-limited ACKs never grow cwnd (RFC 9002 §7.8) in either regime" {
+    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
+    const initial = nr.cwnd;
+    // Slow start, tiny pipe: 1200 acked with nothing else in flight
+    // against a 12000-byte window — application limited, no growth.
+    nr.onPacketAcked(1200, 100, 0, 0, 0);
+    try std.testing.expectEqual(initial, nr.cwnd);
+
+    // Congestion avoidance, same story.
+    nr.ssthresh = 6000;
+    nr.cwnd = 12000;
+    nr.onPacketAcked(1200, 200, 0, 0, 0);
+    try std.testing.expectEqual(@as(u64, 12000), nr.cwnd);
+
+    // The boundary: residue + acked exactly filling the window grows.
+    nr.onPacketAcked(1200, 300, 0, 0, nr.cwnd - 1200);
+    try std.testing.expect(nr.cwnd > 12000 or nr.bytes_acked_in_ca > 0);
+}
+
+test "app-limited ACK still exits recovery (state maintenance precedes the gate)" {
+    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
+    nr.cwnd = 12000;
+    nr.onPacketLost(1200, 1_000_000);
+    try std.testing.expect(nr.recovery_start_time_us != null);
+    const cwnd_in_recovery = nr.cwnd;
+    // Post-recovery ACK with an empty pipe: recovery must clear even
+    // though the window doesn't grow.
+    nr.onPacketAcked(1200, 2_000_000, 0, 0, 0);
+    try std.testing.expectEqual(@as(?u64, null), nr.recovery_start_time_us);
+    try std.testing.expectEqual(cwnd_in_recovery, nr.cwnd);
+}
+
+test "CongestionController dispatch is observably identical to direct NewReno" {
+    // Drive the same ack/loss/CE script through a bare NewReno and
+    // through the union; every observable must match at every step —
+    // the zero-delta guarantee of the dispatch layer.
+    const cfg: Config = .{ .max_datagram_size = 1200, .algorithm = .new_reno };
+    var direct = NewReno.init(cfg);
+    var boxed = CongestionController.init(cfg);
+    try std.testing.expectEqual(Algorithm.new_reno, boxed.algorithm());
+
+    const Step = union(enum) {
+        ack: struct { bytes: u64, sent_us: u64 },
+        loss: struct { bytes: u64, sent_us: u64 },
+        ce: u64,
+        persistent: void,
+    };
+    const script = [_]Step{
+        .{ .ack = .{ .bytes = 2400, .sent_us = 100 } },
+        .{ .ack = .{ .bytes = 4800, .sent_us = 200 } },
+        .{ .loss = .{ .bytes = 1200, .sent_us = 300 } },
+        .{ .ack = .{ .bytes = 1200, .sent_us = 250 } }, // in recovery
+        .{ .ack = .{ .bytes = 9000, .sent_us = 400 } }, // exits recovery
+        .{ .ce = 500 },
+        .{ .persistent = {} },
+        .{ .ack = .{ .bytes = 3000, .sent_us = 600 } },
+    };
+    for (script) |step| {
+        switch (step) {
+            .ack => |a| {
+                direct.onPacketAcked(a.bytes, a.sent_us, 1_000, 25_000, direct.cwnd);
+                boxed.onPacketAcked(a.bytes, a.sent_us, 1_000, 25_000, boxed.cwndBytes());
+            },
+            .loss => |l| {
+                direct.onPacketLost(l.bytes, l.sent_us);
+                boxed.onPacketLost(l.bytes, l.sent_us);
+            },
+            .ce => |t| {
+                direct.onCongestionEvent(t);
+                boxed.onCongestionEvent(t);
+            },
+            .persistent => {
+                direct.onPersistentCongestion();
+                boxed.onPersistentCongestion();
+            },
+        }
+        try std.testing.expectEqual(direct.cwnd, boxed.cwndBytes());
+        try std.testing.expectEqual(direct.ssthresh, boxed.ssthreshBytes());
+        try std.testing.expectEqual(direct.recovery_start_time_us, boxed.recoveryStartTimeUs());
+        try std.testing.expectEqual(direct.isSlowStart(), boxed.isSlowStart());
+        try std.testing.expectEqual(
+            direct.sendAllowance(5000),
+            boxed.sendAllowance(5000),
+        );
+    }
+    try std.testing.expectEqual(cfg.minWindow(), boxed.minWindow());
+    try std.testing.expectEqual(@as(u64, 1200), boxed.config().max_datagram_size);
+    boxed.setCwndForTest(99_999);
+    try std.testing.expectEqual(@as(u64, 99_999), boxed.cwndBytes());
 }

@@ -1237,8 +1237,10 @@ pub const PosixPollReactor = struct {
                     self.waker.drain(&wake_scratch);
                     self.runQueuedWork();
                 }
-                // One datagram per readable fd per iteration, matching
-                // `udp_server.max_datagrams_per_loop_iteration`, so a
+                // One datagram per readable fd per iteration — a
+                // deliberately tight per-tick ingress budget (the
+                // packaged loops batch up to
+                // `RunUdpOptions.max_datagrams_per_iteration`), so a
                 // hot ingress queue cannot starve tick-driven loss
                 // detection. A batching embedder raises this and takes
                 // responsibility for its own per-tick budget.

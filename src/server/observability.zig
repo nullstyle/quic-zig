@@ -272,7 +272,7 @@ fn acceptLogRate(
 }
 
 /// Internal helper: invoke `log_callback` if installed. Mediated
-/// by the per-source log rate limit (hardening guide §9.4) when
+/// by the per-source log rate limit (log-flood DoS defense) when
 /// the event carries a source address — events with `from = null`
 /// (or a variant that doesn't bind to a peer) bypass the gate.
 pub fn emitLog(self: *Server, ev: LogEvent) void {

@@ -24,13 +24,27 @@ check-tools:
 test:
     zig build test
 
-# Deep coverage-guided fuzzing (single-instance; Linux). ITERS = input budget.
-# The fuzzer rotates across all sites in the unfiltered test binary.
+# Deep coverage-guided fuzzing (single-instance, unfiltered). ITERS = input
+# budget. The fuzzer rotates across all sites in the unfiltered test binary.
+# -Duse-llvm matches CI: the self-hosted x86_64 backend emits no sancov.
 fuzz iters="1M":
-    zig build test --fuzz={{iters}}
+    zig build test -Duse-llvm=true --fuzz={{iters}}
 
 clean:
     rm -rf .zig-cache zig-out
+
+# Refresh the local benchmark baseline: 3 runs at --samples 9, keep the
+# least-loaded pass (lowest sum of medians), write it to
+# baselines/bench/<machine>.json. Inspect the diff before committing.
+bench-baseline-refresh machine=`hostname -s`:
+    mkdir -p benchmark-reports
+    for i in 1 2 3; do zig build bench -- --samples 9 --json "benchmark-reports/baseline-candidate-$i.json"; done
+    python3 -c "$(printf '%s\n' \
+        'import json, sys' \
+        'cands = [json.load(open(f"benchmark-reports/baseline-candidate-{i}.json")) for i in (1, 2, 3)]' \
+        'best = min(cands, key=lambda r: sum(b.get("median_ns_per_op", b.get("ns_per_op", 0.0)) for b in r["benchmarks"]))' \
+        'json.dump(best, open("baselines/bench/{{machine}}.json", "w"), indent=1)' \
+        'print("wrote baselines/bench/{{machine}}.json")')"
 
 # Build the local QNS image from this checkout.
 interop-build-image:
@@ -56,6 +70,10 @@ interop-loss-client:
     SERVERS=quic-go TESTS=transferloss,blackhole just interop-client
 
 interop-loss-both: interop-loss interop-loss-client
+
+# Goodput measurement cells (runner reports Mbps in result.json).
+interop-goodput:
+    CLIENTS=quic-go,quiche,ngtcp2 TESTS=G just interop
 
 # Refresh and inspect the published QNS image on a remote runner host.
 interop-remote-pull:

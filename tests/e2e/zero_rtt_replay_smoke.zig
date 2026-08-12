@@ -40,9 +40,9 @@ const quic_zig = @import("quic_zig");
 const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
-/// SHA-256 of the resumed session's ticket bytes. Per §5.2 of the
-/// hardening guide, this is option (1) in the "Identity choice"
-/// section of `quic_zig.tls.anti_replay`'s module docstring: bound to
+/// SHA-256 of the resumed session's ticket bytes. This is option (1)
+/// in the "Identity choice" section of
+/// `quic_zig.tls.anti_replay`'s module docstring: bound to
 /// the ticket exactly, stable across replays of the same 0-RTT
 /// message, differs across distinct legitimate 0-RTT attempts (a
 /// peer-issued single-use ticket cannot be re-issued).

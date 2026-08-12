@@ -1,5 +1,5 @@
 //! End-to-end smoke for NEW_TOKEN issuance (RFC 9000 §8.1.3 /
-//! hardening guide §4.3 follow-up B1).
+//! NEW_TOKEN address-binding follow-up).
 //!
 //! Three scenarios drive the full Server↔Client pump loop and assert
 //! on the NEW_TOKEN lifecycle:

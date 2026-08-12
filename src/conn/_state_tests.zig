@@ -12,6 +12,7 @@ comptime {
     _ = @import("_state_tests_loss.zig");
     _ = @import("_state_tests_migration.zig");
     _ = @import("_state_tests_misc.zig");
+    _ = @import("_state_tests_pacing.zig");
     _ = @import("_state_tests_paths.zig");
     _ = @import("_state_tests_qlog.zig");
     _ = @import("_state_tests_recv.zig");
