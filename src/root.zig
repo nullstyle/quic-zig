@@ -277,6 +277,8 @@ pub const TimerKind = conn.TimerKind;
 /// Read-only snapshot of one path's RTT, congestion, and loss
 /// counters.
 pub const PathStats = conn.PathStats;
+/// Whole-connection observability snapshot (`Connection.stats()`, Unstable tier).
+pub const ConnectionStats = conn.ConnectionStats;
 
 /// Read-only snapshot of a stream's send half (bytes written / acked /
 /// buffered + whether anything is ready to send), from

@@ -55,6 +55,10 @@ suite.
   surface here is still maturing, so they also sit in this tier.
 - **Newly added surfaces** may see minor signature or naming refinement
   as they are exercised for the first time.
+- **`Connection.stats()` / `ConnectionStats`** (added 0.11.0): the
+  whole-connection observability snapshot. Fields may be *added* in any
+  minor; existing fields keep their meaning. Promotion to Stable is
+  planned once the field set survives one release unchanged.
 - **Config naming** follows a settled convention: on/off feature toggles use
   `enable_` (`enable_ecn`) and permission grants use `allow_`
   (`allow_no_idle_timeout`). A few fields keep intentional semantic prefixes —

@@ -94,6 +94,7 @@ const conn_loss = @import("conn_loss.zig");
 const conn_recv_data_handlers = @import("conn_recv_data_handlers.zig");
 const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
 const conn_send = @import("conn_send.zig");
+const conn_stats = @import("conn_stats.zig");
 
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
@@ -119,6 +120,8 @@ pub const PathSet = path_mod.PathSet;
 pub const PathState = path_mod.PathState;
 /// Per-path counters (datagrams sent/received, loss, RTT inputs).
 pub const PathStats = path_mod.PathStats;
+/// Whole-connection observability snapshot returned by `Connection.stats()`.
+pub const ConnectionStats = conn_stats.ConnectionStats;
 /// RFC 8899 DPLPMTUD probe-state-machine phase (re-export).
 pub const PmtudState = path_mod.PmtudState;
 /// RFC 8899 DPLPMTUD embedder configuration (re-export).
@@ -2021,8 +2024,8 @@ pub const Connection = struct {
         return conn_qlog.emitPacketSent(self, lvl, pn, size, frames_count);
     }
 
-    fn emitLossDetected(self: *Connection, lvl: EncryptionLevel, stats: LossStats, reason: QlogLossReason) void {
-        return conn_qlog.emitLossDetected(self, lvl, stats, reason);
+    fn emitLossDetected(self: *Connection, lvl: EncryptionLevel, loss_stats: LossStats, reason: QlogLossReason) void {
+        return conn_qlog.emitLossDetected(self, lvl, loss_stats, reason);
     }
 
     fn emitPacketLost(self: *Connection, lvl: EncryptionLevel, pn: u64, bytes: u32, reason: QlogLossReason) void {
@@ -2700,6 +2703,16 @@ pub const Connection = struct {
 
     pub fn pathStats(self: *const Connection, path_id: u32) ?PathStats {
         return conn_paths.pathStats(self, path_id);
+    }
+
+    /// One-call observability snapshot (Unstable tier): whole-connection
+    /// byte/packet counters, an active-path cwnd/RTT/PMTU snapshot, and
+    /// the open-stream/close-state gauges — the connection-level mirror
+    /// of `Server.metricsSnapshot`. Everything is copied by value, so
+    /// the result is safe to hold across ticks and reaps. Per-path
+    /// detail stays on `pathStats(path_id)`.
+    pub fn stats(self: *const Connection) ConnectionStats {
+        return conn_stats.stats(self);
     }
 
     pub fn queuePathAbandon(self: *Connection, path_id: u32, error_code: u64) Error!void {
@@ -4248,8 +4261,8 @@ pub const Connection = struct {
         return conn_loss.requeueLostPacket(self, lvl, packet);
     }
 
-    pub fn isPersistentCongestionFromBasePto(base_pto_us: u64, stats: LossStats) bool {
-        return conn_loss.isPersistentCongestionFromBasePto(base_pto_us, stats);
+    pub fn isPersistentCongestionFromBasePto(base_pto_us: u64, loss_stats: LossStats) bool {
+        return conn_loss.isPersistentCongestionFromBasePto(base_pto_us, loss_stats);
     }
 
     pub fn detectLossesByPacketThresholdOnApplicationPath(

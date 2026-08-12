@@ -198,6 +198,7 @@ pub const PathSet = path.PathSet;
 pub const PathState = path.PathState;
 /// Snapshot of per-path observability counters.
 pub const PathStats = path.PathStats;
+pub const ConnectionStats = state.ConnectionStats;
 /// Multipath scheduling policy (primary / round-robin / lowest-RTT-cwnd).
 pub const Scheduler = path.Scheduler;
 /// RFC 8899 DPLPMTUD embedder configuration (re-export).
