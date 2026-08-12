@@ -15,7 +15,6 @@
 //!      layer.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const quic_zig = @import("quic_zig");
 
 const common = @import("common.zig");
@@ -131,11 +130,6 @@ test "runUdpClient rejects zero-byte buffers" {
 }
 
 test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
-    // Untested on Windows, not known-broken: the recorded cause for
-    // this skip no longer matches the pinned std. See the platform
-    // tier notes in docs/RELEASE_READINESS.md before deleting it.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     // Closest thing to exercising the loop body without a peer:
     // pre-flip the shutdown flag, point the loop at an unused
     // loopback target, and verify it cleans up without waiting
