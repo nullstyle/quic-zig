@@ -277,12 +277,21 @@ pub fn handleAckAtLevel(
                 self.handshakeDone(),
                 self.peerMaxAckDelayUs(),
             );
+            if (lvl == .application) {
+                self.ccForApplication().onRttSample(now_us - sent_time_us, now_us);
+            }
         }
     }
     if (any_ack_eliciting_newly_acked) self.ptoCountForLevel(lvl).* = 0;
     if (in_flight_bytes_acked > 0) {
         if (lvl == .application) {
-            self.ccForApplication().onPacketAcked(in_flight_bytes_acked, newest_acked_sent_time_us);
+            self.ccForApplication().onPacketAcked(
+                in_flight_bytes_acked,
+                newest_acked_sent_time_us,
+                now_us,
+                self.rttForLevel(lvl).smoothed_rtt_us,
+                sent.bytes_in_flight,
+            );
         }
     }
 
@@ -388,11 +397,18 @@ pub fn handleApplicationAckOnPath(
                 self.handshakeDone(),
                 self.peerMaxAckDelayUs(),
             );
+            path.path.cc.onRttSample(now_us - sent_time_us, now_us);
         }
     }
     if (any_ack_eliciting_newly_acked) path.pto_count = 0;
     if (in_flight_bytes_acked > 0) {
-        path.path.cc.onPacketAcked(in_flight_bytes_acked, newest_acked_sent_time_us);
+        path.path.cc.onPacketAcked(
+            in_flight_bytes_acked,
+            newest_acked_sent_time_us,
+            now_us,
+            path.path.rtt.smoothed_rtt_us,
+            path.sent.bytes_in_flight,
+        );
     }
 
     // §13.4.2 ECN-CE → congestion event, twin of `handleAckAtLevel`.

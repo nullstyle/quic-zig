@@ -530,7 +530,7 @@ test "MUST grow cwnd by bytes_acked while in slow start [RFC9002 §7.3 ¶?]" {
     const initial = nr.cwnd;
     try std.testing.expect(nr.isSlowStart());
 
-    nr.onPacketAcked(2400, 100);
+    nr.onPacketAcked(2400, 100, 0, 0, nr.cwnd); // full pipe (§7.8 gate open)
 
     try std.testing.expectEqual(initial + 2400, nr.cwnd);
 }
@@ -544,7 +544,7 @@ test "MUST grow cwnd by ~MSS per RTT in congestion avoidance [RFC9002 §B.5 ¶?]
     nr.ssthresh = 6000; // force CA mode
     try std.testing.expect(!nr.isSlowStart());
 
-    nr.onPacketAcked(12000, 100);
+    nr.onPacketAcked(12000, 100, 0, 0, nr.cwnd); // full pipe (§7.8 gate open)
 
     try std.testing.expectEqual(@as(u64, 13200), nr.cwnd);
 }
@@ -586,7 +586,7 @@ test "MUST NOT grow cwnd from ACKs of packets sent before recovery [RFC9002 §7.
     const cwnd_after_loss = nr.cwnd;
 
     // ACK for a packet sent at 999_999 — strictly before recovery_start.
-    nr.onPacketAcked(1200, 999_999);
+    nr.onPacketAcked(1200, 999_999, 0, 0, nr.cwnd);
 
     try std.testing.expectEqual(cwnd_after_loss, nr.cwnd);
 }

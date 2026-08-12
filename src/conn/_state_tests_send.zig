@@ -19,6 +19,9 @@ test "ACKed in-flight packets grow congestion window" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
+    // The §7.8 app-limited gate only grows cwnd off a full pipe:
+    // shrink the window to what this single 1200-byte packet fills.
+    conn.ccForApplication().setCwndForTest(1200);
     const initial_cwnd = conn.congestionWindow();
     try conn.sentForLevel(.application).record(.{
         .pn = 1,
