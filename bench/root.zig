@@ -8,6 +8,7 @@ test {
     _ = @import("loss_ack.zig");
     _ = @import("packet_crypto.zig");
     _ = @import("path_flow.zig");
+    _ = @import("report.zig");
     _ = @import("stream_reassembly.zig");
     _ = @import("tokens_lb.zig");
     _ = @import("transport_params.zig");
