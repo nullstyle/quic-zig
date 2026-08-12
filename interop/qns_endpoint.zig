@@ -407,46 +407,36 @@ var keylog_file: ?std.Io.File = null;
 const QlogSink = struct {
     io: std.Io,
     file: std.Io.File,
+    writer: quic_zig.qlog.Writer,
 
-    fn init(io: std.Io, dir: []const u8, role: []const u8) !QlogSink {
+    // Standard JSON-SEQ qlog via `quic_zig.qlog.Writer` — qvis loads
+    // the emitted `.sqlog` directly. (This replaced an ad-hoc 7-field
+    // JSONL format no qlog tool could read.) Packet-level events stay
+    // opt-in via `setQlogPacketEvents` at the install site.
+    fn init(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, role: []const u8) !QlogSink {
         try std.Io.Dir.cwd().createDirPath(io, dir);
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/quic-zig-{s}.jsonl", .{ dir, role });
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/quic-zig-{s}.sqlog", .{ dir, role });
         const file = try createTraceFile(io, path, true);
-        return .{ .io = io, .file = file };
+        errdefer file.close(io);
+        var title_buf: [64]u8 = undefined;
+        const title = try std.fmt.bufPrint(&title_buf, "quic-zig qns {s}", .{role});
+        const writer = try quic_zig.qlog.Writer.init(allocator, io, file, .{
+            .vantage_point = if (std.mem.eql(u8, role, "server")) .server else .client,
+            .title = title,
+        });
+        return .{ .io = io, .file = file, .writer = writer };
     }
 
     fn deinit(self: *QlogSink) void {
+        self.writer.deinit();
         self.file.close(self.io);
         self.* = undefined;
     }
 
     fn callback(user_data: ?*anyopaque, event: quic_zig.QlogEvent) void {
         const self: *QlogSink = @ptrCast(@alignCast(user_data.?));
-        self.write(event) catch {};
-    }
-
-    fn write(self: *QlogSink, event: quic_zig.QlogEvent) !void {
-        const key_epoch: i128 = if (event.key_epoch) |v| @intCast(v) else -1;
-        const key_phase: i8 = if (event.key_phase) |v| if (v) 1 else 0 else -1;
-        const packet_number: i128 = if (event.packet_number) |v| @intCast(v) else -1;
-        const discard_deadline: i128 = if (event.discard_deadline_us) |v| @intCast(v) else -1;
-        var buf: [512]u8 = undefined;
-        const line = try std.fmt.bufPrint(
-            &buf,
-            "{{\"name\":\"{s}\",\"at_us\":{},\"level\":\"{s}\",\"key_epoch\":{},\"key_phase\":{},\"packet_number\":{},\"discard_deadline_us\":{}}}",
-            .{
-                @tagName(event.name),
-                event.at_us,
-                @tagName(event.level),
-                key_epoch,
-                key_phase,
-                packet_number,
-                discard_deadline,
-            },
-        );
-        try self.file.writeStreamingAll(self.io, line);
-        try self.file.writeStreamingAll(self.io, "\n");
+        self.writer.writeEvent(event);
     }
 };
 
@@ -1053,7 +1043,7 @@ fn runServer(
     defer closeKeylog(io);
 
     var qlog_sink: ?QlogSink = null;
-    if (opts.qlog_dir) |dir| qlog_sink = try QlogSink.init(io, dir, "server");
+    if (opts.qlog_dir) |dir| qlog_sink = try QlogSink.init(allocator, io, dir, "server");
     defer if (qlog_sink) |*sink| sink.deinit();
 
     // RFC 9001 §6: for TESTCASE=keyupdate the server also initiates one
@@ -1661,7 +1651,7 @@ fn runClient(
     defer downloads_dir.close(io);
 
     var qlog_sink: ?QlogSink = null;
-    if (opts.qlog_dir) |dir| qlog_sink = try QlogSink.init(io, dir, "client");
+    if (opts.qlog_dir) |dir| qlog_sink = try QlogSink.init(allocator, io, dir, "client");
     defer if (qlog_sink) |*sink| sink.deinit();
 
     // NEW_TOKEN capture (RFC 9000 §8.1.3): inbound NEW_TOKEN frames

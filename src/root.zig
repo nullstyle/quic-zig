@@ -67,6 +67,11 @@ pub const retry_token = conn.retry_token;
 /// I/O and path-tracking helpers later.
 pub const transport = @import("transport/root.zig");
 
+/// qlog serialization (Unstable tier): `qlog.Writer` turns the
+/// `Connection.setQlogCallback` event stream into a standard JSON-SEQ
+/// `.sqlog` trace that qvis loads directly.
+pub const qlog = @import("qlog/root.zig");
+
 /// Server-side QUIC-LB connection-ID generation
 /// (draft-ietf-quic-load-balancers-21). Off by default — wiring
 /// `Server.Config.quic_lb` opts in. See `lb.LbConfig` for the
@@ -332,6 +337,7 @@ test {
     _ = transport;
     _ = lb;
     _ = alt_addr;
+    _ = qlog;
     _ = @import("server.zig");
     _ = @import("client.zig");
 }
