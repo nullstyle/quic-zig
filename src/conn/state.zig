@@ -1123,7 +1123,15 @@ pub const Connection = struct {
     /// Sent-packet tracker for connection-level PN spaces. Application
     /// packets live in `paths.primary().sent`; Initial/Handshake stay
     /// here because QUIC multipath only widens the Application space.
-    sent: [2]SentPacketTracker = .{ .{}, .{} },
+    /// Initial + Handshake sent-packet trackers, one heap slab owned
+    /// by the Connection (created in `initClient`/`initServer`, freed
+    /// in `deinit`). Kept off the struct because two 4096-slot
+    /// trackers inline would put ~1.5 MB on every stack frame that
+    /// constructs or moves a Connection by value — the by-value
+    /// `init*` return became a stack overflow the moment SentPacket
+    /// grew its delivery-rate stamps. The application-level tracker
+    /// lives on each PathState (heap via PathSet).
+    sent: *[2]SentPacketTracker,
     /// Multipath-capable Application path set. Path id 0 is always the
     /// initial path and owns Application PN/ACK/sent/RTT/congestion.
     paths: PathSet = .{},
@@ -1586,11 +1594,15 @@ pub const Connection = struct {
         tls_ctx: boringssl.tls.Context,
         server_name: [:0]const u8,
     ) !Connection {
+        const sent_slab = try allocator.create([2]SentPacketTracker);
+        errdefer allocator.destroy(sent_slab);
+        sent_slab.* = .{ .{}, .{} };
         var conn: Connection = .{
             .allocator = allocator,
             .role = .client,
             .inner = try tls_ctx.newQuicClient(),
             .pending_hostname = server_name,
+            .sent = sent_slab,
         };
         errdefer conn.inner.deinit();
         try conn.paths.ensurePrimary(allocator, .{
@@ -1622,10 +1634,14 @@ pub const Connection = struct {
         allocator: std.mem.Allocator,
         tls_ctx: boringssl.tls.Context,
     ) !Connection {
+        const sent_slab = try allocator.create([2]SentPacketTracker);
+        errdefer allocator.destroy(sent_slab);
+        sent_slab.* = .{ .{}, .{} };
         var conn: Connection = .{
             .allocator = allocator,
             .role = .server,
             .inner = try tls_ctx.newQuicServer(),
+            .sent = sent_slab,
         };
         errdefer conn.inner.deinit();
         try conn.paths.ensurePrimary(allocator, .{
@@ -1731,7 +1747,7 @@ pub const Connection = struct {
         }
         self.streams.deinit(self.allocator);
         self.pending_frames.deinit(self.allocator);
-        for (&self.sent) |*tracker| {
+        for (self.sent) |*tracker| {
             var i: u32 = 0;
             while (i < tracker.count) : (i += 1) {
                 // Tombstones own nothing; deinit would double-free.
@@ -1739,6 +1755,7 @@ pub const Connection = struct {
                 tracker.packets[i].deinit(self.allocator);
             }
         }
+        self.allocator.destroy(self.sent);
         self.paths.deinit(self.allocator);
         for (&self.crypto_pending) |*list| {
             for (list.items) |chunk| self.allocator.free(chunk.data);
@@ -3360,7 +3377,7 @@ pub const Connection = struct {
     }
 
     fn clearRecoveryState(self: *Connection) void {
-        for (&self.sent) |*tracker| self.clearSentTracker(tracker);
+        for (self.sent) |*tracker| self.clearSentTracker(tracker);
         for (self.paths.paths.items) |*path| {
             self.clearSentTracker(&path.sent);
             path.pending_ping = false;
@@ -3533,7 +3550,7 @@ pub const Connection = struct {
 
     fn bytesInFlight(self: *const Connection) u64 {
         var total: u64 = 0;
-        for (&self.sent) |*tracker| total += tracker.bytes_in_flight;
+        for (self.sent) |*tracker| total += tracker.bytes_in_flight;
         for (self.paths.paths.items) |*p| total += p.sent.bytes_in_flight;
         return total;
     }

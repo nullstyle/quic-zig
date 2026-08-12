@@ -44,6 +44,9 @@ pub const rtt = @import("rtt.zig");
 pub const sent_packets = @import("sent_packets.zig");
 /// RFC 9002 §7 + Appendix B NewReno congestion control.
 pub const congestion = @import("congestion.zig");
+/// Delivery-rate estimation for rate-based congestion control
+/// (draft-cheng-iccrg-delivery-rate-estimation-02 / ccwg-bbr §4.1.2).
+pub const delivery_rate = @import("delivery_rate.zig");
 /// RFC 9002 §6 ACK processing and loss detection primitives.
 pub const loss_recovery = @import("loss_recovery.zig");
 /// RFC 9002 §7.7 token-bucket packet pacing.
@@ -236,6 +239,7 @@ test {
     _ = rtt;
     _ = sent_packets;
     _ = congestion;
+    _ = delivery_rate;
     _ = loss_recovery;
     _ = flow_control;
     _ = path_validator;

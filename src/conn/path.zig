@@ -18,6 +18,7 @@
 const std = @import("std");
 
 const congestion_mod = @import("congestion.zig");
+const delivery_rate_mod = @import("delivery_rate.zig");
 const pacing_mod = @import("pacing.zig");
 const pn_space_mod = @import("pn_space.zig");
 const path_validator_mod = @import("path_validator.zig");
@@ -190,6 +191,16 @@ pub const Path = struct {
     /// RFC 9002 §7.7 token-bucket pacer; refilled lazily on the send
     /// path from this path's cwnd/srtt.
     pacer: pacing_mod.Pacer = .{},
+    /// Delivery-rate estimator (draft-cheng-iccrg-delivery-rate-
+    /// estimation-02, as embedded/updated by draft-ietf-ccwg-bbr-06
+    /// §4.1.2): per-path C.delivered/C.lost clocks, per-ACK rate
+    /// samples, and app-limited marking for rate-based congestion
+    /// control. Stamped on the send path, fed from ACK and loss
+    /// processing; application/0-RTT in-flight packets only. Lifetime
+    /// totals — deliberately NOT reset by `resetRecoveryAfterMigration`
+    /// or key updates (packets stamped before either event still
+    /// describe real delivery when acked after it).
+    delivery: delivery_rate_mod.Estimator = .{},
 
     /// True once this path has been validated (or validation is
     /// implicit because we initiated it and completed the handshake

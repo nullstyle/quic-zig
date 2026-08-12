@@ -110,6 +110,12 @@ fn dispatchAckedAtLevel(
         if (acked.sent_time_us > ctx.newest_acked_sent_time_us.*) {
             ctx.newest_acked_sent_time_us.* = acked.sent_time_us;
         }
+        // Delivery-rate sampler: fold this delivery into the ACK
+        // event's sample while the slot's transmit-time stamps are
+        // still live (the deferred deinit runs after this handler).
+        if (ctx.lvl == .application) {
+            ctx.ack_path.path.delivery.onPacketAcked(acked, ctx.now_us);
+        }
     }
     // RFC 8899 §5.1 probe-vs-regular ack classification —
     // 1-RTT only.
@@ -160,6 +166,8 @@ fn dispatchAckedOnPath(
         if (acked.sent_time_us > ctx.newest_acked_sent_time_us.*) {
             ctx.newest_acked_sent_time_us.* = acked.sent_time_us;
         }
+        // Delivery-rate sampler, per-path twin of the primary handler.
+        ctx.path.path.delivery.onPacketAcked(acked, ctx.now_us);
     }
     // RFC 8899 §5.1 probe-vs-regular ack classification.
     if (ctx.path.pmtu_probe_pn) |probe_pn| {
@@ -241,6 +249,11 @@ pub fn handleAckAtLevel(
         .any_regular_acked = &any_regular_acked,
     };
 
+    // Open the delivery-rate sampler's ACK event before the walk so
+    // per-packet deliveries and any losses this event declares fold
+    // into one sample.
+    if (lvl == .application) ack_path.path.delivery.beginAckEvent();
+
     var ack_it = ack_range_mod.iter(a);
     while (try ack_it.next()) |interval| {
         // Walk the (small, bounded) sent-packet tracker rather
@@ -315,18 +328,31 @@ pub fn handleAckAtLevel(
     // the recovery period boundary; if no in-flight packets were
     // matched (an empty-range ACK with bumped CE is technically
     // legal but never useful), we fall back to `now_us`.
-    if (ecn_ok and lvl == .application) {
-        if (ceDelta(prev_ecn_seen, prev_ce, a.ecn_counts)) |delta| {
-            if (delta > 0) {
-                const ce_anchor = if (newest_acked_sent_time_us != 0) newest_acked_sent_time_us else now_us;
-                self.ccForApplication().onCongestionEvent(ce_anchor);
-            }
-        }
+    const ce_delta_packets: u64 = if (ecn_ok and lvl == .application)
+        ceDelta(prev_ecn_seen, prev_ce, a.ecn_counts) orelse 0
+    else
+        0;
+    if (ce_delta_packets > 0) {
+        const ce_anchor = if (newest_acked_sent_time_us != 0) newest_acked_sent_time_us else now_us;
+        self.ccForApplication().onCongestionEvent(ce_anchor);
     }
 
     // Loss detection at the same level — packet-threshold only
     // (time-threshold lives in `tick`).
     try conn_loss.detectLossesByPacketThresholdAtLevel(self, lvl);
+
+    // Close the delivery-rate sampler's ACK event AFTER loss
+    // detection, so `newly_lost` covers everything this ACK declared
+    // lost (ccwg-bbr-06 §2.3). The sample is currently unconsumed —
+    // the controller inlet lands with the rate-based controller; the
+    // sampler still runs for its own state (C.* totals, app-limited
+    // marker retirement).
+    if (lvl == .application) {
+        const min_rtt_us = self.rttForLevel(lvl).min_rtt_us;
+        if (ack_path.path.delivery.generateRateSample(min_rtt_us, ce_delta_packets)) |rs| {
+            _ = rs;
+        }
+    }
 
     // Snapshot metrics + congestion phase after a meaningful ACK.
     if (any_ack_eliciting_newly_acked or in_flight_bytes_acked > 0) {
@@ -381,6 +407,9 @@ pub fn handleApplicationAckOnPath(
         .any_regular_acked = &any_regular_acked,
     };
 
+    // Delivery-rate sampler ACK event, per-path twin.
+    path.path.delivery.beginAckEvent();
+
     var ack_it = ack_range_mod.iter(a);
     while (try ack_it.next()) |interval| {
         // See `handleAckAtLevel` above for the rationale; this
@@ -430,16 +459,22 @@ pub fn handleApplicationAckOnPath(
     );
 
     // §13.4.2 ECN-CE → congestion event, twin of `handleAckAtLevel`.
-    if (ecn_ok) {
-        if (ceDelta(prev_ecn_seen, prev_ce, a.ecn_counts)) |delta| {
-            if (delta > 0) {
-                const ce_anchor = if (newest_acked_sent_time_us != 0) newest_acked_sent_time_us else now_us;
-                path.path.cc.onCongestionEvent(ce_anchor);
-            }
-        }
+    const ce_delta_packets: u64 = if (ecn_ok)
+        ceDelta(prev_ecn_seen, prev_ce, a.ecn_counts) orelse 0
+    else
+        0;
+    if (ce_delta_packets > 0) {
+        const ce_anchor = if (newest_acked_sent_time_us != 0) newest_acked_sent_time_us else now_us;
+        path.path.cc.onCongestionEvent(ce_anchor);
     }
 
     try self.detectLossesByPacketThresholdOnApplicationPath(path);
+
+    // Close the sampler's ACK event after loss detection — twin of
+    // `handleAckAtLevel`; see there for the ordering rationale.
+    if (path.path.delivery.generateRateSample(path.path.rtt.min_rtt_us, ce_delta_packets)) |rs| {
+        _ = rs;
+    }
 
     // Snapshot metrics + congestion phase after a meaningful ACK.
     if (any_ack_eliciting_newly_acked or in_flight_bytes_acked > 0) {

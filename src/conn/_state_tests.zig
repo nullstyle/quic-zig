@@ -5,6 +5,7 @@
 comptime {
     _ = @import("_state_tests_cids.zig");
     _ = @import("_state_tests_datagram.zig");
+    _ = @import("_state_tests_delivery.zig");
     _ = @import("_state_tests_flow.zig");
     _ = @import("_state_tests_fuzz.zig");
     _ = @import("_state_tests_keys.zig");

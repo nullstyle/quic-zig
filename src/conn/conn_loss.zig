@@ -581,6 +581,14 @@ pub fn detectLossesByPacketThresholdAtLevel(
                 return;
             }
             ctx.stats.add(lost.*);
+            // Delivery-rate sampler C.lost accounting (in-flight
+            // application bytes only, DPLPMTUD probes excluded above
+            // — the same gate the controller's LossStats ride).
+            // Result unconsumed until the rate-based controller's
+            // per-lost inlet lands.
+            if (ctx.lvl == .application and lost.in_flight) {
+                _ = ctx.path.path.delivery.onPacketLost(lost);
+            }
             if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
     };
@@ -640,6 +648,8 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
             _ = try requeueLostPacketOnPath(ctx.self, .application, lost, ctx.path.id);
             if (is_probe) return;
             ctx.stats.add(lost.*);
+            // Delivery-rate sampler C.lost, per-path twin.
+            if (lost.in_flight) _ = ctx.path.path.delivery.onPacketLost(lost);
             pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
     };
@@ -709,6 +719,14 @@ pub fn detectLossesByTimeThresholdAtLevel(
             _ = try requeueLostPacket(ctx.self, ctx.lvl, lost);
             if (is_probe) return;
             ctx.stats.add(lost.*);
+            // Delivery-rate sampler C.lost accounting (in-flight
+            // application bytes only, DPLPMTUD probes excluded above
+            // — the same gate the controller's LossStats ride).
+            // Result unconsumed until the rate-based controller's
+            // per-lost inlet lands.
+            if (ctx.lvl == .application and lost.in_flight) {
+                _ = ctx.path.path.delivery.onPacketLost(lost);
+            }
             if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
     };
@@ -776,6 +794,8 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
             _ = try requeueLostPacketOnPath(ctx.self, .application, lost, ctx.path.id);
             if (is_probe) return;
             ctx.stats.add(lost.*);
+            // Delivery-rate sampler C.lost, per-path twin.
+            if (lost.in_flight) _ = ctx.path.path.delivery.onPacketLost(lost);
             pmtudHandleRegularLoss(ctx.self, ctx.path);
         }
     };
@@ -841,6 +861,11 @@ fn firePtoAtLevel(
         }
         var stats: LossStats = .{};
         stats.add(lost);
+        // Delivery-rate sampler C.lost: PTO-expired packets are real
+        // losses to the estimator too (probe losses returned above).
+        if (lvl == .application and lost.in_flight) {
+            _ = path.path.delivery.onPacketLost(&lost);
+        }
         self.qlog_packets_lost +|= stats.count;
         conn_qlog.emitLossDetected(self, lvl, stats, .pto_probe);
         onPacketsLostAtLevel(self, lvl, stats);
@@ -874,6 +899,8 @@ fn firePtoOnApplicationPath(
         }
         var stats: LossStats = .{};
         stats.add(lost);
+        // Delivery-rate sampler C.lost, per-path PTO twin.
+        if (lost.in_flight) _ = path.path.delivery.onPacketLost(&lost);
         self.qlog_packets_lost +|= stats.count;
         conn_qlog.emitLossDetected(self, .application, stats, .pto_probe);
         onApplicationPathPacketsLost(self, path, stats);

@@ -62,6 +62,7 @@ tests/
     README.md
     _initial_fixture.zig
     _handshake_fixture.zig
+    rfc8899_dplpmtud.zig
     rfc8999_invariants.zig
     rfc9000_varint.zig
     rfc9000_packet_headers.zig
@@ -73,11 +74,15 @@ tests/
     rfc9000_ecn.zig
     rfc9001_tls.zig
     rfc9002_loss_recovery.zig
+    rfc9002_pacing.zig
     rfc9221_datagram.zig
     rfc9287_grease_quic_bit.zig
     rfc9368_quic_v2.zig
+    rfc9406_hystart.zig
+    rfc9438_cubic.zig
     quic_lb_draft21.zig
     draft_munizaga_alt_addr_00.zig
+    draft_cheng_delivery_rate_02.zig
 ```
 
 The entry point lives at `tests/conformance.zig` so suites can embed

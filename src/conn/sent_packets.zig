@@ -107,6 +107,25 @@ pub const SentPacket = struct {
     /// Wire size of the encoded packet (header + ciphertext + tag).
     /// Used for in-flight bookkeeping and congestion-controller updates.
     bytes: u64,
+    /// -- Delivery-rate sampler stamps (draft-cheng-iccrg-delivery-rate-
+    /// estimation-02 §3.1.2, as embedded/updated by draft-ietf-ccwg-bbr-06
+    /// §4.1.2.1.2). Written by `delivery_rate.Estimator.onPacketSent` for
+    /// in-flight application/0-RTT packets; zero for Initial/Handshake
+    /// and non-in-flight packets, which are never sampled.
+    ///
+    /// `C.delivered` at send time (bytes delivered so far on this path).
+    delivered: u64 = 0,
+    /// `C.delivered_time` at send time (µs).
+    delivered_time_us: u64 = 0,
+    /// `C.first_sent_time` at send time (µs) — the start of the send
+    /// interval a future rate sample over this packet will measure.
+    first_sent_time_us: u64 = 0,
+    /// Bytes in flight immediately after this transmission, INCLUDING
+    /// this packet (ccwg-bbr-06 §4.1.2.1.2 `P.tx_in_flight`).
+    tx_in_flight: u64 = 0,
+    /// `C.lost` at send time (bytes). BBR's loss response computes
+    /// `rs.lost = C.lost - P.lost` from it (ccwg-bbr-06 §5.5.10.2).
+    lost_at_send: u64 = 0,
     /// Did this packet contain at least one ack-eliciting frame?
     /// (Almost any frame except PADDING/ACK/CONNECTION_CLOSE.)
     ack_eliciting: bool,
@@ -143,6 +162,10 @@ pub const SentPacket = struct {
     key_epoch: ?u64 = null,
     /// Key Phase bit used on the wire for a 1-RTT application packet.
     key_phase: ?bool = null,
+    /// `C.app_limited != 0` at send time (draft-cheng-02 §3.2): a rate
+    /// sample over this packet must not be taken as evidence of the
+    /// path's full bandwidth.
+    is_app_limited: bool = false,
     /// Tombstone: this slot was removed (acked / lost / PTO-expired)
     /// and awaits compaction inside `record`. Dead slots keep their
     /// field values (so PN-ordered scans and binary search stay
@@ -662,10 +685,23 @@ test "SentPacket.stream_ref defaults to empty sentinel" {
 }
 
 test "SentPacket size stays pinned (tracker footprint = 4096 of these)" {
-    // The `dead` flag must ride in existing padding. If this fails,
-    // a field was added or reordered in a way that grows every
-    // tracker by 4096x the delta — do that consciously.
-    try std.testing.expectEqual(@as(usize, 144), @sizeOf(SentPacket));
+    // 184 = 176 bytes of 8-aligned fields (including the five u64
+    // delivery-rate stamps added for rate-based congestion control)
+    // + 7 one-byte tail fields (`is_app_limited` and `dead` ride in
+    // tail padding) + 1 pad byte. Every +8 here costs 32 KB per
+    // tracker (4096 slots) and struct-copy time in the ACK-churn hot
+    // path — grow consciously, and re-run the
+    // `sent_tracker_churn_3500_occupancy` A/B (baselines/bench/README.md)
+    // before accepting. The 144 -> 184 growth for the stamps was
+    // measured in-commit: raw churn +33% (pure 184/144 memcpy ratio),
+    // end-to-end goodput -1% (crypto dominates). Rejected then, and
+    // not worth re-litigating without new numbers: a compressed
+    // u32-delta layout (alignment gives back only 8 of the 40 bytes)
+    // and a PN-keyed side ring for the stamps (returns this micro to
+    // its old number but keeps the ack-path stamping cost, and adds
+    // collision semantics once a live PN span exceeds the slot
+    // count — silent sample corruption traded for a synthetic win).
+    try std.testing.expectEqual(@as(usize, 184), @sizeOf(SentPacket));
 }
 
 test "compaction triggers inside record and preserves order + search" {

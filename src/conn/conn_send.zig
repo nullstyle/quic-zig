@@ -1154,7 +1154,23 @@ pub fn pollLevelOnPath(
         }
     }
 
-    if (pl_pos == 0) return null;
+    if (pl_pos == 0) {
+        // draft-cheng-02 §3.4 / draft-ietf-ccwg-bbr-06 §4.1.2.4: this
+        // poll ran every frame builder dry at full budget — the app
+        // (not the congestion window) is what's limiting delivery. If
+        // the cwnd/pacer gate left headroom, mark the connection
+        // app-limited: rate samples stay tainted until C.delivered
+        // passes the marker, so an idle app can never deflate the
+        // bandwidth estimate. A cwnd-full or pacer-throttled poll must
+        // NOT mark (that is congestion-, not app-limited). Known
+        // imprecision, accepted: a stream with buffered data but no
+        // flow credit also produces no chunk and marks app-limited —
+        // that under-claims bandwidth, never over-claims it.
+        if ((lvl == .application or lvl == .early_data) and !congestion_blocked) {
+            app_path.path.delivery.markAppLimited(sent_tracker.bytes_in_flight);
+        }
+        return null;
+    }
 
     // 4) Allocate PN at this level, seal at the right header type.
     const pn = pn_space.nextPn() orelse return Error.PnSpaceExhausted;
@@ -1246,6 +1262,16 @@ pub fn pollLevelOnPath(
             .stream_id = sc.stream.id,
             .stream_key = sc.stream_key,
         });
+    }
+    // Delivery-rate stamps (draft-cheng-02 §3.2): application/0-RTT
+    // in-flight packets only — Initial/Handshake flights are never
+    // sampled (the congestion controller is application-level only),
+    // and non-in-flight packets (ACK-only, CONNECTION_CLOSE) must not
+    // touch the estimator's idle-restart clocks. Stamped before
+    // `record` so the tracker's copy carries the fields, with the
+    // tracker's pre-record bytes-in-flight as the draft's C.inflight.
+    if ((lvl == .application or lvl == .early_data) and sent_packet.in_flight) {
+        app_path.path.delivery.onPacketSent(&sent_packet, sent_tracker.bytes_in_flight);
     }
     if (sent_packet.ack_eliciting) {
         try sent_tracker.record(sent_packet);
