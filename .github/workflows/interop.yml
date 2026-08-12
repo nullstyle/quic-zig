@@ -10,7 +10,7 @@ on:
       tests:
         description: "QNS test letters (comma-separated)"
         required: false
-        default: "H,D,C,M"
+        default: "H,D,C,M,L2,B,G"
       clients:
         description: "Client matrix"
         required: false
@@ -29,7 +29,12 @@ jobs:
       QUIC_INTEROP_RUNNER_REF: 1d6f6554ac8e3b7c4cca0e3d40fd69f661420673
       QUIC_GO_IMAGE: martenseemann/quic-go-interop@sha256:37db4402341f81981ffba01a6fa532d378f165a6fa8dd2b902f33549383d0077
       QUIC_ZIG_IMAGE: quic-zig-qns:local
-      TESTS: ${{ github.event.inputs.tests || 'H,D,C,M' }}
+      # H,D,C,M = handshake/transfer/chacha20/multiplexing pass-fail
+      # cells; L2/B = transferloss/blackhole (loss-conditioned cells
+      # guarding the CC/pacing/batching behavior); G = the goodput
+      # MEASUREMENT cell — the runner reports Mbps per implementation
+      # pair in result.json, summarized below.
+      TESTS: ${{ github.event.inputs.tests || 'H,D,C,M,L2,B,G' }}
       CLIENTS: ${{ github.event.inputs.clients || 'quic-go,quiche,ngtcp2' }}
     steps:
       - name: Checkout quic-zig
@@ -101,6 +106,35 @@ jobs:
             --quic-go-image "${QUIC_GO_IMAGE}" \
             --log-dir "${{ github.workspace }}/interop-logs" \
             --json "${{ github.workspace }}/interop-logs/result.json"
+
+      # Surface the pass/fail matrix and the goodput measurements in
+      # the job summary so nobody has to download artifacts to see the
+      # numbers. result.json shape: quic-interop-runner's schema —
+      # "results"/"measurements" are lists (one per client) of lists of
+      # {abbr/result} / {abbr, result, details} cells.
+      - name: Summarize results
+        if: always()
+        run: |
+          RESULT="${{ github.workspace }}/interop-logs/result.json"
+          if [ ! -f "$RESULT" ]; then
+            echo "### interop: no result.json produced" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "### interop matrix (quic-zig as server)"
+            echo ""
+            jq -r '
+              (.clients // []) as $clients
+              | "| client | tests | measurements |",
+                "|---|---|---|",
+                (range($clients | length) as $i
+                 | "| \($clients[$i]) | \(
+                      [.results[$i][]? | "\(.abbr):\(.result)"] | join(" ")
+                    ) | \(
+                      [.measurements[$i][]? | "\(.abbr):\(.result) \(.details // "")"] | join(" ")
+                    ) |")
+            ' "$RESULT"
+          } >> "$GITHUB_STEP_SUMMARY" ||             echo "(result.json did not match the expected schema)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload interop logs
         if: always()

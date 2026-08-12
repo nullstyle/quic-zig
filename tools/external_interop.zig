@@ -34,6 +34,11 @@ const case_aliases = [_]CaseAlias{
     .{ .short = "6", .long = "ipv6" },
     .{ .short = "E", .long = "ecn" },
     .{ .short = "A", .long = "amplificationlimit" },
+    // Measurement cells (the runner reports Mbps in result.json
+    // rather than pass/fail): raw goodput and goodput under
+    // competing cross-traffic.
+    .{ .short = "G", .long = "goodput" },
+    .{ .short = "CT", .long = "crosstraffic" },
 };
 
 const CaseAlias = struct {

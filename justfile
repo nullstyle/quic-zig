@@ -71,6 +71,10 @@ interop-loss-client:
 
 interop-loss-both: interop-loss interop-loss-client
 
+# Goodput measurement cells (runner reports Mbps in result.json).
+interop-goodput:
+    CLIENTS=quic-go,quiche,ngtcp2 TESTS=G just interop
+
 # Refresh and inspect the published QNS image on a remote runner host.
 interop-remote-pull:
     ssh "{{remote_host}}" 'docker pull {{remote_image}}'
