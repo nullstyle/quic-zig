@@ -52,6 +52,7 @@ const conn_keys = @import("conn_keys.zig");
 const conn_version = @import("conn_version.zig");
 const conn_cids = @import("conn_cids.zig");
 const conn_streams = @import("conn_streams.zig");
+const conn_datagram = @import("conn_datagram.zig");
 
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
@@ -2741,18 +2742,12 @@ pub const Connection = struct {
         return conn_cids.connectionIdEventStillNeeded(self, path_id);
     }
 
-    fn recordDatagramSendEvent(self: *Connection, event: StoredDatagramSendEvent) void {
-        self.datagram_send_events.push(event);
-    }
-
     pub fn recordDatagramAcked(self: *Connection, packet: *const sent_packets_mod.SentPacket) void {
-        const event = event_queue_mod.datagramEventFromPacket(packet) orelse return;
-        self.recordDatagramSendEvent(.{ .acked = event });
+        return conn_datagram.recordDatagramAcked(self, packet);
     }
 
     fn recordDatagramLost(self: *Connection, packet: *const sent_packets_mod.SentPacket) void {
-        const event = event_queue_mod.datagramEventFromPacket(packet) orelse return;
-        self.recordDatagramSendEvent(.{ .lost = event });
+        return conn_datagram.recordDatagramLost(self, packet);
     }
 
     fn findStreamBlocked(
@@ -2952,35 +2947,14 @@ pub const Connection = struct {
     /// by the implementation's UDP packet budget and, once known, the
     /// peer's `max_datagram_frame_size` transport parameter.
     pub fn sendDatagram(self: *Connection, payload: []const u8) Error!void {
-        _ = try self.sendDatagramTracked(payload);
+        return conn_datagram.sendDatagram(self, payload);
     }
 
     /// Queue a DATAGRAM and return a connection-local id that will be
     /// echoed in `datagram_acked` / `datagram_lost` events. QUIC never
     /// retransmits DATAGRAM frames; this id is only for app retry policy.
     pub fn sendDatagramTracked(self: *Connection, payload: []const u8) Error!u64 {
-        const max_payload = try self.maxDatagramPayload();
-        if (payload.len > max_payload) return Error.DatagramTooLarge;
-        if (self.pending_frames.send_datagrams.items.len >= max_pending_datagram_count) {
-            return Error.DatagramQueueFull;
-        }
-        if (payload.len > max_pending_datagram_bytes or
-            self.pending_frames.send_datagram_bytes > max_pending_datagram_bytes - payload.len)
-        {
-            return Error.DatagramQueueFull;
-        }
-        const copy = try self.allocator.alloc(u8, payload.len);
-        errdefer self.allocator.free(copy);
-        @memcpy(copy, payload);
-        if (self.next_datagram_id == std.math.maxInt(u64)) return Error.DatagramIdExhausted;
-        const id = self.next_datagram_id;
-        self.next_datagram_id += 1;
-        try self.pending_frames.send_datagrams.append(self.allocator, .{
-            .id = id,
-            .data = copy,
-        });
-        self.pending_frames.send_datagram_bytes += payload.len;
-        return id;
+        return conn_datagram.sendDatagramTracked(self, payload);
     }
 
     /// The largest RFC 9221 DATAGRAM payload (in bytes) that `sendDatagram`
@@ -2998,19 +2972,7 @@ pub const Connection = struct {
     /// DATAGRAM; the send path only emits one that fits the current packet, so
     /// a payload sized to this value is carried whole.
     pub fn maxDatagramPayload(self: *const Connection) Error!usize {
-        // Room a 1-RTT packet + DATAGRAM frame need around the payload. The
-        // reserve matches the historical `default_mtu`-derived ceiling at the
-        // 1200-byte floor, so behavior there is unchanged and only the
-        // PMTU-scaling is new; the send-time build guard enforces exact fit.
-        const packet_reserve: usize = default_mtu - max_outbound_datagram_payload_size;
-        // Grow/shrink with the active path's PMTU, but never past the
-        // plaintext buffer the send path builds a packet into.
-        var limit: usize = @min(self.pmtu() -| packet_reserve, max_recv_plaintext);
-        if (self.cached_peer_transport_params) |params| {
-            if (params.max_datagram_frame_size == 0) return Error.DatagramUnavailable;
-            limit = @min(limit, @as(usize, @intCast(params.max_datagram_frame_size)));
-        }
-        return limit;
+        return conn_datagram.maxDatagramPayload(self);
     }
 
     pub fn queueNewConnectionId(
@@ -3152,29 +3114,18 @@ pub const Connection = struct {
     /// fit — caller must size `dst` to the peer's advertised
     /// `max_datagram_frame_size`.
     pub fn receiveDatagram(self: *Connection, dst: []u8) ?usize {
-        const item = self.receiveDatagramInfo(dst) orelse return null;
-        return item.len;
+        return conn_datagram.receiveDatagram(self, dst);
     }
 
     /// Pop the oldest received DATAGRAM and include whether it arrived
     /// in 0-RTT. The payload is dropped from the queue regardless of
     /// whether it fit.
     pub fn receiveDatagramInfo(self: *Connection, dst: []u8) ?IncomingDatagram {
-        const item = self.pending_frames.popRecvDatagram() orelse return null;
-        defer self.allocator.free(item.data);
-        // Hardening guide §3.5 / §8: pair the resident-bytes release
-        // with the queue dequeue. `popRecvDatagram` already decrements
-        // `recv_datagram_bytes`; this drops the matching cents from
-        // the global resident-bytes counter.
-        defer self.releaseResidentBytes(item.data.len);
-        const n = @min(dst.len, item.data.len);
-        @memcpy(dst[0..n], item.data[0..n]);
-        return .{ .len = n, .arrived_in_early_data = item.arrived_in_early_data };
+        return conn_datagram.receiveDatagramInfo(self, dst);
     }
 
-    /// Number of inbound DATAGRAMs queued for the app to read.
     pub fn pendingDatagrams(self: *const Connection) usize {
-        return self.pending_frames.recv_datagrams.items.len;
+        return conn_datagram.pendingDatagrams(self);
     }
 
     /// Enable or disable the public multipath surface. The current
