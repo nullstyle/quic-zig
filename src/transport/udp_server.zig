@@ -123,6 +123,13 @@ pub const RunUdpOptions = struct {
     /// Set to 1 to restore the historical datagram-per-iteration
     /// behavior exactly.
     max_datagrams_per_iteration: u32 = 16,
+    /// Egress batch bound: outbound datagrams accumulate into a
+    /// per-listener buffer and ship through one `Socket.sendMany`
+    /// call (real `sendmmsg` on Linux, 64 messages per syscall; a
+    /// plain send loop elsewhere). One batch can carry datagrams for
+    /// MANY different peers. 64 matches the kernel chunk size; 1
+    /// restores a syscall per datagram.
+    max_send_batch_datagrams: u32 = 64,
     /// Optional shutdown signal. The loop calls `flag.load(.acquire)`
     /// at the top of every iteration; once it observes `true`, it
     /// calls `Server.shutdown(0, "")`, drains outgoing CONNECTION_CLOSE
@@ -329,8 +336,6 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     const allocator = server.allocator;
     const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
     defer allocator.free(rx);
-    const tx = try allocator.alloc(u8, options.tx_buffer_bytes);
-    defer allocator.free(tx);
     // cmsg buffer is shared across listeners — only one listener is
     // read per inner-loop iteration, so the kernel re-populates the
     // bytes on each `receiveManyTimeout`. Any listener with
@@ -357,6 +362,23 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     // own cmsg slice when ECN is active.
     const batch_msgs = try allocator.alloc(Net.IncomingMessage, batch_len);
     defer allocator.free(batch_msgs);
+
+    // Per-listener egress batches (OutgoingMessage.address points into
+    // the batch's own addrs array, so each listener keeps its own).
+    const send_batches = try allocator.alloc(SendBatch, listeners.len);
+    var batches_ready: usize = 0;
+    defer {
+        for (send_batches[0..batches_ready]) |*b| b.deinit(allocator);
+        allocator.free(send_batches);
+    }
+    for (send_batches) |*b| {
+        b.* = try SendBatch.init(
+            allocator,
+            @max(1, options.max_send_batch_datagrams),
+            options.tx_buffer_bytes,
+        );
+        batches_ready += 1;
+    }
 
     // Split the per-iteration recv timeout across listeners so the
     // worst-case PTO-heartbeat latency stays close to the original
@@ -521,8 +543,15 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             // those states.
             if (slot.conn.closeState() == .closed) continue;
             const idx: usize = @min(@as(usize, slot.last_recv_socket_idx), listeners.len - 1);
-            drainSlot(slot, tx, now_us, listeners[idx].sock, options.io) catch {};
+            drainSlot(slot, &send_batches[idx], now_us, listeners[idx].sock, options.io) catch {};
             slot.conn.tick(now_us) catch {};
+        }
+        // Ship whatever the drain pass accumulated — one syscall per
+        // listener for up to max_send_batch_datagrams datagrams across
+        // ALL slots (best-effort, matching the historical per-datagram
+        // posture).
+        for (send_batches, 0..) |*b, li| {
+            b.flush(options.io, listeners[li].sock) catch {};
         }
 
         iteration_count +%= 1;
@@ -579,17 +608,99 @@ fn stampLastRecvSocket(
 /// CID exhaustion) doesn't abort the whole server loop. Errors only
 /// propagate when `sock.send` itself fails — that's a real I/O
 /// failure the embedder needs to know about.
+/// Per-listener egress accumulator: outbound datagrams (for any
+/// number of peers) collect here and ship via one `Socket.sendMany`.
+/// `addrs` is parallel stable storage — `OutgoingMessage.address` is a
+/// pointer, so the addresses must not move between fill and flush.
+pub const SendBatch = struct {
+    msgs: []Net.OutgoingMessage,
+    addrs: []Net.IpAddress,
+    buf: []u8,
+    datagram_bytes: usize,
+    len: usize = 0,
+    used: usize = 0,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        capacity: usize,
+        datagram_bytes: usize,
+    ) !SendBatch {
+        const msgs = try allocator.alloc(Net.OutgoingMessage, capacity);
+        errdefer allocator.free(msgs);
+        const addrs = try allocator.alloc(Net.IpAddress, capacity);
+        errdefer allocator.free(addrs);
+        const buf = try allocator.alloc(u8, capacity * datagram_bytes);
+        errdefer allocator.free(buf);
+        return .{
+            .msgs = msgs,
+            .addrs = addrs,
+            .buf = buf,
+            .datagram_bytes = datagram_bytes,
+        };
+    }
+
+    pub fn deinit(self: *SendBatch, allocator: std.mem.Allocator) void {
+        allocator.free(self.msgs);
+        allocator.free(self.addrs);
+        allocator.free(self.buf);
+        self.* = undefined;
+    }
+
+    /// Scratch space for the next datagram, or null when full.
+    pub fn nextSlot(self: *SendBatch) ?[]u8 {
+        if (self.len >= self.msgs.len) return null;
+        return self.buf[self.used..][0..self.datagram_bytes];
+    }
+
+    /// Commit `len` bytes of the slot returned by `nextSlot` for `to`.
+    pub fn commit(self: *SendBatch, to: Net.IpAddress, len: usize) void {
+        std.debug.assert(self.len < self.msgs.len);
+        self.addrs[self.len] = to;
+        self.msgs[self.len] = .{
+            .address = &self.addrs[self.len],
+            .data_ptr = self.buf.ptr + self.used,
+            .data_len = len,
+        };
+        self.len += 1;
+        self.used += len;
+    }
+
+    /// Ship everything accumulated (one sendMany; the std lowers to
+    /// sendmmsg in 64-message chunks on Linux, a send loop elsewhere)
+    /// and reset. Send failures are the caller's policy.
+    pub fn flush(self: *SendBatch, io: std.Io, sock: Net.Socket) !void {
+        if (self.len == 0) return;
+        defer {
+            self.len = 0;
+            self.used = 0;
+        }
+        try sock.sendMany(io, self.msgs[0..self.len], .{});
+    }
+};
+
 fn drainSlot(
     slot: *Server.Slot,
-    tx: []u8,
+    batch: *SendBatch,
     now_us: u64,
     sock: Net.Socket,
     io: std.Io,
 ) !void {
-    while (try slot.conn.pollDatagram(tx, now_us)) |out| {
+    while (true) {
+        const dst = batch.nextSlot() orelse blk: {
+            // Batch full mid-drain: ship it and keep going.
+            batch.flush(io, sock) catch |err| {
+                // Parity with the historical per-datagram posture:
+                // egress failures for a slot are non-fatal (QUIC loss
+                // recovery covers dropped tails), but stop this
+                // slot's drain for the iteration.
+                return err;
+            };
+            break :blk batch.nextSlot() orelse return;
+        };
+        const out = (try slot.conn.pollDatagram(dst, now_us)) orelse return;
         const target = out.to orelse slot.peer_addr orelse continue;
         const dest = pathAddressToIpAddress(target) orelse continue;
-        try sock.send(io, &dest, tx[0..out.len]);
+        batch.commit(dest, out.len);
     }
 }
 

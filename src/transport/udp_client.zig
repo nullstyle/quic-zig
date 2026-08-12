@@ -96,6 +96,10 @@ pub const RunUdpClientOptions = struct {
     /// receive before ticking and draining (see the server option of
     /// the same name). Set to 1 for the historical behavior.
     max_datagrams_per_iteration: u32 = 16,
+    /// Egress batch bound: outbound datagrams accumulate into a batch
+    /// and ship through one `Socket.sendMany` (see the server option
+    /// of the same name). 1 restores a syscall per datagram.
+    max_send_batch_datagrams: u32 = 64,
     /// `Socket.receiveTimeout` interval between `tick` calls.
     /// Default 5 ms keeps PTO firing on time.
     receive_timeout: std.Io.Duration = std.Io.Duration.fromMilliseconds(default_receive_timeout_ms),
@@ -244,8 +248,12 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
     const allocator = client.allocator;
     const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
     defer allocator.free(rx);
-    const tx = try allocator.alloc(u8, options.tx_buffer_bytes);
-    defer allocator.free(tx);
+    var send_batch = try udp_server.SendBatch.init(
+        allocator,
+        @max(1, options.max_send_batch_datagrams),
+        options.tx_buffer_bytes,
+    );
+    defer send_batch.deinit(allocator);
     const cmsg_buf_len: usize = if (ecn_active) options.cmsg_buffer_bytes else 0;
     var empty_cmsg_buf: [0]u8 = undefined;
     const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
@@ -299,7 +307,7 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
 
         // Drain everything queued before the next receive. Same
         // path-aware shape as the server's drainSlot.
-        try drainOutbound(client.conn, tx, now_us, sock, options.io, target_addr);
+        try drainOutbound(client.conn, &send_batch, now_us, sock, options.io, target_addr);
 
         // Clamp the wait to the connection's earliest timer deadline
         // (pacing credit, PTO, ack-delay, ...) — see
@@ -373,13 +381,18 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
 
 fn drainOutbound(
     conn: *Connection,
-    tx: []u8,
+    batch: *udp_server.SendBatch,
     now_us: u64,
     sock: Net.Socket,
     io: std.Io,
     fallback: Net.IpAddress,
 ) RunError!void {
-    while (try conn.pollDatagram(tx, now_us)) |out| {
+    while (true) {
+        const dst = batch.nextSlot() orelse blk: {
+            try batch.flush(io, sock);
+            break :blk batch.nextSlot() orelse return;
+        };
+        const out = (try conn.pollDatagram(dst, now_us)) orelse break;
         const dest: Net.IpAddress = blk: {
             if (out.to) |path_addr| {
                 if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| {
@@ -391,8 +404,11 @@ fn drainOutbound(
             // configured target.
             break :blk fallback;
         };
-        try sock.send(io, &dest, tx[0..out.len]);
+        batch.commit(dest, out.len);
     }
+    // Client posture: egress failures propagate (parity with the
+    // historical per-datagram `try sock.send`).
+    try batch.flush(io, sock);
 }
 
 // ---- Tests --------------------------------------------------------------
