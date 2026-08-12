@@ -14,6 +14,15 @@
 //! concrete controllers stay exported for tests and direct embedding.
 
 const std = @import("std");
+const cubic_mod = @import("congestion_cubic.zig");
+
+/// RFC 9438 CUBIC controller (re-export; lives in congestion_cubic.zig).
+pub const Cubic = cubic_mod.Cubic;
+/// CUBIC curve helpers + constants (re-exported for the conformance suite).
+pub const cubicK = cubic_mod.cubicK;
+pub const cubicWindowBytes = cubic_mod.cubicWindowBytes;
+pub const cubic_alpha_num = cubic_mod.alpha_num;
+pub const cubic_alpha_den = cubic_mod.alpha_den;
 
 /// kPersistentCongestionThreshold from RFC 9002 §7.6.1: 3.
 pub const persistent_congestion_threshold: u8 = 3;
@@ -35,6 +44,8 @@ pub fn ackFillsWindow(cwnd: u64, bytes_acked: u64, bytes_in_flight: u64) bool {
 pub const Algorithm = enum {
     /// RFC 9002 §7 / Appendix B NewReno.
     new_reno,
+    /// RFC 9438 CUBIC.
+    cubic,
 };
 
 /// Tunables held by-value inside each controller so every path has
@@ -68,10 +79,12 @@ pub const Config = struct {
 /// generically).
 pub const CongestionController = union(Algorithm) {
     new_reno: NewReno,
+    cubic: Cubic,
 
     pub fn init(cfg: Config) CongestionController {
         return switch (cfg.algorithm) {
             .new_reno => .{ .new_reno = NewReno.init(cfg) },
+            .cubic => .{ .cubic = Cubic.init(cfg) },
         };
     }
 

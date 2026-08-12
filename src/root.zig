@@ -284,6 +284,9 @@ pub const TimerKind = conn.TimerKind;
 pub const PathStats = conn.PathStats;
 /// Whole-connection observability snapshot (`Connection.stats()`, Unstable tier).
 pub const ConnectionStats = conn.ConnectionStats;
+/// Congestion-control algorithm selector for `Server.Config` /
+/// `Client.Config` `.congestion_control` (Unstable tier while CUBIC soaks).
+pub const CongestionAlgorithm = conn.CongestionAlgorithm;
 
 /// Read-only snapshot of a stream's send half (bytes written / acked /
 /// buffered + whether anything is ready to send), from

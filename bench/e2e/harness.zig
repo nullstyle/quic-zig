@@ -38,6 +38,9 @@ pub const PairOptions = struct {
     initial_max_data: u64 = 1 << 24,
     initial_max_stream_data: u64 = 1 << 22,
     initial_max_streams_bidi: u64 = 16,
+    /// Congestion controller for both endpoints — the A/B lever the
+    /// CUBIC-default flip gate drives.
+    congestion_control: quic_zig.CongestionAlgorithm = .new_reno,
 };
 
 /// Heap-allocated so the `peer` cross-pointers stay valid.
@@ -102,6 +105,9 @@ pub const Pair = struct {
         try pair.server.setPeerDcid(&client_cid);
         try pair.server.setLocalScid(&server_cid);
 
+        pair.client.setCongestionAlgorithm(opts.congestion_control);
+        pair.server.setCongestionAlgorithm(opts.congestion_control);
+
         return pair;
     }
 
@@ -119,6 +125,7 @@ pub const Pair = struct {
 pub const GoodputOptions = struct {
     total_bytes: usize = 64 << 20,
     chunk_bytes: usize = 256 << 10,
+    congestion_control: quic_zig.CongestionAlgorithm = .new_reno,
     /// Virtual-clock step per shuttle iteration.
     tick_us: u64 = 100,
     /// Cap on collected per-poll latency samples (8 bytes each).
@@ -158,7 +165,7 @@ pub fn runGoodputOnce(
     opts: GoodputOptions,
 ) !GoodputResult {
     const pair_allocator = if (counting) |c| c.allocator() else allocator;
-    const pair = try Pair.create(pair_allocator, .{});
+    const pair = try Pair.create(pair_allocator, .{ .congestion_control = opts.congestion_control });
     defer pair.destroy(pair_allocator);
 
     const data = try allocator.alloc(u8, opts.chunk_bytes);
@@ -310,6 +317,7 @@ pub const ImpairmentOptions = struct {
     total_bytes: usize = 8 << 20,
     chunk_bytes: usize = 256 << 10,
     tick_us: u64 = 100,
+    congestion_control: quic_zig.CongestionAlgorithm = .new_reno,
     seed: u64 = 0xbe9c4,
     loss_permille: u16 = 0,
     reorder_permille: u16 = 0,
@@ -334,7 +342,7 @@ pub const ImpairmentResult = struct {
 /// Bulk transfer through the seeded impairment net, measured in
 /// VIRTUAL time — deterministic for a given seed and option set.
 pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) !ImpairmentResult {
-    const pair = try Pair.create(allocator, .{});
+    const pair = try Pair.create(allocator, .{ .congestion_control = opts.congestion_control });
     defer pair.destroy(allocator);
 
     var net = sim_net.SimNet.init(allocator, .{
@@ -469,4 +477,15 @@ test "handshake batch runs and counts" {
     try std.testing.expect(result.handshakes_per_sec > 0);
     try std.testing.expect(result.allocs_per_handshake > 0);
     try std.testing.expectEqual(@as(u64, 0), counting.live_bytes);
+}
+
+test "CUBIC completes a lossy impairment transfer end-to-end" {
+    const result = try runImpairmentOnce(std.testing.allocator, .{
+        .name = "cubic-loss-e2e",
+        .total_bytes = 512 << 10,
+        .loss_permille = 20,
+        .congestion_control = .cubic,
+    });
+    try std.testing.expect(result.dropped > 0);
+    try std.testing.expect(result.virtual_goodput_mbps > 0);
 }

@@ -560,6 +560,11 @@ pub const Config = struct {
     /// (PMTU stays at `initial_mtu`).
     pmtud: conn_mod.PmtudConfig = .{},
 
+    /// Congestion-control algorithm for every accepted connection
+    /// (Unstable tier while CUBIC soaks): `.new_reno` (RFC 9002, the
+    /// long-standing default) or `.cubic` (RFC 9438).
+    congestion_control: conn_mod.CongestionAlgorithm = .new_reno,
+
     /// RFC 9000 §18.2 / §5.1.1 server preferred-address advertisement.
     /// Null disables the feature (default — no `preferred_address`
     /// transport parameter is sent and clients have no server-driven

@@ -242,6 +242,12 @@ const ConfigImpl = struct {
     /// minimum-MTU floor and the typical 1500-byte internet MTU.
     /// Set `enable = false` to keep the static-MTU behaviour.
     pmtud: conn_mod.PmtudConfig = .{},
+
+    /// Congestion-control algorithm (Unstable tier while CUBIC
+    /// soaks): `.new_reno` (RFC 9002, the long-standing default) or
+    /// `.cubic` (RFC 9438). Applies to every path the connection
+    /// uses, including post-migration paths.
+    congestion_control: conn_mod.CongestionAlgorithm = .new_reno,
 };
 
 /// Callback receiving ready-to-persist `tls.resumption_state` envelope
@@ -470,6 +476,7 @@ pub const Client = struct {
         // RFC 8899 DPLPMTUD: apply the embedder config and
         // re-initialise the per-path PMTUD state.
         conn_ptr.setPmtudConfig(config.pmtud);
+        conn_ptr.setCongestionAlgorithm(config.congestion_control);
 
         if (config.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, config.qlog_user_data);
 

@@ -516,6 +516,7 @@ pub const Server = struct {
     /// at slot-open time. RFC 9000 §13.4 IETF ECN signaling. Default
     /// true; flip to false in environments known to bleach ECN bits.
     ecn_enabled: bool,
+    congestion_control: conn_mod.CongestionAlgorithm,
     /// Captured `Config.pmtud` — applied to every Connection at
     /// slot-open time. RFC 8899 DPLPMTUD.
     pmtud_config: conn_mod.PmtudConfig,
@@ -891,6 +892,7 @@ pub const Server = struct {
             .max_connection_memory = config.max_connection_memory,
             .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
             .ecn_enabled = config.enable_ecn,
+            .congestion_control = config.congestion_control,
             // The listener and bandwidth limiters recommend "off"
             // (envelope-dependent), so `.default` resolves through a
             // zero default cap to null.

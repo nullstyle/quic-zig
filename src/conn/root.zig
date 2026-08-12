@@ -175,6 +175,12 @@ pub const RttEstimator = rtt.RttEstimator;
 pub const SentPacketTracker = sent_packets.SentPacketTracker;
 /// RFC 9002 NewReno congestion controller (re-export).
 pub const NewReno = congestion.NewReno;
+/// RFC 9438 CUBIC congestion controller (re-export).
+pub const Cubic = congestion.Cubic;
+/// Algorithm-dispatching controller each path holds (re-export).
+pub const CongestionController = congestion.CongestionController;
+/// Selectable congestion-control algorithm (`Config.congestion_control`).
+pub const CongestionAlgorithm = congestion.Algorithm;
 /// RFC 9000 §8.2 path-validation state machine (re-export).
 pub const PathValidator = path_validator.PathValidator;
 /// Send-side half-stream (re-export).

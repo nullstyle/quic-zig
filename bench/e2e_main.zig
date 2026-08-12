@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const quic_zig = @import("quic_zig");
 const report_mod = @import("report.zig");
 const harness = @import("e2e/harness.zig");
 
@@ -56,13 +57,13 @@ fn stats(samples: []const f64) struct { median: f64, mad: f64 } {
     return .{ .median = median, .mad = mad };
 }
 
-fn runGoodput(allocator: std.mem.Allocator, samples: usize) !GoodputEntry {
+fn runGoodput(allocator: std.mem.Allocator, samples: usize, cc: quic_zig.CongestionAlgorithm) !GoodputEntry {
     var entry: GoodputEntry = undefined;
     entry.sample_count = samples;
     var last: harness.GoodputResult = undefined;
     for (0..samples) |i| {
         var counting = harness.CountingAllocator.init(allocator);
-        last = try harness.runGoodputOnce(allocator, &counting, .{});
+        last = try harness.runGoodputOnce(allocator, &counting, .{ .congestion_control = cc });
         entry.samples_mb_per_sec[i] = last.mb_per_sec;
         std.debug.print("goodput sample {d}/{d}: {d:.1} MB/s ({d} datagrams, {d} transfer allocs)\n", .{
             i + 1, samples, last.mb_per_sec, last.datagrams, last.transfer_allocs,
@@ -107,9 +108,11 @@ const impairment_cells = [_]harness.ImpairmentOptions{
     .{ .name = "impairment_reorder10pct", .loss_permille = 0, .reorder_permille = 100 },
 };
 
-fn runImpairment(allocator: std.mem.Allocator, out: *Entries) !void {
+fn runImpairment(allocator: std.mem.Allocator, out: *Entries, cc: quic_zig.CongestionAlgorithm) !void {
     for (impairment_cells) |cell| {
-        const result = try harness.runImpairmentOnce(allocator, cell);
+        var cc_cell = cell;
+        cc_cell.congestion_control = cc;
+        const result = try harness.runImpairmentOnce(allocator, cc_cell);
         try out.impairment.append(allocator, result);
         std.debug.print("{s}: {d:.2} vMbps (virtual {d} ms, dropped {d}/{d}, wall {d} ms)\n", .{
             result.name,
@@ -195,6 +198,7 @@ pub fn main(init: std.process.Init) !void {
 
     var scenario: Scenario = .all;
     var samples: usize = default_samples;
+    var cc: quic_zig.CongestionAlgorithm = .new_reno;
     var json_path: ?[]const u8 = null;
     var json_dir: ?[]const u8 = null;
 
@@ -204,6 +208,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingScenario;
             scenario = std.meta.stringToEnum(Scenario, args[i]) orelse return error.UnknownScenario;
+        } else if (std.mem.eql(u8, args[i], "--cc")) {
+            i += 1;
+            if (i >= args.len) return error.MissingCcAlgorithm;
+            cc = std.meta.stringToEnum(quic_zig.CongestionAlgorithm, args[i]) orelse return error.UnknownCcAlgorithm;
         } else if (std.mem.eql(u8, args[i], "--samples")) {
             i += 1;
             if (i >= args.len) return error.MissingSampleCount;
@@ -226,8 +234,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    std.debug.print("quic_zig e2e benchmarks ({s}, {d} samples, {s})\n", .{
-        @tagName(scenario), samples, @tagName(builtin.mode),
+    std.debug.print("quic_zig e2e benchmarks ({s}, {d} samples, cc={s}, {s})\n", .{
+        @tagName(scenario), samples, @tagName(cc), @tagName(builtin.mode),
     });
     std.debug.print("---------------------------------------------------------------\n", .{});
 
@@ -235,13 +243,13 @@ pub fn main(init: std.process.Init) !void {
     defer entries.impairment.deinit(allocator);
 
     if (scenario == .all or scenario == .goodput) {
-        entries.goodput = try runGoodput(allocator, samples);
+        entries.goodput = try runGoodput(allocator, samples, cc);
     }
     if (scenario == .all or scenario == .handshakes) {
         entries.handshakes = try runHandshakes(allocator, samples);
     }
     if (scenario == .all or scenario == .impairment) {
-        try runImpairment(allocator, &entries);
+        try runImpairment(allocator, &entries, cc);
     }
 
     std.debug.print("---------------------------------------------------------------\n", .{});
