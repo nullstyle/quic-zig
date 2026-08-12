@@ -195,7 +195,7 @@ pub fn runLossPtoTick(ctx: *const LossPtoTickCtx, iters: u64) u64 {
         sum +%= losses.in_flight_bytes_lost;
         sum +%= pto_us;
         sum +%= pto_count;
-        sum +%= tracker.count;
+        sum +%= tracker.liveCount();
         if (fired) |packet| {
             sum +%= packet.pn;
             sum +%= packet.bytes;
@@ -235,6 +235,7 @@ fn firePtoIfDue(
     var i: u32 = 0;
     while (i < tracker.count) : (i += 1) {
         const packet = tracker.packets[i];
+        if (packet.dead) continue;
         if (!packet.ack_eliciting) continue;
         if (now_us < packet.sent_time_us +| pto_us) return null;
         pto_count.* +|= 1;
@@ -363,7 +364,7 @@ pub fn runConnectionAckLossDispatch(
 
         const path = ctx.conn.primaryPath();
         sum +%= path.app_pn_space.largest_acked_sent.?;
-        sum +%= path.sent.count;
+        sum +%= path.sent.liveCount();
         sum +%= path.sent.bytes_in_flight;
         sum +%= path.pto_count;
         sum +%= path.path.cc.cwnd;
@@ -429,10 +430,110 @@ test "connection_ack_loss_dispatch fixture drains acked and lost packets" {
     defer ctx.deinit();
 
     try std.testing.expect(runConnectionAckLossDispatch(&ctx, 1) != 0);
-    try std.testing.expectEqual(@as(u32, 0), ctx.conn.sentForLevel(.application).count);
+    try std.testing.expectEqual(@as(u32, 0), ctx.conn.sentForLevel(.application).liveCount());
     try std.testing.expectEqual(
         ctx.ack_largest,
         ctx.conn.pnSpaceForLevel(.application).largest_acked_sent.?,
     );
     try std.testing.expect(ctx.conn.qlog_packets_lost > 0);
+}
+
+// -- sent-tracker churn at high occupancy ---------------------------------
+
+pub const tracker_churn_high_occupancy_name = "sent_tracker_churn_3500_occupancy";
+
+/// Steady-state occupancy the churn benchmark holds. Near the historic
+/// worst case the tombstone removal was built for: with the old
+/// compact-on-remove tracker, every head removal at this occupancy
+/// memmoved ~3500 x 144 B of surviving tail.
+pub const churn_occupancy: u64 = 3500;
+
+/// One operation = remove the oldest tracked packet (cumulative-ACK
+/// shape, located by binary search) and record a replacement, holding
+/// occupancy constant. Measures exactly the per-packet ACK-processing
+/// removal cost at high BDP.
+pub const TrackerChurnHighOccupancyCtx = struct {
+    allocator: std.mem.Allocator,
+    tracker: *SentPacketTracker,
+    /// PN of the oldest live packet — the next one an ACK would cover.
+    oldest_pn: *u64,
+    /// Next PN the send side records.
+    next_pn: *u64,
+
+    pub fn init(allocator: std.mem.Allocator) !TrackerChurnHighOccupancyCtx {
+        const tracker = try allocator.create(SentPacketTracker);
+        errdefer allocator.destroy(tracker);
+        tracker.* = .{};
+        var pn: u64 = 0;
+        while (pn < churn_occupancy) : (pn += 1) {
+            tracker.record(.{
+                .pn = pn,
+                .sent_time_us = pn,
+                .bytes = 1200,
+                .ack_eliciting = true,
+                .in_flight = true,
+            }) catch unreachable;
+        }
+        const oldest_pn = try allocator.create(u64);
+        errdefer allocator.destroy(oldest_pn);
+        oldest_pn.* = 0;
+        const next_pn = try allocator.create(u64);
+        errdefer allocator.destroy(next_pn);
+        next_pn.* = churn_occupancy;
+        return .{
+            .allocator = allocator,
+            .tracker = tracker,
+            .oldest_pn = oldest_pn,
+            .next_pn = next_pn,
+        };
+    }
+
+    pub fn deinit(self: *TrackerChurnHighOccupancyCtx) void {
+        self.allocator.destroy(self.tracker);
+        self.allocator.destroy(self.oldest_pn);
+        self.allocator.destroy(self.next_pn);
+        self.* = undefined;
+    }
+};
+
+pub fn initTrackerChurnHighOccupancyCtx(
+    allocator: std.mem.Allocator,
+) !TrackerChurnHighOccupancyCtx {
+    return TrackerChurnHighOccupancyCtx.init(allocator);
+}
+
+pub fn runTrackerChurnHighOccupancy(ctx: *const TrackerChurnHighOccupancyCtx, iters: u64) u64 {
+    const tracker = ctx.tracker;
+    var sum: u64 = 0;
+    var i: u64 = 0;
+    while (i < iters) : (i += 1) {
+        const idx = tracker.lowerBound(ctx.oldest_pn.*).?;
+        const removed = tracker.removeAt(idx);
+        sum +%= removed.pn;
+        ctx.oldest_pn.* += 1;
+        tracker.record(.{
+            .pn = ctx.next_pn.*,
+            .sent_time_us = ctx.next_pn.*,
+            .bytes = 1200,
+            .ack_eliciting = true,
+            .in_flight = true,
+        }) catch unreachable;
+        ctx.next_pn.* += 1;
+        sum +%= tracker.liveCount();
+    }
+    return sum;
+}
+
+test "tracker churn fixture holds occupancy across many operations" {
+    var ctx = try TrackerChurnHighOccupancyCtx.init(std.testing.allocator);
+    defer ctx.deinit();
+    // Enough operations to cross several compaction sweeps.
+    const churned = runTrackerChurnHighOccupancy(&ctx, 5000);
+    try std.testing.expect(churned != 0);
+    try std.testing.expectEqual(@as(u32, @intCast(churn_occupancy)), ctx.tracker.liveCount());
+    try std.testing.expectEqual(@as(u64, 5000), ctx.oldest_pn.*);
+    try std.testing.expectEqual(
+        @as(u64, 1200 * churn_occupancy),
+        ctx.tracker.bytes_in_flight,
+    );
 }

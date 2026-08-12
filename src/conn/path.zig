@@ -507,10 +507,13 @@ pub const PathState = struct {
     }
 
     /// Free per-packet retransmit-frame and stream-key allocations.
-    /// The `PathState` itself is not freed.
+    /// The `PathState` itself is not freed. Tombstoned slots own
+    /// nothing (their remover took ownership) — deinit'ing them would
+    /// double-free.
     pub fn deinit(self: *PathState, allocator: std.mem.Allocator) void {
         var i: u32 = 0;
         while (i < self.sent.count) : (i += 1) {
+            if (self.sent.packets[i].dead) continue;
             self.sent.packets[i].deinit(allocator);
         }
     }
@@ -521,6 +524,7 @@ pub const PathState = struct {
     pub fn clearRecovery(self: *PathState, allocator: std.mem.Allocator) void {
         var i: u32 = 0;
         while (i < self.sent.count) : (i += 1) {
+            if (self.sent.packets[i].dead) continue;
             self.sent.packets[i].deinit(allocator);
         }
         self.sent = .{};

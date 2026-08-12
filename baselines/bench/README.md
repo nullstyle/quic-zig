@@ -46,3 +46,9 @@ The recipe runs the suite three times at `--samples 9` and keeps the run
 whose total median is lowest (least-loaded pass), then writes it over
 the local machine-class file. Inspect the diff before committing; raw
 reports stay untracked (`benchmark-reports/` is gitignored).
+
+Capture on a THERMALLY QUIET machine: a run taken right after a heavy
+compile showed +12-50% phantom "regressions" across untouched
+microbenchmarks (varint, AEAD) purely from elevated core temperature.
+If a compare flags broad regressions in code the change never touched,
+suspect thermals and re-run before believing it.

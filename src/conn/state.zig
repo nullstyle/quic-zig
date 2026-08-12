@@ -1650,6 +1650,8 @@ pub const Connection = struct {
         for (&self.sent) |*tracker| {
             var i: u32 = 0;
             while (i < tracker.count) : (i += 1) {
+                // Tombstones own nothing; deinit would double-free.
+                if (tracker.packets[i].dead) continue;
                 tracker.packets[i].deinit(self.allocator);
             }
         }
@@ -3263,9 +3265,12 @@ pub const Connection = struct {
     pub fn clearSentTracker(self: *Connection, tracker: *SentPacketTracker) void {
         var i: u32 = 0;
         while (i < tracker.count) : (i += 1) {
+            // Tombstones own nothing; deinit would double-free.
+            if (tracker.packets[i].dead) continue;
             tracker.packets[i].deinit(self.allocator);
         }
         tracker.count = 0;
+        tracker.dead_count = 0;
         tracker.bytes_in_flight = 0;
         tracker.ack_eliciting_in_flight = 0;
     }

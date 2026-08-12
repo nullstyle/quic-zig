@@ -94,6 +94,7 @@ pub fn lossDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 
     var i: u32 = 0;
     while (i < sent.count) : (i += 1) {
         const p = sent.packets[i];
+        if (p.dead) continue;
         if (p.pn > largest_acked) continue;
         const at_us = p.sent_time_us +| time_threshold;
         if (best == null or at_us < best.?) best = at_us;
@@ -115,6 +116,7 @@ pub fn lossDeadlineForApplicationPath(self: *const Connection, path: *const Path
     var i: u32 = 0;
     while (i < path.sent.count) : (i += 1) {
         const p = path.sent.packets[i];
+        if (p.dead) continue;
         if (p.pn > largest_acked) continue;
         const at_us = p.sent_time_us +| time_threshold;
         if (best == null or at_us < best.?) best = at_us;
@@ -128,6 +130,7 @@ pub fn ptoDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 {
     var i: u32 = 0;
     while (i < sent.count) : (i += 1) {
         const p = sent.packets[i];
+        if (p.dead) continue;
         if (!p.ack_eliciting) continue;
         if (oldest == null or p.sent_time_us < oldest.?) oldest = p.sent_time_us;
     }
@@ -140,6 +143,7 @@ pub fn ptoDeadlineForApplicationPath(self: *const Connection, path: *const PathS
     var i: u32 = 0;
     while (i < path.sent.count) : (i += 1) {
         const p = path.sent.packets[i];
+        if (p.dead) continue;
         if (!p.ack_eliciting) continue;
         if (oldest == null or p.sent_time_us < oldest.?) oldest = p.sent_time_us;
     }
@@ -588,6 +592,12 @@ pub fn detectLossesByPacketThresholdAtLevel(
     };
     while (i < sent.count) {
         const p = sent.packets[i];
+        // Skip tombstones — a dead entry re-matching after the
+        // `i = start` re-entry below would loop forever.
+        if (p.dead) {
+            i += 1;
+            continue;
+        }
         if (p.pn <= largest_acked and (largest_acked - p.pn) >= threshold) {
             const start = i;
             i += 1;
@@ -640,6 +650,11 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
     };
     while (i < path.sent.count) {
         const p = path.sent.packets[i];
+        // Skip tombstones — see detectLossesByPacketThresholdAtLevel.
+        if (p.dead) {
+            i += 1;
+            continue;
+        }
         if (p.pn <= largest_acked and (largest_acked - p.pn) >= threshold) {
             const start = i;
             i += 1;
@@ -705,6 +720,11 @@ pub fn detectLossesByTimeThresholdAtLevel(
     };
     while (i < sent.count) {
         const p = sent.packets[i];
+        // Skip tombstones — see detectLossesByPacketThresholdAtLevel.
+        if (p.dead) {
+            i += 1;
+            continue;
+        }
         const eligible = if (largest_acked_opt) |la| p.pn <= la else false;
         if (eligible and p.sent_time_us < cutoff) {
             const start = i;
@@ -766,6 +786,11 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
     };
     while (i < path.sent.count) {
         const p = path.sent.packets[i];
+        // Skip tombstones — see detectLossesByPacketThresholdAtLevel.
+        if (p.dead) {
+            i += 1;
+            continue;
+        }
         const eligible = if (largest_acked_opt) |la| p.pn <= la else false;
         if (eligible and p.sent_time_us < cutoff) {
             const start = i;
@@ -796,6 +821,7 @@ fn firePtoAtLevel(
     var i: u32 = 0;
     while (i < sent.count) : (i += 1) {
         const p = sent.packets[i];
+        if (p.dead) continue;
         if (!p.ack_eliciting) continue;
 
         var lost = sent.removeAt(i);
@@ -833,6 +859,7 @@ fn firePtoOnApplicationPath(
     var i: u32 = 0;
     while (i < path.sent.count) : (i += 1) {
         const p = path.sent.packets[i];
+        if (p.dead) continue;
         if (!p.ack_eliciting) continue;
 
         var lost = path.sent.removeAt(i);

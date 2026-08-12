@@ -79,6 +79,20 @@ const PnSpace = quic_zig.conn.PnSpace;
 const NewReno = quic_zig.conn.NewReno;
 const ms = rtt.ms;
 
+// Helper: the tracker's live (still-tracked) PNs in order. Removal
+// tombstones slots in place, so physical `packets[0..count]` includes
+// dead entries; this is the observable tracked-set view.
+fn trackedPns(tr: *const SentPacketTracker, buf: []u64) []const u64 {
+    var n: usize = 0;
+    var i: u32 = 0;
+    while (i < tr.count) : (i += 1) {
+        if (tr.packets[i].dead) continue;
+        buf[n] = tr.packets[i].pn;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
 // Helper: build a minimal `frame.Ack` covering [largest - first_range, largest].
 fn buildAck(largest: u64, first_range: u64) quic_zig.frame.types.Ack {
     return .{
@@ -219,9 +233,10 @@ test "MUST declare a packet lost when an ACK acks a packet >= 3 PNs higher [RFC9
     try std.testing.expectEqual(@as(u32, 2), result.count);
     try std.testing.expectEqual(@as(u64, 2400), result.bytes_lost);
     // Tracker now holds only PNs 2 and 3 (gap < kPacketThreshold).
-    try std.testing.expectEqual(@as(u32, 2), tr.count);
-    try std.testing.expectEqual(@as(u64, 2), tr.packets[0].pn);
-    try std.testing.expectEqual(@as(u64, 3), tr.packets[1].pn);
+    // (`liveCount`/live-walk: removal tombstones slots in place.)
+    try std.testing.expectEqual(@as(u32, 2), tr.liveCount());
+    var pn_scratch: [8]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &.{ 2, 3 }, trackedPns(&tr, &pn_scratch));
 }
 
 test "MUST NOT declare lost a packet whose PN exceeds largest_acked [RFC9002 §6.1.1 ¶?]" {
@@ -246,9 +261,9 @@ test "MUST NOT declare lost a packet whose PN exceeds largest_acked [RFC9002 §6
     const result = loss_recovery.detectLosses(&tr, &space, &rtt_est, 1_000_000_000);
 
     try std.testing.expectEqual(@as(u32, 2), result.count);
-    try std.testing.expectEqual(@as(u32, 2), tr.count);
-    try std.testing.expectEqual(@as(u64, 5), tr.packets[0].pn);
-    try std.testing.expectEqual(@as(u64, 6), tr.packets[1].pn);
+    try std.testing.expectEqual(@as(u32, 2), tr.liveCount());
+    var pn_scratch: [8]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &.{ 5, 6 }, trackedPns(&tr, &pn_scratch));
 }
 
 test "MUST use 9/8 of max(latest_rtt, smoothed_rtt) as the time threshold [RFC9002 §6.1.2 ¶2]" {

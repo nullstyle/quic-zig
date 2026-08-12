@@ -672,6 +672,16 @@ pub fn main(init: std.process.Init) !void {
         &connection_ack_loss_ctx,
         loss_ack_bench.runConnectionAckLossDispatch,
     );
+    var tracker_churn_ctx = try loss_ack_bench.initTrackerChurnHighOccupancyCtx(allocator);
+    defer tracker_churn_ctx.deinit();
+    recordBenchmark(
+        &results,
+        &result_count,
+        loss_ack_bench.tracker_churn_high_occupancy_name,
+        *const loss_ack_bench.TrackerChurnHighOccupancyCtx,
+        &tracker_churn_ctx,
+        loss_ack_bench.runTrackerChurnHighOccupancy,
+    );
 
     // Connection-adjacent DATAGRAM ACK/loss event queue
     const datagram_event_ctx = connection_datagram_bench.initDatagramEventCtx();
