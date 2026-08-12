@@ -392,6 +392,27 @@ pub fn build(b: *std.Build) void {
     );
     echo_smoke_step.dependOn(&run_echo_smoke.step);
 
+    // Goodput smoke: bulk-upload counterpart to the echo smoke — the
+    // real-socket wrapper-loop throughput number (informational; the
+    // gate is completion). CI runs it on the Linux leg.
+    const goodput_smoke_mod = b.createModule(.{
+        .root_source_file = b.path("examples/goodput_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    goodput_smoke_mod.addImport("quic_zig", quic_zig_mod);
+    const goodput_smoke_exe = b.addExecutable(.{
+        .name = "goodput-smoke",
+        .root_module = goodput_smoke_mod,
+    });
+    const run_goodput_smoke = b.addRunArtifact(goodput_smoke_exe);
+    const goodput_smoke_step = b.step(
+        "run-goodput-smoke",
+        "Run the goodput smoke (bulk upload over loopback UDP; completion-gated, rate informational)",
+    );
+    goodput_smoke_step.dependOn(&run_goodput_smoke.step);
+
     // Foreign-event-loop embedder: the caller-drives (no-I/O) path
     // wired into a hand-rolled `std.posix.poll` reactor instead of
     // `transport.runUdp*`. Ships as both a runnable example

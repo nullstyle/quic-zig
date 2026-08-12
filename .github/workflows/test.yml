@@ -89,6 +89,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: zig build run-echo-smoke
 
+      # Bulk-upload counterpart: completion-gated, the MB/s line is
+      # informational (loopback rate on shared runners is too noisy to
+      # assert on).
+      - name: zig build run-goodput-smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build run-goodput-smoke
+
       # Out-of-tree consumer smoke: builds a separate package that
       # depends on quic-zig by path and pins the exported quic_zig +
       # boringssl module surface (type identity for
