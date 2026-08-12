@@ -51,6 +51,7 @@ const conn_state = @import("../conn/state.zig");
 const Connection = conn_state.Connection;
 const path_mod = @import("../conn/path.zig");
 const socket_opts = @import("socket_opts.zig");
+const udp_batch = @import("udp_batch.zig");
 const udp_server = @import("udp_server.zig");
 
 const Net = std.Io.net;
@@ -100,6 +101,11 @@ pub const RunUdpClientOptions = struct {
     /// and ship through one `Socket.sendMany` (see the server option
     /// of the same name). 1 restores a syscall per datagram.
     max_send_batch_datagrams: u32 = 64,
+    /// Linux UDP GSO for uploads (see the server option). Probed at
+    /// socket setup; runtime send errors fall back to plain batching.
+    enable_gso: bool = true,
+    /// Linux UDP GRO for downloads (see the server option).
+    enable_gro: bool = true,
     /// `Socket.receiveTimeout` interval between `tick` calls.
     /// Default 5 ms keeps PTO firing on time.
     receive_timeout: std.Io.Duration = std.Io.Duration.fromMilliseconds(default_receive_timeout_ms),
@@ -244,6 +250,13 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
             };
         }
     }
+    var gso_active = options.enable_gso and socket_opts.probeUdpGso(sock.handle);
+    var gro_active = false;
+    if (options.enable_gro) {
+        if (socket_opts.setUdpGroEnabled(sock.handle)) |_| {
+            gro_active = true;
+        } else |_| {}
+    }
 
     const allocator = client.allocator;
     const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
@@ -254,7 +267,12 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
         options.tx_buffer_bytes,
     );
     defer send_batch.deinit(allocator);
-    const cmsg_buf_len: usize = if (ecn_active) options.cmsg_buffer_bytes else 0;
+    const gso_buf = try allocator.alloc(
+        u8,
+        @as(usize, socket_opts.default_gso_max_segments) * options.tx_buffer_bytes,
+    );
+    defer allocator.free(gso_buf);
+    const cmsg_buf_len: usize = if (ecn_active or gro_active) options.cmsg_buffer_bytes else 0;
     var empty_cmsg_buf: [0]u8 = undefined;
     const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
     const cmsg_buf: []u8 = if (cmsg_buf_len > 0)
@@ -307,7 +325,15 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
 
         // Drain everything queued before the next receive. Same
         // path-aware shape as the server's drainSlot.
-        try drainOutbound(client.conn, &send_batch, now_us, sock, options.io, target_addr);
+        try drainOutbound(
+            client.conn,
+            &send_batch,
+            .{ .buf = gso_buf, .active = &gso_active },
+            now_us,
+            sock,
+            options.io,
+            target_addr,
+        );
 
         // Clamp the wait to the connection's earliest timer deadline
         // (pacing credit, PTO, ack-delay, ...) — see
@@ -324,7 +350,7 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
         // when ECN is active.
         for (batch_msgs, 0..) |*msg, i| {
             msg.* = .init;
-            if (ecn_active) {
+            if (ecn_active or gro_active) {
                 msg.control = cmsg_buf[i * cmsg_buf_len ..][0..cmsg_buf_len];
             }
         }
@@ -351,6 +377,32 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
             else
                 .not_ect;
             const from_addr = udp_server.ipAddressToPathAddress(msg.from);
+            // GRO: split a kernel-coalesced buffer back into original
+            // datagrams (see runUdpServer).
+            if (gro_active) {
+                if (socket_opts.parseGroSegmentFromControl(msg.control)) |gro_seg| {
+                    if (msg.data.len > gro_seg) {
+                        var off: usize = 0;
+                        var gro_failed = false;
+                        while (off < msg.data.len) {
+                            const end = @min(off + @as(usize, gro_seg), msg.data.len);
+                            client.conn.handleWithEcn(msg.data[off..end], from_addr, ecn, now_us) catch |err| switch (err) {
+                                error.HandshakeFailed,
+                                error.PeerAlerted,
+                                error.UnsupportedCipherSuite,
+                                => {
+                                    gro_failed = true;
+                                    break;
+                                },
+                                else => return err,
+                            };
+                            off = end;
+                        }
+                        if (gro_failed) return;
+                        continue;
+                    }
+                }
+            }
             // `Connection.handleWithEcn` swallows per-frame errors
             // internally; only fatal connection-level errors
             // propagate out (e.g. OOM during a stream allocation).
@@ -382,11 +434,57 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
 fn drainOutbound(
     conn: *Connection,
     batch: *udp_server.SendBatch,
+    gso: struct { buf: []u8, active: *bool },
     now_us: u64,
     sock: Net.Socket,
     io: std.Io,
     fallback: Net.IpAddress,
 ) RunError!void {
+    if (gso.active.*) {
+        while (true) {
+            const filled = try udp_batch.fillGsoBatch(
+                conn,
+                gso.buf,
+                socket_opts.default_gso_max_segments,
+                now_us,
+            );
+            if (filled.count == 0) return;
+            var dest: Net.IpAddress = fallback;
+            if (filled.to) |path_addr| {
+                if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| dest = resolved;
+            }
+            if (filled.count == 1) {
+                try sock.send(io, &dest, gso.buf[0..filled.total_len]);
+            } else {
+                var cmsg: [64]u8 = undefined;
+                const cmsg_len = socket_opts.writeUdpSegmentCmsg(&cmsg, @intCast(filled.seg_size));
+                var msgs = [_]Net.OutgoingMessage{.{
+                    .address = &dest,
+                    .data_ptr = gso.buf.ptr,
+                    .data_len = filled.total_len,
+                    .control = cmsg[0..cmsg_len],
+                }};
+                sock.sendMany(io, &msgs, .{}) catch {
+                    // Runtime offload failure: disable and re-ship the
+                    // already-built segments plainly.
+                    gso.active.* = false;
+                    var off: usize = 0;
+                    while (off < filled.total_len) {
+                        const end = @min(off + filled.seg_size, filled.total_len);
+                        try sock.send(io, &dest, gso.buf[off..end]);
+                        off = end;
+                    }
+                };
+            }
+            if (filled.hasCarry()) {
+                var carry_dest: Net.IpAddress = fallback;
+                if (filled.carry_to) |path_addr| {
+                    if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| carry_dest = resolved;
+                }
+                try sock.send(io, &carry_dest, gso.buf[filled.carry_offset..][0..filled.carry_len]);
+            }
+        }
+    }
     while (true) {
         const dst = batch.nextSlot() orelse blk: {
             try batch.flush(io, sock);

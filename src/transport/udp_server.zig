@@ -38,6 +38,7 @@ const std = @import("std");
 const Server = @import("../server.zig").Server;
 const path_mod = @import("../conn/path.zig");
 const socket_opts = @import("socket_opts.zig");
+const udp_batch = @import("udp_batch.zig");
 
 const Net = std.Io.net;
 const Address = path_mod.Address;
@@ -130,6 +131,18 @@ pub const RunUdpOptions = struct {
     /// MANY different peers. 64 matches the kernel chunk size; 1
     /// restores a syscall per datagram.
     max_send_batch_datagrams: u32 = 64,
+    /// Linux UDP generic segmentation offload: pack consecutive
+    /// same-size datagrams for one connection into a super-datagram
+    /// the kernel splits (one sendmsg for up to 64 packets). Probed
+    /// per socket at bind; runtime send errors disable it for that
+    /// socket and fall back to plain batched sends. No effect off
+    /// Linux.
+    enable_gso: bool = true,
+    /// Linux UDP generic receive offload: the kernel coalesces
+    /// consecutive same-source datagrams and reports the segment size
+    /// via cmsg; the loop splits and feeds each original datagram.
+    /// Enabled per socket where supported. No effect off Linux.
+    enable_gro: bool = true,
     /// Optional shutdown signal. The loop calls `flag.load(.acquire)`
     /// at the top of every iteration; once it observes `true`, it
     /// calls `Server.shutdown(0, "")`, drains outgoing CONNECTION_CLOSE
@@ -218,6 +231,13 @@ const Listener = struct {
     sock: Net.Socket,
     bind_addr: Net.IpAddress,
     ecn_active: bool,
+    /// UDP_SEGMENT probe passed — GSO cmsgs may be attached to sends
+    /// on this socket. Cleared at runtime on the first GSO send error
+    /// (offload quirks); plain sends take over.
+    gso_active: bool = false,
+    /// UDP_GRO enabled — received datagrams may be kernel-coalesced
+    /// and carry a segment-size cmsg.
+    gro_active: bool = false,
 };
 
 const max_listeners: usize = 3;
@@ -332,6 +352,13 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             l.ecn_active = ok;
         }
     }
+    for (listeners) |*l| {
+        if (options.enable_gso) l.gso_active = socket_opts.probeUdpGso(l.sock.handle);
+        if (options.enable_gro) {
+            socket_opts.setUdpGroEnabled(l.sock.handle) catch continue;
+            l.gro_active = true;
+        }
+    }
 
     const allocator = server.allocator;
     const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
@@ -348,7 +375,11 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
         }
     }
     const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
-    const cmsg_buf_len: usize = if (any_ecn_active) options.cmsg_buffer_bytes * batch_len else 0;
+    var any_offload_cmsg = any_ecn_active;
+    for (listeners) |l| {
+        if (l.gro_active) any_offload_cmsg = true;
+    }
+    const cmsg_buf_len: usize = if (any_offload_cmsg) options.cmsg_buffer_bytes * batch_len else 0;
     var empty_cmsg_buf: [0]u8 = undefined;
     const cmsg_buf: []u8 = if (cmsg_buf_len > 0)
         try allocator.alloc(u8, cmsg_buf_len)
@@ -362,6 +393,14 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     // own cmsg slice when ECN is active.
     const batch_msgs = try allocator.alloc(Net.IncomingMessage, batch_len);
     defer allocator.free(batch_msgs);
+
+    // GSO super-datagram scratch (immediate sends; safe to share
+    // across listeners and slots).
+    const gso_buf = try allocator.alloc(
+        u8,
+        @as(usize, socket_opts.default_gso_max_segments) * options.tx_buffer_bytes,
+    );
+    defer allocator.free(gso_buf);
 
     // Per-listener egress batches (OutgoingMessage.address points into
     // the batch's own addrs array, so each listener keeps its own).
@@ -448,7 +487,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             // dropped below (a truncated QUIC datagram is useless).
             for (batch_msgs, 0..) |*msg, i| {
                 msg.* = .init;
-                if (l.ecn_active) {
+                if (l.ecn_active or l.gro_active) {
                     msg.control =
                         cmsg_buf[i * options.cmsg_buffer_bytes ..][0..options.cmsg_buffer_bytes];
                 }
@@ -478,6 +517,30 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 else
                     .not_ect;
                 const from_addr = ipAddressToPathAddress(msg.from);
+                // GRO: the kernel may hand us several original
+                // datagrams coalesced into one buffer; the cmsg
+                // carries the split stride. Feed each original
+                // datagram — QUIC coalescing rules apply per datagram.
+                if (l.gro_active) {
+                    if (socket_opts.parseGroSegmentFromControl(msg.control)) |gro_seg| {
+                        if (msg.data.len > gro_seg) {
+                            var off: usize = 0;
+                            while (off < msg.data.len) {
+                                const end = @min(off + @as(usize, gro_seg), msg.data.len);
+                                _ = try server.feedWithEcn(msg.data[off..end], from_addr, ecn, now_us);
+                                off = end;
+                            }
+                            stampLastRecvSocket(
+                                server,
+                                from_addr,
+                                @intCast(sock_idx),
+                                listeners[sock_idx].bind_addr,
+                                now_us,
+                            );
+                            continue;
+                        }
+                    }
+                }
                 // `feed` swallows per-connection errors internally;
                 // OutOfMemory and rarely RandFailed propagate out, and
                 // either is already a hard failure for the loop. The
@@ -543,7 +606,15 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             // those states.
             if (slot.conn.closeState() == .closed) continue;
             const idx: usize = @min(@as(usize, slot.last_recv_socket_idx), listeners.len - 1);
-            drainSlot(slot, &send_batches[idx], now_us, listeners[idx].sock, options.io) catch {};
+            drainSlot(
+                slot,
+                &send_batches[idx],
+                &listeners[idx],
+                gso_buf,
+                socket_opts.default_gso_max_segments,
+                now_us,
+                options.io,
+            ) catch {};
             slot.conn.tick(now_us) catch {};
         }
         // Ship whatever the drain pass accumulated — one syscall per
@@ -681,14 +752,17 @@ pub const SendBatch = struct {
 fn drainSlot(
     slot: *Server.Slot,
     batch: *SendBatch,
+    l: *Listener,
+    gso_buf: []u8,
+    max_gso_segments: u32,
     now_us: u64,
-    sock: Net.Socket,
     io: std.Io,
 ) !void {
+    if (l.gso_active) return drainSlotGso(slot, l, gso_buf, max_gso_segments, now_us, io);
     while (true) {
         const dst = batch.nextSlot() orelse blk: {
             // Batch full mid-drain: ship it and keep going.
-            batch.flush(io, sock) catch |err| {
+            batch.flush(io, l.sock) catch |err| {
                 // Parity with the historical per-datagram posture:
                 // egress failures for a slot are non-fatal (QUIC loss
                 // recovery covers dropped tails), but stop this
@@ -701,6 +775,60 @@ fn drainSlot(
         const target = out.to orelse slot.peer_addr orelse continue;
         const dest = pathAddressToIpAddress(target) orelse continue;
         batch.commit(dest, out.len);
+    }
+}
+
+/// GSO egress: pack the slot's outbox into equal-size super-datagrams
+/// (one sendmsg per up to 64 packets). Bypasses the cross-slot batch —
+/// the syscall saving already happened inside the super-datagram, and
+/// immediate sends sidestep buffer-lifetime coupling with other slots.
+/// A send error clears `gso_active` (kernel/offload quirk) and
+/// re-ships the already-built segments individually before falling
+/// back to plain batching next pass.
+fn drainSlotGso(
+    slot: *Server.Slot,
+    l: *Listener,
+    gso_buf: []u8,
+    max_gso_segments: u32,
+    now_us: u64,
+    io: std.Io,
+) !void {
+    while (true) {
+        const filled = try udp_batch.fillGsoBatch(slot.conn, gso_buf, max_gso_segments, now_us);
+        if (filled.count == 0) return;
+        const target = filled.to orelse slot.peer_addr orelse return;
+        var dest = pathAddressToIpAddress(target) orelse return;
+
+        if (filled.count == 1) {
+            try l.sock.send(io, &dest, gso_buf[0..filled.total_len]);
+        } else {
+            var cmsg: [64]u8 = undefined;
+            const cmsg_len = socket_opts.writeUdpSegmentCmsg(&cmsg, @intCast(filled.seg_size));
+            var msgs = [_]Net.OutgoingMessage{.{
+                .address = &dest,
+                .data_ptr = gso_buf.ptr,
+                .data_len = filled.total_len,
+                .control = cmsg[0..cmsg_len],
+            }};
+            l.sock.sendMany(io, &msgs, .{}) catch {
+                // Offload rejected at runtime (EIO family): disable for
+                // this socket and re-ship the built segments plainly —
+                // they are already segment-aligned in gso_buf.
+                l.gso_active = false;
+                var off: usize = 0;
+                while (off < filled.total_len) {
+                    const end = @min(off + filled.seg_size, filled.total_len);
+                    try l.sock.send(io, &dest, gso_buf[off..end]);
+                    off = end;
+                }
+            };
+        }
+
+        if (filled.hasCarry()) {
+            const carry_target = filled.carry_to orelse slot.peer_addr orelse return;
+            var carry_dest = pathAddressToIpAddress(carry_target) orelse return;
+            try l.sock.send(io, &carry_dest, gso_buf[filled.carry_offset..][0..filled.carry_len]);
+        }
     }
 }
 

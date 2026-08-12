@@ -13,6 +13,9 @@ pub const socket_opts = @import("socket_opts.zig");
 pub const udp_server = @import("udp_server.zig");
 /// Submodule of the opinionated `std.Io`-based UDP client loop.
 pub const udp_client = @import("udp_client.zig");
+/// Submodule of GSO super-datagram assembly (Linux `UDP_SEGMENT`) for
+/// batching embedders — see `udp_batch.fillGsoBatch`.
+pub const udp_batch = @import("udp_batch.zig");
 
 /// Re-export of `socket_opts.ServerTuning`, the buffer-size knob struct.
 pub const ServerTuning = socket_opts.ServerTuning;
@@ -45,6 +48,22 @@ pub const setEcnRecvEnabled = socket_opts.setEcnRecvEnabled;
 pub const parseEcnFromControl = socket_opts.parseEcnFromControl;
 /// Re-export of `socket_opts.default_cmsg_buffer_bytes`.
 pub const default_cmsg_buffer_bytes = socket_opts.default_cmsg_buffer_bytes;
+/// Re-export of `udp_batch.fillGsoBatch` / `GsoBatch` — pack one
+/// connection's outbox into a GSO super-datagram (foreign-loop
+/// embedders pair it with `probeUdpGso` + `writeUdpSegmentCmsg`).
+pub const fillGsoBatch = udp_batch.fillGsoBatch;
+pub const GsoBatch = udp_batch.GsoBatch;
+/// Re-export of `socket_opts.probeUdpGso` — the LOAD-BEARING gate for
+/// attaching GSO cmsgs (see its doc).
+pub const probeUdpGso = socket_opts.probeUdpGso;
+/// Re-export of `socket_opts.setUdpGroEnabled`.
+pub const setUdpGroEnabled = socket_opts.setUdpGroEnabled;
+/// Re-export of `socket_opts.writeUdpSegmentCmsg`.
+pub const writeUdpSegmentCmsg = socket_opts.writeUdpSegmentCmsg;
+/// Re-export of `socket_opts.parseGroSegmentFromControl`.
+pub const parseGroSegmentFromControl = socket_opts.parseGroSegmentFromControl;
+/// Re-export of `socket_opts.default_gso_max_segments` (kernel cap).
+pub const default_gso_max_segments = socket_opts.default_gso_max_segments;
 
 /// Re-export of `udp_server.runUdpServer` — the opinionated
 /// `std.Io`-based UDP server loop. See `udp_server.zig` for the full
@@ -70,4 +89,5 @@ test {
     _ = socket_opts;
     _ = udp_server;
     _ = udp_client;
+    _ = udp_batch;
 }

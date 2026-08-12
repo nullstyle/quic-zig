@@ -747,3 +747,155 @@ test "parseEcnFromControl: hand-rolled IPV6_TCLASS cmsg returns the codepoint" {
     const out = parseEcnFromControl(buf[0..cmsg_total]);
     try testing.expectEqual(EcnCodepoint.ce, out);
 }
+
+// -- Linux UDP GSO / GRO (generic segmentation / receive offload) -----------
+
+/// Linux `SOL_UDP` / `IPPROTO_UDP` — the cmsg/sockopt level for UDP
+/// segmentation options. ABI constants; only meaningful on Linux but
+/// harmless (and unit-testable) everywhere.
+pub const sol_udp: i32 = 17;
+/// Linux `UDP_SEGMENT` (kernel >= 4.18): as a sockopt, the default
+/// egress segment size (0 = off); as a cmsg, the per-sendmsg segment
+/// size for a GSO super-datagram.
+pub const udp_segment: i32 = 103;
+/// Linux `UDP_GRO` (kernel >= 5.0): opt into receive-side coalescing;
+/// the kernel reports the segment size of a coalesced datagram via a
+/// same-numbered cmsg.
+pub const udp_gro: i32 = 104;
+
+/// Kernel cap on segments per GSO send (`UDP_MAX_SEGMENTS`).
+pub const default_gso_max_segments: u32 = 64;
+
+/// Whether this target can ever do UDP GSO/GRO.
+pub const has_udp_gso: bool = builtin.os.tag == .linux;
+
+/// Probe whether `handle` accepts UDP_SEGMENT — the load-bearing gate
+/// for attaching GSO cmsgs: the std maps a rejected sendmsg cmsg
+/// (EINVAL/EOPNOTSUPP) to a PANIC, not an error, so a GSO cmsg must
+/// never reach a socket that didn't pass this probe. Setting 0 leaves
+/// egress behavior unchanged (no default segmentation).
+pub fn probeUdpGso(handle: Handle) bool {
+    if (comptime !has_udp_gso) return false;
+    const zero: c_int = 0;
+    setsockoptIntChecked(
+        handle,
+        @intCast(sol_udp),
+        @intCast(udp_segment),
+        std.mem.asBytes(&zero),
+    ) catch return false;
+    return true;
+}
+
+/// Enable receive-side UDP GRO on `handle`. The call doubles as the
+/// probe: `error.Unsupported` means pre-5.0 kernel or non-Linux.
+pub fn setUdpGroEnabled(handle: Handle) SetEcnError!void {
+    if (comptime !has_udp_gso) return error.Unsupported;
+    const one: c_int = 1;
+    try setsockoptIntChecked(
+        handle,
+        @intCast(sol_udp),
+        @intCast(udp_gro),
+        std.mem.asBytes(&one),
+    );
+}
+
+/// Serialize one `UDP_SEGMENT` cmsg carrying `segment_size` into
+/// `buf`, returning the number of bytes written (header + u16 payload,
+/// aligned like the kernel's CMSG_SPACE). Pure byte math — mirrors the
+/// layout projection `parseEcnFromControl` uses, so it is testable on
+/// every platform.
+pub fn writeUdpSegmentCmsg(buf: []u8, segment_size: u16) usize {
+    const Cmsg = std.c.cmsghdr;
+    const header_size: usize = @sizeOf(Cmsg);
+    const len_off: usize = @offsetOf(Cmsg, "len");
+    const level_off: usize = @offsetOf(Cmsg, "level");
+    const type_off: usize = @offsetOf(Cmsg, "type");
+    const len_size: usize = @sizeOf(@FieldType(Cmsg, "len"));
+    const align_to: usize = @sizeOf(usize);
+
+    const cmsg_len = header_size + @sizeOf(u16);
+    const space = std.mem.alignForward(usize, cmsg_len, align_to);
+    std.debug.assert(buf.len >= space);
+
+    @memset(buf[0..space], 0);
+    if (len_size == @sizeOf(usize)) {
+        std.mem.writeInt(usize, buf[len_off..][0..@sizeOf(usize)], cmsg_len, native_endian);
+    } else {
+        std.mem.writeInt(u32, buf[len_off..][0..@sizeOf(u32)], @intCast(cmsg_len), native_endian);
+    }
+    std.mem.writeInt(i32, buf[level_off..][0..4], sol_udp, native_endian);
+    std.mem.writeInt(i32, buf[type_off..][0..4], udp_segment, native_endian);
+    std.mem.writeInt(u16, buf[header_size..][0..2], segment_size, native_endian);
+    return space;
+}
+
+/// Walk a populated `recvmsg` control buffer for the kernel's
+/// `UDP_GRO` cmsg: the original segment size of a coalesced datagram.
+/// Null when absent (not coalesced, or GRO off). Same tolerant walker
+/// posture as `parseEcnFromControl`.
+pub fn parseGroSegmentFromControl(control: []const u8) ?u16 {
+    const Cmsg = std.c.cmsghdr;
+    const header_size: usize = @sizeOf(Cmsg);
+    const len_off: usize = @offsetOf(Cmsg, "len");
+    const level_off: usize = @offsetOf(Cmsg, "level");
+    const type_off: usize = @offsetOf(Cmsg, "type");
+    const len_size: usize = @sizeOf(@FieldType(Cmsg, "len"));
+    const align_to: usize = @sizeOf(usize);
+
+    var pos: usize = 0;
+    while (pos + header_size <= control.len) {
+        const cmsg_len: usize = blk: {
+            if (len_size == @sizeOf(usize)) {
+                break :blk std.mem.readInt(usize, control[pos + len_off ..][0..@sizeOf(usize)], native_endian);
+            } else {
+                break :blk @intCast(std.mem.readInt(u32, control[pos + len_off ..][0..@sizeOf(u32)], native_endian));
+            }
+        };
+        if (cmsg_len < header_size or pos + cmsg_len > control.len) break;
+        const cmsg_level = std.mem.readInt(i32, control[pos + level_off ..][0..4], native_endian);
+        const cmsg_type = std.mem.readInt(i32, control[pos + type_off ..][0..4], native_endian);
+        const data_off = pos + header_size;
+        const data_len = cmsg_len - header_size;
+
+        if (cmsg_level == sol_udp and cmsg_type == udp_gro) {
+            // The kernel writes an int; accept 2- or 4-byte payloads
+            // like the ECN walker does.
+            if (data_len >= 4 and data_off + 4 <= control.len) {
+                const v = std.mem.readInt(i32, control[data_off..][0..4], native_endian);
+                if (v > 0 and v <= std.math.maxInt(u16)) return @intCast(v);
+                return null;
+            }
+            if (data_len >= 2 and data_off + 2 <= control.len) {
+                const v = std.mem.readInt(u16, control[data_off..][0..2], native_endian);
+                return if (v > 0) v else null;
+            }
+            return null;
+        }
+
+        const aligned = std.mem.alignForward(usize, cmsg_len, align_to);
+        if (aligned == 0) break;
+        pos += aligned;
+    }
+    return null;
+}
+
+test "writeUdpSegmentCmsg round-trips through the GRO parser layout" {
+    // The builder and parser share the projected cmsghdr layout, so a
+    // built UDP_SEGMENT cmsg re-labeled as UDP_GRO must parse back.
+    var buf: [64]u8 = undefined;
+    const n = writeUdpSegmentCmsg(&buf, 1350);
+    try std.testing.expect(n >= @sizeOf(std.c.cmsghdr) + 2);
+    try std.testing.expect(n % @sizeOf(usize) == 0);
+    // Not a GRO cmsg (type = UDP_SEGMENT): parser must ignore it.
+    try std.testing.expectEqual(@as(?u16, null), parseGroSegmentFromControl(buf[0..n]));
+    // Flip the type to UDP_GRO: now it parses as a segment size.
+    const type_off: usize = @offsetOf(std.c.cmsghdr, "type");
+    std.mem.writeInt(i32, buf[type_off..][0..4], udp_gro, native_endian);
+    try std.testing.expectEqual(@as(?u16, 1350), parseGroSegmentFromControl(buf[0..n]));
+}
+
+test "parseGroSegmentFromControl tolerates junk and empty buffers" {
+    try std.testing.expectEqual(@as(?u16, null), parseGroSegmentFromControl(&.{}));
+    var junk: [24]u8 = @splat(0xff);
+    try std.testing.expectEqual(@as(?u16, null), parseGroSegmentFromControl(&junk));
+}
