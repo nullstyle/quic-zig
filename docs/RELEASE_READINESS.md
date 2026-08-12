@@ -59,8 +59,11 @@ is safe to embed in production. The gates:
       smoke test on each push; `.github/workflows/fuzz.yml` remains weekly
       advisory coverage. Before tagging v0.8.0 or a later RC/final release,
       `.github/workflows/rc-fuzz.yml` must pass unfiltered
-      `zig build test --fuzz=1M` (or a larger requested budget) and upload
-      `.zig-cache/v` for replay. No open crashers are tracked in-tree.
+      `zig build test --fuzz` at its default budget of 50000 per target
+      (~1.85M executions; raise it for an RC/1.0), assert the coverage
+      file's `pcs_len` is non-zero (an uninstrumented run looks green),
+      and upload `.zig-cache/v` for replay. No open crashers are tracked
+      in-tree.
 
 ### API surface
 - [x] The `Connection` surface is partitioned into Stable / Unstable so

@@ -62,8 +62,10 @@ modes:
   runs plateauing near 12.5k. A blocking gate that costs half a day
   buys under a point of coverage and, empirically, means releases don't
   get tagged at all (v0.8.0 and v0.9.0 both shipped untagged). Deep
-  exploration belongs to the weekly `fuzz.yml` job at `10M`, which runs
-  regardless of the release calendar.
+  exploration belongs to the weekly `fuzz.yml` job at `1M` per target
+  (~37M executions, ~5 hours — the largest budget that fits GitHub's 6-hour
+  job cap; this line used to say `10M`, which would be ~50 hours and was
+  never actually runnable), which runs regardless of the release calendar.
 
   What the release gate is for, and still does at `50000`: prove the fuzz
   harness is genuinely instrumented on this commit, and catch a crash or

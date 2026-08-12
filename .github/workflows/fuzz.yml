@@ -9,20 +9,27 @@ on:
       iterations:
         description: "Per-target iteration budget (e.g. 100K, 1M)"
         required: false
-        default: "100K"
+        default: "1M"
 
 # Coverage-guided fuzzing of the wire / frame / server header-peek
 # parsers. The harness lives next to the unit tests in src/wire/,
 # src/frame/, and src/server.zig (every `std.testing.fuzz` site).
 # Crashes save to .zig-cache/v/; the artifact upload preserves them
 # so we can replay locally.
+#
+# Budget: 1M per target (~37M executions total, ~5 h measured on the
+# pinned toolchain). This is the weekly deep-exploration run; the
+# release gate is rc-fuzz.yml at 50000/target. The docs used to claim
+# 10M here while the default was 100K — 10M/target would be ~50 h,
+# past the 6 h job cap, so it was never runnable; 1M is the largest
+# budget that fits.
 jobs:
   fuzz:
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 60
+    timeout-minutes: 350
     env:
-      ITERS: ${{ github.event.inputs.iterations || '100K' }}
+      ITERS: ${{ github.event.inputs.iterations || '1M' }}
     steps:
       - name: Checkout quic-zig
         uses: actions/checkout@v7

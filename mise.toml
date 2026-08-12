@@ -30,15 +30,16 @@ description = "Run the quic-zig Zig test suite"
 run = "zig build test"
 
 [tasks.fuzz]
-# Deep coverage-guided fuzzing on the unfiltered test binary — the only
-# invocation that works on 0.17.0-dev.1158 (a *filtered* test binary under
-# --fuzz aborts the build-runner; ziglang/zig#25352). Single-instance
-# (n_instances = 1), so it saturates one core and rotates across sites. This
-# is exactly what CI runs (.github/workflows/fuzz.yml, ubuntu-latest); the
-# fuzz runtime aborts on macOS regardless, so run it on Linux. See
-# CONTRIBUTING.md "Fuzzing".
-description = "Deep coverage-guided fuzzing (single-instance, unfiltered; Linux)"
-run = "zig build test --fuzz=10M"
+# Deep coverage-guided fuzzing on the unfiltered test binary — a *filtered*
+# test binary under --fuzz still aborts the build-runner (ziglang/zig#25352),
+# so there are deliberately no per-site steps. Single-instance
+# (n_instances = 1), so it saturates one core and rotates across sites.
+# Matches CI (.github/workflows/fuzz.yml) in command and budget: 1M/target
+# ~= 37M executions ~= 5 h. Works on macOS as of the pinned 0.17.0-dev.1252
+# (the dev.1158 macOS abort is fixed; see CONTRIBUTING.md "Fuzzing"), but
+# prefer Linux for long runs since that is what CI exercises.
+description = "Deep coverage-guided fuzzing (single-instance, unfiltered)"
+run = "zig build test -Duse-llvm=true --fuzz=1M"
 
 [tasks.qns-endpoint]
 description = "Build the QNS endpoint binary"
