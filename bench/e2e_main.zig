@@ -136,6 +136,21 @@ const impairment_cells = [_]harness.ImpairmentOptions{
         .total_bytes = 4 << 20,
         .streams = 8,
     },
+    // Shallow buffer: same 10 Mbit link with only 25 ms of queue
+    // before tail drop (the cells above run sim_net's 100 ms
+    // default). This is the regime that separates congestion-control
+    // philosophies: a loss-based sender's sawtooth repeatedly fills
+    // the small buffer (drops + latency spikes), while a rate-based
+    // sender that keeps headroom should hold the queue short. Added
+    // ahead of the BBR landing so the A/B has the cell where that
+    // contrast is starkest — instrument before measure (see 367bfb2).
+    .{
+        .name = "impairment_bottleneck_10mbit_shallow25ms",
+        .loss_permille = 0,
+        .bottleneck_bytes_per_s = 1_250_000,
+        .max_queue_delay_us = 25_000,
+        .total_bytes = 4 << 20,
+    },
 };
 
 fn runImpairment(

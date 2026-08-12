@@ -332,6 +332,13 @@ pub const ImpairmentOptions = struct {
     /// which is what inflates RTT — the only condition under which
     /// slow-start-exit behavior is observable.
     bottleneck_bytes_per_s: u64 = 0,
+    /// Bottleneck buffer depth, expressed as the maximum queueing
+    /// delay before tail drop (sim_net's model). 100 ms is a
+    /// deep-ish consumer buffer; a shallow value (e.g. 25 ms) is the
+    /// regime where a loss-based sender's queue-filling sawtooth and
+    /// a rate-based sender's headroom-keeping cruise diverge most.
+    /// Ignored when `bottleneck_bytes_per_s` is 0.
+    max_queue_delay_us: u64 = 100_000,
     /// Concurrent bidi streams carrying the transfer, round-robin.
     /// >1 reproduces the QNS `multiplexing` (M) shape, where the
     /// send scheduler interleaves many streams rather than draining
@@ -372,6 +379,7 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .loss_permille = opts.loss_permille,
         .reorder_permille = opts.reorder_permille,
         .bottleneck_bytes_per_s = opts.bottleneck_bytes_per_s,
+        .max_queue_delay_us = opts.max_queue_delay_us,
     });
     defer net.deinit();
 
@@ -543,5 +551,21 @@ test "CUBIC completes a lossy impairment transfer end-to-end" {
         .congestion_control = .cubic,
     });
     try std.testing.expect(result.dropped > 0);
+    try std.testing.expect(result.virtual_goodput_mbps > 0);
+}
+
+test "max_queue_delay_us reaches the bottleneck model: a shallow buffer tail-drops and caps peak delay" {
+    const result = try runImpairmentOnce(std.testing.allocator, .{
+        .name = "shallow-buffer-e2e",
+        .total_bytes = 1 << 20,
+        .bottleneck_bytes_per_s = 1_250_000,
+        .max_queue_delay_us = 25_000,
+    });
+    // The reported peak is the max queue delay among ACCEPTED packets,
+    // so a working buffer bound is directly observable...
+    try std.testing.expect(result.peak_queue_delay_us <= 25_000);
+    // ...and an overshooting slow start into 25 ms of buffer must
+    // tail-drop (the deep default rarely does on a clean link).
+    try std.testing.expect(result.queue_dropped > 0);
     try std.testing.expect(result.virtual_goodput_mbps > 0);
 }
