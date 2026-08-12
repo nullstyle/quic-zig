@@ -1,10 +1,6 @@
 const std = @import("std");
 
 const default_image = "quic-zig-qns:local";
-// Keep in step with `build.zig.zon`'s `minimum_zig_version` and the QNS
-// `Dockerfile` ARG; a drift here builds the interop image with a different
-// compiler than `zig build` uses.
-const default_zig_version = "0.17.0-dev.1158+1d1193aa7";
 const default_runner_python = "3.12";
 const default_wireshark_image = "quic-zig-interop-wireshark:local";
 
@@ -53,7 +49,9 @@ const Config = struct {
     home_env: []const u8 = "",
     zig_global_cache_env: []const u8 = "",
     image: []const u8 = default_image,
-    zig_version: []const u8 = default_zig_version,
+    /// Null means "whatever the Dockerfile pins", which is the
+    /// only combination whose SHA-256 check can pass.
+    zig_version: ?[]const u8 = null,
     dry_run: bool = false,
     runner_dir: ?[]const u8 = null,
     role: RunnerRole = .server,
@@ -132,7 +130,7 @@ fn usage() void {
     std.debug.print(
         \\usage:
         \\  zig build external-interop -- preflight [--image quic-zig-qns:local] [--dry-run]
-        \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version 0.17.0-dev.1158+1d1193aa7] [--dry-run]
+        \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version <ver> (also needs matching --build-arg hashes)] [--dry-run]
         \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--assume-compliant quic-go] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
         \\
     , .{});
@@ -327,18 +325,29 @@ fn buildImage(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
         }
     }
 
-    const cmd = [_][]const u8{
-        "docker",
-        "build",
-        "--build-arg",
-        try std.fmt.allocPrint(allocator, "ZIG_VERSION={s}", .{cfg.zig_version}),
+    // The Dockerfile owns the Zig pin, because it also owns the per-arch
+    // SHA-256 that must match it. Overriding just the version from here
+    // would leave the two disagreeing and fail the hash check — which is
+    // exactly how this drifted to a dead pin and took the interop gate
+    // down. So pass the build-arg only when a caller explicitly asks for
+    // a different toolchain, and let them own the mismatch.
+    var cmd: std.ArrayList([]const u8) = .empty;
+    defer cmd.deinit(allocator);
+    try cmd.appendSlice(allocator, &.{ "docker", "build" });
+    if (cfg.zig_version) |v| {
+        try cmd.appendSlice(allocator, &.{
+            "--build-arg",
+            try std.fmt.allocPrint(allocator, "ZIG_VERSION={s}", .{v}),
+        });
+    }
+    try cmd.appendSlice(allocator, &.{
         "-f",
         "quic-zig/interop/qns/Dockerfile",
         "-t",
         cfg.image,
         ".",
-    };
-    try runCommand(io, &cmd, docker_context, cfg.dry_run);
+    });
+    try runCommand(io, cmd.items, docker_context, cfg.dry_run);
 }
 
 fn hostZigPackageCachePath(allocator: std.mem.Allocator, cfg: Config) !?[]const u8 {
