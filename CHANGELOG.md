@@ -7,6 +7,28 @@ changes.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-12
+
+Patch release over v0.10.0 so downstreams can pin a tag instead of a
+raw SHA for the native-Windows build fix. Library code is byte-identical
+to v0.10.0 — the only functional change is the dependency pin.
+
+Verified toolchain: zig 0.17.0-dev.1252+e4b325c19 (unchanged).
+
+### Fixed
+
+- **Native Windows builds no longer fail in the linker configuration
+  step.** The `boringssl-zig` pin moves from tag `v0.6.4` to `0.6.5`
+  (`292c70a2`), which stops `ws2_32` from being resolved through
+  `pkg-config`: Git Bash can expose a `pkg-config.BAT` shim that cannot
+  describe Windows SDK libraries, failing an otherwise healthy native
+  build. This is a *build-configuration* fix; no runtime behavior
+  changed on any platform.
+
+  Note the pin is a commit SHA rather than a tag, because the fix
+  landed upstream before boringssl-zig cut a release; see the
+  cross-repo pin note in `docs/RELEASE_READINESS.md`.
+
 ## [0.10.0] - 2026-07-29
 
 Consumer-feedback release (thanks to the capnp-zig team for a detailed
