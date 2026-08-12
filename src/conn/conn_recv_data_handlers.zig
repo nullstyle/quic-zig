@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_streams = @import("conn_streams.zig");
 const conn_keys = @import("conn_keys.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
@@ -260,7 +261,7 @@ pub fn handleStream(
     lvl: EncryptionLevel,
     s: frame_types.Stream,
 ) Error!void {
-    if (!self.peerMaySendOnStream(s.stream_id)) {
+    if (!conn_streams.peerMaySendOnStream(self, s.stream_id)) {
         self.close(true, transport_error_stream_state, "stream data on receive-only stream");
         return;
     }
@@ -269,7 +270,7 @@ pub fn handleStream(
         return;
     };
     const existing = self.streams.get(s.stream_id);
-    if (existing == null and self.streamInitiatedByLocal(s.stream_id)) {
+    if (existing == null and conn_streams.streamInitiatedByLocal(self, s.stream_id)) {
         self.close(true, transport_error_stream_state, "peer referenced unopened local stream");
         return;
     }
@@ -278,7 +279,7 @@ pub fn handleStream(
     // it instead of resurrecting the stream with fresh (final-size /
     // reset) state. Checked before recordPeerStreamOpenOrClose so the
     // id is neither re-counted nor recreated.
-    if (existing == null and self.peerStreamAlreadyReaped(s.stream_id)) return;
+    if (existing == null and conn_streams.peerStreamAlreadyReaped(self, s.stream_id)) return;
     if (existing == null and !self.recordPeerStreamOpenOrClose(s.stream_id)) return;
 
     const ptr = existing orelse blk: {

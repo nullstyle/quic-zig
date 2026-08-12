@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const ConnectionId = state_mod.ConnectionId;
@@ -629,7 +630,7 @@ pub fn registerPeerCid(
         self.close(true, transport_error_protocol_violation, "invalid connection id retire_prior_to");
         return;
     }
-    if (self.multipathNegotiated() and !self.pathIdAllowedByLocalLimit(path_id)) return;
+    if (self.multipathNegotiated() and !conn_recv_dispatch.pathIdAllowedByLocalLimit(self, path_id)) return;
 
     for (self.peer_cids.items) |*item| {
         if (item.path_id == path_id and item.sequence_number == sequence_number) {

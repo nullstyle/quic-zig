@@ -8,6 +8,40 @@
 //! spaces, ACK tracking, congestion control, flow control, the
 //! stream layer, the multipath `PathSet`, key updates, and the
 //! close/draining lifecycle.
+//!
+//! This file is the hub: the struct definition (fields), construction,
+//! negotiated transport-parameter config, the close/draining
+//! lifecycle, per-level dispatch shims, `tick`/`nextTimerDeadline`,
+//! the TLS handshake driver + `tls.quic.Method` trampolines, and thin
+//! delegating methods. The method bodies live in free-function
+//! sibling files, each taking `*Connection` as its first argument:
+//!
+//!  - conn_send.zig          — canSend/poll*; the packet assembler
+//!  - conn_recv_dispatch.zig — handle/handleWithEcn, packet open,
+//!                             frame dispatch + gates, stateless reset
+//!  - conn_recv_data_handlers.zig    — CRYPTO / STREAM / DATAGRAM
+//!  - conn_recv_packet_handlers.zig  — per-level packet handlers
+//!  - conn_recv_ack_handlers.zig     — inbound ACK processing
+//!  - conn_recv_flow_handlers.zig    — MAX_* / *_BLOCKED frames
+//!  - conn_recv_cid_token_handlers.zig / conn_recv_multipath_handlers.zig
+//!  - conn_recv_stream_control_handlers.zig — STOP_SENDING/RESET_STREAM
+//!  - conn_streams.zig       — stream open/id algebra/limits/GC + API
+//!  - conn_flow.zig          — flow-control credit + blocked state
+//!  - conn_datagram.zig      — RFC 9221 datagram API + events
+//!  - conn_cids.zig          — local + peer CID registries/budgets
+//!  - conn_keys.zig          — key schedule, 1-RTT key update, discard
+//!  - conn_version.zig       — Initial accept, VN/Retry, version upgrade
+//!  - conn_paths.zig         — multipath lifecycle, PATH_CHALLENGE, probes
+//!  - conn_migration.zig     — RFC 9000 §9 migration + alt-address
+//!  - conn_loss.zig          — RFC 9002 loss detection, PTO, deadlines
+//!  - conn_qlog.zig          — qlog event types + emitters
+//!  - path_frame_queue.zig / _internal.zig — multipath queueing + shared
+//!                             CID helpers (pre-existing)
+//!
+//! Tests live in _state_tests_<area>.zig (aggregated by
+//! _state_tests.zig); shared fixtures in _test_util.zig. Methods and
+//! decls annotated `// INTERNAL:` are pub only for these sibling
+//! files — they are not embedder API.
 
 const std = @import("std");
 const boringssl = @import("boringssl");
@@ -1591,7 +1625,9 @@ pub const Connection = struct {
         // For clients, `bind` is the moment we kick off the handshake;
         // emit `connection_started` here. Servers fire it from
         // `handleInitial` once they have a peer SCID.
-        if (self.role == .client) self.emitConnectionStartedOnce();
+        if (self.role == .client) conn_qlog.emitConnectionStartedOnce(
+            self,
+        );
     }
 
     /// Free all per-connection allocations, including stream
@@ -1973,10 +2009,6 @@ pub const Connection = struct {
         return conn_qlog.setQlogPacketEvents(self, enabled);
     }
 
-    pub fn emitConnectionStartedOnce(self: *Connection) void {
-        return conn_qlog.emitConnectionStartedOnce(self);
-    }
-
     fn emitConnectionStateIfChanged(self: *Connection) void {
         return conn_qlog.emitConnectionStateIfChanged(self);
     }
@@ -1989,28 +2021,12 @@ pub const Connection = struct {
         return conn_qlog.emitPacketSent(self, lvl, pn, size, frames_count);
     }
 
-    pub fn emitPacketReceived(self: *Connection, lvl: EncryptionLevel, pn: u64, size: u32, frames_count: u32) void {
-        return conn_qlog.emitPacketReceived(self, lvl, pn, size, frames_count);
-    }
-
-    pub fn emitPacketDropped(self: *Connection, lvl: ?EncryptionLevel, size: u32, reason: QlogPacketDropReason) void {
-        return conn_qlog.emitPacketDropped(self, lvl, size, reason);
-    }
-
     fn emitLossDetected(self: *Connection, lvl: EncryptionLevel, stats: LossStats, reason: QlogLossReason) void {
         return conn_qlog.emitLossDetected(self, lvl, stats, reason);
     }
 
     fn emitPacketLost(self: *Connection, lvl: EncryptionLevel, pn: u64, bytes: u32, reason: QlogLossReason) void {
         return conn_qlog.emitPacketLost(self, lvl, pn, bytes, reason);
-    }
-
-    pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
-        return conn_qlog.emitCongestionStateIfChanged(self, now_us);
-    }
-
-    pub fn emitMetricsSnapshot(self: *Connection, now_us: u64) void {
-        return conn_qlog.emitMetricsSnapshot(self, now_us);
     }
 
     pub fn haveSecret(self: *const Connection, lvl: EncryptionLevel, dir: Direction) bool {
@@ -2051,10 +2067,6 @@ pub const Connection = struct {
 
     pub fn promoteApplicationReadKeys(self: *Connection, now_us: u64) Error!void {
         return conn_keys.promoteApplicationReadKeys(self, now_us);
-    }
-
-    pub fn maybeRespondToPeerKeyUpdate(self: *Connection, now_us: u64) Error!void {
-        return conn_keys.maybeRespondToPeerKeyUpdate(self, now_us);
     }
 
     pub fn canInitiateKeyUpdateAt(self: *const Connection, now_us: u64) bool {
@@ -2103,10 +2115,6 @@ pub const Connection = struct {
         return conn_keys.onApplicationPacketAckedForKeys(self, packet, now_us);
     }
 
-    pub fn noteApplicationAuthFailure(self: *Connection) void {
-        return conn_keys.noteApplicationAuthFailure(self);
-    }
-
     fn discardExpiredApplicationReadKeys(self: *Connection, now_us: u64) void {
         return conn_keys.discardExpiredApplicationReadKeys(self, now_us);
     }
@@ -2125,26 +2133,6 @@ pub const Connection = struct {
 
     pub fn longHeaderScid(self: *const Connection) ConnectionId {
         return conn_cids.longHeaderScid(self);
-    }
-
-    pub fn retireLocalCidsPriorTo(
-        self: *Connection,
-        path_id: u32,
-        retire_prior_to: u64,
-    ) void {
-        return conn_cids.retireLocalCidsPriorTo(self, path_id, retire_prior_to);
-    }
-
-    pub fn retireLocalCidFromPeer(self: *Connection, path_id: u32, sequence_number: u64) void {
-        return conn_cids.retireLocalCidFromPeer(self, path_id, sequence_number);
-    }
-
-    pub fn dropPendingLocalCidAdvertisement(
-        self: *Connection,
-        path_id: u32,
-        sequence_number: u64,
-    ) void {
-        return conn_cids.dropPendingLocalCidAdvertisement(self, path_id, sequence_number);
     }
 
     pub fn smallestLiveLocalCidSeq(self: *const Connection, path_id: u32) ?u64 {
@@ -2175,28 +2163,12 @@ pub const Connection = struct {
         return conn_cids.setIncomingLocalCidSeq(self, seq);
     }
 
-    pub fn localCidSequenceExists(
-        self: *const Connection,
-        path_id: u32,
-        sequence_number: u64,
-    ) bool {
-        return conn_cids.localCidSequenceExists(self, path_id, sequence_number);
-    }
-
     pub fn peerActiveConnectionIdLimit(self: *const Connection) u64 {
         return conn_cids.peerActiveConnectionIdLimit(self);
     }
 
     pub fn localConnectionIdIssueBudget(self: *const Connection, path_id: u32) usize {
         return conn_cids.localConnectionIdIssueBudget(self, path_id);
-    }
-
-    pub fn localConnectionIdIssueBudgetAfterRetirePriorTo(
-        self: *const Connection,
-        path_id: u32,
-        retire_prior_to: u64,
-    ) usize {
-        return conn_cids.localConnectionIdIssueBudgetAfterRetirePriorTo(self, path_id, retire_prior_to);
     }
 
     pub fn acceptInitial(
@@ -2238,20 +2210,12 @@ pub const Connection = struct {
         return conn_keys.discardHandshakeKeys(self);
     }
 
-    pub fn ensureInitialKeys(self: *Connection) Error!void {
-        return conn_keys.ensureInitialKeys(self);
-    }
-
     pub fn setVersion(self: *Connection, version: u32) void {
         return conn_version.setVersion(self, version);
     }
 
     pub fn setPendingVersionUpgrade(self: *Connection, version: ?u32) void {
         return conn_version.setPendingVersionUpgrade(self, version);
-    }
-
-    pub fn pendingVersionUpgrade(self: *const Connection) ?u32 {
-        return conn_version.pendingVersionUpgrade(self);
     }
 
     pub fn applyPendingVersionUpgrade(self: *Connection) bool {
@@ -2312,18 +2276,6 @@ pub const Connection = struct {
         return conn_streams.streamIndex(id);
     }
 
-    pub fn streamInitiatedByLocal(self: *const Connection, id: u64) bool {
-        return conn_streams.streamInitiatedByLocal(self, id);
-    }
-
-    pub fn localMaySendOnStream(self: *const Connection, id: u64) bool {
-        return conn_streams.localMaySendOnStream(self, id);
-    }
-
-    pub fn peerMaySendOnStream(self: *const Connection, id: u64) bool {
-        return conn_streams.peerMaySendOnStream(self, id);
-    }
-
     pub fn initialRecvStreamLimit(self: *const Connection, id: u64) u64 {
         return conn_streams.initialRecvStreamLimit(self, id);
     }
@@ -2350,14 +2302,6 @@ pub const Connection = struct {
 
     pub fn recordPeerStreamOpenOrClose(self: *Connection, id: u64) bool {
         return conn_streams.recordPeerStreamOpenOrClose(self, id);
-    }
-
-    pub fn peerStreamAlreadyReaped(self: *const Connection, id: u64) bool {
-        return conn_streams.peerStreamAlreadyReaped(self, id);
-    }
-
-    pub fn peerStreamWithinLocalLimit(self: *Connection, id: u64) bool {
-        return conn_streams.peerStreamWithinLocalLimit(self, id);
     }
 
     pub fn limitChunkToSendFlow(
@@ -2399,14 +2343,6 @@ pub const Connection = struct {
 
     fn gcClosedStreams(self: *Connection) void {
         return conn_streams.gcClosedStreams(self);
-    }
-
-    pub fn nextServerUniId(self: *const Connection, start: u64) u64 {
-        return conn_streams.nextServerUniId(self, start);
-    }
-
-    pub fn nextServerBidiId(self: *const Connection, start: u64) u64 {
-        return conn_streams.nextServerBidiId(self, start);
     }
 
     /// Look up a stream by id. Returns null if no stream is open
@@ -2503,18 +2439,6 @@ pub const Connection = struct {
         return conn_flow.peerStreamsBlockedAt(self, bidi);
     }
 
-    pub fn queueMaxStreamData(
-        self: *Connection,
-        stream_id: u64,
-        maximum_stream_data: u64,
-    ) Error!void {
-        return conn_flow.queueMaxStreamData(self, stream_id, maximum_stream_data);
-    }
-
-    pub fn queueMaxData(self: *Connection, maximum_data: u64) void {
-        return conn_flow.queueMaxData(self, maximum_data);
-    }
-
     pub fn shouldQueueReceiveCredit(consumed: u64, advertised: u64, window: u64) bool {
         return conn_flow.shouldQueueReceiveCredit(consumed, advertised, window);
     }
@@ -2523,45 +2447,11 @@ pub const Connection = struct {
         return conn_flow.queueMaxStreams(self, bidi, maximum_streams);
     }
 
-    pub fn maybeReturnPeerStreamCredit(self: *Connection, s: *Stream) void {
-        return conn_flow.maybeReturnPeerStreamCredit(self, s);
-    }
-
-    pub fn recordFlowBlockedEvent(self: *Connection, info: FlowBlockedInfo) void {
-        return conn_flow.recordFlowBlockedEvent(self, info);
-    }
-
     pub fn connectionIdReplenishInfo(
         self: *const Connection,
         path_id: u32,
     ) ?ConnectionIdReplenishInfo {
         return conn_cids.connectionIdReplenishInfo(self, path_id);
-    }
-
-    pub fn connectionIdReplenishInfoFor(
-        self: *const Connection,
-        path_id: u32,
-        reason: ConnectionIdReplenishReason,
-        blocked_next_sequence_number: ?u64,
-    ) ConnectionIdReplenishInfo {
-        return conn_cids.connectionIdReplenishInfoFor(self, path_id, reason, blocked_next_sequence_number);
-    }
-
-    pub fn recordConnectionIdsNeeded(
-        self: *Connection,
-        path_id: u32,
-        reason: ConnectionIdReplenishReason,
-        blocked_next_sequence_number: ?u64,
-    ) void {
-        return conn_cids.recordConnectionIdsNeeded(self, path_id, reason, blocked_next_sequence_number);
-    }
-
-    pub fn connectionIdEventStillNeeded(self: *const Connection, path_id: u32) bool {
-        return conn_cids.connectionIdEventStillNeeded(self, path_id);
-    }
-
-    pub fn recordDatagramAcked(self: *Connection, packet: *const sent_packets_mod.SentPacket) void {
-        return conn_datagram.recordDatagramAcked(self, packet);
     }
 
     fn recordDatagramLost(self: *Connection, packet: *const sent_packets_mod.SentPacket) void {
@@ -2790,10 +2680,6 @@ pub const Connection = struct {
         now_us: u64,
     ) bool {
         return conn_paths.abandonPathAt(self, path_id, error_code, now_us);
-    }
-
-    pub fn setPathStatus(self: *Connection, path_id: u32, state: path_mod.State) bool {
-        return conn_paths.setPathStatus(self, path_id, state);
     }
 
     pub fn setPathBackup(self: *Connection, path_id: u32, backup: bool) bool {
@@ -3126,10 +3012,6 @@ pub const Connection = struct {
 
     pub fn activePath(self: *Connection) *PathState {
         return conn_paths.activePath(self);
-    }
-
-    pub fn pathForId(self: *Connection, path_id: u32) *PathState {
-        return conn_paths.pathForId(self, path_id);
     }
 
     fn applicationPathForPoll(self: *Connection) *PathState {
@@ -3470,7 +3352,7 @@ pub const Connection = struct {
                 self.recordDatagramLost(&removed);
                 _ = try self.dispatchLostPacketToStreams(&removed);
                 _ = try self.dispatchLostControlFramesOnPath(&removed, path.id);
-                self.discardSentCryptoForPacket(.early_data, removed.pn);
+                conn_loss.discardSentCryptoForPacket(self, .early_data, removed.pn);
             }
         }
     }
@@ -3517,16 +3399,6 @@ pub const Connection = struct {
 
     pub fn retiredPathRetentionUs(self: *const Connection) u64 {
         return conn_loss.retiredPathRetentionUs(self);
-    }
-
-    pub fn retirePath(
-        self: *Connection,
-        path_id: u32,
-        error_code: u64,
-        now_us: u64,
-        queue_abandon: bool,
-    ) bool {
-        return conn_paths.retirePath(self, path_id, error_code, now_us, queue_abandon);
     }
 
     fn expireRetiringPaths(self: *Connection, now_us: u64) void {
@@ -3834,18 +3706,6 @@ pub const Connection = struct {
         return conn_recv_dispatch.handleWithEcn(self, bytes, from, ecn, now_us);
     }
 
-    pub fn closingAttributionOnly(self: *const Connection) bool {
-        return conn_recv_dispatch.closingAttributionOnly(self);
-    }
-
-    pub fn scanForPeerCloseFrame(
-        self: *Connection,
-        payload: []const u8,
-        now_us: u64,
-    ) void {
-        return conn_recv_dispatch.scanForPeerCloseFrame(self, payload, now_us);
-    }
-
     pub fn probePath(
         self: *Connection,
         token: [8]u8,
@@ -3853,16 +3713,6 @@ pub const Connection = struct {
         timeout_us: u64,
     ) Error!void {
         return conn_paths.probePath(self, token, now_us, timeout_us);
-    }
-
-    pub fn probePathId(
-        self: *Connection,
-        path_id: u32,
-        token: [8]u8,
-        now_us: u64,
-        timeout_us: u64,
-    ) Error!void {
-        return conn_paths.probePathId(self, path_id, token, now_us, timeout_us);
     }
 
     pub fn requestPing(self: *Connection) void {
@@ -4154,49 +4004,12 @@ pub const Connection = struct {
         return conn_recv_dispatch.packetPayloadNeedsImmediateAck(payload);
     }
 
-    pub fn recordApplicationReceivedPacket(
-        app_pn_space: *PnSpace,
-        pn: u64,
-        now_us: u64,
-        payload: []const u8,
-        delayed_ack_threshold: u8,
-    ) void {
-        return conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, pn, now_us, payload, delayed_ack_threshold);
-    }
-
-    pub fn versionListContains(vn: wire_header.VersionNegotiation, version: u32) bool {
-        return conn_recv_dispatch.versionListContains(vn, version);
-    }
-
-    pub fn handleVersionNegotiation(
-        self: *Connection,
-        bytes: []u8,
-        now_us: u64,
-    ) usize {
-        return conn_recv_packet_handlers.handleVersionNegotiation(self, bytes, now_us);
-    }
-
     pub fn handleShort(
         self: *Connection,
         bytes: []u8,
         now_us: u64,
     ) Error!usize {
         return conn_recv_packet_handlers.handleShort(self, bytes, now_us);
-    }
-
-    pub fn countFrames(payload: []const u8) u32 {
-        return conn_recv_dispatch.countFrames(payload);
-    }
-
-    pub fn openApplicationPacket(
-        self: *Connection,
-        pt_buf: *[max_recv_plaintext]u8,
-        bytes: []u8,
-        app_path: *const PathState,
-        largest_received: u64,
-        multipath_path_id: ?u32,
-    ) Error!?ApplicationOpenResult {
-        return conn_recv_dispatch.openApplicationPacket(self, pt_buf, bytes, app_path, largest_received, multipath_path_id);
     }
 
     pub fn handleInitial(
@@ -4215,22 +4028,6 @@ pub const Connection = struct {
         return conn_recv_packet_handlers.handleRetry(self, bytes, now_us);
     }
 
-    pub fn handleZeroRtt(
-        self: *Connection,
-        bytes: []u8,
-        now_us: u64,
-    ) Error!usize {
-        return conn_recv_packet_handlers.handleZeroRtt(self, bytes, now_us);
-    }
-
-    pub fn handleHandshake(
-        self: *Connection,
-        bytes: []u8,
-        now_us: u64,
-    ) Error!usize {
-        return conn_recv_packet_handlers.handleHandshake(self, bytes, now_us);
-    }
-
     pub fn dispatchFrames(
         self: *Connection,
         lvl: EncryptionLevel,
@@ -4246,10 +4043,6 @@ pub const Connection = struct {
 
     pub fn isKnownStatelessReset(self: *const Connection, bytes: []const u8) bool {
         return conn_recv_dispatch.isKnownStatelessReset(self, bytes);
-    }
-
-    pub fn pathIdAllowedByLocalLimit(self: *Connection, path_id: u32) bool {
-        return conn_recv_dispatch.pathIdAllowedByLocalLimit(self, path_id);
     }
 
     pub fn peerCidActiveCountForPath(self: *const Connection, path_id: u32) usize {
@@ -4304,32 +4097,12 @@ pub const Connection = struct {
         return conn_recv_cid_token_handlers.handleNewToken(self, nt);
     }
 
-    pub fn pathAckToAck(pa: frame_types.PathAck) frame_types.Ack {
-        return conn_recv_multipath_handlers.pathAckToAck(pa);
-    }
-
     pub fn handlePathAck(
         self: *Connection,
         pa: frame_types.PathAck,
         now_us: u64,
     ) Error!void {
         return conn_recv_multipath_handlers.handlePathAck(self, pa, now_us);
-    }
-
-    pub fn handlePathAbandon(
-        self: *Connection,
-        pa: frame_types.PathAbandon,
-        now_us: u64,
-    ) void {
-        return conn_recv_multipath_handlers.handlePathAbandon(self, pa, now_us);
-    }
-
-    pub fn handlePathStatus(
-        self: *Connection,
-        ps: frame_types.PathStatus,
-        available: bool,
-    ) void {
-        return conn_recv_multipath_handlers.handlePathStatus(self, ps, available);
     }
 
     pub fn handlePathNewConnectionId(
@@ -4374,13 +4147,6 @@ pub const Connection = struct {
 
     pub fn highestAlternativeAddressSequenceSeen(self: *const Connection) ?u64 {
         return conn_migration.highestAlternativeAddressSequenceSeen(self);
-    }
-
-    pub fn handleStopSending(
-        self: *Connection,
-        ss: frame_types.StopSending,
-    ) Error!void {
-        return conn_recv_stream_control_handlers.handleStopSending(self, ss);
     }
 
     pub fn handleMaxData(self: *Connection, md: frame_types.MaxData) void {
@@ -4452,42 +4218,11 @@ pub const Connection = struct {
         return conn_recv_ack_handlers.handleAckAtLevel(self, lvl, a, now_us);
     }
 
-    pub fn handleApplicationAckOnPath(
-        self: *Connection,
-        path: *PathState,
-        a: frame_types.Ack,
-        now_us: u64,
-    ) Error!void {
-        return conn_recv_ack_handlers.handleApplicationAckOnPath(self, path, a, now_us);
-    }
-
-    pub fn dispatchAckedPacketToStreams(
-        self: *Connection,
-        packet: *const sent_packets_mod.SentPacket,
-    ) Error!void {
-        return conn_loss.dispatchAckedPacketToStreams(self, packet);
-    }
-
     fn dispatchLostPacketToStreams(
         self: *Connection,
         packet: *const sent_packets_mod.SentPacket,
     ) Error!bool {
         return conn_loss.dispatchLostPacketToStreams(self, packet);
-    }
-
-    pub fn discardSentCryptoForPacket(
-        self: *Connection,
-        lvl: EncryptionLevel,
-        pn: u64,
-    ) void {
-        return conn_loss.discardSentCryptoForPacket(self, lvl, pn);
-    }
-
-    pub fn dispatchAckedControlFrames(
-        self: *Connection,
-        packet: *const sent_packets_mod.SentPacket,
-    ) void {
-        return conn_loss.dispatchAckedControlFrames(self, packet);
     }
 
     pub fn dispatchLostControlFrames(
@@ -4515,13 +4250,6 @@ pub const Connection = struct {
 
     pub fn isPersistentCongestionFromBasePto(base_pto_us: u64, stats: LossStats) bool {
         return conn_loss.isPersistentCongestionFromBasePto(base_pto_us, stats);
-    }
-
-    pub fn detectLossesByPacketThresholdAtLevel(
-        self: *Connection,
-        lvl: EncryptionLevel,
-    ) Error!void {
-        return conn_loss.detectLossesByPacketThresholdAtLevel(self, lvl);
     }
 
     pub fn detectLossesByPacketThresholdOnApplicationPath(

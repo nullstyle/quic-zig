@@ -10,6 +10,10 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_paths = @import("conn_paths.zig");
+const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
+const conn_recv_ack_handlers = @import("conn_recv_ack_handlers.zig");
+const conn_cids = @import("conn_cids.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;
@@ -38,7 +42,7 @@ pub fn handlePathAck(
         return self.handleAckAtLevel(.application, pathAckToAck(pa), now_us);
     }
     const path = self.paths.get(pa.path_id) orelse return;
-    try self.handleApplicationAckOnPath(path, pathAckToAck(pa), now_us);
+    try conn_recv_ack_handlers.handleApplicationAckOnPath(self, path, pathAckToAck(pa), now_us);
 }
 
 pub fn handlePathAbandon(
@@ -46,7 +50,7 @@ pub fn handlePathAbandon(
     pa: frame_types.PathAbandon,
     now_us: u64,
 ) void {
-    _ = self.retirePath(pa.path_id, pa.error_code, now_us, true);
+    _ = conn_paths.retirePath(self, pa.path_id, pa.error_code, now_us, true);
 }
 
 pub fn handlePathStatus(
@@ -79,8 +83,8 @@ pub fn handlePathRetireConnectionId(
             return;
         }
     }
-    self.retireLocalCidFromPeer(rc.path_id, rc.sequence_number);
-    self.dropPendingLocalCidAdvertisement(rc.path_id, rc.sequence_number);
+    conn_cids.retireLocalCidFromPeer(self, rc.path_id, rc.sequence_number);
+    conn_cids.dropPendingLocalCidAdvertisement(self, rc.path_id, rc.sequence_number);
 }
 
 pub fn handleMaxPathId(self: *Connection, mp: frame_types.MaxPathId) void {
@@ -98,13 +102,13 @@ pub fn handleMaxPathId(self: *Connection, mp: frame_types.MaxPathId) void {
 }
 
 pub fn handlePathsBlocked(self: *Connection, pb: frame_types.PathsBlocked) void {
-    if (!self.pathIdAllowedByLocalLimit(pb.maximum_path_id)) return;
+    if (!conn_recv_dispatch.pathIdAllowedByLocalLimit(self, pb.maximum_path_id)) return;
     if (pb.maximum_path_id < self.local_max_path_id) return;
     self.peer_paths_blocked_at = pb.maximum_path_id;
 }
 
 pub fn handlePathCidsBlocked(self: *Connection, pcb: frame_types.PathCidsBlocked) void {
-    if (!self.pathIdAllowedByLocalLimit(pcb.path_id)) return;
+    if (!conn_recv_dispatch.pathIdAllowedByLocalLimit(self, pcb.path_id)) return;
     const next = _internal.nextLocalCidSequence(self, pcb.path_id);
     if (pcb.next_sequence_number > next) {
         self.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
@@ -112,5 +116,5 @@ pub fn handlePathCidsBlocked(self: *Connection, pcb: frame_types.PathCidsBlocked
     }
     self.peer_path_cids_blocked_path_id = pcb.path_id;
     self.peer_path_cids_blocked_next_sequence = pcb.next_sequence_number;
-    self.recordConnectionIdsNeeded(pcb.path_id, .path_cids_blocked, pcb.next_sequence_number);
+    conn_cids.recordConnectionIdsNeeded(self, pcb.path_id, .path_cids_blocked, pcb.next_sequence_number);
 }

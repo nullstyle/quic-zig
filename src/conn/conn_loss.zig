@@ -264,11 +264,12 @@ pub fn dispatchLostControlFramesOnPath(
     for (packet.retransmit_frames.items) |frame| {
         switch (frame) {
             .max_data => |md| {
-                self.queueMaxData(md.maximum_data);
+                conn_flow.queueMaxData(self, md.maximum_data);
                 any = true;
             },
             .max_stream_data => |msd| {
-                try self.queueMaxStreamData(
+                try conn_flow.queueMaxStreamData(
+                    self,
                     msd.stream_id,
                     msd.maximum_stream_data,
                 );
@@ -603,7 +604,7 @@ pub fn detectLossesByPacketThresholdAtLevel(
     self.qlog_packets_lost +|= stats.count;
     conn_qlog.emitLossDetected(self, lvl, stats, .packet_threshold);
     onPacketsLostAtLevel(self, lvl, stats);
-    self.emitCongestionStateIfChanged(0);
+    conn_qlog.emitCongestionStateIfChanged(self, 0);
 }
 
 pub fn detectLossesByPacketThresholdOnApplicationPath(
@@ -655,7 +656,7 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
     self.qlog_packets_lost +|= stats.count;
     conn_qlog.emitLossDetected(self, .application, stats, .packet_threshold);
     onApplicationPathPacketsLost(self, path, stats);
-    self.emitCongestionStateIfChanged(0);
+    conn_qlog.emitCongestionStateIfChanged(self, 0);
 }
 
 pub fn detectLossesByTimeThresholdAtLevel(
@@ -722,7 +723,7 @@ pub fn detectLossesByTimeThresholdAtLevel(
     self.qlog_packets_lost +|= stats.count;
     conn_qlog.emitLossDetected(self, lvl, stats, .time_threshold);
     onPacketsLostAtLevel(self, lvl, stats);
-    self.emitCongestionStateIfChanged(now_us);
+    conn_qlog.emitCongestionStateIfChanged(self, now_us);
 }
 
 pub fn detectLossesByTimeThresholdOnApplicationPath(
@@ -783,7 +784,7 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
     self.qlog_packets_lost +|= stats.count;
     conn_qlog.emitLossDetected(self, .application, stats, .time_threshold);
     onApplicationPathPacketsLost(self, path, stats);
-    self.emitCongestionStateIfChanged(now_us);
+    conn_qlog.emitCongestionStateIfChanged(self, now_us);
 }
 
 fn firePtoAtLevel(

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_cids = @import("conn_cids.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;
@@ -69,8 +70,8 @@ pub fn handleRetireConnectionId(
     if (self.smallestLiveLocalCidSeq(0)) |smallest| {
         if (rc.sequence_number < smallest) return;
     }
-    self.retireLocalCidFromPeer(0, rc.sequence_number);
-    self.dropPendingLocalCidAdvertisement(0, rc.sequence_number);
+    conn_cids.retireLocalCidFromPeer(self, 0, rc.sequence_number);
+    conn_cids.dropPendingLocalCidAdvertisement(self, 0, rc.sequence_number);
 }
 
 /// RFC 9000 §19.7 — server-issued NEW_TOKEN. The frame is only

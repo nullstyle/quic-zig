@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
 const conn_qlog = @import("conn_qlog.zig");
 const conn_keys = @import("conn_keys.zig");
 const conn_paths = @import("conn_paths.zig");
@@ -137,7 +138,7 @@ pub fn pollDatagram(
     }
     if (pos == 0) return null;
     self.last_activity_us = now_us;
-    const out_path = self.pathForId(app_path_id);
+    const out_path = conn_paths.pathForId(self, app_path_id);
     const out_addr = if (pos > app_start_pos) self.poll_addr_override orelse out_path.peerAddress() else out_path.peerAddress();
     self.poll_addr_override = null;
     if (out_addr) |addr| {
@@ -176,7 +177,9 @@ pub fn pollLevelOnPath(
     var have_keys = false;
     switch (lvl) {
         .initial => {
-            try self.ensureInitialKeys();
+            try conn_keys.ensureInitialKeys(
+                self,
+            );
             if (self.initial_keys_write) |k| {
                 keys = k;
                 have_keys = true;
@@ -201,7 +204,7 @@ pub fn pollLevelOnPath(
     if (!self.peer_dcid_set) return Error.PeerDcidNotSet;
 
     // Build payload.
-    const app_path = self.pathForId(app_path_id);
+    const app_path = conn_paths.pathForId(self, app_path_id);
     const pn_space = self.pnSpaceForLevelOnPath(lvl, app_path);
     const sent_tracker = self.sentForLevelOnPath(lvl, app_path);
     const pending_ping = self.pendingPingForLevelOnPath(lvl, app_path);
@@ -1278,7 +1281,7 @@ pub fn pollLevelOnPath(
     // qlog hooks for the outgoing packet.
     self.qlog_packets_sent +|= 1;
     self.qlog_bytes_sent +|= n;
-    conn_qlog.emitPacketSent(self, lvl, pn, @intCast(n), Connection.countFrames(pl_buf[0..pl_pos]));
+    conn_qlog.emitPacketSent(self, lvl, pn, @intCast(n), conn_recv_dispatch.countFrames(pl_buf[0..pl_pos]));
 
     return n;
 }

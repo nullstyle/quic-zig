@@ -101,7 +101,13 @@ pub const PreferredAddressConfig = @import("server.zig").PreferredAddressConfig;
 pub const Client = @import("client.zig").Client;
 
 /// The per-connection state machine. See `conn.Connection` for the
-/// full method surface (~106 public methods).
+/// full method surface. The implementation is split across
+/// free-function sibling files under `src/conn/` (`conn_send.zig`,
+/// `conn_recv_dispatch.zig`, `conn_streams.zig`, ...) with thin
+/// delegating methods left on the struct; methods carrying an
+/// `INTERNAL` comment are cross-file scaffolding, not embedder API —
+/// the intended embedder surface is the documented tier in
+/// `docs/API_STABILITY.md`.
 pub const Connection = conn.Connection;
 
 /// The error set `Connection`'s methods return. Embedders building a

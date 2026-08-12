@@ -138,7 +138,7 @@ pub fn queueMaxStreams(self: *Connection, bidi: bool, maximum_streams: u64) void
 }
 
 pub fn maybeReturnPeerStreamCredit(self: *Connection, s: *Stream) void {
-    if (self.streamInitiatedByLocal(s.id)) return;
+    if (conn_streams.streamInitiatedByLocal(self, s.id)) return;
     if (s.stream_count_credit_returned) return;
     if (!(s.recv.state == .data_recvd or
         s.recv.state == .data_read or

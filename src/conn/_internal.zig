@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_cids = @import("conn_cids.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const path_mod = @import("path.zig");
@@ -46,8 +47,8 @@ pub fn ensureCanIssueLocalCid(
     cid_len: usize,
 ) Error!void {
     if (cid_len == 0) return;
-    if (self.localCidSequenceExists(path_id, sequence_number)) return;
-    if (self.localConnectionIdIssueBudgetAfterRetirePriorTo(path_id, retire_prior_to) == 0) {
+    if (conn_cids.localCidSequenceExists(self, path_id, sequence_number)) return;
+    if (conn_cids.localConnectionIdIssueBudgetAfterRetirePriorTo(self, path_id, retire_prior_to) == 0) {
         return Error.ConnectionIdLimitExceeded;
     }
 }
@@ -97,7 +98,7 @@ pub fn rememberLocalCid(
             return;
         }
     }
-    self.retireLocalCidsPriorTo(path_id, retire_prior_to);
+    conn_cids.retireLocalCidsPriorTo(self, path_id, retire_prior_to);
     try self.local_cids.append(self.allocator, .{
         .path_id = path_id,
         .sequence_number = sequence_number,
@@ -127,12 +128,13 @@ pub fn refreshConnectionIdEventsForPath(self: *Connection, path_id: u32) void {
             i += 1;
             continue;
         }
-        if (!self.connectionIdEventStillNeeded(path_id)) {
+        if (!conn_cids.connectionIdEventStillNeeded(self, path_id)) {
             self.connection_id_events.removeAt(i);
             continue;
         }
         const event = slice[i];
-        self.connection_id_events.slice()[i] = self.connectionIdReplenishInfoFor(
+        self.connection_id_events.slice()[i] = conn_cids.connectionIdReplenishInfoFor(
+            self,
             path_id,
             event.reason,
             event.blocked_next_sequence_number,

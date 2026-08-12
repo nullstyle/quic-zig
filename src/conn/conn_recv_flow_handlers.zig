@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_flow = @import("conn_flow.zig");
+const conn_streams = @import("conn_streams.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;
@@ -30,7 +32,7 @@ pub fn handleMaxData(self: *Connection, md: frame_types.MaxData) void {
 /// increases. PROTOCOL_VIOLATION if the stream is receive-only from
 /// our perspective.
 pub fn handleMaxStreamData(self: *Connection, msd: frame_types.MaxStreamData) void {
-    if (!self.localMaySendOnStream(msd.stream_id)) {
+    if (!conn_streams.localMaySendOnStream(self, msd.stream_id)) {
         self.close(true, transport_error_stream_state, "max stream data for receive-only stream");
         return;
     }
@@ -68,7 +70,7 @@ pub fn handleMaxStreams(self: *Connection, ms: frame_types.MaxStreams) void {
 /// flow-control deadlocks via `peerDataBlockedAt`.
 pub fn handleDataBlocked(self: *Connection, db: frame_types.DataBlocked) void {
     self.peer_data_blocked_at = db.maximum_data;
-    self.recordFlowBlockedEvent(.{
+    conn_flow.recordFlowBlockedEvent(self, .{
         .source = .peer,
         .kind = .data,
         .limit = db.maximum_data,
@@ -79,7 +81,7 @@ pub fn handleDataBlocked(self: *Connection, db: frame_types.DataBlocked) void {
 /// Records the peer's stream-level limit. STREAM_STATE_ERROR if the
 /// stream is receive-only from the peer's perspective.
 pub fn handleStreamDataBlocked(self: *Connection, sdb: frame_types.StreamDataBlocked) Error!void {
-    if (!self.peerMaySendOnStream(sdb.stream_id)) {
+    if (!conn_streams.peerMaySendOnStream(self, sdb.stream_id)) {
         self.close(true, transport_error_stream_state, "stream data blocked for receive-only stream");
         return;
     }
@@ -89,8 +91,8 @@ pub fn handleStreamDataBlocked(self: *Connection, sdb: frame_types.StreamDataBlo
         return;
     }
     const existing = self.streams.get(sdb.stream_id);
-    if (existing == null and self.streamInitiatedByLocal(sdb.stream_id)) return;
-    if (existing == null and !self.peerStreamWithinLocalLimit(sdb.stream_id)) return;
+    if (existing == null and conn_streams.streamInitiatedByLocal(self, sdb.stream_id)) return;
+    if (existing == null and !conn_streams.peerStreamWithinLocalLimit(self, sdb.stream_id)) return;
     _ = upsertStreamBlocked(&self.peer_stream_data_blocked, self.allocator, sdb) catch |err| {
         if (err == Error.StreamLimitExceeded) {
             self.close(true, transport_error_protocol_violation, "stream data blocked tracking exhausted");
@@ -98,7 +100,7 @@ pub fn handleStreamDataBlocked(self: *Connection, sdb: frame_types.StreamDataBlo
         }
         return err;
     };
-    self.recordFlowBlockedEvent(.{
+    conn_flow.recordFlowBlockedEvent(self, .{
         .source = .peer,
         .kind = .stream_data,
         .limit = sdb.maximum_stream_data,
@@ -119,7 +121,7 @@ pub fn handleStreamsBlocked(self: *Connection, sb: frame_types.StreamsBlocked) v
     } else {
         self.peer_streams_blocked_uni = sb.maximum_streams;
     }
-    self.recordFlowBlockedEvent(.{
+    conn_flow.recordFlowBlockedEvent(self, .{
         .source = .peer,
         .kind = .streams,
         .limit = sb.maximum_streams,

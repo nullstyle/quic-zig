@@ -479,7 +479,7 @@ pub fn recordAuthenticatedDatagramAddress(
     datagram_len: usize,
     now_us: u64,
 ) Error!void {
-    const path = self.pathForId(path_id);
+    const path = conn_paths.pathForId(self, path_id);
     if (!path.peer_addr_set) {
         path.setPeerAddress(addr);
         path.path.onDatagramReceived(datagram_len);

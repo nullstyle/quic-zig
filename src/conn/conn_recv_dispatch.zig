@@ -12,6 +12,9 @@
 const std = @import("std");
 const boringssl = @import("boringssl");
 const state_mod = @import("state.zig");
+const conn_recv_stream_control_handlers = @import("conn_recv_stream_control_handlers.zig");
+const conn_recv_multipath_handlers = @import("conn_recv_multipath_handlers.zig");
+const conn_recv_packet_handlers = @import("conn_recv_packet_handlers.zig");
 const conn_qlog = @import("conn_qlog.zig");
 const conn_keys = @import("conn_keys.zig");
 const conn_loss = @import("conn_loss.zig");
@@ -79,7 +82,7 @@ pub fn handleWithEcn(
     if (bytes.len > localUdpPayloadLimit(
         self,
     )) {
-        self.emitPacketDropped(null, @intCast(bytes.len), .payload_too_large);
+        conn_qlog.emitPacketDropped(self, null, @intCast(bytes.len), .payload_too_large);
         self.close(true, transport_error_protocol_violation, "udp payload exceeds local limit");
         conn_qlog.emitConnectionStateIfChanged(
             self,
@@ -93,7 +96,7 @@ pub fn handleWithEcn(
     const incoming_path_id = self.incomingPathId(from);
     self.current_incoming_path_id = incoming_path_id;
     self.current_incoming_addr = from;
-    const incoming_path = self.pathForId(incoming_path_id);
+    const incoming_path = conn_paths.pathForId(self, incoming_path_id);
     const rebind_addr = self.peerAddressChangeCandidate(incoming_path_id, from);
     const from_migration_rollback_addr = if (from) |addr|
         incoming_path.matchesMigrationRollbackAddress(addr)
@@ -295,7 +298,7 @@ pub fn handleOnePacket(
     if (bytes.len < 5) return 0;
     const version = std.mem.readInt(u32, bytes[1..5], .big);
     if (version == 0) {
-        return self.handleVersionNegotiation(bytes, now_us);
+        return conn_recv_packet_handlers.handleVersionNegotiation(self, bytes, now_us);
     }
 
     // RFC 9368 §3.2: long-header type bits rotate between v1 and
@@ -309,8 +312,8 @@ pub fn handleOnePacket(
     const long_type = wire_header.longTypeFromBits(version, long_type_bits);
     return switch (long_type) {
         .initial => try self.handleInitial(bytes, now_us),
-        .zero_rtt => try self.handleZeroRtt(bytes, now_us),
-        .handshake => try self.handleHandshake(bytes, now_us),
+        .zero_rtt => try conn_recv_packet_handlers.handleZeroRtt(self, bytes, now_us),
+        .handshake => try conn_recv_packet_handlers.handleHandshake(self, bytes, now_us),
         .retry => try self.handleRetry(bytes, now_us),
     };
 }
@@ -594,7 +597,7 @@ pub fn dispatchFrames(
                 // what we're already using on this path. The
                 // PATH_RESPONSE we just queued still ships under
                 // the existing DCID, which preserves liveness.
-                const path = self.pathForId(self.current_incoming_path_id);
+                const path = conn_paths.pathForId(self, self.current_incoming_path_id);
                 if (conn_migration.consumeFreshPeerCidForMigration(self, path)) |fresh_cid| {
                     path.path.peer_cid = fresh_cid;
                     if (path.id == 0) {
@@ -605,10 +608,10 @@ pub fn dispatchFrames(
             },
             .path_response => |pr| self.recordPathResponse(self.current_incoming_path_id, pr.data),
             .new_connection_id => |nc| try self.handleNewConnectionId(nc),
-            .stop_sending => |ss| try self.handleStopSending(ss),
-            .path_abandon => |pa| self.handlePathAbandon(pa, now_us),
-            .path_status_backup => |ps| self.handlePathStatus(ps, false),
-            .path_status_available => |ps| self.handlePathStatus(ps, true),
+            .stop_sending => |ss| try conn_recv_stream_control_handlers.handleStopSending(self, ss),
+            .path_abandon => |pa| conn_recv_multipath_handlers.handlePathAbandon(self, pa, now_us),
+            .path_status_backup => |ps| conn_recv_multipath_handlers.handlePathStatus(self, ps, false),
+            .path_status_available => |ps| conn_recv_multipath_handlers.handlePathStatus(self, ps, true),
             .path_new_connection_id => |nc| try self.handlePathNewConnectionId(nc),
             .path_retire_connection_id => |rc| self.handlePathRetireConnectionId(rc),
             .max_path_id => |mp| self.handleMaxPathId(mp),

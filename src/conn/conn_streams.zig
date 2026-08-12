@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const state_mod = @import("state.zig");
+const conn_flow = @import("conn_flow.zig");
 const conn_qlog = @import("conn_qlog.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
@@ -571,17 +572,17 @@ pub fn streamRead(self: *Connection, id: u64, dst: []u8) Error!usize {
             s.recv_max_data,
             default_stream_receive_window,
         )) {
-            try self.queueMaxStreamData(id, s.recv.read_offset +| default_stream_receive_window);
+            try conn_flow.queueMaxStreamData(self, id, s.recv.read_offset +| default_stream_receive_window);
         }
         if (Connection.shouldQueueReceiveCredit(
             self.recv_stream_bytes_read,
             self.local_max_data,
             default_connection_receive_window,
         )) {
-            self.queueMaxData(self.recv_stream_bytes_read +| default_connection_receive_window);
+            conn_flow.queueMaxData(self, self.recv_stream_bytes_read +| default_connection_receive_window);
         }
     }
-    self.maybeReturnPeerStreamCredit(s);
+    conn_flow.maybeReturnPeerStreamCredit(self, s);
     return n;
 }
 
