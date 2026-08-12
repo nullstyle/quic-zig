@@ -386,7 +386,7 @@ test "packet-threshold loss reduces congestion window" {
     }, 50_000);
 
     try std.testing.expect(conn.congestionWindow() < initial_cwnd);
-    try std.testing.expect(conn.ccForApplication().ssthresh != null);
+    try std.testing.expect(conn.ccForApplication().ssthreshBytes() != null);
 }
 
 test "persistent congestion resets congestion window to minimum" {
@@ -396,7 +396,7 @@ test "persistent congestion resets congestion window to minimum" {
     var conn = try Connection.initClient(allocator, ctx, "x");
     defer conn.deinit();
 
-    conn.ccForApplication().cwnd = 30_000;
+    conn.ccForApplication().setCwndForTest(30_000);
     conn.rttForLevel(.application).smoothed_rtt_us = 10_000;
     conn.rttForLevel(.application).latest_rtt_us = 10_000;
     conn.rttForLevel(.application).rtt_var_us = 1_000;
@@ -416,7 +416,7 @@ test "persistent congestion resets congestion window to minimum" {
 
     try conn.tick(1_000_000);
 
-    try std.testing.expectEqual(conn.ccForApplication().cfg.minWindow(), conn.congestionWindow());
+    try std.testing.expectEqual(conn.ccForApplication().minWindow(), conn.congestionWindow());
     try std.testing.expectEqual(@as(u64, 0), conn.congestionBytesInFlight());
 }
 

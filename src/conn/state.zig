@@ -140,6 +140,10 @@ pub const RttEstimator = rtt_mod.RttEstimator;
 pub const TransportParams = transport_params_mod.Params;
 /// Default congestion controller — NewReno from RFC 9002 §7.
 pub const NewReno = congestion_mod.NewReno;
+/// Algorithm-dispatching congestion controller each path holds.
+pub const CongestionController = congestion_mod.CongestionController;
+/// Selectable congestion-control algorithm.
+pub const CongestionAlgorithm = congestion_mod.Algorithm;
 /// BoringSSL TLS session ticket handle, used for 0-RTT resumption.
 pub const Session = boringssl.tls.Session;
 /// 0-RTT acceptance/rejection status reported by BoringSSL.
@@ -1350,6 +1354,13 @@ pub const Connection = struct {
     /// production embedders get DPLPMTUD without any extra wiring.
     pmtud_config: path_mod.PmtudConfig = .{ .enable = false },
 
+    /// Congestion-control algorithm used by every path's controller.
+    /// A mutable posture switch like `ecn_enabled`: wrappers thread
+    /// `Config.congestion_control` through `setCongestionAlgorithm`
+    /// right after `initClient`/`initServer`; paths created later
+    /// (multipath, migration) inherit it at construction.
+    cc_algorithm: congestion_mod.Algorithm = .new_reno,
+
     /// Local parameters handed to BoringSSL. Kept here too so ACK
     /// delay and idle timers can use the negotiated local values.
     local_transport_params: TransportParams = .{},
@@ -1546,7 +1557,10 @@ pub const Connection = struct {
             .pending_hostname = server_name,
         };
         errdefer conn.inner.deinit();
-        try conn.paths.ensurePrimary(allocator, .{ .max_datagram_size = default_mtu });
+        try conn.paths.ensurePrimary(allocator, .{
+            .max_datagram_size = default_mtu,
+            .algorithm = conn.cc_algorithm,
+        });
         // Client picked the destination address itself, so the §8.1
         // anti-amplification cap doesn't apply on its outbound. Primary
         // path starts validated. (See `PathSet.ensurePrimary` for the
@@ -1577,7 +1591,10 @@ pub const Connection = struct {
             .inner = try tls_ctx.newQuicServer(),
         };
         errdefer conn.inner.deinit();
-        try conn.paths.ensurePrimary(allocator, .{ .max_datagram_size = default_mtu });
+        try conn.paths.ensurePrimary(allocator, .{
+            .max_datagram_size = default_mtu,
+            .algorithm = conn.cc_algorithm,
+        });
         // RFC 8899 DPLPMTUD on the primary path. See `initClient` for
         // the embedder-config plumbing path.
         conn.setPmtudConfig(conn.pmtud_config);
@@ -1601,6 +1618,21 @@ pub const Connection = struct {
         self.pmtud_config = cfg;
         for (self.paths.paths.items) |*p| {
             p.pmtudInit(cfg);
+        }
+    }
+
+    /// Select the congestion-control algorithm and re-initialise the
+    /// controller on every existing path (each keeps its own
+    /// `max_datagram_size`). Wrappers call this right after
+    /// `initClient`/`initServer`, mirroring `setPmtudConfig`; calling
+    /// it mid-connection is legal but resets all congestion state —
+    /// cwnd returns to the initial window on every path.
+    pub fn setCongestionAlgorithm(self: *Connection, algo: congestion_mod.Algorithm) void {
+        self.cc_algorithm = algo;
+        for (self.paths.paths.items) |*p| {
+            var cfg = p.path.cc.config();
+            cfg.algorithm = algo;
+            p.path.cc = congestion_mod.CongestionController.init(cfg);
         }
     }
 
@@ -3202,11 +3234,11 @@ pub const Connection = struct {
         return &self.primaryPathConst().path.rtt;
     }
 
-    pub fn ccForApplication(self: *Connection) *NewReno {
+    pub fn ccForApplication(self: *Connection) *CongestionController {
         return &self.primaryPath().path.cc;
     }
 
-    fn ccForApplicationConst(self: *const Connection) *const NewReno {
+    fn ccForApplicationConst(self: *const Connection) *const CongestionController {
         return &self.primaryPathConst().path.cc;
     }
 
@@ -3457,7 +3489,7 @@ pub const Connection = struct {
     /// Current NewReno congestion window in bytes for the active
     /// application-data path. Diagnostic only; there is no setter.
     pub fn congestionWindow(self: *const Connection) u64 {
-        return self.ccForApplicationConst().cwnd;
+        return self.ccForApplicationConst().cwndBytes();
     }
 
     /// Total bytes currently in flight across all packet-number

@@ -25,6 +25,8 @@ const sent_packets_mod = @import("sent_packets.zig");
 
 /// Re-export of the per-path NewReno congestion controller.
 pub const NewReno = congestion_mod.NewReno;
+/// Re-export of the algorithm-dispatching controller each path holds.
+pub const CongestionController = congestion_mod.CongestionController;
 /// Re-export of the QUIC packet number space type.
 pub const PnSpace = pn_space_mod.PnSpace;
 /// Re-export of the RFC 9000 §8.2 path validator.
@@ -183,7 +185,7 @@ pub const Path = struct {
 
     validator: PathValidator = .{},
     rtt: RttEstimator = .{},
-    cc: NewReno,
+    cc: CongestionController,
 
     /// True once this path has been validated (or validation is
     /// implicit because we initiated it and completed the handshake
@@ -200,8 +202,8 @@ pub const Path = struct {
     last_path_challenge_at_us: ?u64 = null,
 
     /// Construct a fresh `Path` with the given 4-tuple/CID pair and
-    /// a NewReno controller seeded from `cc_cfg`. The path starts
-    /// `fresh` and unvalidated.
+    /// a congestion controller seeded from `cc_cfg` (algorithm chosen
+    /// by `cc_cfg.algorithm`). The path starts `fresh` and unvalidated.
     pub fn init(
         peer_addr: Address,
         local_addr: Address,
@@ -214,7 +216,7 @@ pub const Path = struct {
             .local_addr = local_addr,
             .local_cid = local_cid,
             .peer_cid = peer_cid,
-            .cc = NewReno.init(cc_cfg),
+            .cc = CongestionController.init(cc_cfg),
         };
     }
 
@@ -542,7 +544,7 @@ pub const PathState = struct {
         cc_cfg: congestion_mod.Config,
     ) void {
         self.path.rtt = .{};
-        self.path.cc = NewReno.init(cc_cfg);
+        self.path.cc = CongestionController.init(cc_cfg);
         self.pending_ping = false;
         self.pto_probe_count = 0;
         self.pto_count = 0;
@@ -634,8 +636,8 @@ pub const PathState = struct {
         const cc = &self.path.cc;
         const rtt = &self.path.rtt;
         const phase: CongestionState = blk: {
-            if (cc.recovery_start_time_us != null) break :blk .recovery;
-            if (cc.ssthresh == null or cc.cwnd < cc.ssthresh.?) break :blk .slow_start;
+            if (cc.recoveryStartTimeUs() != null) break :blk .recovery;
+            if (cc.isSlowStart()) break :blk .slow_start;
             break :blk .congestion_avoidance;
         };
         return .{
@@ -647,7 +649,7 @@ pub const PathState = struct {
             .bytes_sent = self.path.bytes_sent,
             .bytes_in_flight = self.sent.bytes_in_flight,
             .ack_eliciting_in_flight = self.sent.ack_eliciting_in_flight,
-            .cwnd = cc.cwnd,
+            .cwnd = cc.cwndBytes(),
             .smoothed_rtt_us = rtt.smoothed_rtt_us,
             .latest_rtt_us = rtt.latest_rtt_us,
             .pto_count = self.pto_count,
@@ -657,7 +659,7 @@ pub const PathState = struct {
             .srtt_us = rtt.smoothed_rtt_us,
             .rttvar_us = rtt.rtt_var_us,
             .min_rtt_us = rtt.min_rtt_us,
-            .ssthresh = cc.ssthresh,
+            .ssthresh = cc.ssthreshBytes(),
             .congestion_window_state = phase,
             .pmtu = self.pmtu,
             .pmtu_state = self.pmtu_state,

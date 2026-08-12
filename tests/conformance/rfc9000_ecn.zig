@@ -300,7 +300,7 @@ test "MUST credit a peer ACK with first ECN report without flagging it as a CE e
     const client = pair.clientConn();
     const lar = try driveOneAppPn(client, &pair);
 
-    const recovery_before = client.ccForApplication().recovery_start_time_us;
+    const recovery_before = client.ccForApplication().recoveryStartTimeUs();
 
     const ack: frame.types.Ack = .{
         .largest_acked = lar,
@@ -321,7 +321,7 @@ test "MUST credit a peer ACK with first ECN report without flagging it as a CE e
     // The ACK itself acknowledges an in-flight packet, so cwnd may
     // grow a touch (slow start); the only thing we promise is that
     // we did NOT *enter recovery* on a CE-less first report.
-    try std.testing.expectEqual(recovery_before, client.ccForApplication().recovery_start_time_us);
+    try std.testing.expectEqual(recovery_before, client.ccForApplication().recoveryStartTimeUs());
 }
 
 test "MUST trigger a congestion event when a subsequent peer ACK reports CE incremented [RFC9000 §13.4.2 / RFC9002 §B.7]" {
@@ -356,7 +356,7 @@ test "MUST trigger a congestion event when a subsequent peer ACK reports CE incr
     const new_lar: u64 = client.pnSpaceForLevel(.application).next_pn - 1;
     try std.testing.expect(new_lar > lar);
 
-    const cwnd_before = client.ccForApplication().cwnd;
+    const cwnd_before = client.ccForApplication().cwndBytes();
 
     // Second ACK reports CE = 1 (one CE-marked datagram seen by
     // the peer). RFC 9000 §13.4.2 → call NewReno.onCongestionEvent.
@@ -370,9 +370,9 @@ test "MUST trigger a congestion event when a subsequent peer ACK reports CE incr
     };
     try client.handleAckAtLevel(.application, ack_with_ce, pair.now_us);
 
-    const cwnd_after = client.ccForApplication().cwnd;
+    const cwnd_after = client.ccForApplication().cwndBytes();
     try std.testing.expect(cwnd_after < cwnd_before);
-    try std.testing.expect(client.ccForApplication().recovery_start_time_us != null);
+    try std.testing.expect(client.ccForApplication().recoveryStartTimeUs() != null);
     // Validation must remain at `testing` — counts went up
     // monotonically, no integrity violation.
     try std.testing.expectEqual(

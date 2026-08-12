@@ -326,7 +326,7 @@ fn resetConnectionAckLossDispatch(ctx: *const ConnectionAckLossDispatchCtx) void
         .min_rtt_us = 20 * rtt_mod.ms,
         .first_sample_taken = true,
     };
-    path.path.cc = congestion.NewReno.init(.{});
+    path.path.cc = congestion.CongestionController.init(.{});
     path.pto_count = 3;
     path.pending_ping = false;
     path.pmtu_probe_pn = null;
@@ -367,7 +367,7 @@ pub fn runConnectionAckLossDispatch(
         sum +%= path.sent.liveCount();
         sum +%= path.sent.bytes_in_flight;
         sum +%= path.pto_count;
-        sum +%= path.path.cc.cwnd;
+        sum +%= path.path.cc.cwndBytes();
         sum +%= ctx.conn.qlog_packets_lost;
     }
     return sum;

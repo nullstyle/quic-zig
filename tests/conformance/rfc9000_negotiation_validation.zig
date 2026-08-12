@@ -893,7 +893,7 @@ test "MUST reset per-path RTT and congestion controller after migration [RFC9000
     // congestion-controller cwnd inflated.
     ps.path.rtt.smoothed_rtt_us = 50_000;
     ps.path.rtt.latest_rtt_us = 50_000;
-    ps.path.cc.cwnd = 200_000;
+    ps.path.cc.setCwndForTest(200_000);
     ps.pto_count = 5;
     ps.pending_ping = true;
 
@@ -906,7 +906,7 @@ test "MUST reset per-path RTT and congestion controller after migration [RFC9000
     // Fresh NewReno: cwnd back at initial-window. The exact value
     // depends on `max_datagram_size`, but it's strictly less than
     // the inflated 200_000 we set above.
-    try std.testing.expect(ps.path.cc.cwnd < 200_000);
+    try std.testing.expect(ps.path.cc.cwndBytes() < 200_000);
     // PTO/ping bookkeeping cleared.
     try std.testing.expectEqual(@as(u32, 0), ps.pto_count);
     try std.testing.expect(!ps.pending_ping);

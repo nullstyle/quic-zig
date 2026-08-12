@@ -1,4 +1,4 @@
-//! NewReno congestion control (RFC 9002 §7 + Appendix B).
+//! Congestion control (RFC 9002 §7 + Appendix B).
 //!
 //! One controller per Path: the single-path connection has one,
 //! multipath connections have one per active path. The controller
@@ -6,6 +6,12 @@
 //! maintains externally (in `SentPacketTracker`), but the controller
 //! itself tracks `cwnd` and `ssthresh` as authoritative per-path
 //! limits.
+//!
+//! `CongestionController` is the dispatch layer: a tagged union over
+//! the available algorithms (NewReno today; the tag is chosen by
+//! `Config.algorithm` and dispatched with zero indirection via inline
+//! switches). Everything outside this file talks to the union; the
+//! concrete controllers stay exported for tests and direct embedding.
 
 const std = @import("std");
 
@@ -17,12 +23,20 @@ pub const loss_reduction_factor_num: u64 = 1;
 /// kLossReductionFactor denominator from RFC 9002 §B.1 (factor = 1/2).
 pub const loss_reduction_factor_den: u64 = 2;
 
-/// Tunables for the NewReno controller. Held by-value inside the
-/// controller so each path has independent state.
+/// Selectable congestion-control algorithm.
+pub const Algorithm = enum {
+    /// RFC 9002 §7 / Appendix B NewReno.
+    new_reno,
+};
+
+/// Tunables held by-value inside each controller so every path has
+/// independent state.
 pub const Config = struct {
     /// Maximum UDP datagram size we'll send. Conservatively 1200
     /// per the QUIC v1 minimum; raised by PMTU discovery later.
     max_datagram_size: u64 = 1200,
+    /// Which controller `CongestionController.init` builds.
+    algorithm: Algorithm = .new_reno,
 
     /// Minimum congestion window: 2 * max_datagram_size.
     pub fn minWindow(self: Config) u64 {
@@ -35,6 +49,125 @@ pub const Config = struct {
         const ten = 10 * self.max_datagram_size;
         const fourteen720 = @max(self.minWindow(), 14720);
         return @min(ten, fourteen720);
+    }
+};
+
+/// Algorithm-dispatching congestion controller: by-value on each path,
+/// no allocation, no vtable — every method is an inline switch on a
+/// one-byte tag. Concrete controllers must expose the same event
+/// surface plus `cwnd`, `ssthresh`, `recovery_start_time_us`, and
+/// `cfg` fields (the inline-else accessors below reach them
+/// generically).
+pub const CongestionController = union(Algorithm) {
+    new_reno: NewReno,
+
+    pub fn init(cfg: Config) CongestionController {
+        return switch (cfg.algorithm) {
+            .new_reno => .{ .new_reno = NewReno.init(cfg) },
+        };
+    }
+
+    /// The active algorithm (the union tag).
+    pub fn algorithm(self: *const CongestionController) Algorithm {
+        return std.meta.activeTag(self.*);
+    }
+
+    // -- event surface (forwarded) ----------------------------------------
+
+    pub fn onPacketAcked(
+        self: *CongestionController,
+        bytes_acked: u64,
+        largest_acked_sent_time_us: u64,
+    ) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPacketAcked(bytes_acked, largest_acked_sent_time_us),
+        }
+    }
+
+    pub fn onPacketLost(
+        self: *CongestionController,
+        bytes_lost: u64,
+        lost_largest_sent_time_us: u64,
+    ) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPacketLost(bytes_lost, lost_largest_sent_time_us),
+        }
+    }
+
+    pub fn onPersistentCongestion(self: *CongestionController) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onPersistentCongestion(),
+        }
+    }
+
+    pub fn onCongestionEvent(self: *CongestionController, ce_packet_sent_time_us: u64) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onCongestionEvent(ce_packet_sent_time_us),
+        }
+    }
+
+    // -- read surface --------------------------------------------------------
+
+    pub fn sendAllowance(self: *const CongestionController, bytes_in_flight: u64) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.sendAllowance(bytes_in_flight),
+        };
+    }
+
+    pub fn isSlowStart(self: *const CongestionController) bool {
+        return switch (self.*) {
+            inline else => |*impl| impl.isSlowStart(),
+        };
+    }
+
+    pub fn isInRecovery(self: *const CongestionController, sent_time_us: u64) bool {
+        return switch (self.*) {
+            inline else => |*impl| impl.isInRecovery(sent_time_us),
+        };
+    }
+
+    /// Current congestion window in bytes.
+    pub fn cwndBytes(self: *const CongestionController) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.cwnd,
+        };
+    }
+
+    /// Slow-start threshold; null = infinity (still in initial slow start).
+    pub fn ssthreshBytes(self: *const CongestionController) ?u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.ssthresh,
+        };
+    }
+
+    /// Recovery-period anchor, if currently in recovery.
+    pub fn recoveryStartTimeUs(self: *const CongestionController) ?u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.recovery_start_time_us,
+        };
+    }
+
+    /// The controller's configured minimum window.
+    pub fn minWindow(self: *const CongestionController) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.cfg.minWindow(),
+        };
+    }
+
+    /// The controller's configuration (algorithm tag included).
+    pub fn config(self: *const CongestionController) Config {
+        return switch (self.*) {
+            inline else => |*impl| impl.cfg,
+        };
+    }
+
+    // INTERNAL: direct cwnd override for tests and benchmark fixtures
+    // that need to force a controller into a specific regime. Not part
+    // of any embedder contract.
+    pub fn setCwndForTest(self: *CongestionController, cwnd: u64) void {
+        switch (self.*) {
+            inline else => |*impl| impl.cwnd = cwnd,
+        }
     }
 };
 
@@ -273,4 +406,63 @@ test "onCongestionEvent suppresses re-entry within an existing recovery period" 
     // a duplicate signal — shouldn't shrink cwnd further.
     nr.onCongestionEvent(999_999);
     try std.testing.expectEqual(cwnd_after_first, nr.cwnd);
+}
+
+test "CongestionController dispatch is observably identical to direct NewReno" {
+    // Drive the same ack/loss/CE script through a bare NewReno and
+    // through the union; every observable must match at every step —
+    // the zero-delta guarantee of the dispatch layer.
+    const cfg: Config = .{ .max_datagram_size = 1200 };
+    var direct = NewReno.init(cfg);
+    var boxed = CongestionController.init(cfg);
+    try std.testing.expectEqual(Algorithm.new_reno, boxed.algorithm());
+
+    const Step = union(enum) {
+        ack: struct { bytes: u64, sent_us: u64 },
+        loss: struct { bytes: u64, sent_us: u64 },
+        ce: u64,
+        persistent: void,
+    };
+    const script = [_]Step{
+        .{ .ack = .{ .bytes = 2400, .sent_us = 100 } },
+        .{ .ack = .{ .bytes = 4800, .sent_us = 200 } },
+        .{ .loss = .{ .bytes = 1200, .sent_us = 300 } },
+        .{ .ack = .{ .bytes = 1200, .sent_us = 250 } }, // in recovery
+        .{ .ack = .{ .bytes = 9000, .sent_us = 400 } }, // exits recovery
+        .{ .ce = 500 },
+        .{ .persistent = {} },
+        .{ .ack = .{ .bytes = 3000, .sent_us = 600 } },
+    };
+    for (script) |step| {
+        switch (step) {
+            .ack => |a| {
+                direct.onPacketAcked(a.bytes, a.sent_us);
+                boxed.onPacketAcked(a.bytes, a.sent_us);
+            },
+            .loss => |l| {
+                direct.onPacketLost(l.bytes, l.sent_us);
+                boxed.onPacketLost(l.bytes, l.sent_us);
+            },
+            .ce => |t| {
+                direct.onCongestionEvent(t);
+                boxed.onCongestionEvent(t);
+            },
+            .persistent => {
+                direct.onPersistentCongestion();
+                boxed.onPersistentCongestion();
+            },
+        }
+        try std.testing.expectEqual(direct.cwnd, boxed.cwndBytes());
+        try std.testing.expectEqual(direct.ssthresh, boxed.ssthreshBytes());
+        try std.testing.expectEqual(direct.recovery_start_time_us, boxed.recoveryStartTimeUs());
+        try std.testing.expectEqual(direct.isSlowStart(), boxed.isSlowStart());
+        try std.testing.expectEqual(
+            direct.sendAllowance(5000),
+            boxed.sendAllowance(5000),
+        );
+    }
+    try std.testing.expectEqual(cfg.minWindow(), boxed.minWindow());
+    try std.testing.expectEqual(@as(u64, 1200), boxed.config().max_datagram_size);
+    boxed.setCwndForTest(99_999);
+    try std.testing.expectEqual(@as(u64, 99_999), boxed.cwndBytes());
 }

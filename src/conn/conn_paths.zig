@@ -103,7 +103,7 @@ pub fn openPath(
         local_addr,
         local_cid,
         peer_cid,
-        .{ .max_datagram_size = self.mtu },
+        .{ .max_datagram_size = self.mtu, .algorithm = self.cc_algorithm },
     );
     // Seed RFC 8899 PMTUD state on the freshly-opened path.
     if (self.paths.get(opened_path_id)) |new_path| {
@@ -302,7 +302,10 @@ fn resetPathRecoveryAfterMigration(
     self: *Connection,
     path: *PathState,
 ) void {
-    path.resetRecoveryAfterMigration(.{ .max_datagram_size = self.mtu });
+    path.resetRecoveryAfterMigration(.{
+        .max_datagram_size = self.mtu,
+        .algorithm = self.cc_algorithm,
+    });
 }
 
 pub fn handlePathValidationFailure(

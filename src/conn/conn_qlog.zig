@@ -412,8 +412,8 @@ pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
     const path = self.primaryPath();
     const cc = &path.path.cc;
     const new_state: QlogCongestionState = blk: {
-        if (cc.recovery_start_time_us != null and now_us <= cc.recovery_start_time_us.?) {
-            break :blk .recovery;
+        if (cc.recoveryStartTimeUs()) |rec_start| {
+            if (now_us <= rec_start) break :blk .recovery;
         }
         if (cc.isSlowStart()) break :blk .slow_start;
         break :blk .congestion_avoidance;
@@ -426,8 +426,8 @@ pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
         .name = .congestion_state_updated,
         .at_us = now_us,
         .congestion_state = new_state,
-        .cwnd = cc.cwnd,
-        .ssthresh = cc.ssthresh,
+        .cwnd = cc.cwndBytes(),
+        .ssthresh = cc.ssthreshBytes(),
         .bytes_in_flight = path.sent.bytes_in_flight,
     });
 }
@@ -442,8 +442,8 @@ pub fn emitMetricsSnapshot(self: *Connection, now_us: u64) void {
     emitQlog(self, .{
         .name = .metrics_updated,
         .at_us = now_us,
-        .cwnd = cc.cwnd,
-        .ssthresh = cc.ssthresh,
+        .cwnd = cc.cwndBytes(),
+        .ssthresh = cc.ssthreshBytes(),
         .bytes_in_flight = path.sent.bytes_in_flight,
         .smoothed_rtt_us = rtt.smoothed_rtt_us,
         .rtt_var_us = rtt.rtt_var_us,
