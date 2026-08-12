@@ -57,6 +57,7 @@ const conn_flow = @import("conn_flow.zig");
 const conn_paths = @import("conn_paths.zig");
 const conn_migration = @import("conn_migration.zig");
 const conn_loss = @import("conn_loss.zig");
+const conn_recv_data_handlers = @import("conn_recv_data_handlers.zig");
 
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
@@ -1917,7 +1918,8 @@ pub const Connection = struct {
         return self.inner.handshakeDone();
     }
 
-    fn queueHandshakeDoneIfReady(self: *Connection) void {
+    // INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+    pub fn queueHandshakeDoneIfReady(self: *Connection) void {
         if (self.role != .server) return;
         if (!self.inner.handshakeDone()) return;
         if (self.handshake_done_queued_once) return;
@@ -2873,7 +2875,8 @@ pub const Connection = struct {
         return conn_cids.replenishPathConnectionIds(self, path_id, provisions);
     }
 
-    fn cachePeerTransportParams(self: *Connection) Error!void {
+    // INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+    pub fn cachePeerTransportParams(self: *Connection) Error!void {
         if (self.cached_peer_transport_params != null) return;
         const blob = self.inner.peerQuicTransportParams() orelse return;
         self.cached_peer_transport_params = try transport_params_mod.Params.decode(blob);
@@ -3439,7 +3442,8 @@ pub const Connection = struct {
         }
     }
 
-    fn refreshEarlyDataStatus(self: *Connection) Error!void {
+    // INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+    pub fn refreshEarlyDataStatus(self: *Connection) Error!void {
         if (self.early_data_rejection_processed) return;
         if (self.inner.earlyDataStatus() != .rejected) return;
         try self.requeueRejectedEarlyData();
@@ -6308,327 +6312,36 @@ pub const Connection = struct {
         return conn_recv_flow_handlers.handleStreamsBlocked(self, sb);
     }
 
-    /// Apply a peer-sent DATAGRAM frame (RFC 9221) to the inbound queue.
-    /// Public so per-connection hardening tests can drive the
-    /// resident-bytes accounting without crafting encrypted packets;
-    /// the production path is `handleOnePacket` → `handleApplication`.
     pub fn handleDatagram(
         self: *Connection,
         lvl: EncryptionLevel,
         dg: frame_types.Datagram,
     ) Error!void {
-        const local_max = self.local_transport_params.max_datagram_frame_size;
-        if (local_max == 0 or dg.data.len > local_max or dg.data.len > max_supported_udp_payload_size) {
-            self.close(true, transport_error_protocol_violation, "datagram exceeds local limit");
-            return;
-        }
-        if (self.pending_frames.recv_datagrams.items.len >= max_pending_datagram_count) {
-            self.close(true, transport_error_protocol_violation, "datagram receive queue exhausted");
-            return;
-        }
-        if (dg.data.len > max_pending_datagram_bytes or
-            self.pending_frames.recv_datagram_bytes > max_pending_datagram_bytes - dg.data.len)
-        {
-            self.close(true, transport_error_protocol_violation, "datagram receive budget exhausted");
-            return;
-        }
-        // Hardening guide §3.5 / §8: the inbound DATAGRAM queue and
-        // every other peer-controlled buffer share one resident-bytes
-        // budget so a peer cannot bypass each per-buffer cap by
-        // ballooning many of them at once.
-        self.tryReserveResidentBytes(dg.data.len) catch {
-            self.close(true, transport_error_excessive_load, "excessive resource use");
-            return;
-        };
-        const copy = self.allocator.alloc(u8, dg.data.len) catch |err| {
-            self.releaseResidentBytes(dg.data.len);
-            return err;
-        };
-        errdefer {
-            self.releaseResidentBytes(dg.data.len);
-            self.allocator.free(copy);
-        }
-        @memcpy(copy, dg.data);
-        try self.pending_frames.recv_datagrams.append(self.allocator, .{
-            .data = copy,
-            .arrived_in_early_data = lvl == .early_data,
-        });
-        self.pending_frames.recv_datagram_bytes += dg.data.len;
+        return conn_recv_data_handlers.handleDatagram(self, lvl, dg);
     }
 
-    /// Apply a peer-sent CRYPTO frame's bytes at the given encryption
-    /// level. Public so per-connection hardening tests can drive the
-    /// reassembly path without crafting encrypted packets; the
-    /// production path is `handleOnePacket` → `handleInitial` etc.
     pub fn handleCrypto(
         self: *Connection,
         lvl: EncryptionLevel,
         cr: frame_types.Crypto,
     ) Error!void {
-        const idx = lvl.idx();
-        if (cr.data.len == 0) return;
-
-        const start = cr.offset;
-        const data_len: u64 = @intCast(cr.data.len);
-        const end = std.math.add(u64, cr.offset, data_len) catch {
-            self.close(true, transport_error_protocol_violation, "crypto offset overflow");
-            return;
-        };
-        const my_off = self.crypto_recv_offset[idx];
-
-        // Already delivered → ignore (retransmit / overlap).
-        if (end <= my_off) return;
-
-        // Clip any prefix that was already delivered.
-        const data_start: usize = if (start < my_off)
-            @intCast(my_off - start)
-        else
-            0;
-        const eff_offset: u64 = @max(start, my_off);
-        const eff_data = cr.data[data_start..];
-
-        if (eff_offset == my_off) {
-            try self.inbox[idx].append(eff_data);
-            self.crypto_recv_offset[idx] += eff_data.len;
-            try self.drainPendingCrypto(idx);
-        } else {
-            // Out-of-order — buffer.
-            if (eff_offset - my_off > max_crypto_reassembly_gap) {
-                self.close(true, transport_error_protocol_violation, "crypto reassembly gap exceeds limit");
-                return;
-            }
-            if (eff_data.len > max_pending_crypto_bytes_per_level or
-                self.crypto_pending_bytes[idx] > max_pending_crypto_bytes_per_level - eff_data.len)
-            {
-                self.close(true, transport_error_protocol_violation, "crypto reassembly exceeds limit");
-                return;
-            }
-            // Bound the fragment *count*, not just the byte volume: an
-            // unbounded count of tiny fragments turns drainPendingCrypto's
-            // O(n²) scan into a CPU-exhaustion vector (see the constant).
-            if (self.crypto_pending[idx].items.len >= max_pending_crypto_fragments_per_level) {
-                self.close(true, transport_error_protocol_violation, "crypto reassembly fragment count exceeds limit");
-                return;
-            }
-            // Hardening guide §3.5 / §8: reserve from the global
-            // resident-bytes budget *before* allocating. The per-level
-            // crypto cap above gates a single level; this gates the
-            // whole connection (CRYPTO + DATAGRAM + stream buffers
-            // sharing one budget so a peer can't open many small
-            // buffers and bypass each individual cap).
-            self.tryReserveResidentBytes(eff_data.len) catch {
-                self.close(true, transport_error_excessive_load, "excessive resource use");
-                return;
-            };
-            const copy = self.allocator.alloc(u8, eff_data.len) catch |err| {
-                self.releaseResidentBytes(eff_data.len);
-                return err;
-            };
-            errdefer {
-                self.releaseResidentBytes(eff_data.len);
-                self.allocator.free(copy);
-            }
-            @memcpy(copy, eff_data);
-            try self.crypto_pending[idx].append(self.allocator, .{
-                .offset = eff_offset,
-                .data = copy,
-            });
-            self.crypto_pending_bytes[idx] += eff_data.len;
-        }
-    }
-
-    fn drainPendingCrypto(self: *Connection, idx: usize) Error!void {
-        // Repeatedly find a pending chunk that starts at our floor
-        // (or below it, in which case we clip), deliver it, and
-        // bump the floor — until no chunk matches.
-        outer: while (self.crypto_pending[idx].items.len > 0) {
-            const my_off = self.crypto_recv_offset[idx];
-            var i: usize = 0;
-            while (i < self.crypto_pending[idx].items.len) : (i += 1) {
-                const chunk = self.crypto_pending[idx].items[i];
-                const c_end = std.math.add(u64, chunk.offset, @as(u64, @intCast(chunk.data.len))) catch {
-                    self.close(true, transport_error_protocol_violation, "crypto pending offset overflow");
-                    return;
-                };
-                if (c_end <= my_off) {
-                    // Wholly below the floor — drop.
-                    self.crypto_pending_bytes[idx] -= chunk.data.len;
-                    self.releaseResidentBytes(chunk.data.len);
-                    self.allocator.free(chunk.data);
-                    _ = self.crypto_pending[idx].orderedRemove(i);
-                    continue :outer;
-                }
-                if (chunk.offset <= my_off) {
-                    // Bridges the floor — deliver the new portion.
-                    const skip: usize = @intCast(my_off - chunk.offset);
-                    const tail = chunk.data[skip..];
-                    try self.inbox[idx].append(tail);
-                    self.crypto_recv_offset[idx] += tail.len;
-                    self.crypto_pending_bytes[idx] -= chunk.data.len;
-                    self.releaseResidentBytes(chunk.data.len);
-                    self.allocator.free(chunk.data);
-                    _ = self.crypto_pending[idx].orderedRemove(i);
-                    continue :outer;
-                }
-            }
-            // No chunk reaches the floor → done.
-            break;
-        }
+        return conn_recv_data_handlers.handleCrypto(self, lvl, cr);
     }
 
     fn cryptoInboxQueued(self: *const Connection) bool {
-        inline for (level_mod.all) |lvl| {
-            if (self.inbox[lvl.idx()].len > 0) return true;
-        }
-        return false;
+        return conn_recv_data_handlers.cryptoInboxQueued(self);
     }
 
     fn drainInboxIntoTls(self: *Connection) Error!void {
-        inline for (level_mod.all) |lvl| {
-            const idx = lvl.idx();
-            if (self.inbox[idx].len > 0) {
-                const bytes = self.inbox[idx].drain();
-                try self.inner.provideQuicData(lvl.toBoringssl(), bytes);
-                if (self.inner.handshakeDone()) {
-                    try self.cachePeerTransportParams();
-                    try self.inner.processQuicPostHandshake();
-                } else {
-                    try self.advanceHandshake();
-                }
-            }
-        }
-        if (!self.inner.handshakeDone()) try self.advanceHandshake();
-        if (self.inner.handshakeDone()) try self.cachePeerTransportParams();
-        self.queueHandshakeDoneIfReady();
-        // RFC 9001 §5.7 ¶3 / ¶4: discard Initial keys once handshake
-        // confirms. The strict spec timing is "first Handshake packet
-        // sent" (client) / "first Handshake packet processed" (server),
-        // but in quic_zig's flow the client's first Handshake send is
-        // accompanied by an Initial-level ACK that's still needed by
-        // the server, so we wait until handshake confirms — at which
-        // point no further Initial activity is legitimate. Latched +
-        // idempotent.
-        if (self.inner.handshakeDone() and !self.initial_keys_discarded) {
-            self.discardInitialKeys();
-        }
-        // RFC 9001 §4.1.2 ¶1 / §4.9.2: the server's "TLS handshake
-        // confirmed" event coincides with TLS handshake completion
-        // (i.e. processing the client's Finished). The matching key
-        // discard runs immediately. The client takes the symmetrical
-        // path on receipt of HANDSHAKE_DONE — see the
-        // `received_handshake_done` arm in the frame switch above and
-        // the `handleWithEcn` post-loop discard.
-        if (self.role == .server and self.inner.handshakeDone() and !self.handshake_keys_discarded) {
-            self.discardHandshakeKeys();
-        }
-        try self.refreshEarlyDataStatus();
+        return conn_recv_data_handlers.drainInboxIntoTls(self);
     }
 
-    /// Apply a peer-sent STREAM frame to the matching stream's recv
-    /// reassembly buffer (creating the stream if it is peer-initiated
-    /// and not yet seen). Public so per-connection hardening tests can
-    /// drive the recv-reassembly path without crafting encrypted
-    /// packets; the production path is `handleOnePacket` →
-    /// `handleApplication`.
     pub fn handleStream(
         self: *Connection,
         lvl: EncryptionLevel,
         s: frame_types.Stream,
     ) Error!void {
-        if (!self.peerMaySendOnStream(s.stream_id)) {
-            self.close(true, transport_error_stream_state, "stream data on receive-only stream");
-            return;
-        }
-        const frame_end = std.math.add(u64, s.offset, @as(u64, @intCast(s.data.len))) catch {
-            self.close(true, transport_error_flow_control, "stream offset overflow");
-            return;
-        };
-        const existing = self.streams.get(s.stream_id);
-        if (existing == null and self.streamInitiatedByLocal(s.stream_id)) {
-            self.close(true, transport_error_stream_state, "peer referenced unopened local stream");
-            return;
-        }
-        // RFC 9000 §3.2: a STREAM frame for a peer stream that already
-        // reached a terminal state and was reaped is post-terminal — drop
-        // it instead of resurrecting the stream with fresh (final-size /
-        // reset) state. Checked before recordPeerStreamOpenOrClose so the
-        // id is neither re-counted nor recreated.
-        if (existing == null and self.peerStreamAlreadyReaped(s.stream_id)) return;
-        if (existing == null and !self.recordPeerStreamOpenOrClose(s.stream_id)) return;
-
-        const ptr = existing orelse blk: {
-            const new_ptr = try self.allocator.create(Stream);
-            errdefer self.allocator.destroy(new_ptr);
-            new_ptr.* = .{
-                .id = s.stream_id,
-                .send = SendStream.init(self.allocator),
-                .recv = RecvStream.init(self.allocator),
-                .recv_max_data = self.initialRecvStreamLimit(s.stream_id),
-                .send_max_data = self.initialSendStreamLimit(s.stream_id),
-            };
-            try self.streams.put(self.allocator, s.stream_id, new_ptr);
-            break :blk new_ptr;
-        };
-        if (lvl == .early_data) ptr.arrived_in_early_data = true;
-        const old_highest = ptr.recv.peerHighestOffset();
-        const new_highest = @max(old_highest, frame_end);
-        if (new_highest > ptr.recv_max_data) {
-            self.close(true, transport_error_flow_control, "peer exceeded stream data limit");
-            return;
-        }
-        const delta = new_highest - old_highest;
-        if (delta > 0 and
-            (delta > self.local_max_data or self.peer_sent_stream_data > self.local_max_data - delta))
-        {
-            self.close(true, transport_error_flow_control, "peer exceeded connection data limit");
-            return;
-        }
-        // Hardening guide §3.5 / §8: snapshot the recv-buffer length
-        // around `recv()` and reconcile the global resident-bytes
-        // budget. `RecvStream.recv` may grow its internal buffer to
-        // cover [read_offset, frame_end) — the diff captures whatever
-        // it actually allocated (overlapping ranges deduplicate, so
-        // the diff can be 0 or smaller than `s.data.len`).
-        const recv_before = ptr.recv.bytes.items.len;
-        ptr.recv.recv(s.offset, s.data, s.fin) catch |err| switch (err) {
-            error.BufferLimitExceeded => {
-                self.reconcileRecvResidentBytes(ptr, recv_before);
-                self.close(true, transport_error_protocol_violation, "stream reassembly exceeds allocation limit");
-                return;
-            },
-            error.BeyondFinalSize, error.FinalSizeChanged => {
-                self.reconcileRecvResidentBytes(ptr, recv_before);
-                self.close(true, transport_error_final_size, "stream final size changed");
-                return;
-            },
-            else => {
-                self.reconcileRecvResidentBytes(ptr, recv_before);
-                return err;
-            },
-        };
-        if (ptr.recv.bytes.items.len > recv_before) {
-            const grew = ptr.recv.bytes.items.len - recv_before;
-            self.tryReserveResidentBytes(grew) catch {
-                self.close(true, transport_error_excessive_load, "excessive resource use");
-                return;
-            };
-        } else if (ptr.recv.bytes.items.len < recv_before) {
-            self.releaseResidentBytes(recv_before - ptr.recv.bytes.items.len);
-        }
-        self.peer_sent_stream_data += delta;
-    }
-
-    /// Best-effort reconciliation of the resident-bytes counter when
-    /// `RecvStream.recv` partially advanced its internal buffer before
-    /// returning an error. Releases bytes the recv buffer dropped on
-    /// the error path; if the buffer grew, the bytes are conceded to
-    /// the running total but the connection is closing immediately so
-    /// the over-count never leaks past `tick` / `reap`.
-    fn reconcileRecvResidentBytes(self: *Connection, ptr: *Stream, recv_before: usize) void {
-        const after = ptr.recv.bytes.items.len;
-        if (after < recv_before) {
-            self.releaseResidentBytes(recv_before - after);
-        }
+        return conn_recv_data_handlers.handleStream(self, lvl, s);
     }
 
     pub fn handleResetStream(self: *Connection, rs: frame_types.ResetStream) Error!void {
@@ -6898,7 +6611,8 @@ pub const Connection = struct {
         }
     }
 
-    fn advanceHandshake(self: *Connection) Error!void {
+    // INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+    pub fn advanceHandshake(self: *Connection) Error!void {
         self.inner.handshake() catch |e| switch (e) {
             error.WantRead, error.WantWrite => {},
             // RFC 9001 §4.6.2: the server declined our 0-RTT — a routine
