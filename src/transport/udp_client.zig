@@ -92,6 +92,10 @@ pub const RunUdpClientOptions = struct {
     /// Caller-provided `std.Io` instance. Same contract as
     /// `RunUdpOptions.io`.
     io: std.Io,
+    /// Ingress batch bound: how many datagrams one iteration may
+    /// receive before ticking and draining (see the server option of
+    /// the same name). Set to 1 for the historical behavior.
+    max_datagrams_per_iteration: u32 = 16,
     /// `Socket.receiveTimeout` interval between `tick` calls.
     /// Default 5 ms keeps PTO firing on time.
     receive_timeout: std.Io.Duration = std.Io.Duration.fromMilliseconds(default_receive_timeout_ms),
@@ -244,11 +248,17 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
     defer allocator.free(tx);
     const cmsg_buf_len: usize = if (ecn_active) options.cmsg_buffer_bytes else 0;
     var empty_cmsg_buf: [0]u8 = undefined;
+    const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
     const cmsg_buf: []u8 = if (cmsg_buf_len > 0)
-        try allocator.alloc(u8, cmsg_buf_len)
+        try allocator.alloc(u8, cmsg_buf_len * batch_len)
     else
         empty_cmsg_buf[0..0];
     defer if (cmsg_buf_len > 0) allocator.free(cmsg_buf);
+
+    // Ingress batch: up to `batch_len` messages per iteration through
+    // one `receiveManyTimeout` call (see runUdpServer for the shape).
+    const batch_msgs = try allocator.alloc(Net.IncomingMessage, batch_len);
+    defer allocator.free(batch_msgs);
 
     // Kick the handshake. `Client.connect` deliberately doesn't call
     // `advance` so 0-RTT-bound STREAM data could be installed before
@@ -300,45 +310,38 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
             now_us,
         );
 
-        // Receive (or timeout). When ECN is active we use
-        // `receiveManyTimeout` so we can hand the kernel a control
-        // buffer for IP_TOS / IPV6_TCLASS cmsgs; otherwise the
-        // cheaper `receiveTimeout` shape.
-        var maybe_msg: ?Net.IncomingMessage = null;
-        var ecn: socket_opts.EcnCodepoint = .not_ect;
-        if (ecn_active) {
-            var msg: Net.IncomingMessage = .init;
-            msg.control = cmsg_buf;
-            const buf_slice = (&msg)[0..1];
-            const ret = sock.receiveManyTimeout(options.io, buf_slice, rx, .{}, .{
-                .duration = .{
-                    .raw = iteration_timeout,
-                    .clock = .awake,
-                },
-            });
-            if (ret[0]) |err| switch (err) {
-                error.Timeout => {},
-                else => return err,
-            } else if (ret[1] == 1) {
-                ecn = socket_opts.parseEcnFromControl(msg.control);
-                maybe_msg = msg;
+        // Batched receive (or timeout): the first message waits up to
+        // the deadline-clamped timeout, the rest drain what's already
+        // queued. Per-message cmsg slices carry IP_TOS / IPV6_TCLASS
+        // when ECN is active.
+        for (batch_msgs, 0..) |*msg, i| {
+            msg.* = .init;
+            if (ecn_active) {
+                msg.control = cmsg_buf[i * cmsg_buf_len ..][0..cmsg_buf_len];
             }
-        } else {
-            maybe_msg = sock.receiveTimeout(options.io, rx, .{
-                .duration = .{
-                    .raw = iteration_timeout,
-                    .clock = .awake,
-                },
-            }) catch |err| switch (err) {
-                error.Timeout => null,
-                else => return err,
-            };
         }
+        const ret = sock.receiveManyTimeout(options.io, batch_msgs, rx, .{}, .{
+            .duration = .{
+                .raw = iteration_timeout,
+                .clock = .awake,
+            },
+        });
+        var received: usize = ret[1];
+        if (ret[0]) |err| switch (err) {
+            error.Timeout => {},
+            else => return err,
+        };
 
         // Refresh time after the (possibly-blocking) receive.
         now_us = udp_server.monotonicNowUs(options.io, start);
 
-        if (maybe_msg) |msg| {
+        if (received > batch_msgs.len) received = batch_msgs.len;
+        for (batch_msgs[0..received]) |*msg| {
+            if (msg.flags.trunc) continue;
+            const ecn: socket_opts.EcnCodepoint = if (ecn_active)
+                socket_opts.parseEcnFromControl(msg.control)
+            else
+                .not_ect;
             const from_addr = udp_server.ipAddressToPathAddress(msg.from);
             // `Connection.handleWithEcn` swallows per-frame errors
             // internally; only fatal connection-level errors

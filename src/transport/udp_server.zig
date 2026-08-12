@@ -47,16 +47,15 @@ const Address = path_mod.Address;
 /// the QNS endpoint's `rx` buffer.
 pub const default_rx_buffer_bytes: usize = 64 * 1024;
 
-/// Hardening guide §8 `max_datagrams_per_event_loop_tick`: the loop
-/// processes exactly one inbound datagram per iteration. After ingest
-/// it drains every slot's outbox before looping back to `recv`. The
-/// 1-per-tick cap is a structural property of `runUdpServer`, not a
-/// configurable knob — it exists primarily so PTO / loss-detection
-/// tick-driven work can't be starved by a hot ingress queue. Embedders
-/// that need batched ingress (e.g. via `recvmmsg`) bypass this loop
-/// and call `Server.feed` directly, taking responsibility for their
-/// own per-tick budget.
-pub const max_datagrams_per_loop_iteration: u32 = 1;
+// Hardening guide §8 `max_datagrams_per_event_loop_tick`: ingress per
+// iteration is BOUNDED — the loop receives at most
+// `RunUdpOptions.max_datagrams_per_iteration` datagrams per listener
+// (one batched `receiveManyTimeout` call), then drains every slot's
+// outbox and ticks before looping back. The bound keeps PTO /
+// loss-detection tick-driven work from being starved by a hot ingress
+// queue while amortizing per-wake loop overhead across the batch.
+// (This replaced the historical hard-wired 1-per-iteration cap,
+// `max_datagrams_per_loop_iteration`.)
 
 /// Default size of the send buffer scratch space used by the loop.
 /// 1500 bytes covers the default QUIC `max_udp_payload_size` plus a
@@ -108,14 +107,22 @@ pub const RunUdpOptions = struct {
     /// recommends ECT(0) for QUIC). `not_ect` disables marking;
     /// `ect1` and `ce` are reserved.
     ecn_send_codepoint: socket_opts.EcnCodepoint = .ect0,
-    /// Per-recv cmsg control buffer size. Each iteration allocates a
-    /// stack-local buffer of this many bytes for the kernel to
-    /// populate with TOS / TCLASS cmsgs. 64 bytes is comfortably
-    /// large enough for both `IP_TOS` and `IPV6_TCLASS` cmsgs in
-    /// the same datagram with alignment slack. Bump only if
-    /// pipelining other ancillary data (PKTINFO, etc.) onto the same
-    /// socket is in scope.
+    /// Per-recv cmsg control buffer size — PER MESSAGE: the loop
+    /// allocates `max_datagrams_per_iteration x cmsg_buffer_bytes` and
+    /// hands each batched message its own slice for the kernel's
+    /// TOS / TCLASS cmsgs. 64 bytes is comfortably large enough for
+    /// both `IP_TOS` and `IPV6_TCLASS` with alignment slack. Bump only
+    /// if pipelining other ancillary data (PKTINFO, etc.) onto the
+    /// same socket is in scope.
     cmsg_buffer_bytes: usize = socket_opts.default_cmsg_buffer_bytes,
+    /// Ingress batch bound: how many datagrams one iteration may
+    /// receive per listener before draining outboxes and ticking
+    /// (hardening guide §8's per-tick budget). One batched receive
+    /// call ingests up to this many; 16 amortizes wake overhead ~an
+    /// order of magnitude while keeping the tick cadence tight.
+    /// Set to 1 to restore the historical datagram-per-iteration
+    /// behavior exactly.
+    max_datagrams_per_iteration: u32 = 16,
     /// Optional shutdown signal. The loop calls `flag.load(.acquire)`
     /// at the top of every iteration; once it observes `true`, it
     /// calls `Server.shutdown(0, "")`, drains outgoing CONNECTION_CLOSE
@@ -335,13 +342,21 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             break;
         }
     }
-    const cmsg_buf_len: usize = if (any_ecn_active) options.cmsg_buffer_bytes else 0;
+    const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
+    const cmsg_buf_len: usize = if (any_ecn_active) options.cmsg_buffer_bytes * batch_len else 0;
     var empty_cmsg_buf: [0]u8 = undefined;
     const cmsg_buf: []u8 = if (cmsg_buf_len > 0)
         try allocator.alloc(u8, cmsg_buf_len)
     else
         empty_cmsg_buf[0..0];
     defer if (cmsg_buf_len > 0) allocator.free(cmsg_buf);
+
+    // Ingress batch: up to `batch_len` messages per listener per
+    // iteration through one `receiveManyTimeout` call. Message data
+    // slices carve from the shared `rx` buffer; each message gets its
+    // own cmsg slice when ECN is active.
+    const batch_msgs = try allocator.alloc(Net.IncomingMessage, batch_len);
+    defer allocator.free(batch_msgs);
 
     // Split the per-iteration recv timeout across listeners so the
     // worst-case PTO-heartbeat latency stays close to the original
@@ -395,83 +410,82 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             now_us,
         );
 
-        // Receive (or timeout) on each listener in turn. The loop
-        // checks every listener on each pass:
-        // `max_datagrams_per_loop_iteration = 1` caps each listener
-        // at one feed per iteration, so a multi-listener server may
-        // feed once per listener. Each listener still gets a fair
-        // recv-timeout slice so a hot listener can't starve a quiet
-        // one. Sub-second-scale priority inversion is fine; QUIC's
-        // PTO timer fires on millisecond-ish granularity anyway.
+        // Receive (or timeout) on each listener in turn. Each
+        // listener ingests up to `max_datagrams_per_iteration`
+        // datagrams per pass through one batched receive, and still
+        // gets a fair recv-timeout slice so a hot listener can't
+        // starve a quiet one. Sub-second-scale priority inversion is
+        // fine; QUIC's PTO timer fires on millisecond-ish granularity
+        // anyway.
         for (listeners, 0..) |l, sock_idx| {
-            var maybe_msg: ?Net.IncomingMessage = null;
-            var ecn: socket_opts.EcnCodepoint = .not_ect;
-            if (l.ecn_active) {
-                var msg: Net.IncomingMessage = .init;
-                msg.control = cmsg_buf;
-                const buf_slice = (&msg)[0..1];
-                const ret = l.sock.receiveManyTimeout(options.io, buf_slice, rx, .{}, .{
-                    .duration = .{
-                        .raw = iteration_timeout,
-                        .clock = .awake,
-                    },
-                });
-                if (ret[0]) |err| switch (err) {
-                    error.Timeout => {},
-                    else => return err,
-                } else if (ret[1] == 1) {
-                    ecn = socket_opts.parseEcnFromControl(msg.control);
-                    maybe_msg = msg;
+            // One batched receive per listener: the first message
+            // waits up to the (deadline-clamped) timeout, the rest
+            // drain whatever is already queued, non-blocking. Data
+            // slices carve from the shared `rx`; a datagram that
+            // doesn't fit the residue is flagged truncated and
+            // dropped below (a truncated QUIC datagram is useless).
+            for (batch_msgs, 0..) |*msg, i| {
+                msg.* = .init;
+                if (l.ecn_active) {
+                    msg.control =
+                        cmsg_buf[i * options.cmsg_buffer_bytes ..][0..options.cmsg_buffer_bytes];
                 }
-            } else {
-                maybe_msg = l.sock.receiveTimeout(options.io, rx, .{
-                    .duration = .{
-                        .raw = iteration_timeout,
-                        .clock = .awake,
-                    },
-                }) catch |err| switch (err) {
-                    error.Timeout => null,
-                    else => return err,
-                };
             }
+            const ret = l.sock.receiveManyTimeout(options.io, batch_msgs, rx, .{}, .{
+                .duration = .{
+                    .raw = iteration_timeout,
+                    .clock = .awake,
+                },
+            });
+            var received: usize = ret[1];
+            if (ret[0]) |err| switch (err) {
+                error.Timeout => {},
+                else => return err,
+            };
 
             // Refresh time after the (possibly-blocking) receive call.
             // Don't reuse the pre-receive timestamp: tick / poll need to
             // see the actual now_us so PTO timers fire on schedule.
             now_us = monotonicNowUs(options.io, start);
 
-            const msg = maybe_msg orelse continue;
-            const from_addr = ipAddressToPathAddress(msg.from);
-            // `feed` swallows per-connection errors internally;
-            // OutOfMemory and rarely RandFailed propagate out, and
-            // either is already a hard failure for the loop. The
-            // FeedOutcome is informational —
-            // production embedders may want to plumb it into a metrics
-            // counter, but the default loop just lets it ride.
-            const outcome = try server.feedWithEcn(msg.data, from_addr, ecn, now_us);
-            // Stamp the receiving listener-index on the slot so the
-            // outbound drain below picks the right socket. We look
-            // up the slot by source address (the most recently
-            // touched slot for this peer) — any post-handshake
-            // datagram routes to the same slot regardless of which
-            // listener it arrived on. Pre-handshake retransmits in
-            // the .accepted / .routed buckets are equally fine to
-            // stamp; the field is purely an outbound hint.
-            _ = outcome;
-            stampLastRecvSocket(
-                server,
-                from_addr,
-                @intCast(sock_idx),
-                listeners[sock_idx].bind_addr,
-                now_us,
-            );
+            if (received > batch_msgs.len) received = batch_msgs.len;
+            for (batch_msgs[0..received]) |*msg| {
+                if (msg.flags.trunc) continue;
+                const ecn: socket_opts.EcnCodepoint = if (l.ecn_active)
+                    socket_opts.parseEcnFromControl(msg.control)
+                else
+                    .not_ect;
+                const from_addr = ipAddressToPathAddress(msg.from);
+                // `feed` swallows per-connection errors internally;
+                // OutOfMemory and rarely RandFailed propagate out, and
+                // either is already a hard failure for the loop. The
+                // FeedOutcome is informational — production embedders
+                // may want to plumb it into a metrics counter, but the
+                // default loop just lets it ride.
+                _ = try server.feedWithEcn(msg.data, from_addr, ecn, now_us);
+                // Stamp the receiving listener-index on the slot so the
+                // outbound drain below picks the right socket. We look
+                // up the slot by source address (the most recently
+                // touched slot for this peer) — any post-handshake
+                // datagram routes to the same slot regardless of which
+                // listener it arrived on. Pre-handshake retransmits in
+                // the .accepted / .routed buckets are equally fine to
+                // stamp; the field is purely an outbound hint.
+                stampLastRecvSocket(
+                    server,
+                    from_addr,
+                    @intCast(sock_idx),
+                    listeners[sock_idx].bind_addr,
+                    now_us,
+                );
+            }
 
             // Drain any Version Negotiation / Retry packets that
-            // `feed` queued. Sending these via the same listener the
-            // datagram arrived on is part of the Server contract:
-            // they are stateless responses with no associated slot,
-            // so the per-slot poll loop below would never reach
-            // them.
+            // `feed` queued for this batch. Sending these via the same
+            // listener the datagrams arrived on is part of the Server
+            // contract: they are stateless responses with no
+            // associated slot, so the per-slot poll loop below would
+            // never reach them.
             while (server.drainStatelessResponse()) |response| {
                 const dest = pathAddressToIpAddress(response.dst) orelse continue;
                 l.sock.send(options.io, &dest, response.slice()) catch {
