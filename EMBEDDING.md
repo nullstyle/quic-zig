@@ -521,4 +521,6 @@ off in low-overhead deployments.
 ## Out Of Scope
 
 quic-zig does not implement HTTP/3, QPACK, WebTransport, MASQUE, FIPS
-validation, BBR, or a platform support guarantee for Windows.
+validation, or BBR. (Windows used to be listed here; it has since been
+promoted to a tier-1 release-gating platform — see
+`docs/RELEASE_READINESS.md`.)

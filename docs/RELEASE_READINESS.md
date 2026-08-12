@@ -14,8 +14,8 @@ release.
 | Platform | Arch | CI | Status |
 | --- | --- | --- | --- |
 | Linux | x86-64 | `ubuntu-latest` | Gating |
-| Linux | aarch64 | (via `ubuntu-24.04-arm` downstream) | Gating |
-| macOS | aarch64 | `macos-latest` | Gating |
+| Linux | aarch64 | `ubuntu-24.04-arm` | Gating |
+| macOS | aarch64 | `macos-15` (`macos-26` advisory) | Gating |
 | Windows | x86-64 | `windows-latest` | Gating |
 
 **Tier 2 — best-effort.** Builds are expected to work but are not
