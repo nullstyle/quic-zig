@@ -24,10 +24,11 @@ check-tools:
 test:
     zig build test
 
-# Deep coverage-guided fuzzing (single-instance; Linux). ITERS = input budget.
-# The fuzzer rotates across all sites in the unfiltered test binary.
+# Deep coverage-guided fuzzing (single-instance, unfiltered). ITERS = input
+# budget. The fuzzer rotates across all sites in the unfiltered test binary.
+# -Duse-llvm matches CI: the self-hosted x86_64 backend emits no sancov.
 fuzz iters="1M":
-    zig build test --fuzz={{iters}}
+    zig build test -Duse-llvm=true --fuzz={{iters}}
 
 clean:
     rm -rf .zig-cache zig-out
