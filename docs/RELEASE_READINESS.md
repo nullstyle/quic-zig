@@ -123,33 +123,26 @@ is safe to embed in production. The gates:
       when boringssl-zig tags v0.6.5, both repos repin to the tag, and the
       known pair is deleted from the lint.
 
-- [ ] **The pinned toolchain is durably obtainable.** It is obtainable
-      today but not durably, because the pin tracks Zig *master* and
-      ziglang.org garbage-collects older master dev tarballs. Retention
-      is finite but not one-deep — measured 2026-08-12, `dev.1683`
-      (then current) and `dev.1509` (174 commits back) both returned
-      200 while `dev.1252` and `dev.1158` were 404 — so a pin does not
-      die the instant master advances; it has a shelf life of some
-      hundreds of commits.
+- [x] **Toolchain pinning policy is decided.** quic-zig **tracks Zig
+      master** during development and will **pin the `0.17.0` tag once
+      it is released**. This is a deliberate choice, not an open gate.
 
-      `0.17.0-dev.1252` outlived its. When it went missing the Docker
-      jobs (which have no toolchain cache) went red, and every other
-      leg kept passing only because `jdx/mise-action` restores a warm
-      cache and never re-downloads — meaning an Actions cache eviction
-      would have taken all of CI red with no in-repo remedy.
+      The consequence to be aware of: ziglang.org garbage-collects
+      older master dev tarballs, so a master pin has a finite shelf
+      life and will eventually 404. Retention is not one-deep —
+      measured 2026-08-12, `dev.1683` (then current) and `dev.1509`
+      (174 commits back) both served, while `dev.1252` and `dev.1158`
+      were gone — so this is a periodic bump, not a cliff.
 
-      Two mitigations are in place. The pin moved up to
-      `0.17.0-dev.1683+5ceec001b`, which ziglang.org currently serves,
-      and `interop/qns/Dockerfile` now walks Zig's community mirror
-      list with per-architecture SHA-256 pins so it survives the source
-      disappearing again. Neither makes the pin permanent: moving up
-      only restarts the same clock.
-
-      Close this properly by pinning a *tagged* Zig release once one
-      exists that quic-zig can build against (0.16.0 cannot — HEAD uses
-      0.17-only forms), or by vendoring the tarball somewhere the
-      project controls. Tagged releases are retained indefinitely,
-      which is the only version of this that stays true.
+      When a pin does expire it presents misleadingly: the Docker jobs
+      go red first because they have no toolchain cache, while every
+      other leg keeps passing off `jdx/mise-action`'s warm cache. If
+      CI ever looks broken *only* in containers, check whether the pin
+      still exists upstream before debugging the container. Bump the
+      pin (mise.toml, `build.zig.zon` `minimum_zig_version`, and the
+      version + per-arch SHA-256 in `interop/qns/Dockerfile`) and
+      re-run. `interop/qns/Dockerfile` also walks Zig's community
+      mirror list, so it tolerates the source vanishing mid-cycle.
 
 ### Platforms
 - [x] Windows `windows-latest` job is green and `continue-on-error` is
