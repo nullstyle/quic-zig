@@ -105,16 +105,30 @@ seed and machine-independent):
 
 ## [0.10.1] - 2026-08-12
 
-Patch release cut on the `release/0.10.x` maintenance line (not an
-ancestor of this trunk's 0.11.0), so downstreams could pin a tag rather
-than a raw SHA for the native-Windows build fix. Library code is
-byte-identical to v0.10.0; the only functional change is the
-`boringssl-zig` pin moving from tag `v0.6.4` to `0.6.5` (`292c70a2`),
-which stops `ws2_32` from being resolved through `pkg-config` (a Git
-Bash `pkg-config.BAT` shim cannot describe Windows SDK libraries and
-fails an otherwise healthy native build). Build configuration only; no
-runtime behavior changed on any platform. Both changes are already
-present on this trunk via `e00d449`.
+Patch release over v0.10.0 so downstreams can pin a tag instead of a
+raw SHA for the native-Windows build fix. Library code is byte-identical
+to v0.10.0 — the only functional change is the dependency pin.
+
+Cut on a short-lived `release/0.10.x` line off `e00d449` and merged back
+into the trunk, so `v0.10.1` is an ancestor of `main` and development
+stays on one thread. The tag itself is immutable and unaffected by that
+merge.
+
+Verified toolchain: zig 0.17.0-dev.1252+e4b325c19 (unchanged).
+
+### Fixed
+
+- **Native Windows builds no longer fail in the linker configuration
+  step.** The `boringssl-zig` pin moves from tag `v0.6.4` to `0.6.5`
+  (`292c70a2`), which stops `ws2_32` from being resolved through
+  `pkg-config`: Git Bash can expose a `pkg-config.BAT` shim that cannot
+  describe Windows SDK libraries, failing an otherwise healthy native
+  build. This is a *build-configuration* fix; no runtime behavior
+  changed on any platform.
+
+  Note the pin is a commit SHA rather than a tag, because the fix
+  landed upstream before boringssl-zig cut a release; see the
+  cross-repo pin note in `docs/RELEASE_READINESS.md`.
 
 ## [0.10.0] - 2026-07-29
 
