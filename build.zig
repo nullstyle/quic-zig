@@ -457,6 +457,30 @@ pub fn build(b: *std.Build) void {
     const external_interop_step = b.step("external-interop", "Run the external QUIC interop gate helper");
     external_interop_step.dependOn(&run_interop_tool.step);
 
+    // Benchmark report comparison: reads two bench/report.zig JSON
+    // reports and fails on regressions (median beyond tolerance AND
+    // beyond the 3xMAD noise floor). Pure std tool, no quic_zig import.
+    const bench_compare_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench_compare.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    const bench_compare_exe = b.addExecutable(.{
+        .name = "quic-zig-bench-compare",
+        .root_module = bench_compare_mod,
+    });
+    b.installArtifact(bench_compare_exe);
+
+    const bench_compare_tests = b.addTest(.{ .root_module = bench_compare_mod });
+    const run_bench_compare_tests = b.addRunArtifact(bench_compare_tests);
+    test_step.dependOn(&run_bench_compare_tests.step);
+
+    const run_bench_compare = b.addRunArtifact(bench_compare_exe);
+    run_bench_compare.addPassthruArgs();
+    const bench_compare_step = b.step("bench-compare", "Compare a benchmark JSON report against a baseline");
+    bench_compare_step.dependOn(&run_bench_compare.step);
+
     // Microbenchmarks. Built with ReleaseSafe by default, regardless
     // of the user's -Doptimize choice for the rest of the tree. This
     // keeps benchmark fixtures aligned with the production safety
