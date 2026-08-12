@@ -103,6 +103,19 @@ seed and machine-independent):
   code comments that cited a nonexistent "hardening guide" are
   repointed to the governing RFC sections.
 
+## [0.10.1] - 2026-08-12
+
+Patch release cut on the `release/0.10.x` maintenance line (not an
+ancestor of this trunk's 0.11.0), so downstreams could pin a tag rather
+than a raw SHA for the native-Windows build fix. Library code is
+byte-identical to v0.10.0; the only functional change is the
+`boringssl-zig` pin moving from tag `v0.6.4` to `0.6.5` (`292c70a2`),
+which stops `ws2_32` from being resolved through `pkg-config` (a Git
+Bash `pkg-config.BAT` shim cannot describe Windows SDK libraries and
+fails an otherwise healthy native build). Build configuration only; no
+runtime behavior changed on any platform. Both changes are already
+present on this trunk via `e00d449`.
+
 ## [0.10.0] - 2026-07-29
 
 Consumer-feedback release (thanks to the capnp-zig team for a detailed
