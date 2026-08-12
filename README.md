@@ -295,7 +295,9 @@ consumer-facing files; those trees live in the git repository.
   every push / PR. See
   [docs/RELEASE_READINESS.md](https://github.com/nullstyle/quic-zig/blob/main/docs/RELEASE_READINESS.md)
   for the platform tiers and graduation checklist.
-- BBR and large-scale performance tuning remain future work.
+- BBRv3 congestion control (draft-ietf-ccwg-bbr-06) is available opt-in
+  via `congestion_control = .bbr`; CUBIC remains the default. Large-scale
+  performance tuning remains future work.
 
 ## License
 

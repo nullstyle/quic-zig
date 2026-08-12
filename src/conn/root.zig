@@ -184,6 +184,8 @@ pub const SentPacketTracker = sent_packets.SentPacketTracker;
 pub const NewReno = congestion.NewReno;
 /// RFC 9438 CUBIC congestion controller (re-export).
 pub const Cubic = congestion.Cubic;
+/// BBRv3 congestion controller (draft-ietf-ccwg-bbr; re-export).
+pub const Bbr = congestion.Bbr;
 /// Algorithm-dispatching controller each path holds (re-export).
 pub const CongestionController = congestion.CongestionController;
 /// Selectable congestion-control algorithm (`Config.congestion_control`).

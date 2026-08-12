@@ -561,8 +561,11 @@ pub const Config = struct {
     pmtud: conn_mod.PmtudConfig = .{},
 
     /// Congestion-control algorithm for every accepted connection:
-    /// `.cubic` (RFC 9438, the default as of 0.11.0) or `.new_reno`
-    /// (RFC 9002, the historical default — the one-line rollback).
+    /// `.cubic` (RFC 9438, the default as of 0.11.0), `.new_reno`
+    /// (RFC 9002, the historical default — the one-line rollback), or
+    /// `.bbr` (BBRv3, draft-ietf-ccwg-bbr-06, opt-in: model-based;
+    /// ignores `enable_hystart` and expects `enable_pacing = true`,
+    /// without which it degrades to window-limited bursts).
     congestion_control: conn_mod.CongestionAlgorithm = .cubic,
 
     /// RFC 9002 §7.7 packet pacing for every accepted connection (on

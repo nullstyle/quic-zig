@@ -15,6 +15,7 @@
 //! tests and direct embedding.
 
 const std = @import("std");
+const bbr_mod = @import("congestion_bbr.zig");
 const cubic_mod = @import("congestion_cubic.zig");
 const delivery_rate = @import("delivery_rate.zig");
 const hystart_mod = @import("hystart.zig");
@@ -26,6 +27,11 @@ pub const HyStartConfig = hystart_mod.Config;
 
 /// RFC 9438 CUBIC controller (re-export; lives in congestion_cubic.zig).
 pub const Cubic = cubic_mod.Cubic;
+
+/// BBRv3 controller (re-export; lives in congestion_bbr.zig).
+pub const Bbr = bbr_mod.Bbr;
+/// BBR model observability record (`CongestionController.bbrSnapshot`).
+pub const BbrSnapshot = bbr_mod.Snapshot;
 /// CUBIC curve helpers + constants (re-exported for the conformance suite).
 pub const cubicK = cubic_mod.cubicK;
 pub const cubicWindowBytes = cubic_mod.cubicWindowBytes;
@@ -54,6 +60,13 @@ pub const Algorithm = enum {
     new_reno,
     /// RFC 9438 CUBIC.
     cubic,
+    /// BBRv3 (draft-ietf-ccwg-bbr-06), model-based: paces at the
+    /// estimated bottleneck bandwidth instead of reacting to loss.
+    /// Opt-in; ignores the `hystart` config (Startup has its own exit
+    /// machinery) and is designed to run with pacing enabled (without
+    /// it the rate model still bounds cwnd, but the send process
+    /// degrades to window-limited bursts).
+    bbr,
 };
 
 /// Tunables held by-value inside each controller so every path has
@@ -94,11 +107,13 @@ pub const Config = struct {
 pub const CongestionController = union(Algorithm) {
     new_reno: NewReno,
     cubic: Cubic,
+    bbr: Bbr,
 
     pub fn init(cfg: Config) CongestionController {
         return switch (cfg.algorithm) {
             .new_reno => .{ .new_reno = NewReno.init(cfg) },
             .cubic => .{ .cubic = Cubic.init(cfg) },
+            .bbr => .{ .bbr = Bbr.init(cfg) },
         };
     }
 
@@ -297,6 +312,18 @@ pub const CongestionController = union(Algorithm) {
     pub fn config(self: *const CongestionController) Config {
         return switch (self.*) {
             inline else => |*impl| impl.cfg,
+        };
+    }
+
+    /// BBR model observability: the bandwidth/RTT estimates, model
+    /// bounds, and state-machine position driving the pacing rate and
+    /// cwnd. Null for the loss-based controllers. Additive read-only
+    /// surface for bench/debug tooling — the loss-based fields
+    /// (cwndBytes, ssthreshBytes, ...) stay the qlog vocabulary.
+    pub fn bbrSnapshot(self: *const CongestionController) ?bbr_mod.Snapshot {
+        return switch (self.*) {
+            .bbr => |*impl| impl.snapshot(),
+            else => null,
         };
     }
 

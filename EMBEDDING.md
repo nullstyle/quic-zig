@@ -535,10 +535,12 @@ off in low-overhead deployments.
 
 ## Out Of Scope
 
-quic-zig does not implement HTTP/3, QPACK, WebTransport, MASQUE, FIPS
-validation, or BBR. (Windows used to be listed here; it has since been
-promoted to a tier-1 release-gating platform — see
-`docs/RELEASE_READINESS.md`.)
+quic-zig does not implement HTTP/3, QPACK, WebTransport, MASQUE, or FIPS
+validation. (Windows used to be listed here; it has since been promoted
+to a tier-1 release-gating platform — see `docs/RELEASE_READINESS.md`.
+BBR also used to be listed here; BBRv3 landed as an opt-in
+`congestion_control = .bbr`, pinned to draft-ietf-ccwg-bbr-06 — the
+default stays CUBIC.)
 
 One Windows caveat, and it is about the *bundled* loop only: the
 convenience helpers `transport.runUdpServer` / `runUdpClient` fail

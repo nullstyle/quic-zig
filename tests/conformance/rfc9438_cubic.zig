@@ -27,9 +27,9 @@
 //!                              minimum window
 //!
 //! Out of scope here:
-//!   RFC9438 §4.10 (HyStart++ / slow-start exit refinements) — not
-//!   implemented; the controller uses RFC 9002 slow start. The
-//!   `onRttSample` inlet exists for a later HyStart landing.
+//!   RFC9438 §4.10 (HyStart++ slow-start exit) — implemented as the
+//!   shared `hystart.zig` module both loss-based controllers embed;
+//!   its conformance suite is rfc9406_hystart.zig.
 
 const std = @import("std");
 const quic_zig = @import("quic_zig");
@@ -109,8 +109,12 @@ test "MUST NOT fall below the Reno-friendly trajectory [RFC9438 §4.3]" {
     try std.testing.expect(cubic.cwnd >= 12_000 + min_growth);
 }
 
-test "SHOULD NOT grow cwnd when application limited [RFC9002 §7.8 ¶1] (both algorithms)" {
-    inline for ([_]congestion.Algorithm{ .new_reno, .cubic }) |algo| {
+test "SHOULD NOT grow cwnd when application limited [RFC9002 §7.8 ¶1] (all algorithms)" {
+    // For the loss-based controllers the §7.8 utilization gate blocks
+    // growth on this ACK; for BBR the claim holds structurally —
+    // onPacketAcked never grows cwnd at all (growth is sample-driven
+    // and gated on rs.is_app_limited inside the bandwidth model).
+    inline for ([_]congestion.Algorithm{ .new_reno, .cubic, .bbr }) |algo| {
         var cc = CongestionController.init(.{ .max_datagram_size = 1200, .algorithm = algo });
         cc.setCwndForTest(50_000);
         const before = cc.cwndBytes();

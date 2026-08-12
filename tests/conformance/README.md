@@ -83,6 +83,7 @@ tests/
     quic_lb_draft21.zig
     draft_munizaga_alt_addr_00.zig
     draft_cheng_delivery_rate_02.zig
+    bbr_draft06.zig
 ```
 
 The entry point lives at `tests/conformance.zig` so suites can embed

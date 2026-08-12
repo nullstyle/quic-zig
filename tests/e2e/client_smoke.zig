@@ -69,6 +69,29 @@ test "Client.Config.congestion_control = .new_reno is the one-line rollback" {
     try std.testing.expectEqual(quic_zig.CongestionAlgorithm.new_reno, client.conn.cc_algorithm);
 }
 
+test "Client.Config.congestion_control = .bbr opts into the rate-based controller" {
+    const protos = [_][]const u8{"hq-test"};
+
+    var client = try quic_zig.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .congestion_control = .bbr,
+    });
+    defer client.deinit();
+
+    try std.testing.expectEqual(
+        quic_zig.CongestionAlgorithm.bbr,
+        client.conn.ccForApplication().algorithm(),
+    );
+    try std.testing.expectEqual(quic_zig.CongestionAlgorithm.bbr, client.conn.cc_algorithm);
+    // The model surface is live (and null for the loss-based pair —
+    // pinned by the dispatch tests next to the union).
+    try std.testing.expect(client.conn.ccForApplication().bbrSnapshot() != null);
+}
+
 test "Client.connect drives the first Initial out via poll" {
     const protos = [_][]const u8{"hq-test"};
 

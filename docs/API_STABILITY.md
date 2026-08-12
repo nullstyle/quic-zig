@@ -153,6 +153,7 @@ knows what kind of change to expect:
 | QUIC-LB (`quic_zig.lb`) | draft-ietf-quic-load-balancers-21 | Track-to-RFC |
 | Multipath | draft-ietf-quic-multipath-21 | Experimental (Unstable-with-SLA) |
 | Alternative Server Address (`quic_zig.alt_addr`) | draft-…-00 | Experimental (Unstable-with-SLA) |
+| BBRv3 congestion control (`congestion_control = .bbr`) | draft-ietf-ccwg-bbr-06 (behavior only — no wire format, so revision bumps are behavior/API changes and the sunset mechanics below do not apply) | Track-to-RFC (adopted CCWG deliverable; the draft's own intended status is Experimental, and API graduation additionally follows the `CongestionAlgorithm` Unstable-tier soak) |
 | qlog events | qlog event schema | Stable **API** (callback signatures), draft-tracked **schema** (emitted field shape follows the qlog draft) |
 
 Preferred address (RFC 9000 §9.6) and QUIC v2 negotiation (RFC 9369) are

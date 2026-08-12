@@ -9,6 +9,25 @@ changes.
 
 ### Added
 
+- **BBRv3 congestion control (opt-in)** — `congestion_control = .bbr`
+  on both `Client.Config` and `Server.Config` selects a model-based
+  controller per draft-ietf-ccwg-bbr-06: it paces at the estimated
+  bottleneck bandwidth (windowed max delivery rate) and bounds data in
+  flight to a small multiple of the estimated BDP (windowed min RTT),
+  cycling Startup/Drain/ProbeBW/ProbeRTT with loss-driven short- and
+  long-term inflight bounds. The default remains CUBIC — flipping it
+  is gated on a multi-flow fairness cell and an interop battery (see
+  the `congestion_bbr.zig` header). Built on new per-packet
+  delivery-rate sampling (draft-cheng-iccrg-delivery-rate-estimation,
+  as embedded in the BBR draft), a controller-owned pacing-rate
+  outlet, and per-lost-packet controller inlets, each of which landed
+  as its own zero-consumer/zero-delta commit. Conformance:
+  `tests/conformance/bbr_draft06.zig` (26 draft-cited claims + 2
+  visible-debt skips) and `draft_cheng_delivery_rate_02.zig`.
+  Observability: `CongestionController.bbrSnapshot()`. On the
+  deterministic impairment battery vs CUBIC (identical seeds), BBR
+  holds link-limited goodput while cutting bottleneck queueing —
+  full A/B table in the landing commit message.
 - **`MetricsSnapshot.egress_local_faults`** — counts send attempts
   abandoned on a *local* socket fault (`NetworkDown`,
   `SystemResources`, `AccessDenied`) inside `runUdpServer`. The server
