@@ -3,6 +3,8 @@
   "suite": "quic_zig.bench_e2e",
   "generated_unix_ns": 1786552657061860000,
   "samples_per_benchmark": 9,
+  "cc_algorithm": "cubic",
+  "cc_hystart_enabled": true,
   "optimize": "ReleaseSafe",
   "bench_unsafe_release_fast": false,
   "report_path": "baselines/bench/m5max-e2e.json",

@@ -113,6 +113,23 @@ pub fn appendNullableU64(out: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     }
 }
 
+/// Append the congestion-control posture a suite ran under to an
+/// `extra_header_json` block (line shape documented on
+/// `Meta.extra_header_json`). Two reports taken with different `--cc`
+/// or `--hystart` settings are otherwise indistinguishable on disk,
+/// which is exactly the mixup an A/B comparison must rule out.
+pub fn appendCcPosture(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    cc_algorithm: []const u8,
+    hystart_enabled: bool,
+) !void {
+    try out.appendSlice(allocator, "  \"cc_algorithm\": ");
+    try appendJsonString(out, allocator, cc_algorithm);
+    try out.appendSlice(allocator, ",\n");
+    try out.print(allocator, "  \"cc_hystart_enabled\": {},\n", .{hystart_enabled});
+}
+
 test "appendJsonString escapes control and quote characters" {
     const allocator = std.testing.allocator;
     var out: std.ArrayList(u8) = .empty;
@@ -361,4 +378,42 @@ test "renderReport produces parseable JSON with the shared envelope" {
     const benchmarks = root.get("benchmarks").?.array;
     try std.testing.expectEqual(@as(usize, 1), benchmarks.items.len);
     try std.testing.expectEqualStrings("micro", benchmarks.items[0].object.get("kind").?.string);
+}
+
+test "appendCcPosture renders header keys both suites splice verbatim" {
+    const allocator = std.testing.allocator;
+    var extra: std.ArrayList(u8) = .empty;
+    defer extra.deinit(allocator);
+    try appendCcPosture(&extra, allocator, "cubic", true);
+    try std.testing.expectEqualStrings(
+        "  \"cc_algorithm\": \"cubic\",\n  \"cc_hystart_enabled\": true,\n",
+        extra.items,
+    );
+
+    // Round-trip through the envelope: the keys must land as
+    // top-level header fields a comparison tool can read back.
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    const Entries = struct {
+        fn write(o: *std.ArrayList(u8), a: std.mem.Allocator, _: void) anyerror!void {
+            try o.appendSlice(a, "    {\n      \"name\": \"x\",\n      \"kind\": \"micro\",\n      \"ns_per_op\": 1.5\n    }\n");
+        }
+    };
+    try renderReport(&out, allocator, .{
+        .suite = "quic_zig.report_test",
+        .generated_unix_ns = 7,
+        .machine_id = "test-machine",
+        .hostname = null,
+        .report_path = "unused.json",
+        .github_sha = null,
+        .github_run_id = null,
+        .github_ref_name = null,
+        .extra_header_json = extra.items,
+    }, void, {}, Entries.write);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, out.items, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("cubic", root.get("cc_algorithm").?.string);
+    try std.testing.expectEqual(true, root.get("cc_hystart_enabled").?.bool);
 }

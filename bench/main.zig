@@ -808,6 +808,17 @@ pub fn main(init: std.process.Init) !void {
         try extra_header.print(allocator, "  \"min_iters\": {d},\n", .{min_iters});
         try extra_header.print(allocator, "  \"max_iters\": {d},\n", .{max_iters});
         try extra_header.print(allocator, "  \"samples_per_benchmark\": {d},\n", .{configured_samples});
+        // The micro suite has no --cc flag; it measures whatever the
+        // library ships as the default posture. Record that, so a
+        // report predating or following a default flip says which
+        // side of the flip it measured.
+        const cc_defaults: quic_zig.conn.congestion.Config = .{};
+        try report_mod.appendCcPosture(
+            &extra_header,
+            allocator,
+            @tagName(cc_defaults.algorithm),
+            cc_defaults.hystart.enabled,
+        );
         try report_mod.writeReport(
             allocator,
             io,

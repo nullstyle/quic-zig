@@ -340,6 +340,7 @@ pub fn main(init: std.process.Init) !void {
         var extra_header: std.ArrayList(u8) = .empty;
         defer extra_header.deinit(allocator);
         try extra_header.print(allocator, "  \"samples_per_benchmark\": {d},\n", .{samples});
+        try report_mod.appendCcPosture(&extra_header, allocator, @tagName(cc), hystart);
         try report_mod.writeReport(
             allocator,
             io,

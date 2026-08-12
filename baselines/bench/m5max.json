@@ -6,6 +6,8 @@
   "min_iters": 1000,
   "max_iters": 200000000,
   "samples_per_benchmark": 9,
+  "cc_algorithm": "cubic",
+  "cc_hystart_enabled": true,
   "optimize": "ReleaseSafe",
   "bench_unsafe_release_fast": false,
   "report_path": "baselines/bench/m5max.json",
