@@ -88,9 +88,11 @@ seed and machine-independent):
 
 ### Changed
 
-- **CUBIC and pacing are the defaults** (see Added for the opt-outs) —
-  the one deliberate wire-behavior change this release; validated by
-  the blocking quic-go interop gate and the weekly matrix.
+- **CUBIC, pacing, and HyStart++ are the defaults** (see Added for the
+  per-feature opt-outs) — the deliberate wire-behavior changes in this
+  release, each landed separately and measured on its own so a
+  regression bisects to one of them. Validated by the blocking
+  quic-go interop gate and the weekly matrix.
 - `TimerKind` gains a `pacing` variant; embedders with exhaustive
   switches over it get a compile error (the documented forward-compat
   signal) — handle unknown kinds generically (wake, tick, drain).
