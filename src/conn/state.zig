@@ -362,7 +362,7 @@ pub const transport_error_transport_parameter: u64 = 0x08;
 /// peer-controlled state (CRYPTO reassembly, DATAGRAM queues, stream
 /// buffers) closes the connection with EXCESSIVE_LOAD (0x09) rather
 /// than spilling unbounded peer input into the host allocator. The
-/// hardening guide §8 calls this out as the "memory cap" backstop.
+/// This is the connection-wide "memory cap" DoS backstop.
 pub const transport_error_excessive_load: u64 = 0x09;
 pub const transport_error_aead_limit_reached: u64 = 0x0f;
 /// RFC 9000 §20.1 / §10.2.3: the generic transport-error code used when
@@ -1010,7 +1010,7 @@ pub const Connection = struct {
 
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
-    /// hardening guide §9 / §12: internal parser-error strings like
+    /// secure-by-default redaction: internal parser-error strings like
     /// "ack of unsent packet" or "connection id reused across paths"
     /// are useful telemetry for the embedder but reveal implementation
     /// detail to the peer (parser fingerprinting, internal state
@@ -1022,7 +1022,7 @@ pub const Connection = struct {
     /// internal load tests, etc.) can flip this to `true`.
     reveal_close_reason_on_wire: bool = false,
 
-    /// Hard ceiling on `bytes_resident` (hardening guide §3.5 / §8).
+    /// Hard ceiling on `bytes_resident` (per-connection memory DoS cap).
     /// Sums every byte sitting in peer-controlled reassembly /
     /// queue buffers — CRYPTO `crypto_pending`, RFC 9221 inbound
     /// DATAGRAMs, and per-stream send/recv reassembly buffers. When
@@ -4037,7 +4037,7 @@ pub const Connection = struct {
     /// then `close(true, transport_error_excessive_load, "...")` and
     /// abandon the in-flight allocation rather than allow it to land.
     /// The reason string is the wire reason: keep it generic
-    /// (`"excessive resource use"`) per hardening guide §9.1 / §14
+    /// (`"excessive resource use"`) — secure-by-default redaction
     /// to avoid leaking which buffer tripped the cap.
     ///
     /// Pair every successful `tryReserveResidentBytes(n)` with a

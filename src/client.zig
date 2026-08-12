@@ -149,7 +149,7 @@ const ConfigImpl = struct {
 
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
-    /// hardening guide §9 / §12 — internal parser-error strings reveal
+    /// secure-by-default redaction — internal parser-error strings reveal
     /// implementation detail to the peer. Local introspection via
     /// close events is unaffected.
     reveal_close_reason_on_wire: bool = false,

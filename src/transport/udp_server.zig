@@ -118,7 +118,7 @@ pub const RunUdpOptions = struct {
     cmsg_buffer_bytes: usize = socket_opts.default_cmsg_buffer_bytes,
     /// Ingress batch bound: how many datagrams one iteration may
     /// receive per listener before draining outboxes and ticking
-    /// (hardening guide §8's per-tick budget). One batched receive
+    /// (a bounded per-iteration ingress budget). One batched receive
     /// call ingests up to this many; 16 amortizes wake overhead ~an
     /// order of magnitude while keeping the tick cadence tight.
     /// Set to 1 to restore the historical datagram-per-iteration

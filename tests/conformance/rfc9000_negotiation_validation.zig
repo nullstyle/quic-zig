@@ -966,7 +966,7 @@ const QlogPreHandshakeRecorder = struct {
 };
 
 test "MUST reject a peer migration attempt before the handshake confirms [RFC9000 §9.6 ¶?]" {
-    // RFC 9000 §9.6 / hardening guide §4.8: a server MUST NOT honor
+    // RFC 9000 §9.6 (migration before handshake confirmation): a server MUST NOT honor
     // an apparent migration before the handshake is confirmed. The
     // peer's source address is unauthenticated until handshake
     // completion; honoring a "migration" mid-handshake would let an

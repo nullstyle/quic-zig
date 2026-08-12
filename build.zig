@@ -94,7 +94,8 @@ fn boringsslDependency(
     });
 }
 
-// Build-mode policy (hardening guide §3.1).
+// Build-mode policy (secure-by-default: ReleaseSafe keeps runtime
+// safety checks on parser surfaces).
 //
 // `b.standardOptimizeOption` defaults to `Debug` so iterative
 // development (`zig build test`, embedder smoke runs, interop

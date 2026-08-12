@@ -1261,7 +1261,7 @@ pub const Server = struct {
         if (peekLongHeaderIds(bytes)) |ids| {
             if (!self.versionAccepted(ids.version)) {
                 if (from) |addr| {
-                    // Per-source VN-rate gate (hardening guide §4.4):
+                    // Per-source VN-rate gate (anti-amplification DoS defense):
                     // legitimate clients fix their version and retry
                     // with one of our supported versions after one VN
                     // response, so even a small cap is non-disruptive.

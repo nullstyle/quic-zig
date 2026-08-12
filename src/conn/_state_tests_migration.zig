@@ -1099,7 +1099,7 @@ test "noteServerLocalAddressChanged: PATH_CHALLENGE-first emit on the freshly-mi
     }
 }
 
-// -- Connection-level fuzz harnesses (hardening guide §11.1 #8 / #9 / #20) ----
+// -- Connection-level fuzz harnesses (state-machine invariant fuzzing) ----
 //
 // These sit one layer above the per-buffer fuzz harnesses landed in
 // `recv_stream.zig` / `send_stream.zig` / `flow_control.zig` /

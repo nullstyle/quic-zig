@@ -424,7 +424,7 @@ pub const Config = struct {
 
     /// Whether to encode the locally-recorded close-reason string into
     /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
-    /// hardening guide §9 / §12: internal parser-error strings reveal
+    /// secure-by-default redaction: internal parser-error strings reveal
     /// implementation detail to the peer (parser fingerprinting,
     /// internal state names). Local introspection is unaffected; the
     /// embedder still sees the reason via close events.
@@ -460,7 +460,7 @@ pub const Config = struct {
     /// every Connection's `ecn_enabled` field at slot-open time.
     enable_ecn: bool = true,
 
-    /// Listener-level packet rate limit (hardening guide §4.1; was
+    /// Listener-level packet rate limit (global DoS backstop; was
     /// `max_datagrams_per_window: ?u32` before 0.10.0 — retyped onto
     /// the shared `RateLimit` union with its siblings): drop incoming
     /// UDP datagrams when the global per-window count exceeds this
@@ -477,7 +477,7 @@ pub const Config = struct {
     /// `InvalidConfig`.
     listener_datagram_rate_limit: RateLimit = .default,
 
-    /// Listener-level byte rate limit (hardening guide §4.1; was
+    /// Listener-level byte rate limit (global DoS backstop; was
     /// `max_bytes_per_window: ?u64` before 0.10.0): drop incoming UDP
     /// datagrams when the global per-window byte total exceeds this
     /// cap, in bytes per window. `.default` is off — production opts

@@ -1,7 +1,7 @@
 //! Hardening guide §4.4 / §11.2 regression: Version Negotiation flood
 //! under spoofed-source mix.
 //!
-//! The hardening guide §4.4 calls for two separate VN protections:
+//! Secure-by-default version negotiation uses two separate VN protections:
 //!
 //!   1. Per-source VN rate limiter (`vn_source_rate_limit`).
 //!      A single attacker address that sprays non-v1 long-header

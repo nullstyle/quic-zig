@@ -149,7 +149,7 @@ pub const QlogMigrationFailReason = enum {
     /// A `MigrationCallback` returned `.deny`, so PATH_CHALLENGE was
     /// never queued and the candidate 4-tuple was abandoned.
     policy_denied,
-    /// RFC 9000 §9.6 / hardening guide §4.8 — peer attempted to
+    /// RFC 9000 §9.6 (migration before handshake confirmation) — peer attempted to
     /// migrate before the handshake was confirmed. The triggering
     /// authenticated datagram is dropped (no anti-amp credit, no
     /// PATH_CHALLENGE emitted) so the connection state stays

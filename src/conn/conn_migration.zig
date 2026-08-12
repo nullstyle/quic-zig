@@ -491,7 +491,7 @@ pub fn recordAuthenticatedDatagramAddress(
     }
     if (path.matchesMigrationRollbackAddress(addr)) return;
 
-    // RFC 9000 §9.6 / hardening guide §4.8: peer-initiated
+    // RFC 9000 §9.6 (peer migration before handshake confirmation): peer-initiated
     // migration is forbidden before the handshake is confirmed.
     // The triggering datagram authenticated under existing keys,
     // so we know the peer holds them — but pre-handshake an
@@ -509,7 +509,7 @@ pub fn recordAuthenticatedDatagramAddress(
         return;
     }
 
-    // Per-path PATH_CHALLENGE rate limit (hardening guide §4.8:
+    // Per-path PATH_CHALLENGE rate limit (path-probe flood defense:
     // "rate-limit path probes"). Caps how fast a peer can force
     // us to mint fresh challenge tokens and validator state. A
     // legitimate NAT rebinding + retry sequence completes inside
