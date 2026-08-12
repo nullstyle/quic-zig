@@ -51,6 +51,7 @@ const conn_qlog = @import("conn_qlog.zig");
 const conn_keys = @import("conn_keys.zig");
 const conn_version = @import("conn_version.zig");
 const conn_cids = @import("conn_cids.zig");
+const conn_streams = @import("conn_streams.zig");
 
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
@@ -286,37 +287,6 @@ pub const Stream = struct {
             self.recv.state == .reset_read;
     }
 };
-
-/// Ordering for the RFC 9218 send scheduler. Lower urgency first (more
-/// urgent). Within an urgency band (RFC 9218 §10): non-incremental streams
-/// lead, in ascending stream-id order (head-of-line — serve each to
-/// completion); then incremental streams, round-robined by distance from
-/// `rr_cursor` so a different one leads each packet. With no explicit
-/// priorities every stream is non-incremental urgency 3, so this is plain
-/// stream-id order.
-fn streamPriorityLess(a: *const Stream, b: *const Stream, rr_cursor: u64) bool {
-    if (a.priority.urgency != b.priority.urgency) return a.priority.urgency < b.priority.urgency;
-    if (a.priority.incremental != b.priority.incremental) return !a.priority.incremental;
-    if (!a.priority.incremental) return a.id < b.id;
-    return (a.id -% rr_cursor) < (b.id -% rr_cursor);
-}
-
-/// Insert `s` into the priority-sorted (best first) bounded buffer
-/// `buf[0..n.*]`. When the buffer is full, `s` displaces the current worst
-/// only if it ranks strictly higher, so the buffer always holds the
-/// top-`buf.len` streams by priority.
-fn insertStreamByPriority(buf: []*Stream, n: *usize, s: *Stream, rr_cursor: u64) void {
-    if (n.* == buf.len) {
-        if (!streamPriorityLess(s, buf[n.* - 1], rr_cursor)) return;
-    } else {
-        n.* += 1;
-    }
-    var i = n.* - 1;
-    while (i > 0 and streamPriorityLess(s, buf[i - 1], rr_cursor)) : (i -= 1) {
-        buf[i] = buf[i - 1];
-    }
-    buf[i] = s;
-}
 
 /// Default datagram budget for outgoing 1-RTT packets. RFC 9000 §14
 /// mandates at least 1200 bytes path MTU; DPLPMTUD (RFC 8899) can
@@ -2348,29 +2318,20 @@ pub const Connection = struct {
     ///   0 = client-initiated bidi, 1 = server-initiated bidi
     ///   2 = client-initiated uni,  3 = server-initiated uni
     pub fn openBidi(self: *Connection, id: u64) Error!*Stream {
-        if (!streamIsBidi(id) or !self.streamInitiatedByLocal(id)) return Error.InvalidStreamId;
-        if (self.streams.contains(id)) return Error.StreamAlreadyOpen;
-        try self.recordLocalStreamOpen(id);
-        return try self.openStream(id);
+        return conn_streams.openBidi(self, id);
     }
 
     /// Open a new unidirectional stream. The caller is responsible
     /// for choosing an id with the right low bits per §2.1.
     pub fn openUni(self: *Connection, id: u64) Error!*Stream {
-        if (!streamIsUni(id) or !self.streamInitiatedByLocal(id)) return Error.InvalidStreamId;
-        if (self.streams.contains(id)) return Error.StreamAlreadyOpen;
-        try self.recordLocalStreamOpen(id);
-        return try self.openStream(id);
+        return conn_streams.openUni(self, id);
     }
 
     /// The `StreamType` this endpoint uses when it initiates a stream of the
     /// given directionality — client-{bidi,uni} for a client, server-{...}
     /// for a server.
     pub fn localStreamType(self: *const Connection, uni: bool) StreamType {
-        return switch (self.role) {
-            .client => if (uni) .client_uni else .client_bidi,
-            .server => if (uni) .server_uni else .server_bidi,
-        };
+        return conn_streams.localStreamType(self, uni);
     }
 
     /// Open the next bidirectional stream initiated by this endpoint,
@@ -2379,118 +2340,50 @@ pub const Connection = struct {
     /// reached; the id is not consumed in that case, so a later retry after
     /// the peer raises the limit reuses it.
     pub fn openNextBidi(self: *Connection) Error!*Stream {
-        return self.openBidi(self.localStreamType(false).streamId(self.local_opened_streams_bidi));
+        return conn_streams.openNextBidi(self);
     }
 
     /// Open the next unidirectional stream initiated by this endpoint —
     /// e.g. an HTTP/3 control or QPACK encoder/decoder stream — choosing the
     /// id automatically. Same limit/retry semantics as `openNextBidi`.
     pub fn openNextUni(self: *Connection) Error!*Stream {
-        return self.openUni(self.localStreamType(true).streamId(self.local_opened_streams_uni));
+        return conn_streams.openNextUni(self);
     }
 
-    /// The stream id `openNextBidi` would use next, without opening anything
-    /// or advancing the counter. Lets an embedder learn the id up front — e.g.
-    /// to run an HTTP/3 GOAWAY / stream-limit gate keyed on the id *before*
-    /// committing to the open, then call `openNextBidi`. The returned id is
-    /// only valid until the next successful local bidi open on this
-    /// connection (`openNextBidi` or an `openBidi` at or above this id).
     pub fn peekNextBidi(self: *const Connection) u64 {
-        return self.localStreamType(false).streamId(self.local_opened_streams_bidi);
+        return conn_streams.peekNextBidi(self);
     }
 
-    /// The stream id `openNextUni` would use next, without opening anything or
-    /// advancing the counter. Same validity caveat as `peekNextBidi`.
     pub fn peekNextUni(self: *const Connection) u64 {
-        return self.localStreamType(true).streamId(self.local_opened_streams_uni);
-    }
-
-    fn openStream(self: *Connection, id: u64) Error!*Stream {
-        if (self.streams.contains(id)) return Error.StreamAlreadyOpen;
-        const ptr = try self.allocator.create(Stream);
-        errdefer self.allocator.destroy(ptr);
-        ptr.* = .{
-            .id = id,
-            .send = SendStream.init(self.allocator),
-            .recv = RecvStream.init(self.allocator),
-            .recv_max_data = self.initialRecvStreamLimit(id),
-            .send_max_data = self.initialSendStreamLimit(id),
-        };
-        try self.streams.put(self.allocator, id, ptr);
-        self.emitQlog(.{
-            .name = .stream_state_updated,
-            .stream_id = id,
-            .stream_state = .open,
-        });
-        return ptr;
+        return conn_streams.peekNextUni(self);
     }
 
     fn streamIsBidi(id: u64) bool {
-        return (id & 0b10) == 0;
-    }
-
-    fn streamIsUni(id: u64) bool {
-        return !streamIsBidi(id);
+        return conn_streams.streamIsBidi(id);
     }
 
     pub fn streamIndex(id: u64) u64 {
-        return id >> 2;
-    }
-
-    fn streamInitiatedByClient(id: u64) bool {
-        return (id & 0b01) == 0;
+        return conn_streams.streamIndex(id);
     }
 
     pub fn streamInitiatedByLocal(self: *const Connection, id: u64) bool {
-        return streamInitiatedByClient(id) == (self.role == .client);
+        return conn_streams.streamInitiatedByLocal(self, id);
     }
 
     pub fn localMaySendOnStream(self: *const Connection, id: u64) bool {
-        if (streamIsBidi(id)) return true;
-        return self.streamInitiatedByLocal(id);
+        return conn_streams.localMaySendOnStream(self, id);
     }
 
     pub fn peerMaySendOnStream(self: *const Connection, id: u64) bool {
-        if (streamIsBidi(id)) return true;
-        return !self.streamInitiatedByLocal(id);
+        return conn_streams.peerMaySendOnStream(self, id);
     }
 
     pub fn initialRecvStreamLimit(self: *const Connection, id: u64) u64 {
-        const params = self.local_transport_params;
-        if (streamIsUni(id)) {
-            if (self.streamInitiatedByLocal(id)) return 0;
-            return params.initial_max_stream_data_uni;
-        }
-        if (self.streamInitiatedByLocal(id)) {
-            return params.initial_max_stream_data_bidi_local;
-        }
-        return params.initial_max_stream_data_bidi_remote;
+        return conn_streams.initialRecvStreamLimit(self, id);
     }
 
     pub fn initialSendStreamLimit(self: *const Connection, id: u64) u64 {
-        // Prefer the real cached peer params; before they arrive, bound
-        // early-data (0-RTT) sends by the embedder-supplied remembered
-        // session params. With neither available, only a 0-RTT send
-        // window is legitimate at all: grant the (client-self-limited)
-        // unbounded window when early-data write keys are present, and
-        // nothing otherwise — a non-0-RTT connection never sends
-        // application stream data before its params are cached.
-        // applyPeerFlowTransportParams later @max-raises each stream's
-        // send_max_data to the true limit once the real params land.
-        const params = self.cached_peer_transport_params orelse
-            self.remembered_peer_transport_params orelse
-            {
-                if (self.haveSecret(.early_data, .write)) return std.math.maxInt(u64);
-                return 0;
-            };
-        if (streamIsUni(id)) {
-            if (!self.streamInitiatedByLocal(id)) return 0;
-            return params.initial_max_stream_data_uni;
-        }
-        if (self.streamInitiatedByLocal(id)) {
-            return params.initial_max_stream_data_bidi_remote;
-        }
-        return params.initial_max_stream_data_bidi_local;
+        return conn_streams.initialSendStreamLimit(self, id);
     }
 
     /// Install the peer's transport parameters remembered from a prior
@@ -2509,115 +2402,16 @@ pub const Connection = struct {
         }
     }
 
-    fn recordLocalStreamOpen(self: *Connection, id: u64) Error!void {
-        // During graceful shutdown we open no new local streams; in-flight
-        // streams keep draining. Single chokepoint for openBidi/openUni and
-        // the openNext* helpers.
-        if (self.graceful_shutdown) return Error.ShuttingDown;
-        const idx = streamIndex(id);
-        if (idx >= max_stream_count_limit) return Error.InvalidStreamId;
-        const next = idx + 1;
-        if (streamIsBidi(id)) {
-            if (idx >= self.peer_max_streams_bidi) {
-                self.noteStreamsBlocked(true, self.peer_max_streams_bidi);
-                return Error.StreamLimitExceeded;
-            }
-            if (next > self.local_opened_streams_bidi) self.local_opened_streams_bidi = next;
-        } else {
-            if (idx >= self.peer_max_streams_uni) {
-                self.noteStreamsBlocked(false, self.peer_max_streams_uni);
-                return Error.StreamLimitExceeded;
-            }
-            if (next > self.local_opened_streams_uni) self.local_opened_streams_uni = next;
-        }
-    }
-
     pub fn recordPeerStreamOpenOrClose(self: *Connection, id: u64) bool {
-        const idx = streamIndex(id);
-        if (idx >= max_stream_count_limit) {
-            self.close(true, transport_error_frame_encoding, "stream id exceeds stream count space");
-            return false;
-        }
-        const next = idx + 1;
-        if (streamIsBidi(id)) {
-            if (idx >= self.local_max_streams_bidi) {
-                self.close(true, transport_error_stream_limit, "peer exceeded bidirectional stream limit");
-                return false;
-            }
-            if (next > self.peer_opened_streams_bidi) self.peer_opened_streams_bidi = next;
-        } else {
-            if (idx >= self.local_max_streams_uni) {
-                self.close(true, transport_error_stream_limit, "peer exceeded unidirectional stream limit");
-                return false;
-            }
-            if (next > self.peer_opened_streams_uni) self.peer_opened_streams_uni = next;
-        }
-        return true;
+        return conn_streams.recordPeerStreamOpenOrClose(self, id);
     }
 
-    /// True if `id` is a peer-initiated stream that was already opened,
-    /// driven to a terminal state, and reclaimed. A STREAM/RESET_STREAM for
-    /// such an id is a post-terminal frame that MUST be ignored (RFC 9000
-    /// §3.2) rather than resurrecting the stream. Only meaningful for
-    /// peer-initiated ids; callers gate on an absent, peer-initiated stream
-    /// first.
-    ///
-    /// Two cases: below the contiguous watermark (a run of reaped indices
-    /// coalesced from the bottom), OR reaped-but-above the watermark because
-    /// a lower peer stream is still live — the latter is tracked individually
-    /// by its reaped bit until the watermark coalesces past it.
     pub fn peerStreamAlreadyReaped(self: *const Connection, id: u64) bool {
-        const idx = streamIndex(id);
-        const bidi = streamIsBidi(id);
-        if (idx < (if (bidi) self.peer_reaped_below_bidi else self.peer_reaped_below_uni)) return true;
-        if (idx >= max_streams_per_connection) return false;
-        const bits = if (bidi) &self.peer_reaped_bits_bidi else &self.peer_reaped_bits_uni;
-        return bits.isSet(@intCast(idx));
-    }
-
-    /// Record that a peer-initiated stream was reaped, advancing the
-    /// contiguous reaped watermark. Local streams are ignored (their
-    /// absence is handled by the "peer referenced unopened local stream"
-    /// guards). Sets the index's bit, then advances the watermark past
-    /// any consecutive run of reaped indices from the bottom.
-    fn notePeerStreamReaped(self: *Connection, id: u64) void {
-        if (self.streamInitiatedByLocal(id)) return;
-        const idx = streamIndex(id);
-        // Bounded by local_max_streams_* <= max_streams_per_connection.
-        std.debug.assert(idx < max_streams_per_connection);
-        const bidi = streamIsBidi(id);
-        const bits = if (bidi) &self.peer_reaped_bits_bidi else &self.peer_reaped_bits_uni;
-        const below = if (bidi) &self.peer_reaped_below_bidi else &self.peer_reaped_below_uni;
-        const opened = if (bidi) self.peer_opened_streams_bidi else self.peer_opened_streams_uni;
-        bits.set(@intCast(idx));
-        // Coalesce: advance the watermark across consecutive reaped bits.
-        // The `< opened` guard is load-bearing for paths that reap a
-        // stream without bumping peer_opened_streams_* (e.g. direct-put
-        // test setup); it keeps the loop trivially in range too.
-        while (below.* < opened and bits.isSet(@intCast(below.*))) {
-            bits.unset(@intCast(below.*));
-            below.* += 1;
-        }
+        return conn_streams.peerStreamAlreadyReaped(self, id);
     }
 
     pub fn peerStreamWithinLocalLimit(self: *Connection, id: u64) bool {
-        const idx = streamIndex(id);
-        if (idx >= max_stream_count_limit) {
-            self.close(true, transport_error_frame_encoding, "stream id exceeds stream count space");
-            return false;
-        }
-        if (streamIsBidi(id)) {
-            if (idx >= self.local_max_streams_bidi) {
-                self.close(true, transport_error_stream_limit, "peer referenced bidirectional stream above limit");
-                return false;
-            }
-        } else {
-            if (idx >= self.local_max_streams_uni) {
-                self.close(true, transport_error_stream_limit, "peer referenced unidirectional stream above limit");
-                return false;
-            }
-        }
-        return true;
+        return conn_streams.peerStreamWithinLocalLimit(self, id);
     }
 
     pub fn limitChunkToSendFlow(
@@ -2625,7 +2419,7 @@ pub const Connection = struct {
         s: *const Stream,
         chunk: send_stream_mod.Chunk,
     ) Error!?send_stream_mod.Chunk {
-        return self.limitChunkToSendFlowAfterPlanned(s, chunk, 0);
+        return conn_streams.limitChunkToSendFlow(self, s, chunk);
     }
 
     fn limitChunkToSendFlowAfterPlanned(
@@ -2634,54 +2428,15 @@ pub const Connection = struct {
         chunk: send_stream_mod.Chunk,
         planned_conn_new_bytes: u64,
     ) Error!?send_stream_mod.Chunk {
-        if (!self.localMaySendOnStream(s.id)) return null;
-        if (chunk.length == 0) return chunk;
-
-        const chunk_end = std.math.add(u64, chunk.offset, chunk.length) catch return null;
-        const wants_new_data = chunk_end > s.send_flow_highest;
-        const stream_new_allowance = if (s.send_flow_highest >= s.send_max_data)
-            0
-        else
-            s.send_max_data - s.send_flow_highest;
-        const planned_conn_sent = self.we_sent_stream_data +| planned_conn_new_bytes;
-        const conn_new_allowance = if (planned_conn_sent >= self.peer_max_data)
-            0
-        else
-            self.peer_max_data - planned_conn_sent;
-        if (wants_new_data and stream_new_allowance == 0) {
-            try self.noteStreamDataBlocked(s.id, s.send_max_data);
-        }
-        if (wants_new_data and conn_new_allowance == 0) {
-            self.noteDataBlocked(self.peer_max_data);
-        }
-        const new_allowance = @min(stream_new_allowance, conn_new_allowance);
-
-        const retransmit_end = if (chunk.offset < s.send_flow_highest)
-            @min(chunk_end, s.send_flow_highest)
-        else
-            chunk.offset;
-        const allowed_end = retransmit_end +| new_allowance;
-        const send_end = @min(chunk_end, allowed_end);
-        if (send_end <= chunk.offset) return null;
-
-        var limited = chunk;
-        limited.length = send_end - chunk.offset;
-        limited.fin = chunk.fin and send_end == chunk_end;
-        return limited;
+        return conn_streams.limitChunkToSendFlowAfterPlanned(self, s, chunk, planned_conn_new_bytes);
     }
 
     fn streamFlowNewBytes(s: *const Stream, chunk: send_stream_mod.Chunk) u64 {
-        const end = std.math.add(u64, chunk.offset, chunk.length) catch return 0;
-        if (end <= s.send_flow_highest) return 0;
-        return end - s.send_flow_highest;
+        return conn_streams.streamFlowNewBytes(s, chunk);
     }
 
     pub fn recordStreamFlowSent(self: *Connection, s: *Stream, chunk: send_stream_mod.Chunk) void {
-        const end = std.math.add(u64, chunk.offset, chunk.length) catch return;
-        if (end <= s.send_flow_highest) return;
-        const delta = end - s.send_flow_highest;
-        s.send_flow_highest = end;
-        self.we_sent_stream_data += delta;
+        return conn_streams.recordStreamFlowSent(self, s, chunk);
     }
 
     /// Iterate over every open stream. The yielded pointer is
@@ -2689,117 +2444,29 @@ pub const Connection = struct {
     /// by stream removal — finish iteration before mutating the
     /// stream set.
     pub fn streamIterator(self: *Connection) std.AutoHashMapUnmanaged(u64, *Stream).Iterator {
-        return self.streams.iterator();
+        return conn_streams.streamIterator(self);
     }
 
-    /// Number of currently-open streams.
     pub fn streamCount(self: *const Connection) usize {
-        return self.streams.count();
+        return conn_streams.streamCount(self);
     }
 
-    /// Reclaim entries in `self.streams` whose lifecycle is fully
-    /// terminated in both the relevant directions. Without this the
-    /// map grows monotonically with the number of streams the
-    /// connection has ever seen — a long-lived HTTP/3 session that
-    /// opens many short request streams would accumulate `Stream`
-    /// state (recv reassembly, send chunk ring, ACK ranges) for
-    /// every closed-and-forgotten stream until `Connection.deinit`.
-    ///
-    /// Reclaim criterion (RFC 9000 §3.1 / §3.2 stream lifecycle):
-    /// - bidi streams: both `send.isTerminal()` and
-    ///   `recvFullyTerminated()` are true.
-    /// - uni streams the local opened: only the send side is used
-    ///   (`recv_max_data == 0`), so just `send.isTerminal()`.
-    /// - uni streams the peer opened: only the recv side is used,
-    ///   so just `recvFullyTerminated()`.
-    ///
-    /// The send-terminal states are `data_recvd` (FIN ACKed) and
-    /// `reset_recvd` (peer ACKed our RESET_STREAM); the recv-
-    /// terminal states are `data_recvd`/`data_read` (peer FIN seen
-    /// and bytes drained) and `reset_recvd`/`reset_read` (peer
-    /// RESET_STREAM seen). At the moment all of those land, no
-    /// further frames can advance the stream — the per-stream
-    /// flow-control window, ACK tracker, and reassembly metadata
-    /// are dead weight.
-    ///
-    /// Iteration safety: HashMap iteration invalidates on mutation,
-    /// so we collect ids in a small fixed-size buffer per pass and
-    /// only `fetchRemove` once iteration completes. If more than
-    /// `batch.len` streams reclaim in one tick (rare), the surplus
-    /// rolls to the next tick — still bounded, just not in one
-    /// shot.
-    ///
-    /// Resident-bytes budget: `Stream.send.bytes` and
-    /// `Stream.recv.bytes` may still hold capacity that
-    /// `tryReserveResidentBytes` is tracking. We snapshot the live
-    /// `items.len` before destruction and release that count back
-    /// to the budget so a long-lived connection that GCs many
-    /// streams does not leak budget headroom.
     fn gcClosedStreams(self: *Connection) void {
-        var batch: [128]u64 = undefined;
-        var n: usize = 0;
-        var it = self.streams.iterator();
-        while (it.next()) |entry| {
-            const s = entry.value_ptr.*;
-            const send_done = s.send.isTerminal();
-            const recv_done = s.recvFullyTerminated();
-            const reclaimable = if (streamIsBidi(s.id))
-                send_done and recv_done
-            else if (self.streamInitiatedByLocal(s.id))
-                send_done
-            else
-                recv_done;
-            if (!reclaimable) continue;
-            if (n == batch.len) break;
-            batch[n] = s.id;
-            n += 1;
-        }
-        for (batch[0..n]) |id| {
-            const removed = self.streams.fetchRemove(id) orelse continue;
-            const s = removed.value;
-            // Record the reap so a later STREAM/RESET_STREAM for this
-            // peer-initiated id is treated as post-terminal (RFC 9000
-            // §3.2) instead of resurrecting the stream with fresh state.
-            self.notePeerStreamReaped(id);
-            const held = s.send.bytes.items.len + s.recv.bytes.items.len;
-            if (held > 0) self.releaseResidentBytes(held);
-            self.emitQlog(.{
-                .name = .stream_state_updated,
-                .stream_id = id,
-                .stream_state = if (s.send.state == .reset_recvd or
-                    s.recv.state == .reset_recvd or
-                    s.recv.state == .reset_read)
-                    .reset
-                else
-                    .closed,
-            });
-            s.send.deinit();
-            s.recv.deinit();
-            self.allocator.destroy(s);
-        }
+        return conn_streams.gcClosedStreams(self);
     }
 
-    /// Pick the next available server-initiated unidirectional
-    /// stream id (low 2 bits = 0b11) starting from `start`. Skips
-    /// ids that are already open.
     pub fn nextServerUniId(self: *const Connection, start: u64) u64 {
-        var id = start | 0b11;
-        while (self.streams.contains(id)) id += 4;
-        return id;
+        return conn_streams.nextServerUniId(self, start);
     }
 
-    /// Pick the next available server-initiated bidi stream id
-    /// (low 2 bits = 0b01). Skips ids already open.
     pub fn nextServerBidiId(self: *const Connection, start: u64) u64 {
-        var id = (start & ~@as(u64, 0b11)) | 0b01;
-        while (self.streams.contains(id)) id += 4;
-        return id;
+        return conn_streams.nextServerBidiId(self, start);
     }
 
     /// Look up a stream by id. Returns null if no stream is open
     /// at that id.
     pub fn stream(self: *const Connection, id: u64) ?*Stream {
-        return self.streams.get(id);
+        return conn_streams.stream(self, id);
     }
 
     /// Snapshot of stream `id`'s send-half progress (bytes written, acked,
@@ -2810,15 +2477,7 @@ pub const Connection = struct {
     /// `SendStream`'s internals; snapshot a terminal stream's stats before
     /// the reaping GC removes it if you need them post-close.
     pub fn streamSendStats(self: *const Connection, id: u64) ?StreamSendStats {
-        const s = self.streams.get(id) orelse return null;
-        const written = s.send.writtenBytes();
-        const acked = s.send.ackedFloor();
-        return .{
-            .written = written,
-            .acked = acked,
-            .buffered = written - acked,
-            .has_pending = s.send.hasPendingChunk(),
-        };
+        return conn_streams.streamSendStats(self, id);
     }
 
     /// Set the RFC 9218 send priority of stream `id` (see `StreamPriority`).
@@ -2828,44 +2487,17 @@ pub const Connection = struct {
     /// PRIORITY_UPDATE) can update this at any time; it takes effect on the
     /// next packet built. Returns `StreamNotFound` for an unknown/reaped id.
     pub fn streamSetPriority(self: *Connection, id: u64, p: StreamPriority) Error!void {
-        const s = self.streams.get(id) orelse return Error.StreamNotFound;
-        s.priority = p;
+        return conn_streams.streamSetPriority(self, id, p);
     }
 
     /// The current RFC 9218 send priority of stream `id`, or `null` if the
     /// stream is not in the live table (never opened, or already reaped).
     pub fn streamPriority(self: *const Connection, id: u64) ?StreamPriority {
-        const s = self.streams.get(id) orelse return null;
-        return s.priority;
+        return conn_streams.streamPriority(self, id);
     }
 
-    /// Collect pointers to streams with pending send data, ordered by RFC 9218
-    /// priority (urgency asc, then stream id asc), into `buf`. Bounded to
-    /// `buf.len` — the per-packet chunk cap — so if more streams are ready than
-    /// fit one packet, the highest-priority `buf.len` are returned and the rest
-    /// are served on a later packet. Returns the filled prefix.
-    ///
-    /// INTERNAL: pub for `_state_tests.zig` access; not part of the embedder
-    /// API (the scheduling it drives is observed through `pollDatagram`).
     pub fn collectSendableStreamsByPriority(self: *Connection, buf: []*Stream) []*Stream {
-        var n: usize = 0;
-        var it = self.streams.iterator();
-        while (it.next()) |entry| {
-            const s = entry.value_ptr.*;
-            if (!s.send.hasPendingChunk()) continue;
-            insertStreamByPriority(buf, &n, s, self.priority_rr_cursor);
-        }
-        const result = buf[0..n];
-        // Advance the round-robin cursor past the incremental stream that
-        // leads this packet, so the next incremental stream of the same urgency
-        // leads the next one. Non-incremental streams don't move the cursor.
-        for (result) |s| {
-            if (s.priority.incremental) {
-                self.priority_rr_cursor = s.id +% 1;
-                break;
-            }
-        }
-        return result;
+        return conn_streams.collectSendableStreamsByPriority(self, buf);
     }
 
     /// Read-only recv-half status of stream `id`: whether the peer's FIN or
@@ -2875,74 +2507,17 @@ pub const Connection = struct {
     /// `recvFullyTerminated`, it distinguishes a clean FIN from an abortive
     /// RESET, and holds no `*Stream` the caller must keep valid across a reap.
     pub fn streamRecvState(self: *const Connection, id: u64) ?StreamRecvState {
-        const s = self.streams.get(id) orelse return null;
-        return .{
-            .fin_seen = s.recv.fin_seen,
-            .reset_seen = s.recv.reset != null,
-            .terminal = s.recvFullyTerminated(),
-        };
+        return conn_streams.streamRecvState(self, id);
     }
 
     /// Convenience: write `data` to the send half of stream `id`.
     pub fn streamWrite(self: *Connection, id: u64, data: []const u8) Error!usize {
-        const s = self.streams.get(id) orelse return Error.StreamNotFound;
-        // Hardening guide §3.5 / §8: pre-flight the resident-bytes
-        // budget against the bytes we'd accept. The per-stream
-        // `max_buffered` cap already gates a single stream; this
-        // shares one budget with CRYPTO / DATAGRAM / recv reassembly
-        // so opening many streams each near their per-stream cap
-        // can't bypass the connection-wide ceiling.
-        const before = s.send.bytes.items.len;
-        const headroom = s.send.max_buffered -| before;
-        const want = @min(data.len, headroom);
-        if (want > 0) {
-            try self.tryReserveResidentBytes(want);
-        }
-        const accepted = s.send.write(data) catch |err| {
-            self.releaseResidentBytes(want);
-            return err;
-        };
-        // `write` may accept fewer bytes than `want` if it short-writes
-        // (e.g. on its own internal cap); reconcile so we only hold
-        // budget for what actually landed in the buffer.
-        if (accepted < want) {
-            self.releaseResidentBytes(want - accepted);
-        }
-        return accepted;
+        return conn_streams.streamWrite(self, id, data);
     }
 
     /// Convenience: read from the receive half of stream `id`.
     pub fn streamRead(self: *Connection, id: u64, dst: []u8) Error!usize {
-        const s = self.streams.get(id) orelse return Error.StreamNotFound;
-        const before = s.recv.bytes.items.len;
-        const n = s.recv.read(dst);
-        // Hardening guide §3.5 / §8: every byte the app drains is
-        // bytes the connection no longer holds in its recv buffer.
-        // `RecvStream.read` shifts the buffer down and shrinks it to
-        // exactly the live tail, so the delta is the bytes actually
-        // freed.
-        if (s.recv.bytes.items.len < before) {
-            self.releaseResidentBytes(before - s.recv.bytes.items.len);
-        }
-        if (n > 0) {
-            self.recv_stream_bytes_read += n;
-            if (shouldQueueReceiveCredit(
-                s.recv.read_offset,
-                s.recv_max_data,
-                default_stream_receive_window,
-            )) {
-                try self.queueMaxStreamData(id, s.recv.read_offset +| default_stream_receive_window);
-            }
-            if (shouldQueueReceiveCredit(
-                self.recv_stream_bytes_read,
-                self.local_max_data,
-                default_connection_receive_window,
-            )) {
-                self.queueMaxData(self.recv_stream_bytes_read +| default_connection_receive_window);
-            }
-        }
-        self.maybeReturnPeerStreamCredit(s);
-        return n;
+        return conn_streams.streamRead(self, id, dst);
     }
 
     /// Like `streamRead`, but also reports whether the peer's FIN has been
@@ -2951,19 +2526,11 @@ pub const Connection = struct {
     /// GC reaps the moment the recv side goes terminal. Prefer this over
     /// `streamRead` when you need to detect clean stream completion.
     pub fn streamReadFin(self: *Connection, id: u64, dst: []u8) Error!StreamReadResult {
-        const n = try self.streamRead(id, dst);
-        // `streamRead` already returned `StreamNotFound` if the stream was
-        // absent, and reaping (`gcClosedStreams`) runs only in `tick`, so the
-        // stream is still live here; the `else` is a defensive dead branch.
-        const fin = if (self.streams.get(id)) |s| s.recv.fin_seen else false;
-        return .{ .n = n, .fin = fin };
+        return conn_streams.streamReadFin(self, id, dst);
     }
 
-    /// Whether the receive side of `id` has seen any STREAM bytes in
-    /// 0-RTT. Returns null for an unknown stream.
     pub fn streamArrivedInEarlyData(self: *const Connection, id: u64) ?bool {
-        const s = self.streams.get(id) orelse return null;
-        return s.arrived_in_early_data;
+        return conn_streams.streamArrivedInEarlyData(self, id);
     }
 
     /// If the *local* sender ran out of connection-level send credit
@@ -3006,7 +2573,8 @@ pub const Connection = struct {
         return if (bidi) self.peer_streams_blocked_bidi else self.peer_streams_blocked_uni;
     }
 
-    fn queueMaxStreamData(
+    // INTERNAL: pub for conn_streams.zig access; not part of the embedder API.
+    pub fn queueMaxStreamData(
         self: *Connection,
         stream_id: u64,
         maximum_stream_data: u64,
@@ -3029,7 +2597,8 @@ pub const Connection = struct {
         });
     }
 
-    fn queueMaxData(self: *Connection, maximum_data: u64) void {
+    // INTERNAL: pub for conn_streams.zig access; not part of the embedder API.
+    pub fn queueMaxData(self: *Connection, maximum_data: u64) void {
         if (maximum_data > self.local_max_data) self.local_max_data = maximum_data;
         if (self.peer_data_blocked_at) |limit| {
             if (maximum_data > limit) self.peer_data_blocked_at = null;
@@ -3363,8 +2932,7 @@ pub const Connection = struct {
 
     /// Convenience: close the send half of stream `id` (queues FIN).
     pub fn streamFinish(self: *Connection, id: u64) Error!void {
-        const s = self.streams.get(id) orelse return Error.StreamNotFound;
-        try s.send.finish();
+        return conn_streams.streamFinish(self, id);
     }
 
     /// Convenience: abort the send half of stream `id` with
@@ -3376,8 +2944,7 @@ pub const Connection = struct {
         id: u64,
         application_error_code: u64,
     ) Error!void {
-        const s = self.streams.get(id) orelse return Error.StreamNotFound;
-        try s.send.resetStream(application_error_code);
+        return conn_streams.streamReset(self, id, application_error_code);
     }
 
     /// Queue an RFC 9221 DATAGRAM payload for transmission. The next
@@ -7101,27 +6668,14 @@ pub const Connection = struct {
         stream_id: u64,
         application_error_code: u64,
     ) Error!void {
-        try self.queueStopSending(.{
-            .stream_id = stream_id,
-            .application_error_code = application_error_code,
-        });
+        return conn_streams.streamStopSending(self, stream_id, application_error_code);
     }
 
     fn queueStopSending(
         self: *Connection,
         item: StopSendingItem,
     ) Error!void {
-        for (self.pending_frames.stop_sending.items) |queued| {
-            if (queued.stream_id == item.stream_id and
-                queued.application_error_code == item.application_error_code)
-            {
-                return;
-            }
-        }
-        try self.pending_frames.stop_sending.append(self.allocator, .{
-            .stream_id = item.stream_id,
-            .application_error_code = item.application_error_code,
-        });
+        return conn_streams.queueStopSending(self, item);
     }
 
     pub fn peerCidsCount(self: *const Connection) usize {
