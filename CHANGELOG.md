@@ -106,6 +106,11 @@ seed and machine-independent):
   documented 10M was never runnable under GitHub's job cap); a Linux
   aarch64 test leg is added; the weekly interop matrix gains goodput
   and loss-conditioned cells with a job-summary readout.
+- The QNS interop image no longer depends on ziglang.org retaining a
+  dev tarball. It tries the Zig project's community mirrors in order
+  and pins the exact SHA-256 per architecture (digests verified
+  against Zig's minisign key), so the build fails closed on a bad
+  mirror instead of failing open on a missing one.
 
 ### Fixed
 
