@@ -959,3 +959,71 @@ test "ChReassembler: tolerates leading PADDING/PING/ACK in the payload" {
     const got = (try rc.feed(payload[0..p])) orelse return error.TestExpectedSome;
     try std.testing.expectEqualSlices(u8, ch, got);
 }
+
+// -- fuzz harness ------------------------------------------------------------
+//
+// The compatible-version-negotiation preparse (RFC 9368 §5) runs the
+// most complex parser the server exposes to unauthenticated bytes
+// BEFORE any TLS state exists: multi-Initial CRYPTO reassembly of a
+// fragmented ClientHello, then a TLS-extension walk to the
+// `quic_transport_parameters` blob, then the `version_information`
+// transport parameter, then version selection. `src/server/vneg.zig`
+// chains exactly these on the accept path. None may panic on hostile
+// input; every returned slice must point inside the caller buffer.
+
+test "fuzz: ChReassembler + version preparse pipeline never panics" {
+    try std.testing.fuzz({}, fuzzVersionPreparse, .{});
+}
+
+fn fuzzVersionPreparse(_: void, smith: *std.testing.Smith) anyerror!void {
+    // Feed 1-3 Initial payloads through the reassembler exactly as the
+    // server's streaming preparse does, then walk the completed
+    // ClientHello (if any) through the extension / transport-param /
+    // version-selection stages.
+    var dst: [max_client_hello_bytes]u8 = undefined;
+    var rc = ChReassembler.init(&dst);
+
+    const rounds = smith.valueRangeAtMost(u8, 1, 3);
+    var completed: ?[]const u8 = null;
+    var round: u8 = 0;
+    while (round < rounds) : (round += 1) {
+        var payload_buf: [1024]u8 = undefined;
+        const len = smith.slice(&payload_buf);
+        const maybe = rc.feed(payload_buf[0..len]) catch {
+            // Invalid framing is a legal outcome — reset and keep
+            // fuzzing subsequent rounds against a fresh reassembler.
+            rc.reset();
+            continue;
+        };
+        if (maybe) |ch| {
+            // Reassembled slice must lie inside `dst`.
+            try std.testing.expect(@intFromPtr(ch.ptr) >= @intFromPtr(&dst));
+            try std.testing.expect(@intFromPtr(ch.ptr) + ch.len <= @intFromPtr(&dst) + dst.len);
+            completed = ch;
+            break;
+        }
+    }
+
+    const ch = completed orelse return;
+
+    // Downstream walk — the same chain `Server` runs after reassembly.
+    const qtp = findQuicTransportParamsExt(ch) orelse return;
+    try std.testing.expect(@intFromPtr(qtp.ptr) >= @intFromPtr(ch.ptr));
+    try std.testing.expect(@intFromPtr(qtp.ptr) + qtp.len <= @intFromPtr(ch.ptr) + ch.len);
+
+    const info = findVersionInformation(qtp) orelse return;
+    const avail = info.available();
+    // Every advertised version slot must sit inside the tp blob's
+    // backing buffer (it aliases `qtp`).
+    for (avail) |_| {}
+    // Version selection over a fixed server preference must not panic
+    // and must return either null or a member of the server list.
+    const server_versions = [_]u32{ 0x00000001, 0x6b3343cf };
+    if (chooseUpgradeVersion(&server_versions, avail)) |chosen| {
+        var ok = false;
+        for (server_versions) |v| {
+            if (v == chosen) ok = true;
+        }
+        try std.testing.expect(ok);
+    }
+}

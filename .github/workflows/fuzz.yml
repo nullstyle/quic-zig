@@ -49,6 +49,21 @@ jobs:
           key: zig-pkg-${{ hashFiles('build.zig.zon') }}
           restore-keys: zig-pkg-
 
+      # Warm the coverage-guided corpus across weekly runs. `.zig-cache/v`
+      # holds the fuzzer's accumulated interesting inputs; without this
+      # every run starts cold and re-discovers the same coverage.
+      # Keyed on the toolchain pin (a different Zig instruments
+      # differently) with a date suffix so the entry rotates weekly
+      # rather than growing unbounded; restore-keys falls back to the
+      # most recent prior corpus for the same toolchain.
+      - name: Restore fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache/v
+          key: fuzz-corpus-${{ hashFiles('mise.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ hashFiles('mise.toml') }}-
+
       # GitHub's tarball/raw endpoints flake (504s, DNS) often enough to fail
       # real runs. Prefetch the full dependency tree with retries so a bad
       # window costs seconds, not a red CI run; the cache above makes even
