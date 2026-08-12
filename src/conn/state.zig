@@ -432,6 +432,25 @@ pub const max_crypto_reassembly_gap: u64 = 64 * 1024;
 /// ACK frame (RFC 9000 §13.2.2).
 pub const application_ack_eliciting_threshold: u8 = 1;
 /// Hard cap on total bytes spent on ACK ranges in any single application packet.
+///
+/// These caps are deliberately SINGLE-TIER. A two-tier variant — keep
+/// this budget for packets that also carry STREAM data, spend a wider
+/// one (256 B / 64 ranges) on standalone ACKs where no payload is
+/// being crowded out — has been built and measured twice and rejected
+/// both times:
+///   * 2026-05 (`5b9a4f6`): regressed multiplexing completion under a
+///     bursty 10 Mbps simulator.
+///   * 2026-08: re-measured against the bottleneck impairment cells,
+///     including the 8-stream multiplexed one, with pacing enabled
+///     (pacing was the hypothesis for why it should matter now, since
+///     pacing-blocked polls emit standalone ACKs). Every cell came out
+///     bit-identical — no regression, but no benefit either: during a
+///     bulk transfer the range cap simply does not bind.
+/// It is not free: a wider standalone ACK is a bigger packet on the
+/// return path, which matters on asymmetric links. Re-open only with a
+/// workload that demonstrably makes the 16-range cap bind (bursty or
+/// correlated loss producing many disjoint gaps) — not on the
+/// principle alone.
 pub const max_application_ack_ranges_bytes: usize = 128;
 /// Hard cap on the number of additional (non-largest) ACK ranges per application packet.
 pub const max_application_ack_lower_ranges: u64 = 16;

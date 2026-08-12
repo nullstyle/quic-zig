@@ -23,6 +23,11 @@ Headline numbers (m5max dev machine; loopback for the real-socket
 figure, in-process virtual time for impairment — deterministic per
 seed and machine-independent):
 
+- Slow-start overshoot on a 10 Mbit bottleneck: HyStart++ takes
+  buffer-overflow drops from **111 to 0** and peak queueing delay from
+  **99.7 ms to 85.6 ms** (to **33.6 ms**, −52%, with 1% background
+  loss) — identically on the 8-stream multiplexed variant.
+
 - Real-socket upload goodput **10.8 → 48.9 MB/s (4.5×)** from the
   batched datapath (batched ingress, cross-peer `sendmmsg`, Linux
   GSO/GRO).
@@ -47,6 +52,13 @@ seed and machine-independent):
   New `tests/conformance/rfc9002_pacing.zig`.
 - **RFC 9002 §7.8 application-limited gate** — the window no longer
   grows off ACKs from an unfilled pipe (both controllers).
+- **HyStart++ (RFC 9406)** — on by default
+  (`enable_hystart = false` restores plain RFC 9002 slow start).
+  Standard slow start only stops once it overruns the bottleneck and
+  loses packets; HyStart++ watches for sustained RTT inflation across
+  a round and leaves slow start before the overshoot. Shared by both
+  controllers (CUBIC + HyStart++ is the pairing Linux and quiche
+  ship). New `tests/conformance/rfc9406_hystart.zig`.
 - **Batched UDP datapath** in `runUdpServer` / `runUdpClient`: batched
   ingress (`RunUdpOptions.max_datagrams_per_iteration`, default 16),
   cross-peer egress via one `sendMany`/`sendmmsg`
@@ -68,6 +80,11 @@ seed and machine-independent):
   Microbenchmarks (`zig build bench`) now report median ± MAD over N
   samples. New `zig build bench-compare` regression tool + committed
   `baselines/bench/`, and a real-socket `zig build run-goodput-smoke`.
+  The impairment simulator gained a rate-limited **bottleneck link
+  with a finite tail-drop buffer** and a **multi-stream transfer
+  mode**, so congestion-control behavior that only appears when a
+  queue builds — slow-start overshoot above all — is finally
+  measurable in-tree rather than only in interop.
 
 ### Changed
 
