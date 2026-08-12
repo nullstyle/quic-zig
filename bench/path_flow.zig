@@ -340,11 +340,11 @@ fn tryOrUnreachable(result: flow_control.Error!void) void {
 }
 
 fn statusInt(status: path_validator_mod.Status) u64 {
-    return @intFromEnum(status);
+    return @backingInt(status);
 }
 
 fn statusIntPath(state: path_mod.State) u64 {
-    return @intFromEnum(state);
+    return @backingInt(state);
 }
 
 fn foldToken(token: *const [8]u8) u64 {

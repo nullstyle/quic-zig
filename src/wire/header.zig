@@ -110,12 +110,12 @@ pub const PnLength = enum(u8) {
 
     /// Encode this length as the 2-bit (N-1) field for the first byte.
     pub fn toTwoBits(self: PnLength) u2 {
-        return @intCast(@intFromEnum(self) - 1);
+        return @intCast(@backingInt(self) - 1);
     }
 
     /// Length in bytes (1..4).
     pub fn bytes(self: PnLength) u8 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 

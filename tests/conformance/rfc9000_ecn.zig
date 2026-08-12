@@ -253,10 +253,10 @@ test "NORMATIVE EcnCodepoint values match the IETF wire encoding [RFC3168 §5]" 
     // RFC 3168 §5 / IANA "ECN Codepoints in IPv4 / IPv6": the two
     // ECN bits are the low two bits of the TOS byte, in the same
     // wire order as `EcnCodepoint`'s `@intFromEnum`.
-    try std.testing.expectEqual(@as(u2, 0b00), @intFromEnum(transport.EcnCodepoint.not_ect));
-    try std.testing.expectEqual(@as(u2, 0b01), @intFromEnum(transport.EcnCodepoint.ect1));
-    try std.testing.expectEqual(@as(u2, 0b10), @intFromEnum(transport.EcnCodepoint.ect0));
-    try std.testing.expectEqual(@as(u2, 0b11), @intFromEnum(transport.EcnCodepoint.ce));
+    try std.testing.expectEqual(@as(u2, 0b00), @backingInt(transport.EcnCodepoint.not_ect));
+    try std.testing.expectEqual(@as(u2, 0b01), @backingInt(transport.EcnCodepoint.ect1));
+    try std.testing.expectEqual(@as(u2, 0b10), @backingInt(transport.EcnCodepoint.ect0));
+    try std.testing.expectEqual(@as(u2, 0b11), @backingInt(transport.EcnCodepoint.ce));
 }
 
 test "NORMATIVE parseEcnFromControl returns not_ect on an empty control buffer [RFC9000 §13.4.1]" {

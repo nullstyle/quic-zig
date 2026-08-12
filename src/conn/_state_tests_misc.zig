@@ -9,7 +9,7 @@ const level_mod = state.level_mod;
 
 test "EncryptionLevel idx round-trip" {
     inline for (level_mod.all) |lvl| {
-        try std.testing.expectEqual(lvl.idx(), @intFromEnum(lvl));
+        try std.testing.expectEqual(lvl.idx(), @backingInt(lvl));
     }
 }
 

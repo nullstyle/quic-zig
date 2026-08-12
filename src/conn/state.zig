@@ -573,7 +573,7 @@ pub const StreamType = enum(u2) {
 
     /// The stream type encoded in the low two bits of `id` (RFC 9000 §2.1).
     pub fn fromId(id: u64) StreamType {
-        return @enumFromInt(@as(u2, @truncate(id)));
+        return @fromBackingInt(@intCast(@as(u2, @truncate(id))));
     }
 
     /// Compose the stream id for this type at 0-based per-type sequence
@@ -581,11 +581,11 @@ pub const StreamType = enum(u2) {
     /// 62-bit stream-id space.
     pub fn streamId(self: StreamType, index: u64) u64 {
         std.debug.assert(index <= (std.math.maxInt(u64) >> 2));
-        return (index << 2) | @intFromEnum(self);
+        return (index << 2) | @backingInt(self);
     }
 
     pub fn isBidi(self: StreamType) bool {
-        return (@intFromEnum(self) & 0b10) == 0;
+        return (@backingInt(self) & 0b10) == 0;
     }
 
     pub fn isUni(self: StreamType) bool {
@@ -593,7 +593,7 @@ pub const StreamType = enum(u2) {
     }
 
     pub fn initiatedByClient(self: StreamType) bool {
-        return (@intFromEnum(self) & 0b01) == 0;
+        return (@backingInt(self) & 0b01) == 0;
     }
 
     pub fn initiatedByServer(self: StreamType) bool {
@@ -4674,7 +4674,7 @@ fn setSecret(
     @memcpy(material.secret[0..secret_len], secret[0..secret_len]);
     material.secret_len = @intCast(secret_len);
 
-    const lvl = EncryptionLevel.fromBoringssl(@enumFromInt(level));
+    const lvl = EncryptionLevel.fromBoringssl(@fromBackingInt(@intCast(level)));
     if (lvl == .application) {
         conn.installApplicationSecret(dir, material) catch return 0;
     } else switch (dir) {
@@ -4694,7 +4694,7 @@ fn addHandshakeData(
     len: usize,
 ) callconv(.c) c_int {
     const conn = connFromSsl(ssl) orelse return 0;
-    const lvl = EncryptionLevel.fromBoringssl(@enumFromInt(level));
+    const lvl = EncryptionLevel.fromBoringssl(@fromBackingInt(@intCast(level)));
     // Buffer outgoing CRYPTO bytes per level. `poll` packs them into
     // CRYPTO frames inside Initial/Handshake/1-RTT packets — that's
     // the wire-level handshake path. The in-process mock-transport

@@ -153,7 +153,7 @@ pub const SetEcnError = error{
 /// leaves the DSCP bits at zero (the kernel default).
 pub fn setEcnSendMarking(handle: Handle, codepoint: EcnCodepoint) SetEcnError!void {
     if (!has_ip_ecn_sockopts) return error.Unsupported;
-    const tos: c_int = @intFromEnum(codepoint);
+    const tos: c_int = @backingInt(codepoint);
     const tos_bytes = std.mem.asBytes(&tos);
 
     var any_ok = false;
@@ -276,7 +276,7 @@ pub fn parseEcnFromControl(control: []const u8) EcnCodepoint {
             // the low byte holds the TOS.
             if (data_len >= 1 and data_off < control.len) {
                 const tos_byte: u8 = control[data_off];
-                return @enumFromInt(@as(u2, @truncate(tos_byte & 0x03)));
+                return @fromBackingInt(@intCast(@as(u2, @truncate(tos_byte & 0x03))));
             }
         }
         if (cmsg_level == @as(i32, @intCast(ip_consts.ipv6_proto)) and cmsg_type == @as(i32, @intCast(ip_consts.ipv6_tclass))) {
@@ -285,11 +285,11 @@ pub fn parseEcnFromControl(control: []const u8) EcnCodepoint {
             // ECN), of which we only consume the low two ECN bits.
             if (data_len >= 4 and data_off + 4 <= control.len) {
                 const tclass = std.mem.readInt(i32, control[data_off..][0..4], native_endian);
-                return @enumFromInt(@as(u2, @truncate(@as(u32, @bitCast(tclass)) & 0x03)));
+                return @fromBackingInt(@intCast(@as(u2, @truncate(@as(u32, @bitCast(tclass)) & 0x03))));
             }
             if (data_len >= 1 and data_off < control.len) {
                 const tos_byte: u8 = control[data_off];
-                return @enumFromInt(@as(u2, @truncate(tos_byte & 0x03)));
+                return @fromBackingInt(@intCast(@as(u2, @truncate(tos_byte & 0x03))));
             }
         }
 
@@ -667,10 +667,10 @@ test "default tuning constants are reasonable" {
 }
 
 test "EcnCodepoint two-bit encoding matches RFC 3168" {
-    try testing.expectEqual(@as(u2, 0b00), @intFromEnum(EcnCodepoint.not_ect));
-    try testing.expectEqual(@as(u2, 0b01), @intFromEnum(EcnCodepoint.ect1));
-    try testing.expectEqual(@as(u2, 0b10), @intFromEnum(EcnCodepoint.ect0));
-    try testing.expectEqual(@as(u2, 0b11), @intFromEnum(EcnCodepoint.ce));
+    try testing.expectEqual(@as(u2, 0b00), @backingInt(EcnCodepoint.not_ect));
+    try testing.expectEqual(@as(u2, 0b01), @backingInt(EcnCodepoint.ect1));
+    try testing.expectEqual(@as(u2, 0b10), @backingInt(EcnCodepoint.ect0));
+    try testing.expectEqual(@as(u2, 0b11), @backingInt(EcnCodepoint.ce));
 }
 
 test "setEcnSendMarking applies ECT(0) without erroring on loopback" {

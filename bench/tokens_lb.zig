@@ -121,7 +121,7 @@ pub fn runRetryTokenMintValidate(ctx: *const RetryTokenMintValidateCtx, iters: u
         std.debug.assert(result == .valid);
 
         sum +%= n;
-        sum +%= @as(u64, @intFromEnum(result)) + 1;
+        sum +%= @as(u64, @backingInt(result)) + 1;
         sum +%= token[@intCast(i % token.len)];
         sum +%= token[retry_token.nonce_len];
     }
@@ -182,7 +182,7 @@ pub fn runNewTokenMintValidate(ctx: *const NewTokenMintValidateCtx, iters: u64) 
         std.debug.assert(result == .valid);
 
         sum +%= n;
-        sum +%= @as(u64, @intFromEnum(result)) + 1;
+        sum +%= @as(u64, @backingInt(result)) + 1;
         sum +%= token[@intCast(i % token.len)];
         sum +%= token[new_token.nonce_len];
     }

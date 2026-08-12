@@ -26,18 +26,18 @@ pub const EncryptionLevel = enum(u8) {
     /// `boringssl.tls.quic.EncryptionLevel` so
     /// `@enumFromInt(@intFromEnum(...))` round-trips.
     pub fn fromBoringssl(lvl: boringssl.tls.quic.EncryptionLevel) EncryptionLevel {
-        return @enumFromInt(@intFromEnum(lvl));
+        return @fromBackingInt(@intCast(@backingInt(lvl)));
     }
 
     /// Inverse of `fromBoringssl`. Used when handing a level back
     /// down to the BoringSSL QUIC method callbacks.
     pub fn toBoringssl(self: EncryptionLevel) boringssl.tls.quic.EncryptionLevel {
-        return @enumFromInt(@intFromEnum(self));
+        return @fromBackingInt(@intCast(@backingInt(self)));
     }
 
     /// Index for slotted arrays keyed by level.
     pub fn idx(self: EncryptionLevel) usize {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// Map an encryption level to its packet number space (RFC 9000
