@@ -571,6 +571,12 @@ pub const Config = struct {
     /// timing exactly.
     enable_pacing: bool = true,
 
+    /// RFC 9406 HyStart++ for every accepted connection (on by
+    /// default): leaves slow start on sustained RTT inflation instead
+    /// of waiting for the loss that overshooting the bottleneck
+    /// causes. `false` restores plain RFC 9002 slow start.
+    enable_hystart: bool = true,
+
     /// RFC 9000 §18.2 / §5.1.1 server preferred-address advertisement.
     /// Null disables the feature (default — no `preferred_address`
     /// transport parameter is sent and clients have no server-driven

@@ -20,6 +20,20 @@ pub const Options = struct {
     reorder_permille: u16 = 0,
     base_delay_us: u64 = 1_000,
     reorder_extra_us: u64 = 5_000,
+    /// Bottleneck link rate in bytes/second, 0 = unlimited (the
+    /// historical behavior: every packet takes exactly base_delay).
+    ///
+    /// With a rate set, the link serializes packets: a packet arriving
+    /// while the link is busy waits, so its delay grows with the
+    /// standing queue. That queueing delay is what inflates RTT under
+    /// an overshooting sender — the signal RFC 9406 HyStart++ exists
+    /// to detect, and the reason a pure fixed-delay sim cannot
+    /// evaluate slow-start exit at all.
+    bottleneck_bytes_per_s: u64 = 0,
+    /// Tail-drop threshold: a packet that would wait longer than this
+    /// for the link finds the queue full and is dropped. Models a
+    /// finite router buffer.
+    max_queue_delay_us: u64 = 100_000,
 };
 
 const Packet = struct {
@@ -39,6 +53,13 @@ pub const SimNet = struct {
     dropped: u64 = 0,
     delivered: u64 = 0,
     delivered_bytes_hash: u64 = 0,
+    /// When the bottleneck link finishes transmitting everything
+    /// already queued (bottleneck model only).
+    link_free_at_us: u64 = 0,
+    /// Packets tail-dropped because the bottleneck queue was full.
+    queue_dropped: u64 = 0,
+    /// Largest queueing delay any delivered packet experienced.
+    peak_queue_delay_us: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, opts: Options) SimNet {
         return .{
@@ -65,6 +86,29 @@ pub const SimNet = struct {
         }
         var delay = self.opts.base_delay_us;
         if (reorder_roll < self.opts.reorder_permille) delay += self.opts.reorder_extra_us;
+
+        // Bottleneck serialization. Only the data direction contends
+        // for the link; ACKs are small enough that modelling them adds
+        // noise rather than realism.
+        if (self.opts.bottleneck_bytes_per_s != 0 and from_client) {
+            const start_tx = @max(now_us, self.link_free_at_us);
+            const queue_delay = start_tx - now_us;
+            if (queue_delay > self.opts.max_queue_delay_us) {
+                // Buffer full: tail drop.
+                self.dropped += 1;
+                self.queue_dropped += 1;
+                return;
+            }
+            const tx_us = std.math.lossyCast(
+                u64,
+                (@as(u128, bytes.len) * std.time.us_per_s) / self.opts.bottleneck_bytes_per_s,
+            );
+            self.link_free_at_us = start_tx +| tx_us;
+            delay += queue_delay + tx_us;
+            if (queue_delay > self.peak_queue_delay_us) {
+                self.peak_queue_delay_us = queue_delay;
+            }
+        }
 
         const copy = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(copy);
@@ -197,4 +241,65 @@ test "reorder delay lets later packets overtake" {
 
     try std.testing.expectEqual(@as(?u64, 1_100), net.earliestRelease());
     try std.testing.expectEqual(@as(u64, 0), net.dropped);
+}
+
+test "bottleneck link serializes packets and builds a standing queue" {
+    const allocator = std.testing.allocator;
+    // 1 MB/s link: a 1000-byte packet takes 1000 us to transmit.
+    var net = SimNet.init(allocator, .{
+        .seed = 1,
+        .bottleneck_bytes_per_s = 1_000_000,
+        .base_delay_us = 1_000,
+    });
+    defer net.deinit();
+
+    var payload: [1000]u8 = undefined;
+    @memset(&payload, 0xab);
+
+    // Three back-to-back packets at t=0: the first goes out
+    // immediately, the others wait 1 ms and 2 ms for the link.
+    try net.enqueue(true, &payload, 0);
+    try net.enqueue(true, &payload, 0);
+    try net.enqueue(true, &payload, 0);
+    try std.testing.expectEqual(@as(usize, 3), net.queue.items.len);
+    // release = base_delay + queue_delay + tx_time
+    try std.testing.expectEqual(@as(u64, 2_000), net.queue.items[0].release_us);
+    try std.testing.expectEqual(@as(u64, 3_000), net.queue.items[1].release_us);
+    try std.testing.expectEqual(@as(u64, 4_000), net.queue.items[2].release_us);
+    try std.testing.expectEqual(@as(u64, 2_000), net.peak_queue_delay_us);
+    try std.testing.expectEqual(@as(u64, 0), net.queue_dropped);
+}
+
+test "bottleneck tail-drops once the queue exceeds its depth" {
+    const allocator = std.testing.allocator;
+    var net = SimNet.init(allocator, .{
+        .seed = 1,
+        .bottleneck_bytes_per_s = 1_000_000,
+        .max_queue_delay_us = 5_000,
+    });
+    defer net.deinit();
+
+    var payload: [1000]u8 = undefined;
+    @memset(&payload, 0xcd);
+    // Each packet adds 1 ms of queue; past 5 ms of standing queue the
+    // rest are tail-dropped rather than queued forever.
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) try net.enqueue(true, &payload, 0);
+    try std.testing.expect(net.queue_dropped > 0);
+    try std.testing.expectEqual(net.queue_dropped, net.dropped);
+    try std.testing.expect(net.queue.items.len < 20);
+}
+
+test "no bottleneck configured keeps the fixed-delay behavior" {
+    const allocator = std.testing.allocator;
+    var net = SimNet.init(allocator, .{ .seed = 1, .base_delay_us = 1_000 });
+    defer net.deinit();
+    var payload: [1000]u8 = undefined;
+    @memset(&payload, 0x01);
+    try net.enqueue(true, &payload, 0);
+    try net.enqueue(true, &payload, 0);
+    // Both release at the same instant: no serialization.
+    try std.testing.expectEqual(@as(u64, 1_000), net.queue.items[0].release_us);
+    try std.testing.expectEqual(@as(u64, 1_000), net.queue.items[1].release_us);
+    try std.testing.expectEqual(@as(u64, 0), net.peak_queue_delay_us);
 }

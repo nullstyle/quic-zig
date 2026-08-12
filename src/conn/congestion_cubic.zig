@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const congestion = @import("congestion.zig");
+const hystart_mod = @import("hystart.zig");
 
 /// CUBIC multiplicative-decrease factor β_cubic = 0.7 (RFC 9438 §4.6).
 pub const beta_num: u64 = 7;
@@ -50,9 +51,18 @@ pub const Cubic = struct {
     /// Reno-friendly window estimate, bytes (§4.3). CUBIC never lets
     /// cwnd fall below this while in congestion avoidance.
     w_est: u64 = 0,
+    /// RFC 9406 HyStart++ slow-start exit state. CUBIC + HyStart++ is
+    /// the pairing Linux and quiche ship; the two are orthogonal
+    /// (HyStart++ governs when slow start ends, CUBIC governs the
+    /// congestion-avoidance curve).
+    hystart: hystart_mod.State = .{},
 
     pub fn init(cfg: congestion.Config) Cubic {
-        return .{ .cfg = cfg, .cwnd = cfg.initialWindow() };
+        return .{
+            .cfg = cfg,
+            .cwnd = cfg.initialWindow(),
+            .hystart = hystart_mod.State.init(cfg.hystart),
+        };
     }
 
     pub fn isInRecovery(self: *const Cubic, sent_time_us: u64) bool {
@@ -94,7 +104,9 @@ pub const Cubic = struct {
         }
 
         if (self.isSlowStart()) {
-            self.cwnd += bytes_acked;
+            // HyStart++ throttles growth inside Conservative Slow
+            // Start; outside CSS this is plain `bytes_acked`.
+            self.cwnd += self.hystart.slowStartGrowth(bytes_acked);
             return;
         }
 
@@ -141,11 +153,28 @@ pub const Cubic = struct {
         if (self.w_est > self.cwnd) self.cwnd = self.w_est;
     }
 
-    /// RTT-sample hook (HyStart++ inlet, future). No-op today.
-    pub fn onRttSample(self: *Cubic, latest_rtt_us: u64, now_us: u64) void {
-        _ = self;
-        _ = latest_rtt_us;
-        _ = now_us;
+    /// Post-ACK hook driving RFC 9406 HyStart++ (see `hystart.zig`).
+    /// Only meaningful during slow start; a no-op otherwise.
+    pub fn onAckProcessed(
+        self: *Cubic,
+        largest_acked_pn: u64,
+        latest_rtt_us: ?u64,
+        next_pn_to_send: u64,
+    ) void {
+        if (!self.isSlowStart()) return;
+        if (self.hystart.onAckProcessed(largest_acked_pn, latest_rtt_us, next_pn_to_send)) {
+            // Leave slow start without having driven the path to loss.
+            // The next ACK in congestion avoidance anchors a fresh
+            // CUBIC epoch from here.
+            self.ssthresh = self.cwnd;
+            self.epoch_start_us = null;
+            self.hystart.reset();
+        }
+    }
+
+    /// In HyStart++ Conservative Slow Start? (observability)
+    pub fn isInCss(self: *const Cubic) bool {
+        return self.hystart.inCss() and self.isSlowStart();
     }
 
     /// RFC 9438 §4.6 multiplicative decrease + §4.7 fast convergence.
@@ -190,6 +219,9 @@ pub const Cubic = struct {
         );
         self.cwnd = self.ssthresh.?;
         self.epoch_start_us = null;
+        // Loss/CE ends slow start through ssthresh; HyStart++ has
+        // nothing left to track.
+        self.hystart.reset();
     }
 
     /// RFC 9002 §7.6 persistent congestion: collapse to the minimum
@@ -200,6 +232,7 @@ pub const Cubic = struct {
         self.cwnd = self.cfg.minWindow();
         self.recovery_start_time_us = null;
         self.epoch_start_us = null;
+        self.hystart.reset();
     }
 
     /// cwnd headroom in bytes; 0 means "wait".

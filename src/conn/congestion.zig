@@ -16,6 +16,11 @@
 
 const std = @import("std");
 const cubic_mod = @import("congestion_cubic.zig");
+const hystart_mod = @import("hystart.zig");
+
+/// RFC 9406 HyStart++ state/config, shared by both controllers.
+pub const HyStart = hystart_mod.State;
+pub const HyStartConfig = hystart_mod.Config;
 
 /// RFC 9438 CUBIC controller (re-export; lives in congestion_cubic.zig).
 pub const Cubic = cubic_mod.Cubic;
@@ -59,6 +64,10 @@ pub const Config = struct {
     /// (RFC 9438) is the default as of 0.11.0 — the industry-standard
     /// curve; NewReno remains available as the conservative fallback.
     algorithm: Algorithm = .cubic,
+    /// RFC 9406 HyStart++ slow-start exit. Applies to whichever
+    /// algorithm is selected; `.enabled = false` restores plain
+    /// RFC 9002 slow start.
+    hystart: HyStartConfig = .{},
 
     /// Minimum congestion window: 2 * max_datagram_size.
     pub fn minWindow(self: Config) u64 {
@@ -117,11 +126,30 @@ pub const CongestionController = union(Algorithm) {
         }
     }
 
-    /// RTT-sample hook: call once per RTT estimator update.
-    pub fn onRttSample(self: *CongestionController, latest_rtt_us: u64, now_us: u64) void {
+    /// Post-ACK hook: call once per processed ACK. Drives RFC 9406
+    /// HyStart++. `latest_rtt_us` is null when the ACK produced no
+    /// fresh RTT sample; `next_pn_to_send` is the sender's next packet
+    /// number, used for round-trip boundary detection.
+    pub fn onAckProcessed(
+        self: *CongestionController,
+        largest_acked_pn: u64,
+        latest_rtt_us: ?u64,
+        next_pn_to_send: u64,
+    ) void {
         switch (self.*) {
-            inline else => |*impl| impl.onRttSample(latest_rtt_us, now_us),
+            inline else => |*impl| impl.onAckProcessed(
+                largest_acked_pn,
+                latest_rtt_us,
+                next_pn_to_send,
+            ),
         }
+    }
+
+    /// In HyStart++ Conservative Slow Start? (observability)
+    pub fn isInCss(self: *const CongestionController) bool {
+        return switch (self.*) {
+            inline else => |*impl| impl.isInCss(),
+        };
     }
 
     pub fn onPacketLost(
@@ -229,10 +257,16 @@ pub const NewReno = struct {
     /// congestion avoidance. We compound increments per
     /// `bytes_acked / cwnd >= max_datagram_size`.
     bytes_acked_in_ca: u64 = 0,
+    /// RFC 9406 HyStart++ slow-start exit state.
+    hystart: HyStart = .{},
 
     /// Build a fresh controller with `cfg` and `cwnd = initialWindow()`.
     pub fn init(cfg: Config) NewReno {
-        return .{ .cfg = cfg, .cwnd = cfg.initialWindow() };
+        return .{
+            .cfg = cfg,
+            .cwnd = cfg.initialWindow(),
+            .hystart = HyStart.init(cfg.hystart),
+        };
     }
 
     /// True iff the controller is currently in recovery and the
@@ -282,7 +316,9 @@ pub const NewReno = struct {
         if (!ackFillsWindow(self.cwnd, bytes_acked, bytes_in_flight)) return;
 
         if (self.isSlowStart()) {
-            self.cwnd += bytes_acked;
+            // HyStart++ throttles growth inside Conservative Slow
+            // Start; outside CSS this is plain `bytes_acked`.
+            self.cwnd += self.hystart.slowStartGrowth(bytes_acked);
             return;
         }
 
@@ -320,6 +356,9 @@ pub const NewReno = struct {
         );
         self.cwnd = self.ssthresh.?;
         self.bytes_acked_in_ca = 0;
+        // Loss ends slow start through ssthresh; HyStart++ has nothing
+        // left to track.
+        self.hystart.reset();
     }
 
     /// Sent during a "persistent congestion" period (RFC 9002 §7.6).
@@ -328,6 +367,7 @@ pub const NewReno = struct {
         self.cwnd = self.cfg.minWindow();
         self.recovery_start_time_us = null;
         self.bytes_acked_in_ca = 0;
+        self.hystart.reset();
     }
 
     /// Process a peer-reported ECN-CE event for a packet whose newest
@@ -350,15 +390,29 @@ pub const NewReno = struct {
         );
         self.cwnd = self.ssthresh.?;
         self.bytes_acked_in_ca = 0;
+        self.hystart.reset();
     }
 
-    /// RTT-sample hook, called once per RTT estimator update. NewReno
-    /// ignores it; delay-sensitive controllers (CUBIC's HyStart
-    /// successor, BBR) consume it through the shared surface.
-    pub fn onRttSample(self: *NewReno, latest_rtt_us: u64, now_us: u64) void {
-        _ = self;
-        _ = latest_rtt_us;
-        _ = now_us;
+    /// Post-ACK hook driving RFC 9406 HyStart++ (see `hystart.zig`).
+    /// `latest_rtt_us` is null when the ACK produced no RTT sample.
+    /// Only meaningful during slow start; a no-op otherwise.
+    pub fn onAckProcessed(
+        self: *NewReno,
+        largest_acked_pn: u64,
+        latest_rtt_us: ?u64,
+        next_pn_to_send: u64,
+    ) void {
+        if (!self.isSlowStart()) return;
+        if (self.hystart.onAckProcessed(largest_acked_pn, latest_rtt_us, next_pn_to_send)) {
+            // Leave slow start without having driven the path to loss.
+            self.ssthresh = self.cwnd;
+            self.hystart.reset();
+        }
+    }
+
+    /// In HyStart++ Conservative Slow Start? (observability)
+    pub fn isInCss(self: *const NewReno) bool {
+        return self.hystart.inCss() and self.isSlowStart();
     }
 
     /// Are we allowed to send `bytes_in_flight` worth of data right

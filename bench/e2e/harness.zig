@@ -41,6 +41,8 @@ pub const PairOptions = struct {
     /// Congestion controller for both endpoints — the A/B lever the
     /// CUBIC-default flip gate drives. Follows the library default.
     congestion_control: quic_zig.CongestionAlgorithm = .cubic,
+    /// RFC 9406 HyStart++ on both endpoints (A/B lever).
+    hystart: bool = true,
 };
 
 /// Heap-allocated so the `peer` cross-pointers stay valid.
@@ -107,6 +109,8 @@ pub const Pair = struct {
 
         pair.client.setCongestionAlgorithm(opts.congestion_control);
         pair.server.setCongestionAlgorithm(opts.congestion_control);
+        pair.client.setHyStartEnabled(opts.hystart);
+        pair.server.setHyStartEnabled(opts.hystart);
 
         return pair;
     }
@@ -318,9 +322,21 @@ pub const ImpairmentOptions = struct {
     chunk_bytes: usize = 256 << 10,
     tick_us: u64 = 100,
     congestion_control: quic_zig.CongestionAlgorithm = .cubic,
+    /// RFC 9406 HyStart++ on both endpoints (A/B lever).
+    hystart: bool = true,
     seed: u64 = 0xbe9c4,
     loss_permille: u16 = 0,
     reorder_permille: u16 = 0,
+    /// Bottleneck link rate in bytes/s (0 = unlimited). A rate-limited
+    /// link builds a standing queue under an overshooting sender,
+    /// which is what inflates RTT — the only condition under which
+    /// slow-start-exit behavior is observable.
+    bottleneck_bytes_per_s: u64 = 0,
+    /// Concurrent bidi streams carrying the transfer, round-robin.
+    /// >1 reproduces the QNS `multiplexing` (M) shape, where the
+    /// send scheduler interleaves many streams rather than draining
+    /// one.
+    streams: u32 = 1,
     /// Safety bound on virtual time; heavy loss cells that fail to
     /// finish inside it return error.ImpairmentStalled.
     max_virtual_us: u64 = 600 * std.time.us_per_s,
@@ -337,18 +353,25 @@ pub const ImpairmentResult = struct {
     loss_permille: u16,
     reorder_permille: u16,
     seed: u64,
+    /// Bottleneck-model observability (0 when no bottleneck configured).
+    queue_dropped: u64 = 0,
+    peak_queue_delay_us: u64 = 0,
 };
 
 /// Bulk transfer through the seeded impairment net, measured in
 /// VIRTUAL time — deterministic for a given seed and option set.
 pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) !ImpairmentResult {
-    const pair = try Pair.create(allocator, .{ .congestion_control = opts.congestion_control });
+    const pair = try Pair.create(allocator, .{
+        .congestion_control = opts.congestion_control,
+        .hystart = opts.hystart,
+    });
     defer pair.destroy(allocator);
 
     var net = sim_net.SimNet.init(allocator, .{
         .seed = opts.seed,
         .loss_permille = opts.loss_permille,
         .reorder_permille = opts.reorder_permille,
+        .bottleneck_bytes_per_s = opts.bottleneck_bytes_per_s,
     });
     defer net.deinit();
 
@@ -360,7 +383,25 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
     var rbuf: [64 << 10]u8 = undefined;
     var pkt: [2048]u8 = undefined;
 
-    _ = try pair.client.openBidi(0);
+    // Client-initiated bidi stream ids are 0, 4, 8, ... (RFC 9000 §2.1).
+    const stream_count: u32 = @max(1, opts.streams);
+    var stream_ids: [64]u64 = undefined;
+    var per_stream_target: [64]usize = undefined;
+    var per_stream_written: [64]usize = @splat(0);
+    std.debug.assert(stream_count <= stream_ids.len);
+    {
+        var i: u32 = 0;
+        while (i < stream_count) : (i += 1) {
+            stream_ids[i] = @as(u64, i) * 4;
+            _ = try pair.client.openBidi(stream_ids[i]);
+            // Split the transfer evenly; the last stream absorbs the
+            // remainder so the totals match exactly.
+            per_stream_target[i] = opts.total_bytes / stream_count;
+            if (i + 1 == stream_count) {
+                per_stream_target[i] = opts.total_bytes - (opts.total_bytes / stream_count) * (stream_count - 1);
+            }
+        }
+    }
 
     const virtual_start: u64 = 1_000_000;
     var now_us: u64 = virtual_start;
@@ -371,14 +412,23 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
     while (consumed < opts.total_bytes) {
         if (now_us - virtual_start > opts.max_virtual_us) return error.ImpairmentStalled;
 
-        while (written < opts.total_bytes) {
-            const want = @min(opts.chunk_bytes, opts.total_bytes - written);
-            const accepted = try pair.client.streamWrite(0, data[0..want]);
-            written += accepted;
-            if (accepted < want) break;
-        }
-        if (written == opts.total_bytes and !pair.client.stream(0).?.send.fin_marked) {
-            try pair.client.streamFinish(0);
+        // Offer to every stream round-robin so the send scheduler sees
+        // genuine concurrency rather than one stream draining first.
+        var si: u32 = 0;
+        while (si < stream_count) : (si += 1) {
+            const id = stream_ids[si];
+            while (per_stream_written[si] < per_stream_target[si]) {
+                const want = @min(opts.chunk_bytes, per_stream_target[si] - per_stream_written[si]);
+                const accepted = try pair.client.streamWrite(id, data[0..want]);
+                per_stream_written[si] += accepted;
+                written += accepted;
+                if (accepted < want) break;
+            }
+            if (per_stream_written[si] == per_stream_target[si]) {
+                if (pair.client.stream(id)) |st| {
+                    if (!st.send.fin_marked) try pair.client.streamFinish(id);
+                }
+            }
         }
 
         var progressed = true;
@@ -396,15 +446,19 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
 
         try net.deliverDue(&pair.client, &pair.server, now_us);
 
-        while (true) {
-            // Deliveries are delayed, so the stream doesn't exist
-            // server-side until the first STREAM frame lands.
-            const got = pair.server.streamRead(0, &rbuf) catch |err| switch (err) {
-                error.StreamNotFound => break,
-                else => return err,
-            };
-            if (got == 0) break;
-            consumed += got;
+        var di: u32 = 0;
+        while (di < stream_count) : (di += 1) {
+            const id = stream_ids[di];
+            while (true) {
+                // Deliveries are delayed, so a stream doesn't exist
+                // server-side until its first STREAM frame lands.
+                const got = pair.server.streamRead(id, &rbuf) catch |err| switch (err) {
+                    error.StreamNotFound => break,
+                    else => return err,
+                };
+                if (got == 0) break;
+                consumed += got;
+            }
         }
 
         now_us += opts.tick_us;
@@ -428,6 +482,8 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .loss_permille = opts.loss_permille,
         .reorder_permille = opts.reorder_permille,
         .seed = opts.seed,
+        .queue_dropped = net.queue_dropped,
+        .peak_queue_delay_us = net.peak_queue_delay_us,
     };
 }
 

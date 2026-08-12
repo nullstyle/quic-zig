@@ -518,6 +518,7 @@ pub const Server = struct {
     ecn_enabled: bool,
     congestion_control: conn_mod.CongestionAlgorithm,
     pacing_enabled: bool,
+    hystart_enabled: bool,
     /// Captured `Config.pmtud` — applied to every Connection at
     /// slot-open time. RFC 8899 DPLPMTUD.
     pmtud_config: conn_mod.PmtudConfig,
@@ -895,6 +896,7 @@ pub const Server = struct {
             .ecn_enabled = config.enable_ecn,
             .congestion_control = config.congestion_control,
             .pacing_enabled = config.enable_pacing,
+            .hystart_enabled = config.enable_hystart,
             // The listener and bandwidth limiters recommend "off"
             // (envelope-dependent), so `.default` resolves through a
             // zero default cap to null.

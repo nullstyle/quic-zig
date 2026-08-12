@@ -268,6 +268,9 @@ pub fn handleAckAtLevel(
         }
         if (any_regular_acked) ack_path.pmtudOnRegularAcked();
     }
+    // Did this ACK yield a fresh RTT sample? HyStart++ only consumes
+    // ACKs that did (RFC 9406 §4.2).
+    var rtt_sampled = false;
     if (largest_acked_send_time_us) |sent_time_us| {
         if (largest_acked_ack_eliciting and now_us >= sent_time_us) {
             const ack_delay_us = scaledAckDelayUs(a.ack_delay, self.peerAckDelayExponent());
@@ -277,9 +280,7 @@ pub fn handleAckAtLevel(
                 self.handshakeDone(),
                 self.peerMaxAckDelayUs(),
             );
-            if (lvl == .application) {
-                self.ccForApplication().onRttSample(now_us - sent_time_us, now_us);
-            }
+            rtt_sampled = true;
         }
     }
     if (any_ack_eliciting_newly_acked) self.ptoCountForLevel(lvl).* = 0;
@@ -293,6 +294,15 @@ pub fn handleAckAtLevel(
                 sent.bytes_in_flight,
             );
         }
+    }
+    // RFC 9406 HyStart++: feed the processed ACK after cwnd growth, so
+    // an exit decision applies to the window this ACK just produced.
+    if (lvl == .application) {
+        self.ccForApplication().onAckProcessed(
+            a.largest_acked,
+            if (rtt_sampled) self.rttForLevel(lvl).latest_rtt_us else null,
+            self.pnSpaceForLevel(lvl).next_pn,
+        );
     }
 
     // RFC 9000 §13.4.2 / RFC 9002 §B.7: a peer-reported CE bump on
@@ -388,6 +398,8 @@ pub fn handleApplicationAckOnPath(
         );
     }
     if (any_regular_acked) path.pmtudOnRegularAcked();
+    // Did this ACK yield a fresh RTT sample? (HyStart++ input.)
+    var rtt_sampled = false;
     if (largest_acked_send_time_us) |sent_time_us| {
         if (largest_acked_ack_eliciting and now_us >= sent_time_us) {
             const ack_delay_us = scaledAckDelayUs(a.ack_delay, self.peerAckDelayExponent());
@@ -397,7 +409,7 @@ pub fn handleApplicationAckOnPath(
                 self.handshakeDone(),
                 self.peerMaxAckDelayUs(),
             );
-            path.path.cc.onRttSample(now_us - sent_time_us, now_us);
+            rtt_sampled = true;
         }
     }
     if (any_ack_eliciting_newly_acked) path.pto_count = 0;
@@ -410,6 +422,12 @@ pub fn handleApplicationAckOnPath(
             path.sent.bytes_in_flight,
         );
     }
+    // RFC 9406 HyStart++, per-path twin of `handleAckAtLevel`.
+    path.path.cc.onAckProcessed(
+        a.largest_acked,
+        if (rtt_sampled) path.path.rtt.latest_rtt_us else null,
+        path.app_pn_space.next_pn,
+    );
 
     // §13.4.2 ECN-CE → congestion event, twin of `handleAckAtLevel`.
     if (ecn_ok) {

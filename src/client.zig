@@ -253,6 +253,13 @@ const ConfigImpl = struct {
     /// gain x cwnd/RTT instead of bursting a full window. `false`
     /// restores the pre-0.11 emission timing exactly.
     enable_pacing: bool = true,
+
+    /// RFC 9406 HyStart++ (on by default): leaves slow start on
+    /// sustained RTT inflation instead of waiting for the loss that
+    /// overshooting the bottleneck causes. Applies to whichever
+    /// `congestion_control` is selected. `false` restores plain
+    /// RFC 9002 slow start.
+    enable_hystart: bool = true,
 };
 
 /// Callback receiving ready-to-persist `tls.resumption_state` envelope
@@ -483,6 +490,7 @@ pub const Client = struct {
         conn_ptr.setPmtudConfig(config.pmtud);
         conn_ptr.setCongestionAlgorithm(config.congestion_control);
         conn_ptr.pacing_enabled = config.enable_pacing;
+        conn_ptr.setHyStartEnabled(config.enable_hystart);
 
         if (config.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, config.qlog_user_data);
 

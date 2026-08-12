@@ -106,22 +106,62 @@ const impairment_cells = [_]harness.ImpairmentOptions{
     .{ .name = "impairment_loss1pct", .loss_permille = 10 },
     .{ .name = "impairment_loss5pct", .loss_permille = 50 },
     .{ .name = "impairment_reorder10pct", .loss_permille = 0, .reorder_permille = 100 },
+    // Bottleneck cells: a rate-limited link with a finite buffer, so
+    // an overshooting slow start builds a standing queue and inflates
+    // RTT. These are the only cells that can evaluate slow-start exit
+    // (RFC 9406 HyStart++); the fixed-delay cells above never inflate
+    // RTT at all. 10 Mbit mirrors the "bursty 10 Mbps simulator"
+    // condition recorded in 5b9a4f6.
+    .{
+        .name = "impairment_bottleneck_10mbit",
+        .loss_permille = 0,
+        .bottleneck_bytes_per_s = 1_250_000,
+        .total_bytes = 4 << 20,
+    },
+    .{
+        .name = "impairment_bottleneck_10mbit_loss1pct",
+        .loss_permille = 10,
+        .bottleneck_bytes_per_s = 1_250_000,
+        .total_bytes = 4 << 20,
+    },
+    // Multiplexed over the same bottleneck: the QNS `multiplexing`
+    // (M) shape. This cell exists because HyStart++ was once rejected
+    // for regressing M completion under a bursty 10 Mbps simulator
+    // (see 5b9a4f6) — that claim is only re-testable with concurrent
+    // streams in the mix.
+    .{
+        .name = "impairment_bottleneck_10mbit_mux8",
+        .loss_permille = 0,
+        .bottleneck_bytes_per_s = 1_250_000,
+        .total_bytes = 4 << 20,
+        .streams = 8,
+    },
 };
 
-fn runImpairment(allocator: std.mem.Allocator, out: *Entries, cc: quic_zig.CongestionAlgorithm) !void {
+fn runImpairment(
+    allocator: std.mem.Allocator,
+    out: *Entries,
+    cc: quic_zig.CongestionAlgorithm,
+    hystart: bool,
+) !void {
     for (impairment_cells) |cell| {
         var cc_cell = cell;
         cc_cell.congestion_control = cc;
+        cc_cell.hystart = hystart;
         const result = try harness.runImpairmentOnce(allocator, cc_cell);
         try out.impairment.append(allocator, result);
-        std.debug.print("{s}: {d:.2} vMbps (virtual {d} ms, dropped {d}/{d}, wall {d} ms)\n", .{
-            result.name,
-            result.virtual_goodput_mbps,
-            result.virtual_us / std.time.us_per_ms,
-            result.dropped,
-            result.enqueued,
-            result.wall_ns / std.time.ns_per_ms,
-        });
+        std.debug.print(
+            "{s}: {d:.2} vMbps (virtual {d} ms, dropped {d}/{d}, qdrop {d}, peakq {d} us)\n",
+            .{
+                result.name,
+                result.virtual_goodput_mbps,
+                result.virtual_us / std.time.us_per_ms,
+                result.dropped,
+                result.enqueued,
+                result.queue_dropped,
+                result.peak_queue_delay_us,
+            },
+        );
     }
 }
 
@@ -184,6 +224,8 @@ fn writeE2eEntries(out: *std.ArrayList(u8), allocator: std.mem.Allocator, entrie
         try out.print(allocator, "      \"dropped\": {d},\n", .{cell.dropped});
         try out.print(allocator, "      \"loss_permille\": {d},\n", .{cell.loss_permille});
         try out.print(allocator, "      \"reorder_permille\": {d},\n", .{cell.reorder_permille});
+        try out.print(allocator, "      \"queue_dropped\": {d},\n", .{cell.queue_dropped});
+        try out.print(allocator, "      \"peak_queue_delay_us\": {d},\n", .{cell.peak_queue_delay_us});
         try out.print(allocator, "      \"seed\": {d}\n", .{cell.seed});
         try out.appendSlice(allocator, "    }\n");
     }
@@ -199,6 +241,7 @@ pub fn main(init: std.process.Init) !void {
     var scenario: Scenario = .all;
     var samples: usize = default_samples;
     var cc: quic_zig.CongestionAlgorithm = .cubic;
+    var hystart = true;
     var json_path: ?[]const u8 = null;
     var json_dir: ?[]const u8 = null;
 
@@ -212,6 +255,14 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingCcAlgorithm;
             cc = std.meta.stringToEnum(quic_zig.CongestionAlgorithm, args[i]) orelse return error.UnknownCcAlgorithm;
+        } else if (std.mem.eql(u8, args[i], "--hystart")) {
+            i += 1;
+            if (i >= args.len) return error.MissingHyStartValue;
+            if (std.mem.eql(u8, args[i], "on")) {
+                hystart = true;
+            } else if (std.mem.eql(u8, args[i], "off")) {
+                hystart = false;
+            } else return error.InvalidHyStartValue;
         } else if (std.mem.eql(u8, args[i], "--samples")) {
             i += 1;
             if (i >= args.len) return error.MissingSampleCount;
@@ -234,8 +285,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    std.debug.print("quic_zig e2e benchmarks ({s}, {d} samples, cc={s}, {s})\n", .{
-        @tagName(scenario), samples, @tagName(cc), @tagName(builtin.mode),
+    std.debug.print("quic_zig e2e benchmarks ({s}, {d} samples, cc={s}, hystart={s}, {s})\n", .{
+        @tagName(scenario),           samples,                @tagName(cc),
+        if (hystart) "on" else "off", @tagName(builtin.mode),
     });
     std.debug.print("---------------------------------------------------------------\n", .{});
 
@@ -249,7 +301,7 @@ pub fn main(init: std.process.Init) !void {
         entries.handshakes = try runHandshakes(allocator, samples);
     }
     if (scenario == .all or scenario == .impairment) {
-        try runImpairment(allocator, &entries, cc);
+        try runImpairment(allocator, &entries, cc, hystart);
     }
 
     std.debug.print("---------------------------------------------------------------\n", .{});

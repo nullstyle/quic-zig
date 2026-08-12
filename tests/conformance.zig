@@ -37,6 +37,7 @@ test {
     _ = @import("conformance/rfc9001_tls.zig");
     _ = @import("conformance/rfc9002_loss_recovery.zig");
     _ = @import("conformance/rfc9002_pacing.zig");
+    _ = @import("conformance/rfc9406_hystart.zig");
     _ = @import("conformance/rfc9438_cubic.zig");
     _ = @import("conformance/rfc9221_datagram.zig");
     _ = @import("conformance/rfc9287_grease_quic_bit.zig");

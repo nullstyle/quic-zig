@@ -1368,6 +1368,11 @@ pub const Connection = struct {
     /// (multipath, migration) inherit it at construction.
     cc_algorithm: congestion_mod.Algorithm = .cubic,
 
+    /// RFC 9406 HyStart++ configuration for every path's controller.
+    /// A posture switch like `cc_algorithm`; wrappers thread
+    /// `Config.enable_hystart` here right after init.
+    cc_hystart: congestion_mod.HyStartConfig = .{},
+
     /// RFC 9002 §7.7 packet pacing. On by default; `false` restores
     /// the pre-0.11 burst-a-full-cwnd emission timing exactly (the
     /// rollback lever). Wrappers thread `Config.enable_pacing` here.
@@ -1572,6 +1577,7 @@ pub const Connection = struct {
         try conn.paths.ensurePrimary(allocator, .{
             .max_datagram_size = default_mtu,
             .algorithm = conn.cc_algorithm,
+            .hystart = conn.cc_hystart,
         });
         // Client picked the destination address itself, so the §8.1
         // anti-amplification cap doesn't apply on its outbound. Primary
@@ -1606,6 +1612,7 @@ pub const Connection = struct {
         try conn.paths.ensurePrimary(allocator, .{
             .max_datagram_size = default_mtu,
             .algorithm = conn.cc_algorithm,
+            .hystart = conn.cc_hystart,
         });
         // RFC 8899 DPLPMTUD on the primary path. See `initClient` for
         // the embedder-config plumbing path.
@@ -1644,6 +1651,20 @@ pub const Connection = struct {
         for (self.paths.paths.items) |*p| {
             var cfg = p.path.cc.config();
             cfg.algorithm = algo;
+            cfg.hystart = self.cc_hystart;
+            p.path.cc = congestion_mod.CongestionController.init(cfg);
+        }
+    }
+
+    /// Enable or disable RFC 9406 HyStart++ on every path's
+    /// controller. Like `setCongestionAlgorithm`, this re-initialises
+    /// the controllers, so call it during setup rather than
+    /// mid-connection.
+    pub fn setHyStartEnabled(self: *Connection, enabled: bool) void {
+        self.cc_hystart.enabled = enabled;
+        for (self.paths.paths.items) |*p| {
+            var cfg = p.path.cc.config();
+            cfg.hystart = self.cc_hystart;
             p.path.cc = congestion_mod.CongestionController.init(cfg);
         }
     }
