@@ -164,17 +164,23 @@ pub fn initLossPtoTickCtx() LossPtoTickCtx {
     return LossPtoTickCtx.init();
 }
 
+/// Static slot storage for `runLossPtoTick`'s tracker, so the timed
+/// loop stays allocation-free now that tracker capacity is an init
+/// choice (the reset below is counters-only; no packet in this
+/// fixture owns heap data).
+var loss_pto_tracker_slots: [sent_packets.max_tracked]SentPacket = undefined;
+
 /// One operation seeds sent packets, processes a deterministic ACK
 /// with multiple ranges, runs RFC 9002 threshold loss detection, then
 /// fires one PTO probe candidate if the computed PTO deadline is due.
 pub fn runLossPtoTick(ctx: *const LossPtoTickCtx, iters: u64) u64 {
-    var tracker: SentPacketTracker = undefined;
+    var tracker: SentPacketTracker = .{ .packets = &loss_pto_tracker_slots };
     var space: PnSpace = undefined;
     var sum: u64 = 0;
 
     var i: u64 = 0;
     while (i < iters) : (i += 1) {
-        tracker = .{};
+        tracker.resetRetainingCapacity();
         space = .{};
         seedSentPackets(&tracker, ctx);
 
@@ -316,7 +322,9 @@ pub fn initConnectionAckLossDispatchCtx(
 
 fn resetConnectionAckLossDispatch(ctx: *const ConnectionAckLossDispatchCtx) void {
     const path = ctx.conn.primaryPath();
-    path.sent = .{};
+    // Counters-only reset (keeps the tracker's slot storage): no
+    // packet seeded by this fixture owns heap data.
+    path.sent.resetRetainingCapacity();
     path.app_pn_space = .{};
     path.app_pn_space.next_pn = ctx.packet_count;
     path.path.rtt = .{
@@ -403,7 +411,8 @@ test "loss_pto_tick fixture reaches ack loss and pto paths" {
     const ctx = LossPtoTickCtx.init();
     try std.testing.expect(runLossPtoTick(&ctx, 1) != 0);
 
-    var tracker: SentPacketTracker = .{};
+    var tracker = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tracker.deinit(std.testing.allocator);
     var space: PnSpace = .{};
     seedSentPackets(&tracker, &ctx);
 
@@ -463,7 +472,8 @@ pub const TrackerChurnHighOccupancyCtx = struct {
     pub fn init(allocator: std.mem.Allocator) !TrackerChurnHighOccupancyCtx {
         const tracker = try allocator.create(SentPacketTracker);
         errdefer allocator.destroy(tracker);
-        tracker.* = .{};
+        tracker.* = try SentPacketTracker.init(allocator, sent_packets.max_tracked);
+        errdefer tracker.deinit(allocator);
         var pn: u64 = 0;
         while (pn < churn_occupancy) : (pn += 1) {
             tracker.record(.{
@@ -489,6 +499,7 @@ pub const TrackerChurnHighOccupancyCtx = struct {
     }
 
     pub fn deinit(self: *TrackerChurnHighOccupancyCtx) void {
+        self.tracker.deinit(self.allocator);
         self.allocator.destroy(self.tracker);
         self.allocator.destroy(self.oldest_pn);
         self.allocator.destroy(self.next_pn);

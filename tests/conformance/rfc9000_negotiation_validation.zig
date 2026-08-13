@@ -826,7 +826,8 @@ test "MUST drop the validation status of a path when migration begins [RFC9000 �
     // PATH_CHALLENGE round-trip completes. `beginMigration` clears
     // the `validated` flag so the anti-amp gate kicks back in for
     // the new peer address.
-    var ps = path_mod.PathState.init(
+    var ps = try path_mod.PathState.init(
+        std.testing.allocator,
         0,
         .unspecified,
         .unspecified,
@@ -834,6 +835,7 @@ test "MUST drop the validation status of a path when migration begins [RFC9000 �
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
     );
+    defer ps.deinit(std.testing.allocator);
     ps.path.markValidated();
     try std.testing.expect(ps.path.isValidated());
 
@@ -848,7 +850,8 @@ test "MUST zero the per-path anti-amp byte counters on migration [RFC9000 §9.3 
     // bytes_sent/bytes_received are not credit on the new path. The
     // triggering datagram itself is credited (so the response can
     // fit the 3x cap), but anything that came before is wiped.
-    var ps = path_mod.PathState.init(
+    var ps = try path_mod.PathState.init(
+        std.testing.allocator,
         0,
         .unspecified,
         .unspecified,
@@ -856,6 +859,7 @@ test "MUST zero the per-path anti-amp byte counters on migration [RFC9000 §9.3 
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
     );
+    defer ps.deinit(std.testing.allocator);
     // Pre-migration: large counters from steady-state traffic.
     ps.path.onDatagramReceived(50_000);
     ps.path.onDatagramSent(40_000);
@@ -880,7 +884,8 @@ test "MUST reset per-path RTT and congestion controller after migration [RFC9000
     // the RTT estimator is `initial_rtt_us = 333ms`, not zero —
     // here we assert reset returns to those defaults.
     const fresh_rtt = path_mod.RttEstimator{};
-    var ps = path_mod.PathState.init(
+    var ps = try path_mod.PathState.init(
+        std.testing.allocator,
         0,
         .unspecified,
         .unspecified,
@@ -888,6 +893,7 @@ test "MUST reset per-path RTT and congestion controller after migration [RFC9000
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
     );
+    defer ps.deinit(std.testing.allocator);
     // Synthesize "post-handshake" state on the path: smoothed RTT
     // departed from the initial seed, latest RTT populated,
     // congestion-controller cwnd inflated.
@@ -920,7 +926,8 @@ test "MAY roll back a failed migration to the prior 4-tuple [RFC9000 §9.4 ¶?]"
     // rather than tearing down. Pin the optional behavior by
     // checking that rollback restores the original peer address
     // and validation status.
-    var ps = path_mod.PathState.init(
+    var ps = try path_mod.PathState.init(
+        std.testing.allocator,
         0,
         .{ .ipv4 = .{ .addr = @splat(0xaa), .port = 0 } },
         .unspecified,
@@ -928,6 +935,7 @@ test "MAY roll back a failed migration to the prior 4-tuple [RFC9000 §9.4 ¶?]"
         path_mod.ConnectionId.fromSlice(&.{2}),
         .{ .max_datagram_size = 1200 },
     );
+    defer ps.deinit(std.testing.allocator);
     ps.peer_addr_set = true;
     ps.path.markValidated();
     const original_addr = ps.path.peer_addr;

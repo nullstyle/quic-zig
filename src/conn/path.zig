@@ -438,7 +438,10 @@ pub const PathState = struct {
     id: u32,
     path: Path,
     app_pn_space: PnSpace = .{},
-    sent: SentPacketTracker = .{},
+    /// Application-space sent-packet tracker. Owns heap slot storage
+    /// (armed by `PathState.init`), so `PathState` stays cheap to move
+    /// when the owning `PathSet` list grows.
+    sent: SentPacketTracker,
     pto_count: u32 = 0,
     pending_ping: bool = false,
     pto_probe_count: u8 = 0,
@@ -508,43 +511,38 @@ pub const PathState = struct {
     next_local_cid_seq: u64 = 0,
 
     /// Build a fresh `PathState` wrapping a `Path` initialized with
-    /// the given 4-tuple, CIDs, and CC config.
+    /// the given 4-tuple, CIDs, and CC config. Allocates the sent-
+    /// packet tracker's slot storage — every constructed `PathState`
+    /// is armed to track packets (an unarmed tracker would surface as
+    /// a spurious connection-fatal `TooManyInFlight` on first send).
     pub fn init(
+        allocator: std.mem.Allocator,
         id: u32,
         peer_addr: Address,
         local_addr: Address,
         local_cid: ConnectionId,
         peer_cid: ConnectionId,
         cc_cfg: congestion_mod.Config,
-    ) PathState {
+    ) std.mem.Allocator.Error!PathState {
         return .{
             .id = id,
             .path = Path.init(peer_addr, local_addr, local_cid, peer_cid, cc_cfg),
+            .sent = try SentPacketTracker.init(allocator, sent_packets_mod.max_tracked),
         };
     }
 
-    /// Free per-packet retransmit-frame and stream-key allocations.
-    /// The `PathState` itself is not freed. Tombstoned slots own
-    /// nothing (their remover took ownership) — deinit'ing them would
-    /// double-free.
+    /// Free the sent-packet tracker: per-packet retransmit-frame and
+    /// stream-key allocations, then the slot storage. The `PathState`
+    /// itself is not freed.
     pub fn deinit(self: *PathState, allocator: std.mem.Allocator) void {
-        var i: u32 = 0;
-        while (i < self.sent.count) : (i += 1) {
-            if (self.sent.packets[i].dead) continue;
-            self.sent.packets[i].deinit(allocator);
-        }
+        self.sent.deinit(allocator);
     }
 
     /// Drop every tracked sent packet, clear the received-PN tracker,
     /// and zero PTO/ping state. Used on key-update boundaries and
     /// migration where in-flight bookkeeping is no longer meaningful.
     pub fn clearRecovery(self: *PathState, allocator: std.mem.Allocator) void {
-        var i: u32 = 0;
-        while (i < self.sent.count) : (i += 1) {
-            if (self.sent.packets[i].dead) continue;
-            self.sent.packets[i].deinit(allocator);
-        }
-        self.sent = .{};
+        self.sent.clear(allocator);
         self.app_pn_space.received = .{};
         self.pending_ping = false;
         self.pto_probe_count = 0;
@@ -893,7 +891,8 @@ pub const PathSet = struct {
         cc_cfg: congestion_mod.Config,
     ) !void {
         if (self.paths.items.len != 0) return;
-        var p = PathState.init(0, .unspecified, .unspecified, .{}, .{}, cc_cfg);
+        var p = try PathState.init(allocator, 0, .unspecified, .unspecified, .{}, .{}, cc_cfg);
+        errdefer p.deinit(allocator);
         p.path.state = .active;
         try self.paths.append(allocator, p);
     }
@@ -972,7 +971,8 @@ pub const PathSet = struct {
     ) !u32 {
         const id = self.next_path_id;
         self.next_path_id += 1;
-        var p = PathState.init(id, peer_addr, local_addr, local_cid, peer_cid, cc_cfg);
+        var p = try PathState.init(allocator, id, peer_addr, local_addr, local_cid, peer_cid, cc_cfg);
+        errdefer p.deinit(allocator);
         p.peer_addr_set = true;
         p.local_addr_set = true;
         try self.paths.append(allocator, p);
@@ -1159,7 +1159,8 @@ test "PathSet opens and abandons additional paths" {
 // -- RFC 8899 DPLPMTUD inline state-machine tests -----------------
 
 test "DPLPMTUD: pmtudInit configures floor and search state" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{
         .initial_mtu = 1200,
         .max_mtu = 1452,
@@ -1174,14 +1175,16 @@ test "DPLPMTUD: pmtudInit configures floor and search state" {
 }
 
 test "DPLPMTUD: enable=false leaves state disabled" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .enable = false });
     try testing.expectEqual(PmtudState.disabled, ps.pmtu_state);
     try testing.expect(!ps.pmtudIsSearching());
 }
 
 test "DPLPMTUD: pmtudNextProbeSize advances by probe_step until ceiling" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1280, .probe_step = 50 });
     try testing.expectEqual(@as(?u16, 1250), ps.pmtudNextProbeSize(50, 1280));
     ps.pmtu = 1250;
@@ -1189,7 +1192,8 @@ test "DPLPMTUD: pmtudNextProbeSize advances by probe_step until ceiling" {
 }
 
 test "DPLPMTUD: probe ack lifts pmtu and resets fail counter" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1452, .probe_step = 64 });
     ps.pmtudOnProbeSent(7, 1264);
     ps.pmtu_fail_count = 2; // pretend we'd had earlier losses
@@ -1201,7 +1205,8 @@ test "DPLPMTUD: probe ack lifts pmtu and resets fail counter" {
 }
 
 test "DPLPMTUD: probe ack flips to search_complete at the ceiling" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1300, .probe_step = 64 });
     ps.pmtudOnProbeSent(11, 1264);
     _ = ps.pmtudOnProbeAcked(64, 1300);
@@ -1211,7 +1216,8 @@ test "DPLPMTUD: probe ack flips to search_complete at the ceiling" {
 }
 
 test "DPLPMTUD: probe loss bumps fail_count, threshold records upper bound" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1500, .probe_step = 50, .probe_threshold = 3 });
 
     // Loss 1, 2: just bump counter.
@@ -1236,7 +1242,8 @@ test "DPLPMTUD: probe loss bumps fail_count, threshold records upper bound" {
 }
 
 test "DPLPMTUD: probe loss at floor with bound at floor → search_complete" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1500, .probe_step = 100, .probe_threshold = 1 });
     // First loss with threshold=1: record bound and check the
     // search_complete branch when bound <= pmtu. Probed size 1200 is
@@ -1248,7 +1255,8 @@ test "DPLPMTUD: probe loss at floor with bound at floor → search_complete" {
 }
 
 test "DPLPMTUD: black-hole detection halves pmtu after probe_threshold regular losses" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .initial_mtu = 1200, .max_mtu = 1452, .probe_step = 64, .probe_threshold = 3 });
     // Pretend pmtu was lifted to 1400 via prior probes.
     ps.pmtu = 1400;
@@ -1264,7 +1272,8 @@ test "DPLPMTUD: black-hole detection halves pmtu after probe_threshold regular l
 }
 
 test "DPLPMTUD: a regular ack resets the consecutive-loss counter" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{});
     ps.pmtu = 1300;
     _ = ps.pmtudOnRegularLost(3, 1200);
@@ -1278,7 +1287,8 @@ test "DPLPMTUD: a regular ack resets the consecutive-loss counter" {
 }
 
 test "DPLPMTUD: disabled state never enters black-hole detection" {
-    var ps = PathState.init(0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    var ps = try PathState.init(testing.allocator, 0, .unspecified, .unspecified, testCid(&.{1}), testCid(&.{2}), .{});
+    defer ps.deinit(testing.allocator);
     ps.pmtudInit(.{ .enable = false });
     try testing.expect(!ps.pmtudOnRegularLost(1, 1200));
     try testing.expect(!ps.pmtudOnRegularLost(1, 1200));

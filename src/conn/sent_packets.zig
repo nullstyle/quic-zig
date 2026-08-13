@@ -235,11 +235,13 @@ pub const SentPacket = struct {
     }
 };
 
-/// Maximum tracked in-flight packets per PN space. Real connections
-/// rarely exceed a few hundred; we cap at 4096 so fixed-size
-/// arrays don't blow up the struct. When full, `record` returns
-/// `Error.TooManyInFlight` — a connection-fatal condition the
-/// caller should map to a CONNECTION_CLOSE.
+/// Application-space tracker capacity. Real connections rarely hold
+/// more than a few hundred live packets; 4096 gives high-BDP headroom.
+/// Capacity is a per-tracker choice made at `init`, so a PN space
+/// that provably needs less can pay for less. When a tracker is
+/// live-full, `record` returns `Error.TooManyInFlight` — a
+/// connection-fatal condition the caller should map to a
+/// CONNECTION_CLOSE.
 pub const max_tracked: usize = 4096;
 
 /// Errors raised by the sent-packet tracker.
@@ -252,25 +254,36 @@ pub const Error = error{
     TooManyStreamFrames,
 } || std.mem.Allocator.Error;
 
-/// Tombstone density that triggers compaction on the next `record`.
-/// High enough to amortize the sweep (~1 compaction per 1024 removals),
-/// low enough that dead slots never crowd out live capacity for long.
-pub const compact_threshold: u32 = 1024;
+/// Tombstone density that triggers compaction on the next `record`,
+/// as a fraction of capacity: one sweep per `capacity / 4` removals.
+/// High enough to amortize the sweep (each removed slot is scanned at
+/// most 4 extra times), low enough that dead slots never crowd out
+/// live capacity for long. `compact_threshold` is the resulting value
+/// for a `max_tracked`-capacity (application-space) tracker.
+pub const compact_threshold: u32 = max_tracked / 4;
 
 /// RFC 9002 §A.1 sent-packet tracker. Indexed by PN, sorted ascending,
 /// with running totals for in-flight bookkeeping.
 ///
+/// Capacity is chosen at `init` and fixed for the tracker's lifetime —
+/// per-PN-space sizing is the point (the Application space needs
+/// high-BDP headroom; Initial/Handshake carry a handful of packets and
+/// then sit idle for the rest of the connection).
+///
 /// Removal is O(1) tombstoning: removed slots stay in place (marked
 /// `dead`) and are swept out in one pass inside `record` once
-/// `compact_threshold` accumulate. Compaction therefore never runs
+/// `compactThreshold()` accumulate. Compaction therefore never runs
 /// while an ACK/loss walk holds indices — `record` is only called from
 /// the send path. `count` includes tombstones (walks iterate physical
 /// slots and skip `dead`); `liveCount()` is the tracked-packet count.
 pub const SentPacketTracker = struct {
-    /// Sorted ascending by PN (tombstones keep their PN, preserving
-    /// order for binary search). Sent packets are appended at the high
-    /// end; ACKs/loss tombstone anywhere.
-    packets: [max_tracked]SentPacket = undefined,
+    /// Slot storage, sorted ascending by PN (tombstones keep their PN,
+    /// preserving order for binary search). Sent packets are appended
+    /// at the high end; ACKs/loss tombstone anywhere. Length is the
+    /// tracker's capacity. Normally allocated via `init`; constructing
+    /// directly over caller-managed storage is allowed when the
+    /// lifetime is externally guaranteed (see bench/loss_ack.zig).
+    packets: []SentPacket,
     /// Physical entries, INCLUDING tombstones. Loop bound for walks;
     /// not the number of tracked packets — that is `liveCount()`.
     count: u32 = 0,
@@ -283,6 +296,60 @@ pub const SentPacketTracker = struct {
     /// we don't have to walk the array.
     ack_eliciting_in_flight: u64 = 0,
 
+    /// Allocate a tracker with room for `cap` live packets. The
+    /// storage is exactly `cap * @sizeOf(SentPacket)` — capacity is
+    /// the whole per-space memory story, so size it to the space.
+    pub fn init(allocator: std.mem.Allocator, cap: usize) std.mem.Allocator.Error!SentPacketTracker {
+        // Compaction math (capacity / 4) and the MinPipeCwnd-style
+        // floor below it need a few slots to be meaningful.
+        std.debug.assert(cap >= 4);
+        return .{ .packets = try allocator.alloc(SentPacket, cap) };
+    }
+
+    /// Release every live packet's owned per-packet arrays, then the
+    /// slot storage itself. Tombstones own nothing (their remover took
+    /// ownership) — deinit'ing them would double-free.
+    pub fn deinit(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
+        self.clear(allocator);
+        allocator.free(self.packets);
+        self.* = undefined;
+    }
+
+    /// Drop every tracked packet (releasing owned per-packet arrays)
+    /// and zero the running totals, keeping the slot storage for
+    /// reuse. The key-drop / recovery-reset primitive.
+    pub fn clear(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
+        var i: u32 = 0;
+        while (i < self.count) : (i += 1) {
+            // Tombstones own nothing; deinit would double-free.
+            if (self.packets[i].dead) continue;
+            self.packets[i].deinit(allocator);
+        }
+        self.resetRetainingCapacity();
+    }
+
+    /// Forget every tracked packet WITHOUT releasing per-packet owned
+    /// arrays. Only correct when no live packet owns heap data (none
+    /// was given retransmit frames or extra stream refs) — the
+    /// bench/test fast-reset path. Production resets want `clear`.
+    pub fn resetRetainingCapacity(self: *SentPacketTracker) void {
+        self.count = 0;
+        self.dead_count = 0;
+        self.bytes_in_flight = 0;
+        self.ack_eliciting_in_flight = 0;
+    }
+
+    /// Live-packet capacity (the storage length fixed at init).
+    pub fn capacity(self: *const SentPacketTracker) u32 {
+        return @intCast(self.packets.len);
+    }
+
+    /// Tombstone count that triggers a sweep: capacity / 4, so the
+    /// amortization ratio is the same at every tracker size.
+    fn compactThreshold(self: *const SentPacketTracker) u32 {
+        return self.capacity() / 4;
+    }
+
     /// Packets currently tracked (excludes tombstones).
     pub fn liveCount(self: *const SentPacketTracker) u32 {
         return self.count - self.dead_count;
@@ -290,9 +357,9 @@ pub const SentPacketTracker = struct {
 
     /// Record a newly-sent packet. PNs must be strictly increasing.
     pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
-        if (self.liveCount() >= max_tracked) return Error.TooManyInFlight;
-        if (self.count >= max_tracked or self.dead_count >= compact_threshold) {
-            // liveCount < max_tracked, so compaction always frees a slot.
+        if (self.liveCount() >= self.capacity()) return Error.TooManyInFlight;
+        if (self.count >= self.capacity() or self.dead_count >= self.compactThreshold()) {
+            // liveCount < capacity, so compaction always frees a slot.
             self.compact();
         }
         if (self.count > 0) {
@@ -474,7 +541,8 @@ fn livePns(t: *const SentPacketTracker, buf: []u64) []const u64 {
 }
 
 test "record + remove + bytes_in_flight bookkeeping" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     try t.record(.{ .pn = 0, .sent_time_us = 100, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try t.record(.{ .pn = 1, .sent_time_us = 110, .bytes = 800, .ack_eliciting = true, .in_flight = true });
     try t.record(.{ .pn = 2, .sent_time_us = 120, .bytes = 60, .ack_eliciting = false, .in_flight = false });
@@ -493,7 +561,8 @@ test "record + remove + bytes_in_flight bookkeeping" {
 }
 
 test "indexOf returns null for missing PNs" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     try t.record(.{ .pn = 5, .sent_time_us = 0, .bytes = 100, .ack_eliciting = true, .in_flight = true });
     try std.testing.expectEqual(@as(?u32, 0), t.indexOf(5));
     try std.testing.expectEqual(@as(?u32, null), t.indexOf(4));
@@ -501,7 +570,8 @@ test "indexOf returns null for missing PNs" {
 }
 
 test "lowerBound finds the first PN >= target" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     try t.record(.{ .pn = 1, .sent_time_us = 0, .bytes = 100, .ack_eliciting = true, .in_flight = true });
     try t.record(.{ .pn = 3, .sent_time_us = 0, .bytes = 100, .ack_eliciting = true, .in_flight = true });
     try t.record(.{ .pn = 7, .sent_time_us = 0, .bytes = 100, .ack_eliciting = true, .in_flight = true });
@@ -515,7 +585,8 @@ test "lowerBound finds the first PN >= target" {
 }
 
 test "non-in-flight packets don't update bytes_in_flight" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     try t.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 50, .ack_eliciting = false, .in_flight = false });
     try std.testing.expectEqual(@as(u64, 0), t.bytes_in_flight);
     _ = t.removeAt(0);
@@ -536,7 +607,8 @@ fn recordRemovedPacket(stats: *RemovedRangeStats, packet: *SentPacket) void {
 }
 
 test "removeRangeWith tombstones the range and preserves sorted survivors" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < 6) : (pn += 1) {
         try t.record(.{
@@ -571,7 +643,8 @@ fn deinitRemovedPacket(allocator: std.mem.Allocator, packet: *SentPacket) void {
 }
 
 test "removeRangeWith transfers owned packet fields to callback" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     var packet: SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
@@ -606,7 +679,8 @@ fn recordRemovedPacketFallible(
 }
 
 test "removeRangeWithError keeps packets after failing callback" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < 6) : (pn += 1) {
         try t.record(.{
@@ -705,7 +779,8 @@ test "SentPacket size stays pinned (tracker footprint = 4096 of these)" {
 }
 
 test "compaction triggers inside record and preserves order + search" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < 2 * compact_threshold) : (pn += 1) {
         try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 100, .ack_eliciting = true, .in_flight = true });
@@ -741,7 +816,8 @@ test "compaction triggers inside record and preserves order + search" {
 }
 
 test "capacity is live capacity: physical-full compacts instead of failing" {
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < max_tracked) : (pn += 1) {
         try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 10, .ack_eliciting = true, .in_flight = true });
@@ -794,7 +870,8 @@ const ReferenceTracker = struct {
 
 test "property: tombstone tracker is observably identical to the reference model" {
     const allocator = std.testing.allocator;
-    var t: SentPacketTracker = .{};
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
     var ref: ReferenceTracker = .{};
     defer ref.entries.deinit(allocator);
 
@@ -873,4 +950,52 @@ test "property: tombstone tracker is observably identical to the reference model
             try std.testing.expectEqual(t.bytes_in_flight, recomputed_in_flight);
         }
     }
+}
+
+test "capacity is a per-tracker init choice, enforced at the chosen size" {
+    var t = try SentPacketTracker.init(std.testing.allocator, 8);
+    defer t.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 8), t.capacity());
+
+    var pn: u64 = 0;
+    while (pn < 8) : (pn += 1) {
+        try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 10, .ack_eliciting = true, .in_flight = true });
+    }
+    try std.testing.expectError(Error.TooManyInFlight, t.record(.{
+        .pn = pn,
+        .sent_time_us = pn,
+        .bytes = 10,
+        .ack_eliciting = true,
+        .in_flight = true,
+    }));
+    // Live capacity, not physical: freeing one slot lets record
+    // compact-and-succeed exactly as at the full size.
+    _ = t.removeAt(3);
+    try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 10, .ack_eliciting = true, .in_flight = true });
+    try std.testing.expectEqual(@as(u32, 8), t.liveCount());
+}
+
+test "compaction threshold scales with capacity (capacity / 4)" {
+    var t = try SentPacketTracker.init(std.testing.allocator, 64);
+    defer t.deinit(std.testing.allocator);
+
+    var pn: u64 = 0;
+    while (pn < 32) : (pn += 1) {
+        try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 10, .ack_eliciting = true, .in_flight = true });
+    }
+    // Tombstone exactly capacity/4 = 16 packets: the trigger level.
+    var i: u32 = 0;
+    var removed: u32 = 0;
+    while (i < t.count and removed < 16) : (i += 1) {
+        if (t.packets[i].dead) continue;
+        _ = t.removeAt(i);
+        removed += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 16), t.dead_count);
+
+    // The next record sweeps: physical count collapses to live+1.
+    try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 10, .ack_eliciting = true, .in_flight = true });
+    try std.testing.expectEqual(@as(u32, 0), t.dead_count);
+    try std.testing.expectEqual(@as(u32, 17), t.count);
+    try std.testing.expectEqual(@as(u32, 17), t.liveCount());
 }

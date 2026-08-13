@@ -206,7 +206,8 @@ test "MUST declare a packet lost when an ACK acks a packet >= 3 PNs higher [RFC9
     // kPacketThreshold packets after it has been acknowledged."
     // Send PN 0..4, ACK PN 4 → packets 0 and 1 satisfy
     // `4 - pn >= 3`; packets 2 and 3 do not.
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < 5) : (pn += 1) {
         try tr.record(.{
@@ -244,7 +245,8 @@ test "MUST NOT declare lost a packet whose PN exceeds largest_acked [RFC9002 §6
     // §6.1: only packets below the largest acknowledged PN are
     // candidates for loss detection. Higher PNs may simply not have
     // been ACKed yet and must remain in flight.
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 1, .sent_time_us = 1000, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 5, .sent_time_us = 5000, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
@@ -278,7 +280,8 @@ test "MUST use 9/8 of max(latest_rtt, smoothed_rtt) as the time threshold [RFC90
     // threshold = 11.25ms. A packet sent at t=0, with now=200ms,
     // is older than the cutoff (200 - 11.25 = 188.75ms) and must
     // be declared lost; so is one sent at 100ms.
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 1, .sent_time_us = 100_000, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     var space: PnSpace = .{};
@@ -300,7 +303,8 @@ test "MUST floor the time threshold at kGranularity (1ms) [RFC9002 §6.1.2 ¶2]"
     // packet sent at 0 < 1).
     try std.testing.expectEqual(@as(u64, 1 * ms), rtt.granularity_us);
 
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     var space: PnSpace = .{};
     space.largest_acked_sent = 0;
@@ -410,7 +414,8 @@ test "MUST report whether the largest acked packet was ack-eliciting [RFC9002 §
     // newly acknowledged packet was ack-eliciting." quic exposes
     // this via `AckProcessing.largest_acked_ack_eliciting` so the
     // connection knows when to skip the RTT update.
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     // Packet 0 is PADDING-only (not ack-eliciting); packet 1 carries
     // a STREAM frame (ack-eliciting).
     try tr.record(.{ .pn = 0, .sent_time_us = 100, .bytes = 1200, .ack_eliciting = false, .in_flight = false });
@@ -438,7 +443,8 @@ test "MUST flag any newly-acked ack-eliciting packet for PTO-count reset [RFC900
     // acknowledgments." quic exposes this via
     // `AckProcessing.any_ack_eliciting_newly_acked` so the caller can
     // gate the reset on at least one ack-eliciting newly-acked packet.
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 100, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 1, .sent_time_us = 200, .bytes = 100, .ack_eliciting = false, .in_flight = false });
     var space: PnSpace = .{};
@@ -654,7 +660,8 @@ test "MUST detect persistent congestion across 2+ ack-eliciting losses spanning 
     // PN 0 sent at t=0; PN 1 sent at t = PC duration. Both must
     // become loss candidates (PN > largest_acked is spared, so the
     // ACK that drives detection covers PN 2).
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{
         .pn = 0,
         .sent_time_us = 0,

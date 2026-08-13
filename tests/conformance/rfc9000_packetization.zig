@@ -226,7 +226,8 @@ test "MUST NOT acknowledge a packet number the sender never put on the wire [RFC
     // sender never recorded get silently dropped (no removal, no RTT
     // sample, no congestion-controller update). This is the
     // observable consequence of the rule.
-    var tr: sent_packets.SentPacketTracker = .{};
+    var tr = try sent_packets.SentPacketTracker.init(std.testing.allocator, sent_packets.max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 100, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 1, .sent_time_us = 110, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     var space: pn_space_mod.PnSpace = .{};

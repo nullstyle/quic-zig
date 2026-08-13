@@ -13,6 +13,7 @@ const frame_types = @import("../frame/types.zig");
 const PnSpace = @import("pn_space.zig").PnSpace;
 const SentPacketTracker = @import("sent_packets.zig").SentPacketTracker;
 const SentPacket = @import("sent_packets.zig").SentPacket;
+const sent_packets_max_tracked = @import("sent_packets.zig").max_tracked;
 const RttEstimator = @import("rtt.zig").RttEstimator;
 const granularity_us = @import("rtt.zig").granularity_us;
 
@@ -217,7 +218,8 @@ fn buildAck(largest: u64, first_range: u64) frame_types.Ack {
 }
 
 test "processAck removes a single contiguous range from the tracker" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < 5) : (pn += 1) {
         try tr.record(.{ .pn = pn, .sent_time_us = pn * 10, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
@@ -243,7 +245,8 @@ test "processAck removes a single contiguous range from the tracker" {
 }
 
 test "processAck handles an ACK with multiple ranges" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < 11) : (pn += 1) {
         try tr.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 100, .ack_eliciting = true, .in_flight = true });
@@ -283,7 +286,8 @@ test "processAck handles an ACK with multiple ranges" {
 }
 
 test "processAck removes a tracked span with mixed in-flight packets" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 100, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 2, .sent_time_us = 20, .bytes = 200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 3, .sent_time_us = 30, .bytes = 300, .ack_eliciting = false, .in_flight = false });
@@ -306,7 +310,8 @@ test "processAck removes a tracked span with mixed in-flight packets" {
 }
 
 test "detectLosses by packet threshold" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     var pn: u64 = 0;
     while (pn < 5) : (pn += 1) {
         try tr.record(.{ .pn = pn, .sent_time_us = 100, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
@@ -340,7 +345,8 @@ test "detectLosses by packet threshold" {
 }
 
 test "detectLosses by time threshold" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     // Two packets: PN 0 sent at t=0, PN 1 sent at t=100ms.
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 1, .sent_time_us = 100_000, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
@@ -361,7 +367,8 @@ test "detectLosses by time threshold" {
 }
 
 test "detectLosses skips packets above largest_acked" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     // Packets 0, 1, 5, 6. largest_acked = 1.
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 1, .sent_time_us = 1000, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
@@ -385,7 +392,8 @@ test "detectLosses skips packets above largest_acked" {
 }
 
 test "detectLosses batches non-contiguous lost runs" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 100, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 1, .sent_time_us = 9_000, .bytes = 200, .ack_eliciting = true, .in_flight = true });
     try tr.record(.{ .pn = 2, .sent_time_us = 1_000, .bytes = 300, .ack_eliciting = true, .in_flight = true });
@@ -411,7 +419,8 @@ test "detectLosses batches non-contiguous lost runs" {
 }
 
 test "detectLosses with no largest_acked_sent is a no-op" {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
     try tr.record(.{ .pn = 0, .sent_time_us = 0, .bytes = 1200, .ack_eliciting = true, .in_flight = true });
     var space: PnSpace = .{};
     var rtt_est: RttEstimator = .{};
@@ -440,7 +449,8 @@ test "fuzz: loss_recovery processAck invariants" {
 }
 
 fn fuzzProcessAck(_: void, smith: *std.testing.Smith) anyerror!void {
-    var tr: SentPacketTracker = .{};
+    var tr = try SentPacketTracker.init(std.testing.allocator, sent_packets_max_tracked);
+    defer tr.deinit(std.testing.allocator);
 
     // Seed the tracker with up to 64 packets at strictly-increasing
     // PNs. Gap between PNs comes from the corpus so contiguous,
