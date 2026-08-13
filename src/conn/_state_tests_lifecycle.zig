@@ -82,3 +82,30 @@ test "phase() reports initial before keys and closing after close()" {
     try std.testing.expectEqual(CloseState.closing, conn.closeState());
     try std.testing.expectEqual(ConnectionPhase.closing, conn.phase());
 }
+
+test "per-space tracker capacities: 256 for Initial/Handshake, 4096 for Application" {
+    // Wiring pin for the right-sizing decision recorded at
+    // `sent_packets.initial_handshake_max_tracked`: the two
+    // connection-level spaces must get the small capacity, the
+    // per-path Application space the large one. If this fails after
+    // an intentional resize, update the constants' rationale first.
+    const sent_packets = state.sent_packets_mod;
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    try std.testing.expectEqual(
+        @as(u32, sent_packets.initial_handshake_max_tracked),
+        conn.sentForLevel(.initial).capacity(),
+    );
+    try std.testing.expectEqual(
+        @as(u32, sent_packets.initial_handshake_max_tracked),
+        conn.sentForLevel(.handshake).capacity(),
+    );
+    try std.testing.expectEqual(
+        @as(u32, sent_packets.max_tracked),
+        conn.sentForLevel(.application).capacity(),
+    );
+}

@@ -1644,9 +1644,9 @@ pub const Connection = struct {
         server_name: [:0]const u8,
     ) !void {
         var sent_trackers: [2]SentPacketTracker = undefined;
-        sent_trackers[0] = try SentPacketTracker.init(allocator, sent_packets_mod.max_tracked);
+        sent_trackers[0] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
         errdefer sent_trackers[0].deinit(allocator);
-        sent_trackers[1] = try SentPacketTracker.init(allocator, sent_packets_mod.max_tracked);
+        sent_trackers[1] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
         errdefer sent_trackers[1].deinit(allocator);
         conn.* = .{
             .allocator = allocator,
@@ -1686,9 +1686,9 @@ pub const Connection = struct {
         tls_ctx: boringssl.tls.Context,
     ) !void {
         var sent_trackers: [2]SentPacketTracker = undefined;
-        sent_trackers[0] = try SentPacketTracker.init(allocator, sent_packets_mod.max_tracked);
+        sent_trackers[0] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
         errdefer sent_trackers[0].deinit(allocator);
-        sent_trackers[1] = try SentPacketTracker.init(allocator, sent_packets_mod.max_tracked);
+        sent_trackers[1] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
         errdefer sent_trackers[1].deinit(allocator);
         conn.* = .{
             .allocator = allocator,

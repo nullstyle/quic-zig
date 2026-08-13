@@ -38,6 +38,17 @@ changes.
   (`tests/e2e/public_api_smoke.zig`), promoted at the request of the
   first downstream shipping HTTP/3 early data on them. The verbatim
   requeue-on-rejection behavior is documented as part of the surface.
+- **Per-connection memory: −1.35 MiB** — sent-packet tracker capacity
+  became an init-time choice, and the Initial/Handshake spaces are
+  right-sized 4096 → 256 slots (they peak at single-digit live
+  packets across the whole test/impairment corpus and sit idle after
+  the handshake; 256 still covers a 100 KiB certificate-chain flight
+  ~2.8×, with the sizing evidence recorded at
+  `sent_packets.initial_handshake_max_tracked`). Addresses the
+  v0.10.1 → v0.12.0 warm-up footprint growth measured downstream
+  (~6.2 → ~3.5 MB per connection pair expected). The ACK-churn
+  microbench got ~20% faster in the bargain (tracker counters now sit
+  adjacent to the slots they govern).
 
 ## [0.12.0] - 2026-08-12
 

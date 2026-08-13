@@ -236,13 +236,42 @@ pub const SentPacket = struct {
 };
 
 /// Application-space tracker capacity. Real connections rarely hold
-/// more than a few hundred live packets; 4096 gives high-BDP headroom.
-/// Capacity is a per-tracker choice made at `init`, so a PN space
-/// that provably needs less can pay for less. When a tracker is
-/// live-full, `record` returns `Error.TooManyInFlight` — a
-/// connection-fatal condition the caller should map to a
+/// more than a few hundred live packets; 4096 gives high-BDP headroom
+/// (the highest observed across this repo's full test + impairment +
+/// smoke corpus is 915). Capacity is a per-tracker choice made at
+/// `init`, so a PN space that provably needs less pays for less. When
+/// a tracker is live-full, `record` returns `Error.TooManyInFlight` —
+/// a connection-fatal condition the caller should map to a
 /// CONNECTION_CLOSE.
 pub const max_tracked: usize = 4096;
+
+/// Initial/Handshake-space tracker capacity. Those spaces carry the
+/// handshake flights and then sit idle for the connection's remaining
+/// lifetime, so they get 256 slots instead of the Application space's
+/// 4096 — returning ~1.35 MiB per connection. Sizing evidence, both
+/// directions:
+///
+/// - Measured: across 591 connections spanning the unit/integration
+///   suites, all eight deterministic impairment cells (including 5%
+///   loss, which exercises handshake PTO retransmission), and both
+///   wall-clock smokes, peak live occupancy was 3 (Initial) and 1
+///   (Handshake) — 256 is ~85x the observed worst case.
+/// - Bounded: the largest legitimate Handshake flight is a
+///   certificate chain, and BoringSSL peers reject chains above
+///   SSL_MAX_CERT_LIST_DEFAULT (100 KiB) by default, making that the
+///   de-facto interop ceiling for what anyone ships. 100 KiB of
+///   CRYPTO is ~90 packets; holding even that many live at once needs
+///   cwnd > ~300 KiB DURING the handshake, which slow start reaches
+///   only after ~288 KiB of the flight was already acknowledged —
+///   i.e. a chain well past 0.5 MiB.
+///
+/// Failure mode if exceeded anyway: `record` returns
+/// `Error.TooManyInFlight` and the connection closes. The one traffic
+/// shape that can approach the cap — a peer soliciting ACK-carrying
+/// Initial packets indefinitely while acknowledging none of them — is
+/// a flood, and closing on it is the intended defense outcome (the
+/// crypto-flood limiter throttles it long before this backstop).
+pub const initial_handshake_max_tracked: usize = 256;
 
 /// Errors raised by the sent-packet tracker.
 pub const Error = error{
