@@ -26,7 +26,7 @@
 const std = @import("std");
 const boringssl = @import("boringssl");
 
-const config_mod = @import("config.zig");
+const config_mod = @import("LbConfig.zig");
 const cid_mod = @import("cid.zig");
 const feistel_mod = @import("feistel.zig");
 

@@ -26,9 +26,9 @@
 
 const std = @import("std");
 
-pub const config = @import("config.zig");
+pub const config = @import("LbConfig.zig");
 pub const cid = @import("cid.zig");
-pub const nonce = @import("nonce.zig");
+pub const nonce = @import("NonceCounter.zig");
 pub const feistel = @import("feistel.zig");
 pub const decode_mod = @import("decode.zig");
 

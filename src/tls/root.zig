@@ -25,7 +25,7 @@ pub const resumption_state = @import("resumption_state.zig");
 /// Embedders that opt in to 0-RTT plug an `AntiReplayTracker` into
 /// their server loop and call `consume` per accepted early-data
 /// connection — see module docstring for the recommended workflow.
-pub const anti_replay = @import("anti_replay.zig");
+pub const anti_replay = @import("AntiReplayTracker.zig");
 /// PEM-from-memory credential installation: trust-anchor pinning
 /// (`Client.Config.ca_pem` / `Server.Config.client_ca_pem`) and the
 /// client-presented mTLS identity (`Client.Config.client_cert_pem`).

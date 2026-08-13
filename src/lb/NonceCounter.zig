@@ -29,7 +29,7 @@ const NonceCounter = @This();
 const std = @import("std");
 const boringssl = @import("boringssl");
 
-const config_mod = @import("config.zig");
+const config_mod = @import("LbConfig.zig");
 
 pub const Error = error{
     /// Counter has wrapped past the maximum value representable in

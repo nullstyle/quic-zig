@@ -44,8 +44,8 @@
 const std = @import("std");
 const boringssl = @import("boringssl");
 
-const config_mod = @import("config.zig");
-const nonce_mod = @import("nonce.zig");
+const config_mod = @import("LbConfig.zig");
+const nonce_mod = @import("NonceCounter.zig");
 const feistel_mod = @import("feistel.zig");
 
 pub const LbConfig = config_mod;
