@@ -5,6 +5,10 @@
 //! this set when an ACK arrives to compute newly-acked PNs and
 //! detect lost ones.
 
+// Consumers spell `<module>.SentPacketTracker`; the pub self-alias keeps
+// that path resolving now that the file IS the type.
+pub const SentPacketTracker = @This();
+
 const std = @import("std");
 const frame_types = @import("../frame/types.zig");
 
@@ -305,254 +309,252 @@ pub const compact_threshold: u32 = max_tracked / 4;
 /// while an ACK/loss walk holds indices — `record` is only called from
 /// the send path. `count` includes tombstones (walks iterate physical
 /// slots and skip `dead`); `liveCount()` is the tracked-packet count.
-pub const SentPacketTracker = struct {
-    /// Slot storage, sorted ascending by PN (tombstones keep their PN,
-    /// preserving order for binary search). Sent packets are appended
-    /// at the high end; ACKs/loss tombstone anywhere. Length is the
-    /// tracker's capacity. Normally allocated via `init`; constructing
-    /// directly over caller-managed storage is allowed when the
-    /// lifetime is externally guaranteed (see bench/loss_ack.zig).
-    packets: []SentPacket,
-    /// Physical entries, INCLUDING tombstones. Loop bound for walks;
-    /// not the number of tracked packets — that is `liveCount()`.
-    count: u32 = 0,
-    /// Tombstones currently awaiting compaction.
-    dead_count: u32 = 0,
-    /// Sum of bytes for in-flight packets currently tracked.
-    bytes_in_flight: u64 = 0,
-    /// Sum of bytes for ack-eliciting packets currently tracked.
-    /// Used for some loss-recovery state; tracked separately so
-    /// we don't have to walk the array.
-    ack_eliciting_in_flight: u64 = 0,
+/// Slot storage, sorted ascending by PN (tombstones keep their PN,
+/// preserving order for binary search). Sent packets are appended
+/// at the high end; ACKs/loss tombstone anywhere. Length is the
+/// tracker's capacity. Normally allocated via `init`; constructing
+/// directly over caller-managed storage is allowed when the
+/// lifetime is externally guaranteed (see bench/loss_ack.zig).
+packets: []SentPacket,
+/// Physical entries, INCLUDING tombstones. Loop bound for walks;
+/// not the number of tracked packets — that is `liveCount()`.
+count: u32 = 0,
+/// Tombstones currently awaiting compaction.
+dead_count: u32 = 0,
+/// Sum of bytes for in-flight packets currently tracked.
+bytes_in_flight: u64 = 0,
+/// Sum of bytes for ack-eliciting packets currently tracked.
+/// Used for some loss-recovery state; tracked separately so
+/// we don't have to walk the array.
+ack_eliciting_in_flight: u64 = 0,
 
-    /// Allocate a tracker with room for `cap` live packets. The
-    /// storage is exactly `cap * @sizeOf(SentPacket)` — capacity is
-    /// the whole per-space memory story, so size it to the space.
-    pub fn init(allocator: std.mem.Allocator, cap: usize) std.mem.Allocator.Error!SentPacketTracker {
-        // Compaction math (capacity / 4) and the MinPipeCwnd-style
-        // floor below it need a few slots to be meaningful.
-        std.debug.assert(cap >= 4);
-        return .{ .packets = try allocator.alloc(SentPacket, cap) };
+/// Allocate a tracker with room for `cap` live packets. The
+/// storage is exactly `cap * @sizeOf(SentPacket)` — capacity is
+/// the whole per-space memory story, so size it to the space.
+pub fn init(allocator: std.mem.Allocator, cap: usize) std.mem.Allocator.Error!SentPacketTracker {
+    // Compaction math (capacity / 4) and the MinPipeCwnd-style
+    // floor below it need a few slots to be meaningful.
+    std.debug.assert(cap >= 4);
+    return .{ .packets = try allocator.alloc(SentPacket, cap) };
+}
+
+/// Release every live packet's owned per-packet arrays, then the
+/// slot storage itself. Tombstones own nothing (their remover took
+/// ownership) — deinit'ing them would double-free.
+pub fn deinit(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
+    self.clear(allocator);
+    allocator.free(self.packets);
+    self.* = undefined;
+}
+
+/// Drop every tracked packet (releasing owned per-packet arrays)
+/// and zero the running totals, keeping the slot storage for
+/// reuse. The key-drop / recovery-reset primitive.
+pub fn clear(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
+    var i: u32 = 0;
+    while (i < self.count) : (i += 1) {
+        // Tombstones own nothing; deinit would double-free.
+        if (self.packets[i].dead) continue;
+        self.packets[i].deinit(allocator);
     }
+    self.resetRetainingCapacity();
+}
 
-    /// Release every live packet's owned per-packet arrays, then the
-    /// slot storage itself. Tombstones own nothing (their remover took
-    /// ownership) — deinit'ing them would double-free.
-    pub fn deinit(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
-        self.clear(allocator);
-        allocator.free(self.packets);
-        self.* = undefined;
+/// Forget every tracked packet WITHOUT releasing per-packet owned
+/// arrays. Only correct when no live packet owns heap data (none
+/// was given retransmit frames or extra stream refs) — the
+/// bench/test fast-reset path. Production resets want `clear`.
+pub fn resetRetainingCapacity(self: *SentPacketTracker) void {
+    self.count = 0;
+    self.dead_count = 0;
+    self.bytes_in_flight = 0;
+    self.ack_eliciting_in_flight = 0;
+}
+
+/// Live-packet capacity (the storage length fixed at init).
+pub fn capacity(self: *const SentPacketTracker) u32 {
+    return @intCast(self.packets.len);
+}
+
+/// Tombstone count that triggers a sweep: capacity / 4, so the
+/// amortization ratio is the same at every tracker size.
+fn compactThreshold(self: *const SentPacketTracker) u32 {
+    return self.capacity() / 4;
+}
+
+/// Packets currently tracked (excludes tombstones).
+pub fn liveCount(self: *const SentPacketTracker) u32 {
+    return self.count - self.dead_count;
+}
+
+/// Record a newly-sent packet. PNs must be strictly increasing.
+pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
+    if (self.liveCount() >= self.capacity()) return Error.TooManyInFlight;
+    if (self.count >= self.capacity() or self.dead_count >= self.compactThreshold()) {
+        // liveCount < capacity, so compaction always frees a slot.
+        self.compact();
     }
+    if (self.count > 0) {
+        // invariant: caller is the send path, which draws PNs
+        // from a monotonically-incrementing nextPn() and never
+        // reuses one. Not peer-controlled; pure local data.
+        // (Tombstones keep their PN, so comparing against the last
+        // physical slot is still the highest PN ever recorded.)
+        std.debug.assert(p.pn > self.packets[self.count - 1].pn);
+    }
+    self.packets[self.count] = p;
+    self.count += 1;
+    if (p.in_flight) {
+        self.bytes_in_flight += p.bytes;
+        if (p.ack_eliciting) self.ack_eliciting_in_flight += p.bytes;
+    }
+}
 
-    /// Drop every tracked packet (releasing owned per-packet arrays)
-    /// and zero the running totals, keeping the slot storage for
-    /// reuse. The key-drop / recovery-reset primitive.
-    pub fn clear(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
-        var i: u32 = 0;
-        while (i < self.count) : (i += 1) {
-            // Tombstones own nothing; deinit would double-free.
-            if (self.packets[i].dead) continue;
-            self.packets[i].deinit(allocator);
+/// Overwrite a removed slot with a canonical, fully-defined
+/// tombstone. Only the PN survives: PN-ordered scans, binary
+/// search, and the record-monotonicity assert all read dead slots'
+/// PNs, and removal callbacks are allowed to `deinit` the packet
+/// through the pointer they receive (which sets it to `undefined`)
+/// — so the slot must be re-stamped after the callback returns.
+fn tombstone(slot: *SentPacket, pn: u64) void {
+    slot.* = .{
+        .pn = pn,
+        .sent_time_us = 0,
+        .bytes = 0,
+        .ack_eliciting = false,
+        .in_flight = false,
+        .dead = true,
+    };
+}
+
+/// One-pass tombstone sweep preserving PN order. Dead slots own
+/// nothing (ownership left with their remover), so this is a pure
+/// move of the survivors.
+fn compact(self: *SentPacketTracker) void {
+    if (self.dead_count == 0) return;
+    var w: u32 = 0;
+    var r: u32 = 0;
+    while (r < self.count) : (r += 1) {
+        if (self.packets[r].dead) continue;
+        if (w != r) self.packets[w] = self.packets[r];
+        w += 1;
+    }
+    self.count = w;
+    self.dead_count = 0;
+}
+
+/// Remove a tracked packet by index: O(1) tombstone, no memmove.
+/// Returns the removed entry (ownership of its heap-backed arrays
+/// transfers to the caller). `idx` must reference a live packet.
+pub fn removeAt(self: *SentPacketTracker, idx: u32) SentPacket {
+    // invariant: callers walk via indexOf/lowerBound/forward
+    // scan, all of which yield indices already < count, and skip
+    // dead entries before removing.
+    std.debug.assert(idx < self.count);
+    std.debug.assert(!self.packets[idx].dead);
+    const p = self.packets[idx];
+    tombstone(&self.packets[idx], p.pn);
+    self.dead_count += 1;
+    if (p.in_flight) {
+        self.bytes_in_flight -= p.bytes;
+        if (p.ack_eliciting) self.ack_eliciting_in_flight -= p.bytes;
+    }
+    return p;
+}
+
+/// Remove every live packet in the half-open index range
+/// `[start, end)`, calling `on_remove` for each before its slot is
+/// tombstoned. Packet ownership is transferred to the callback.
+/// Tombstones already inside the range are skipped.
+pub fn removeRangeWith(
+    self: *SentPacketTracker,
+    start: u32,
+    end: u32,
+    context: anytype,
+    comptime on_remove: fn (@TypeOf(context), *SentPacket) void,
+) void {
+    std.debug.assert(start <= end);
+    std.debug.assert(end <= self.count);
+
+    var i = start;
+    while (i < end) : (i += 1) {
+        const packet = &self.packets[i];
+        if (packet.dead) continue;
+        if (packet.in_flight) {
+            self.bytes_in_flight -= packet.bytes;
+            if (packet.ack_eliciting) self.ack_eliciting_in_flight -= packet.bytes;
         }
-        self.resetRetainingCapacity();
-    }
-
-    /// Forget every tracked packet WITHOUT releasing per-packet owned
-    /// arrays. Only correct when no live packet owns heap data (none
-    /// was given retransmit frames or extra stream refs) — the
-    /// bench/test fast-reset path. Production resets want `clear`.
-    pub fn resetRetainingCapacity(self: *SentPacketTracker) void {
-        self.count = 0;
-        self.dead_count = 0;
-        self.bytes_in_flight = 0;
-        self.ack_eliciting_in_flight = 0;
-    }
-
-    /// Live-packet capacity (the storage length fixed at init).
-    pub fn capacity(self: *const SentPacketTracker) u32 {
-        return @intCast(self.packets.len);
-    }
-
-    /// Tombstone count that triggers a sweep: capacity / 4, so the
-    /// amortization ratio is the same at every tracker size.
-    fn compactThreshold(self: *const SentPacketTracker) u32 {
-        return self.capacity() / 4;
-    }
-
-    /// Packets currently tracked (excludes tombstones).
-    pub fn liveCount(self: *const SentPacketTracker) u32 {
-        return self.count - self.dead_count;
-    }
-
-    /// Record a newly-sent packet. PNs must be strictly increasing.
-    pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
-        if (self.liveCount() >= self.capacity()) return Error.TooManyInFlight;
-        if (self.count >= self.capacity() or self.dead_count >= self.compactThreshold()) {
-            // liveCount < capacity, so compaction always frees a slot.
-            self.compact();
-        }
-        if (self.count > 0) {
-            // invariant: caller is the send path, which draws PNs
-            // from a monotonically-incrementing nextPn() and never
-            // reuses one. Not peer-controlled; pure local data.
-            // (Tombstones keep their PN, so comparing against the last
-            // physical slot is still the highest PN ever recorded.)
-            std.debug.assert(p.pn > self.packets[self.count - 1].pn);
-        }
-        self.packets[self.count] = p;
-        self.count += 1;
-        if (p.in_flight) {
-            self.bytes_in_flight += p.bytes;
-            if (p.ack_eliciting) self.ack_eliciting_in_flight += p.bytes;
-        }
-    }
-
-    /// Overwrite a removed slot with a canonical, fully-defined
-    /// tombstone. Only the PN survives: PN-ordered scans, binary
-    /// search, and the record-monotonicity assert all read dead slots'
-    /// PNs, and removal callbacks are allowed to `deinit` the packet
-    /// through the pointer they receive (which sets it to `undefined`)
-    /// — so the slot must be re-stamped after the callback returns.
-    fn tombstone(slot: *SentPacket, pn: u64) void {
-        slot.* = .{
-            .pn = pn,
-            .sent_time_us = 0,
-            .bytes = 0,
-            .ack_eliciting = false,
-            .in_flight = false,
-            .dead = true,
-        };
-    }
-
-    /// One-pass tombstone sweep preserving PN order. Dead slots own
-    /// nothing (ownership left with their remover), so this is a pure
-    /// move of the survivors.
-    fn compact(self: *SentPacketTracker) void {
-        if (self.dead_count == 0) return;
-        var w: u32 = 0;
-        var r: u32 = 0;
-        while (r < self.count) : (r += 1) {
-            if (self.packets[r].dead) continue;
-            if (w != r) self.packets[w] = self.packets[r];
-            w += 1;
-        }
-        self.count = w;
-        self.dead_count = 0;
-    }
-
-    /// Remove a tracked packet by index: O(1) tombstone, no memmove.
-    /// Returns the removed entry (ownership of its heap-backed arrays
-    /// transfers to the caller). `idx` must reference a live packet.
-    pub fn removeAt(self: *SentPacketTracker, idx: u32) SentPacket {
-        // invariant: callers walk via indexOf/lowerBound/forward
-        // scan, all of which yield indices already < count, and skip
-        // dead entries before removing.
-        std.debug.assert(idx < self.count);
-        std.debug.assert(!self.packets[idx].dead);
-        const p = self.packets[idx];
-        tombstone(&self.packets[idx], p.pn);
+        const pn = packet.pn;
+        on_remove(context, packet);
+        tombstone(packet, pn);
         self.dead_count += 1;
-        if (p.in_flight) {
-            self.bytes_in_flight -= p.bytes;
-            if (p.ack_eliciting) self.ack_eliciting_in_flight -= p.bytes;
-        }
-        return p;
     }
+}
 
-    /// Remove every live packet in the half-open index range
-    /// `[start, end)`, calling `on_remove` for each before its slot is
-    /// tombstoned. Packet ownership is transferred to the callback.
-    /// Tombstones already inside the range are skipped.
-    pub fn removeRangeWith(
-        self: *SentPacketTracker,
-        start: u32,
-        end: u32,
-        context: anytype,
-        comptime on_remove: fn (@TypeOf(context), *SentPacket) void,
-    ) void {
-        std.debug.assert(start <= end);
-        std.debug.assert(end <= self.count);
+/// Error-aware sibling of `removeRangeWith`. If `on_remove` fails,
+/// packets already handed to the callback (including the failing
+/// packet) are removed; remaining live packets in `[start, end)`
+/// stay tracked.
+pub fn removeRangeWithError(
+    self: *SentPacketTracker,
+    start: u32,
+    end: u32,
+    context: anytype,
+    comptime on_remove: anytype,
+) !void {
+    std.debug.assert(start <= end);
+    std.debug.assert(end <= self.count);
 
-        var i = start;
-        while (i < end) : (i += 1) {
-            const packet = &self.packets[i];
-            if (packet.dead) continue;
-            if (packet.in_flight) {
-                self.bytes_in_flight -= packet.bytes;
-                if (packet.ack_eliciting) self.ack_eliciting_in_flight -= packet.bytes;
-            }
-            const pn = packet.pn;
-            on_remove(context, packet);
-            tombstone(packet, pn);
-            self.dead_count += 1;
+    var i = start;
+    while (i < end) : (i += 1) {
+        const packet = &self.packets[i];
+        if (packet.dead) continue;
+        if (packet.in_flight) {
+            self.bytes_in_flight -= packet.bytes;
+            if (packet.ack_eliciting) self.ack_eliciting_in_flight -= packet.bytes;
         }
+        const pn = packet.pn;
+        const result = on_remove(context, packet);
+        tombstone(packet, pn);
+        self.dead_count += 1;
+        result catch |err| return err;
     }
+}
 
-    /// Error-aware sibling of `removeRangeWith`. If `on_remove` fails,
-    /// packets already handed to the callback (including the failing
-    /// packet) are removed; remaining live packets in `[start, end)`
-    /// stay tracked.
-    pub fn removeRangeWithError(
-        self: *SentPacketTracker,
-        start: u32,
-        end: u32,
-        context: anytype,
-        comptime on_remove: anytype,
-    ) !void {
-        std.debug.assert(start <= end);
-        std.debug.assert(end <= self.count);
-
-        var i = start;
-        while (i < end) : (i += 1) {
-            const packet = &self.packets[i];
-            if (packet.dead) continue;
-            if (packet.in_flight) {
-                self.bytes_in_flight -= packet.bytes;
-                if (packet.ack_eliciting) self.ack_eliciting_in_flight -= packet.bytes;
-            }
-            const pn = packet.pn;
-            const result = on_remove(context, packet);
-            tombstone(packet, pn);
-            self.dead_count += 1;
-            result catch |err| return err;
+/// Find the index of the tracked packet with the given PN.
+/// Returns null if no match. O(log N) binary search.
+pub fn indexOf(self: *const SentPacketTracker, pn: u64) ?u32 {
+    var lo: u32 = 0;
+    var hi: u32 = self.count;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const p = self.packets[mid];
+        if (p.pn == pn) return mid;
+        if (p.pn < pn) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
     }
+    return null;
+}
 
-    /// Find the index of the tracked packet with the given PN.
-    /// Returns null if no match. O(log N) binary search.
-    pub fn indexOf(self: *const SentPacketTracker, pn: u64) ?u32 {
-        var lo: u32 = 0;
-        var hi: u32 = self.count;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const p = self.packets[mid];
-            if (p.pn == pn) return mid;
-            if (p.pn < pn) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
+/// Find the first tracked packet whose PN is >= `pn`.
+/// Returns null if all tracked PNs are smaller.
+pub fn lowerBound(self: *const SentPacketTracker, pn: u64) ?u32 {
+    var lo: u32 = 0;
+    var hi: u32 = self.count;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (self.packets[mid].pn < pn) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
-        return null;
     }
-
-    /// Find the first tracked packet whose PN is >= `pn`.
-    /// Returns null if all tracked PNs are smaller.
-    pub fn lowerBound(self: *const SentPacketTracker, pn: u64) ?u32 {
-        var lo: u32 = 0;
-        var hi: u32 = self.count;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            if (self.packets[mid].pn < pn) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        if (lo >= self.count) return null;
-        return lo;
-    }
-};
+    if (lo >= self.count) return null;
+    return lo;
+}
 
 // -- tests ---------------------------------------------------------------
 

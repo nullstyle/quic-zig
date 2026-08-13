@@ -32,6 +32,10 @@
 //! finite; before the first sample the initial-window burst capacity
 //! dominates anyway.
 
+// Consumers spell `<module>.Pacer`; the pub self-alias keeps
+// that path resolving now that the file IS the type.
+pub const Pacer = @This();
+
 const std = @import("std");
 
 /// RFC 9002 §7.7: allow the initial congestion window as a burst.
@@ -68,83 +72,81 @@ pub fn bucketCapacity(rate_bytes_per_s: u64, mds: u64) u64 {
     return @max(burst_packets * mds, quantum);
 }
 
-pub const Pacer = struct {
-    /// Available send credit in bytes. NEGATIVE = debt left behind by
-    /// exempt sends (probes, close, ACK-only) that bypass the gate.
-    tokens: i64 = 0,
-    last_refill_us: u64 = 0,
-    /// First use seeds a full bucket (the §7.7 initial burst).
-    primed: bool = false,
+/// Available send credit in bytes. NEGATIVE = debt left behind by
+/// exempt sends (probes, close, ACK-only) that bypass the gate.
+tokens: i64 = 0,
+last_refill_us: u64 = 0,
+/// First use seeds a full bucket (the §7.7 initial burst).
+primed: bool = false,
 
-    /// Bring the bucket up to date at `now_us` for the given pacing
-    /// rate. Call before `canSend`/`consume` on the send path; refill
-    /// is lazy — there is no timer-driven upkeep. The rate comes from
-    /// the congestion controller (`pacingRateBps`): loss-based
-    /// controllers derive it as gain x cwnd / srtt via
-    /// `rateBytesPerSecond`; rate-based controllers supply their own
-    /// bandwidth-model rate. The bucket itself is rate-agnostic.
-    pub fn refill(
-        self: *Pacer,
-        now_us: u64,
-        rate_bytes_per_s: u64,
-        mds: u64,
-    ) void {
-        const rate = rate_bytes_per_s;
-        const capacity = std.math.lossyCast(i64, bucketCapacity(rate, mds));
-        if (!self.primed) {
-            self.primed = true;
-            self.last_refill_us = now_us;
-            self.tokens = capacity;
-            return;
-        }
-        const elapsed = now_us -| self.last_refill_us;
+/// Bring the bucket up to date at `now_us` for the given pacing
+/// rate. Call before `canSend`/`consume` on the send path; refill
+/// is lazy — there is no timer-driven upkeep. The rate comes from
+/// the congestion controller (`pacingRateBps`): loss-based
+/// controllers derive it as gain x cwnd / srtt via
+/// `rateBytesPerSecond`; rate-based controllers supply their own
+/// bandwidth-model rate. The bucket itself is rate-agnostic.
+pub fn refill(
+    self: *Pacer,
+    now_us: u64,
+    rate_bytes_per_s: u64,
+    mds: u64,
+) void {
+    const rate = rate_bytes_per_s;
+    const capacity = std.math.lossyCast(i64, bucketCapacity(rate, mds));
+    if (!self.primed) {
+        self.primed = true;
         self.last_refill_us = now_us;
-        if (elapsed != 0) {
-            const add = std.math.lossyCast(
-                i64,
-                (@as(u128, rate) * elapsed) / std.time.us_per_s,
-            );
-            self.tokens = self.tokens +| add;
-        }
-        if (self.tokens > capacity) self.tokens = capacity;
+        self.tokens = capacity;
+        return;
     }
+    const elapsed = now_us -| self.last_refill_us;
+    self.last_refill_us = now_us;
+    if (elapsed != 0) {
+        const add = std.math.lossyCast(
+            i64,
+            (@as(u128, rate) * elapsed) / std.time.us_per_s,
+        );
+        self.tokens = self.tokens +| add;
+    }
+    if (self.tokens > capacity) self.tokens = capacity;
+}
 
-    /// Is there credit for a `bytes`-sized datagram right now?
-    pub fn canSend(self: *const Pacer, bytes: u64) bool {
-        return self.tokens >= std.math.lossyCast(i64, bytes);
-    }
+/// Is there credit for a `bytes`-sized datagram right now?
+pub fn canSend(self: *const Pacer, bytes: u64) bool {
+    return self.tokens >= std.math.lossyCast(i64, bytes);
+}
 
-    /// Debit `bytes`. May push the bucket negative (exempt sends).
-    pub fn consume(self: *Pacer, bytes: u64) void {
-        self.tokens -|= std.math.lossyCast(i64, bytes);
-    }
+/// Debit `bytes`. May push the bucket negative (exempt sends).
+pub fn consume(self: *Pacer, bytes: u64) void {
+    self.tokens -|= std.math.lossyCast(i64, bytes);
+}
 
-    /// Earliest time a `bytes`-sized datagram will have credit at the
-    /// given pacing rate — WITHOUT mutating the bucket (safe from
-    /// `nextTimerDeadline`'s const walk). Returns null when it is
-    /// ready now (or the pacer has never been used).
-    pub fn nextReadyUs(
-        self: *const Pacer,
-        now_us: u64,
-        bytes: u64,
-        rate_bytes_per_s: u64,
-        mds: u64,
-    ) ?u64 {
-        if (!self.primed) return null;
-        const rate = rate_bytes_per_s;
-        const capacity = std.math.lossyCast(i64, bucketCapacity(rate, mds));
-        // Project the lazy refill forward from last_refill_us.
-        const elapsed = now_us -| self.last_refill_us;
-        const accrued = std.math.lossyCast(i64, (@as(u128, rate) * elapsed) / std.time.us_per_s);
-        const effective = @min(self.tokens +| accrued, capacity);
-        const need = std.math.lossyCast(i64, bytes);
-        if (effective >= need) return null;
-        if (rate == 0) return null; // degenerate; treat as unpaced
-        const deficit: u128 = @intCast(need - effective);
-        const wait_us = std.math.lossyCast(u64, (deficit * std.time.us_per_s) / rate);
-        return now_us +| @max(wait_us, 1);
-    }
-};
+/// Earliest time a `bytes`-sized datagram will have credit at the
+/// given pacing rate — WITHOUT mutating the bucket (safe from
+/// `nextTimerDeadline`'s const walk). Returns null when it is
+/// ready now (or the pacer has never been used).
+pub fn nextReadyUs(
+    self: *const Pacer,
+    now_us: u64,
+    bytes: u64,
+    rate_bytes_per_s: u64,
+    mds: u64,
+) ?u64 {
+    if (!self.primed) return null;
+    const rate = rate_bytes_per_s;
+    const capacity = std.math.lossyCast(i64, bucketCapacity(rate, mds));
+    // Project the lazy refill forward from last_refill_us.
+    const elapsed = now_us -| self.last_refill_us;
+    const accrued = std.math.lossyCast(i64, (@as(u128, rate) * elapsed) / std.time.us_per_s);
+    const effective = @min(self.tokens +| accrued, capacity);
+    const need = std.math.lossyCast(i64, bytes);
+    if (effective >= need) return null;
+    if (rate == 0) return null; // degenerate; treat as unpaced
+    const deficit: u128 = @intCast(need - effective);
+    const wait_us = std.math.lossyCast(u64, (deficit * std.time.us_per_s) / rate);
+    return now_us +| @max(wait_us, 1);
+}
 
 // -- tests -------------------------------------------------------------------
 

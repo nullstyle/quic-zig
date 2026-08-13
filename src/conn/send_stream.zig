@@ -23,6 +23,10 @@
 //! flag on the chunk that carries the last byte (or a 0-length FIN
 //! chunk if `finish` was called with no remaining bytes).
 
+// Consumers spell `<module>.SendStream`; the pub self-alias keeps
+// that path resolving now that the file IS the type.
+pub const SendStream = @This();
+
 const std = @import("std");
 
 /// Errors raised by send-side stream operations.
@@ -220,294 +224,292 @@ const SendByteBuffer = struct {
 
 /// One stream's send half: app-side write queue, in-flight tracking,
 /// FIN/RESET state machine.
-pub const SendStream = struct {
-    allocator: std.mem.Allocator,
+allocator: std.mem.Allocator,
 
-    /// Bytes the app has written but not yet had fully-prefix-acked.
-    /// `bytes.items[0]` is at absolute offset `base_offset`.
-    bytes: SendByteBuffer = .empty,
-    /// Soft cap on `bytes.items.len`. `write` short-writes when
-    /// `bytes.items.len + data.len` would exceed this. Set by
-    /// `Connection` from `default_max_buffered_send` (or an embedder
-    /// override at construction time). Tests using bare
-    /// `SendStream.init` get the default. Set to `maxInt(usize)` to
-    /// disable.
-    max_buffered: usize = default_max_buffered_send,
-    /// Absolute offset of the first byte still in `bytes`.
-    base_offset: u64 = 0,
-    /// One past the highest absolute offset the app has written.
-    /// Invariant: `write_offset == base_offset + bytes.items.len`.
-    write_offset: u64 = 0,
+/// Bytes the app has written but not yet had fully-prefix-acked.
+/// `bytes.items[0]` is at absolute offset `base_offset`.
+bytes: SendByteBuffer = .empty,
+/// Soft cap on `bytes.items.len`. `write` short-writes when
+/// `bytes.items.len + data.len` would exceed this. Set by
+/// `Connection` from `default_max_buffered_send` (or an embedder
+/// override at construction time). Tests using bare
+/// `SendStream.init` get the default. Set to `maxInt(usize)` to
+/// disable.
+max_buffered: usize = default_max_buffered_send,
+/// Absolute offset of the first byte still in `bytes`.
+base_offset: u64 = 0,
+/// One past the highest absolute offset the app has written.
+/// Invariant: `write_offset == base_offset + bytes.items.len`.
+write_offset: u64 = 0,
 
-    /// Sorted disjoint ranges (subset of [base_offset, write_offset))
-    /// that need to be sent or retransmitted.
-    pending: std.ArrayList(Range) = .empty,
-    /// In-flight chunks per packet number.
-    in_flight: std.AutoHashMapUnmanaged(u64, Chunk) = .empty,
-    /// Sorted disjoint ranges above `base_offset` that have been
-    /// ACKed but can't yet be folded into the floor.
-    acked_above: std.ArrayList(Range) = .empty,
+/// Sorted disjoint ranges (subset of [base_offset, write_offset))
+/// that need to be sent or retransmitted.
+pending: std.ArrayList(Range) = .empty,
+/// In-flight chunks per packet number.
+in_flight: std.AutoHashMapUnmanaged(u64, Chunk) = .empty,
+/// Sorted disjoint ranges above `base_offset` that have been
+/// ACKed but can't yet be folded into the floor.
+acked_above: std.ArrayList(Range) = .empty,
 
-    /// FIN intent set via `finish`.
-    fin_marked: bool = false,
-    /// FIN has been packed into an in-flight chunk.
-    fin_in_flight: bool = false,
-    /// FIN chunk has been ACKed.
-    fin_acked: bool = false,
-    /// Final stream size; set once `finish` is called.
-    final_size: ?u64 = null,
+/// FIN intent set via `finish`.
+fin_marked: bool = false,
+/// FIN has been packed into an in-flight chunk.
+fin_in_flight: bool = false,
+/// FIN chunk has been ACKed.
+fin_acked: bool = false,
+/// Final stream size; set once `finish` is called.
+final_size: ?u64 = null,
 
-    /// Reset state. `null` until `resetStream` is called.
-    reset: ?ResetInfo = null,
+/// Reset state. `null` until `resetStream` is called.
+reset: ?ResetInfo = null,
 
-    state: State = .ready,
+state: State = .ready,
 
-    /// Construct an empty send buffer that owns its allocations.
-    pub fn init(allocator: std.mem.Allocator) SendStream {
-        return .{ .allocator = allocator };
-    }
+/// Construct an empty send buffer that owns its allocations.
+pub fn init(allocator: std.mem.Allocator) SendStream {
+    return .{ .allocator = allocator };
+}
 
-    /// Free the byte buffer, pending/acked range lists, and the in-flight map.
-    pub fn deinit(self: *SendStream) void {
-        self.bytes.deinit(self.allocator);
-        self.pending.deinit(self.allocator);
-        self.acked_above.deinit(self.allocator);
-        self.in_flight.deinit(self.allocator);
-        self.* = undefined;
-    }
+/// Free the byte buffer, pending/acked range lists, and the in-flight map.
+pub fn deinit(self: *SendStream) void {
+    self.bytes.deinit(self.allocator);
+    self.pending.deinit(self.allocator);
+    self.acked_above.deinit(self.allocator);
+    self.in_flight.deinit(self.allocator);
+    self.* = undefined;
+}
 
-    /// Append `data` to the stream. Returns the number of bytes
-    /// accepted, which may be less than `data.len` if the per-stream
-    /// send-queue cap (`max_buffered`) would be exceeded — embedders
-    /// must check the return value and either retry (after polling
-    /// the connection so ACK'd bytes can shrink the buffer) or
-    /// surface the back-pressure to their application layer. Returns
-    /// 0 when the cap is full but the stream is still open.
-    pub fn write(self: *SendStream, data: []const u8) Error!usize {
-        if (self.fin_marked or self.reset != null) return Error.StreamClosed;
-        if (data.len == 0) return 0;
+/// Append `data` to the stream. Returns the number of bytes
+/// accepted, which may be less than `data.len` if the per-stream
+/// send-queue cap (`max_buffered`) would be exceeded — embedders
+/// must check the return value and either retry (after polling
+/// the connection so ACK'd bytes can shrink the buffer) or
+/// surface the back-pressure to their application layer. Returns
+/// 0 when the cap is full but the stream is still open.
+pub fn write(self: *SendStream, data: []const u8) Error!usize {
+    if (self.fin_marked or self.reset != null) return Error.StreamClosed;
+    if (data.len == 0) return 0;
 
-        // Hardening guide §8 (`max_send_queue_bytes`): cap how many
-        // app-written bytes can sit in `bytes` waiting to be sent.
-        // Without this an embedder calling `streamWrite` faster than
-        // the peer ACKs grows the buffer unboundedly.
-        const headroom = self.max_buffered -| self.bytes.items.len;
-        const accept = @min(data.len, headroom);
-        if (accept == 0) return 0;
+    // Hardening guide §8 (`max_send_queue_bytes`): cap how many
+    // app-written bytes can sit in `bytes` waiting to be sent.
+    // Without this an embedder calling `streamWrite` faster than
+    // the peer ACKs grows the buffer unboundedly.
+    const headroom = self.max_buffered -| self.bytes.items.len;
+    const accept = @min(data.len, headroom);
+    if (accept == 0) return 0;
 
-        try self.bytes.appendSlice(self.allocator, data[0..accept]);
-        const start = self.write_offset;
-        self.write_offset += accept;
-        try self.addPending(.{ .offset = start, .end = self.write_offset });
-        if (self.state == .ready) self.state = .send;
-        return accept;
-    }
+    try self.bytes.appendSlice(self.allocator, data[0..accept]);
+    const start = self.write_offset;
+    self.write_offset += accept;
+    try self.addPending(.{ .offset = start, .end = self.write_offset });
+    if (self.state == .ready) self.state = .send;
+    return accept;
+}
 
-    /// Mark the send side closed. The current `write_offset` becomes
-    /// the final size and a FIN flag will be emitted on the next
-    /// chunk that covers it (or a pure-FIN chunk if no bytes remain).
-    pub fn finish(self: *SendStream) Error!void {
-        if (self.reset != null) return Error.StreamClosed;
-        if (self.fin_marked) return;
-        self.fin_marked = true;
-        self.final_size = self.write_offset;
-        if (self.state == .send or self.state == .ready) self.state = .data_sent;
-    }
+/// Mark the send side closed. The current `write_offset` becomes
+/// the final size and a FIN flag will be emitted on the next
+/// chunk that covers it (or a pure-FIN chunk if no bytes remain).
+pub fn finish(self: *SendStream) Error!void {
+    if (self.reset != null) return Error.StreamClosed;
+    if (self.fin_marked) return;
+    self.fin_marked = true;
+    self.final_size = self.write_offset;
+    if (self.state == .send or self.state == .ready) self.state = .data_sent;
+}
 
-    /// Abandon the stream. Equivalent to RESET_STREAM (§19.4).
-    pub fn resetStream(
-        self: *SendStream,
-        error_code: u64,
-    ) Error!void {
-        if (self.reset != null) return;
-        self.reset = .{ .error_code = error_code, .final_size = self.write_offset };
-        self.state = .reset_sent;
-        // Drop any pending data; we'll never send it.
-        self.pending.clearRetainingCapacity();
-        // In-flight bytes stay tracked so we can correctly handle
-        // their ACK/loss outcomes (and not re-pend them on loss).
-    }
+/// Abandon the stream. Equivalent to RESET_STREAM (§19.4).
+pub fn resetStream(
+    self: *SendStream,
+    error_code: u64,
+) Error!void {
+    if (self.reset != null) return;
+    self.reset = .{ .error_code = error_code, .final_size = self.write_offset };
+    self.state = .reset_sent;
+    // Drop any pending data; we'll never send it.
+    self.pending.clearRetainingCapacity();
+    // In-flight bytes stay tracked so we can correctly handle
+    // their ACK/loss outcomes (and not re-pend them on loss).
+}
 
-    /// True if the stream is fully terminated (data_recvd or reset_recvd).
-    pub fn isTerminal(self: *const SendStream) bool {
-        return self.state == .data_recvd or self.state == .reset_recvd;
-    }
+/// True if the stream is fully terminated (data_recvd or reset_recvd).
+pub fn isTerminal(self: *const SendStream) bool {
+    return self.state == .data_recvd or self.state == .reset_recvd;
+}
 
-    /// Total bytes ever queued by the app.
-    pub fn writtenBytes(self: *const SendStream) u64 {
-        return self.write_offset;
-    }
+/// Total bytes ever queued by the app.
+pub fn writtenBytes(self: *const SendStream) u64 {
+    return self.write_offset;
+}
 
-    /// Bytes contiguously ACKed from offset 0.
-    pub fn ackedFloor(self: *const SendStream) u64 {
-        return self.base_offset;
-    }
+/// Bytes contiguously ACKed from offset 0.
+pub fn ackedFloor(self: *const SendStream) u64 {
+    return self.base_offset;
+}
 
-    /// Are there bytes (or a FIN) ready to send right now?
-    pub fn hasPendingChunk(self: *const SendStream) bool {
-        if (self.reset) |r| return !r.queued;
-        if (self.pending.items.len > 0) return true;
-        if (self.fin_marked and !self.fin_in_flight and !self.fin_acked) return true;
-        return false;
-    }
+/// Are there bytes (or a FIN) ready to send right now?
+pub fn hasPendingChunk(self: *const SendStream) bool {
+    if (self.reset) |r| return !r.queued;
+    if (self.pending.items.len > 0) return true;
+    if (self.fin_marked and !self.fin_in_flight and !self.fin_acked) return true;
+    return false;
+}
 
-    /// Peek the next chunk we'd ship without consuming it. The
-    /// chunk is bounded by `max_bytes`. Returns null if there's
-    /// nothing to send.
-    pub fn peekChunk(self: *const SendStream, max_bytes: usize) ?Chunk {
-        if (self.reset != null) return null;
-        if (self.pending.items.len == 0) {
-            if (self.fin_marked and !self.fin_in_flight and !self.fin_acked) {
-                // Pure FIN chunk at final_size.
-                return .{ .offset = self.final_size.?, .length = 0, .fin = true };
-            }
-            return null;
+/// Peek the next chunk we'd ship without consuming it. The
+/// chunk is bounded by `max_bytes`. Returns null if there's
+/// nothing to send.
+pub fn peekChunk(self: *const SendStream, max_bytes: usize) ?Chunk {
+    if (self.reset != null) return null;
+    if (self.pending.items.len == 0) {
+        if (self.fin_marked and !self.fin_in_flight and !self.fin_acked) {
+            // Pure FIN chunk at final_size.
+            return .{ .offset = self.final_size.?, .length = 0, .fin = true };
         }
+        return null;
+    }
+    const r = self.pending.items[0];
+    const take: u64 = @min(@as(u64, max_bytes), r.end - r.offset);
+    const fin = self.fin_marked and !self.fin_in_flight and !self.fin_acked and
+        r.offset + take == self.final_size.?;
+    return .{ .offset = r.offset, .length = take, .fin = fin };
+}
+
+/// Borrow the bytes for a chunk so the caller can copy them
+/// into a STREAM frame. The slice is valid until the next
+/// mutation of the buffer (write, ACK floor advance, or
+/// resetStream). 0-length chunks (pure FIN) return an empty
+/// slice.
+pub fn chunkBytes(self: *const SendStream, c: Chunk) []const u8 {
+    if (c.length == 0) return &.{};
+    const start: usize = @intCast(c.offset - self.base_offset);
+    const end: usize = start + @as(usize, @intCast(c.length));
+    return self.bytes.items[start..end];
+}
+
+/// Record that the given chunk has been packed into a packet
+/// with packet number `pn` and is now in-flight. Removes the
+/// covered offsets from `pending` and stores the chunk under `pn`.
+pub fn recordSent(self: *SendStream, pn: u64, c: Chunk) Error!void {
+    if (self.in_flight.contains(pn)) return Error.InvalidChunk;
+
+    if (c.length > 0) {
+        // The chunk must be a prefix of the first pending range.
+        if (self.pending.items.len == 0) return Error.InvalidChunk;
         const r = self.pending.items[0];
-        const take: u64 = @min(@as(u64, max_bytes), r.end - r.offset);
-        const fin = self.fin_marked and !self.fin_in_flight and !self.fin_acked and
-            r.offset + take == self.final_size.?;
-        return .{ .offset = r.offset, .length = take, .fin = fin };
+        if (c.offset != r.offset) return Error.InvalidChunk;
+        if (c.offset + c.length > r.end) return Error.InvalidChunk;
+
+        if (c.offset + c.length == r.end) {
+            _ = self.pending.orderedRemove(0);
+        } else {
+            self.pending.items[0].offset = c.offset + c.length;
+        }
+    } else if (!c.fin) {
+        return Error.InvalidChunk;
     }
 
-    /// Borrow the bytes for a chunk so the caller can copy them
-    /// into a STREAM frame. The slice is valid until the next
-    /// mutation of the buffer (write, ACK floor advance, or
-    /// resetStream). 0-length chunks (pure FIN) return an empty
-    /// slice.
-    pub fn chunkBytes(self: *const SendStream, c: Chunk) []const u8 {
-        if (c.length == 0) return &.{};
-        const start: usize = @intCast(c.offset - self.base_offset);
-        const end: usize = start + @as(usize, @intCast(c.length));
-        return self.bytes.items[start..end];
-    }
-
-    /// Record that the given chunk has been packed into a packet
-    /// with packet number `pn` and is now in-flight. Removes the
-    /// covered offsets from `pending` and stores the chunk under `pn`.
-    pub fn recordSent(self: *SendStream, pn: u64, c: Chunk) Error!void {
-        if (self.in_flight.contains(pn)) return Error.InvalidChunk;
-
-        if (c.length > 0) {
-            // The chunk must be a prefix of the first pending range.
-            if (self.pending.items.len == 0) return Error.InvalidChunk;
-            const r = self.pending.items[0];
-            if (c.offset != r.offset) return Error.InvalidChunk;
-            if (c.offset + c.length > r.end) return Error.InvalidChunk;
-
-            if (c.offset + c.length == r.end) {
-                _ = self.pending.orderedRemove(0);
-            } else {
-                self.pending.items[0].offset = c.offset + c.length;
-            }
-        } else if (!c.fin) {
+    if (c.fin) {
+        if (self.fin_in_flight or self.fin_acked) return Error.InvalidChunk;
+        if (self.final_size == null or
+            c.offset + c.length != self.final_size.?)
+        {
             return Error.InvalidChunk;
         }
-
-        if (c.fin) {
-            if (self.fin_in_flight or self.fin_acked) return Error.InvalidChunk;
-            if (self.final_size == null or
-                c.offset + c.length != self.final_size.?)
-            {
-                return Error.InvalidChunk;
-            }
-            self.fin_in_flight = true;
-        }
-
-        try self.in_flight.put(self.allocator, pn, c);
+        self.fin_in_flight = true;
     }
 
-    /// Process an ACK for the packet identified by `pn`. Returns
-    /// `Error.UnknownPacket` if the PN doesn't have an in-flight
-    /// chunk for this stream (the caller should treat that as a
-    /// no-op since not every ACKed packet carries this stream).
-    pub fn onPacketAcked(self: *SendStream, pn: u64) Error!void {
-        const entry = self.in_flight.fetchRemove(pn) orelse return Error.UnknownPacket;
-        const c = entry.value;
-        if (c.fin) self.fin_acked = true;
-        if (c.length > 0) try self.markAcked(.{ .offset = c.offset, .end = c.offset + c.length });
+    try self.in_flight.put(self.allocator, pn, c);
+}
+
+/// Process an ACK for the packet identified by `pn`. Returns
+/// `Error.UnknownPacket` if the PN doesn't have an in-flight
+/// chunk for this stream (the caller should treat that as a
+/// no-op since not every ACKed packet carries this stream).
+pub fn onPacketAcked(self: *SendStream, pn: u64) Error!void {
+    const entry = self.in_flight.fetchRemove(pn) orelse return Error.UnknownPacket;
+    const c = entry.value;
+    if (c.fin) self.fin_acked = true;
+    if (c.length > 0) try self.markAcked(.{ .offset = c.offset, .end = c.offset + c.length });
+    self.maybeAdvanceState();
+}
+
+/// Process a loss for the packet identified by `pn`. The chunk
+/// re-enters the pending queue (unless we're in `reset_sent`,
+/// in which case losses are silently dropped).
+pub fn onPacketLost(self: *SendStream, pn: u64) Error!void {
+    const entry = self.in_flight.fetchRemove(pn) orelse return Error.UnknownPacket;
+    const c = entry.value;
+
+    if (self.reset != null) return; // RESET_STREAM supersedes data losses
+
+    if (c.length > 0) {
+        try self.addPending(.{ .offset = c.offset, .end = c.offset + c.length });
+    }
+    if (c.fin) {
+        self.fin_in_flight = false;
+    }
+}
+
+/// Process ACK for a RESET_STREAM frame carried by a packet.
+/// Marks the reset as acknowledged and advances toward `reset_recvd`.
+pub fn onResetAcked(self: *SendStream) void {
+    if (self.reset) |*r| {
+        r.acked = true;
         self.maybeAdvanceState();
     }
+}
 
-    /// Process a loss for the packet identified by `pn`. The chunk
-    /// re-enters the pending queue (unless we're in `reset_sent`,
-    /// in which case losses are silently dropped).
-    pub fn onPacketLost(self: *SendStream, pn: u64) Error!void {
-        const entry = self.in_flight.fetchRemove(pn) orelse return Error.UnknownPacket;
-        const c = entry.value;
-
-        if (self.reset != null) return; // RESET_STREAM supersedes data losses
-
-        if (c.length > 0) {
-            try self.addPending(.{ .offset = c.offset, .end = c.offset + c.length });
-        }
-        if (c.fin) {
-            self.fin_in_flight = false;
-        }
+/// Process loss for a RESET_STREAM frame. Clears the `queued`
+/// flag so the connection re-emits the frame on the next send pass.
+pub fn onResetLost(self: *SendStream) void {
+    if (self.reset) |*r| {
+        if (!r.acked) r.queued = false;
     }
+}
 
-    /// Process ACK for a RESET_STREAM frame carried by a packet.
-    /// Marks the reset as acknowledged and advances toward `reset_recvd`.
-    pub fn onResetAcked(self: *SendStream) void {
-        if (self.reset) |*r| {
-            r.acked = true;
-            self.maybeAdvanceState();
-        }
-    }
+/// Queue `r` into `pending`, merging with adjacent existing
+/// ranges where possible.
+fn addPending(self: *SendStream, r: Range) Error!void {
+    try insertMerge(&self.pending, self.allocator, r);
+}
 
-    /// Process loss for a RESET_STREAM frame. Clears the `queued`
-    /// flag so the connection re-emits the frame on the next send pass.
-    pub fn onResetLost(self: *SendStream) void {
-        if (self.reset) |*r| {
-            if (!r.acked) r.queued = false;
-        }
+/// Mark `r` as acked. Either advance `base_offset` and drop
+/// covered bytes from `bytes`, or stash into `acked_above`.
+fn markAcked(self: *SendStream, r: Range) Error!void {
+    if (r.offset != self.base_offset) {
+        try insertMerge(&self.acked_above, self.allocator, r);
+        return;
     }
+    // Contiguous with the floor: advance, then absorb anything
+    // in `acked_above` that's now contiguous.
+    self.advanceFloor(r.end);
+    while (self.acked_above.items.len > 0 and
+        self.acked_above.items[0].offset == self.base_offset)
+    {
+        const first = self.acked_above.orderedRemove(0);
+        self.advanceFloor(first.end);
+    }
+}
 
-    /// Queue `r` into `pending`, merging with adjacent existing
-    /// ranges where possible.
-    fn addPending(self: *SendStream, r: Range) Error!void {
-        try insertMerge(&self.pending, self.allocator, r);
-    }
+fn advanceFloor(self: *SendStream, new_floor: u64) void {
+    std.debug.assert(new_floor >= self.base_offset);
+    std.debug.assert(new_floor <= self.write_offset);
+    const drop_n: usize = @intCast(new_floor - self.base_offset);
+    if (drop_n == 0) return;
+    self.bytes.discardPrefix(drop_n);
+    self.base_offset = new_floor;
+}
 
-    /// Mark `r` as acked. Either advance `base_offset` and drop
-    /// covered bytes from `bytes`, or stash into `acked_above`.
-    fn markAcked(self: *SendStream, r: Range) Error!void {
-        if (r.offset != self.base_offset) {
-            try insertMerge(&self.acked_above, self.allocator, r);
-            return;
-        }
-        // Contiguous with the floor: advance, then absorb anything
-        // in `acked_above` that's now contiguous.
-        self.advanceFloor(r.end);
-        while (self.acked_above.items.len > 0 and
-            self.acked_above.items[0].offset == self.base_offset)
-        {
-            const first = self.acked_above.orderedRemove(0);
-            self.advanceFloor(first.end);
-        }
+fn maybeAdvanceState(self: *SendStream) void {
+    if (self.state == .reset_sent) {
+        if (self.reset.?.acked) self.state = .reset_recvd;
+        return;
     }
-
-    fn advanceFloor(self: *SendStream, new_floor: u64) void {
-        std.debug.assert(new_floor >= self.base_offset);
-        std.debug.assert(new_floor <= self.write_offset);
-        const drop_n: usize = @intCast(new_floor - self.base_offset);
-        if (drop_n == 0) return;
-        self.bytes.discardPrefix(drop_n);
-        self.base_offset = new_floor;
+    if (self.fin_acked and self.fin_marked and
+        self.base_offset == self.final_size.?)
+    {
+        self.state = .data_recvd;
     }
-
-    fn maybeAdvanceState(self: *SendStream) void {
-        if (self.state == .reset_sent) {
-            if (self.reset.?.acked) self.state = .reset_recvd;
-            return;
-        }
-        if (self.fin_acked and self.fin_marked and
-            self.base_offset == self.final_size.?)
-        {
-            self.state = .data_recvd;
-        }
-    }
-};
+}
 
 /// Insert `new` into a sorted-disjoint range list, merging with any
 /// adjacent or overlapping existing range. The list grows by at
