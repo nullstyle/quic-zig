@@ -87,33 +87,85 @@ pub fn longHeaderScid(conn: *const Connection) ConnectionId {
     return if (conn.initial_source_cid_set) conn.initial_source_cid else conn.local_scid;
 }
 
+// ---- Direction-agnostic registry traversal ----------------------------
+//
+// The local-CID registry (RFC 9000 §5.1.1, `conn.local_cids`) and the
+// peer-CID registry (§5.1.2, `conn.peer_cids`) store the same element
+// type, `IssuedCid`, keyed by `(path_id, sequence_number)`. The helpers
+// below own the shared traversal so a fix to it lands in both
+// directions at once; everything direction-specific — the `local_scid`
+// / `peer_dcid` mirrors, active-CID limits, and protocol-violation
+// closes — stays in the direction-bound wrappers and their callers.
+
+fn cidActiveCountForPath(items: []const IssuedCid, path_id: u32) usize {
+    var count: usize = 0;
+    for (items) |item| {
+        if (item.path_id == path_id) count += 1;
+    }
+    return count;
+}
+
+/// First registry entry for `path_id` in insertion order — the
+/// successor a promote falls back to — or null when the path has none.
+fn firstCidForPath(items: []const IssuedCid, path_id: u32) ?ConnectionId {
+    for (items) |item| {
+        if (item.path_id == path_id) return item.cid;
+    }
+    return null;
+}
+
+/// Remove every `(path_id, sequence_number < retire_prior_to)` entry
+/// from `list`. Returns true when `current` (the CID the path is
+/// actively using) was among the removed entries, so callers can gate
+/// re-promotion on the in-use CID actually having been retired.
+fn removeCidsPriorTo(
+    list: *std.ArrayList(IssuedCid),
+    path_id: u32,
+    retire_prior_to: u64,
+    current: ConnectionId,
+) bool {
+    var removed_current = false;
+    var i: usize = 0;
+    while (i < list.items.len) {
+        const item = list.items[i];
+        if (item.path_id == path_id and item.sequence_number < retire_prior_to) {
+            if (ConnectionId.eql(item.cid, current)) removed_current = true;
+            _ = list.orderedRemove(i);
+            continue;
+        }
+        i += 1;
+    }
+    return removed_current;
+}
+
 // Pub for `_internal.zig` (subsystem-private). Called from `_internal.rememberLocalCid`.
 pub fn retireLocalCidsPriorTo(
     conn: *Connection,
     path_id: u32,
     retire_prior_to: u64,
 ) void {
-    var i: usize = 0;
-    while (i < conn.local_cids.items.len) {
-        const item = conn.local_cids.items[i];
-        if (item.path_id == path_id and item.sequence_number < retire_prior_to) {
-            _ = conn.local_cids.orderedRemove(i);
-            continue;
-        }
-        i += 1;
-    }
+    // The local direction promotes unconditionally (the removed-current
+    // result is discarded), unlike `retirePeerCidsPriorTo`, which only
+    // re-promotes when the in-use CID was actually swept — and unlike
+    // the local single-sequence `retireLocalCid`, which carries the
+    // same gate. The asymmetry predates this shared helper; aligning
+    // the local bulk path with the gated form is a behavior change
+    // that needs its own tests first.
+    _ = removeCidsPriorTo(&conn.local_cids, path_id, retire_prior_to, .{});
     promoteLocalCidForPath(conn, path_id);
 }
 
 fn promoteLocalCidForPath(conn: *Connection, path_id: u32) void {
     const path = conn.paths.get(path_id) orelse return;
-    path.path.local_cid = .{};
-    for (conn.local_cids.items) |item| {
-        if (item.path_id == path_id) {
-            path.path.local_cid = item.cid;
-            if (path_id == 0) conn.local_scid = item.cid;
-            return;
-        }
+    const successor = firstCidForPath(conn.local_cids.items, path_id);
+    path.path.local_cid = successor orelse .{};
+    // Path-0 mirror: `local_scid` follows the promoted CID but is left
+    // untouched when the path has no surviving entries (incoming
+    // Version-Negotiation / Retry DCID matching keys off it), whereas
+    // the peer twin clears `peer_dcid` in that case. Preserved as-is;
+    // see `promotePeerCidForPath`.
+    if (path_id == 0) {
+        if (successor) |cid| conn.local_scid = cid;
     }
 }
 
@@ -154,6 +206,73 @@ pub fn dropPendingLocalCidAdvertisement(
         return;
     }
     conn.pending_frames.removePathNewConnectionIdBySequence(path_id, sequence_number);
+}
+
+/// Single owner of the local-CID advertisement add-side for both frame
+/// flavours: validates issuance, remembers the CID so packets bearing
+/// it can be authenticated, and parks the frame in the queue matching
+/// `path_id` — path 0 advertises via NEW_CONNECTION_ID (RFC 9000
+/// §19.15), every other path via PATH_NEW_CONNECTION_ID
+/// (draft-ietf-quic-multipath-21 §6.3). Mirror image of
+/// `dropPendingLocalCidAdvertisement` above, which removes pending
+/// advertisements under the same path-0-vs-path-N queue rule; keeping
+/// both rules side by side means the add and drop sides cannot
+/// disagree about where a path-0 advertisement lives.
+// INTERNAL: pub for direct sibling import (path_frame_queue.zig).
+pub fn queueLocalConnectionId(
+    conn: *Connection,
+    path_id: u32,
+    sequence_number: u64,
+    retire_prior_to: u64,
+    cid: []const u8,
+    stateless_reset_token: [16]u8,
+) Error!void {
+    if (cid.len > path_mod.max_cid_len) return Error.DcidTooLong;
+    // Self-guards on path 0 (immediate return), so calling it
+    // unconditionally is a no-op for the NEW_CONNECTION_ID flavour.
+    try _internal.ensureCanIssueCidForPathId(conn, path_id);
+    try _internal.ensureCanIssueLocalCid(conn, path_id, sequence_number, retire_prior_to, cid.len);
+    const local_cid = ConnectionId.fromSlice(cid);
+    try _internal.ensureLocalCidAvailable(conn, path_id, sequence_number, local_cid);
+    // The two pending queues carry different frame types, so the dedupe
+    // scan and the append each need a per-flavour arm; the ordering
+    // contract (availability before remember, remember before append)
+    // is shared and lives only here.
+    if (path_id == 0) {
+        for (conn.pending_frames.new_connection_ids.items) |item| {
+            if (item.sequence_number == sequence_number) {
+                if (!std.mem.eql(u8, item.connection_id.slice(), cid)) return Error.ConnectionIdAlreadyInUse;
+                return;
+            }
+        }
+    } else {
+        for (conn.pending_frames.path_new_connection_ids.items) |item| {
+            if (item.path_id == path_id and item.sequence_number == sequence_number) {
+                if (!std.mem.eql(u8, item.connection_id.slice(), cid)) return Error.ConnectionIdAlreadyInUse;
+                return;
+            }
+        }
+    }
+    var connection_id: frame_types.ConnId = .{ .len = @intCast(cid.len) };
+    @memcpy(connection_id.bytes[0..cid.len], cid);
+    try _internal.rememberLocalCid(conn, path_id, sequence_number, retire_prior_to, local_cid, stateless_reset_token);
+    if (path_id == 0) {
+        try conn.pending_frames.new_connection_ids.append(conn.allocator, .{
+            .sequence_number = sequence_number,
+            .retire_prior_to = retire_prior_to,
+            .connection_id = connection_id,
+            .stateless_reset_token = stateless_reset_token,
+        });
+    } else {
+        try conn.pending_frames.path_new_connection_ids.append(conn.allocator, .{
+            .path_id = path_id,
+            .sequence_number = sequence_number,
+            .retire_prior_to = retire_prior_to,
+            .connection_id = connection_id,
+            .stateless_reset_token = stateless_reset_token,
+        });
+    }
+    _internal.refreshConnectionIdEventsForPath(conn, path_id);
 }
 
 /// Smallest sequence number still resident in `local_cids` for
@@ -273,11 +392,7 @@ fn localCidForSequence(
 }
 
 fn localCidActiveCountForPath(conn: *const Connection, path_id: u32) usize {
-    var count: usize = 0;
-    for (conn.local_cids.items) |item| {
-        if (item.path_id == path_id) count += 1;
-    }
-    return count;
+    return cidActiveCountForPath(conn.local_cids.items, path_id);
 }
 
 fn localCidActiveCountForPathAfterRetirePriorTo(
@@ -409,26 +524,7 @@ pub fn queueNewConnectionId(
     cid: []const u8,
     stateless_reset_token: [16]u8,
 ) Error!void {
-    if (cid.len > path_mod.max_cid_len) return Error.DcidTooLong;
-    try _internal.ensureCanIssueLocalCid(conn, 0, sequence_number, retire_prior_to, cid.len);
-    const local_cid = ConnectionId.fromSlice(cid);
-    try _internal.ensureLocalCidAvailable(conn, 0, sequence_number, local_cid);
-    for (conn.pending_frames.new_connection_ids.items) |item| {
-        if (item.sequence_number == sequence_number) {
-            if (!std.mem.eql(u8, item.connection_id.slice(), cid)) return Error.ConnectionIdAlreadyInUse;
-            return;
-        }
-    }
-    var connection_id: frame_types.ConnId = .{ .len = @intCast(cid.len) };
-    @memcpy(connection_id.bytes[0..cid.len], cid);
-    try _internal.rememberLocalCid(conn, 0, sequence_number, retire_prior_to, local_cid, stateless_reset_token);
-    try conn.pending_frames.new_connection_ids.append(conn.allocator, .{
-        .sequence_number = sequence_number,
-        .retire_prior_to = retire_prior_to,
-        .connection_id = connection_id,
-        .stateless_reset_token = stateless_reset_token,
-    });
-    _internal.refreshConnectionIdEventsForPath(conn, 0);
+    return queueLocalConnectionId(conn, 0, sequence_number, retire_prior_to, cid, stateless_reset_token);
 }
 
 /// Queue a RETIRE_CONNECTION_ID frame asking the peer to drop a
@@ -480,23 +576,14 @@ fn replenishLocalConnectionIds(
             const next = _internal.nextLocalCidSequence(conn, path_id);
             while (seq < next) : (seq += 1) {
                 const issued = localCidForSequence(conn, path_id, seq) orelse continue;
-                if (path_id == 0) {
-                    try queueNewConnectionId(
-                        conn,
-                        issued.sequence_number,
-                        issued.retire_prior_to,
-                        issued.cid.slice(),
-                        issued.stateless_reset_token,
-                    );
-                } else {
-                    try conn.queuePathNewConnectionId(
-                        path_id,
-                        issued.sequence_number,
-                        issued.retire_prior_to,
-                        issued.cid.slice(),
-                        issued.stateless_reset_token,
-                    );
-                }
+                try queueLocalConnectionId(
+                    conn,
+                    path_id,
+                    issued.sequence_number,
+                    issued.retire_prior_to,
+                    issued.cid.slice(),
+                    issued.stateless_reset_token,
+                );
                 queued += 1;
             }
         }
@@ -505,23 +592,14 @@ fn replenishLocalConnectionIds(
     for (provisions) |provision| {
         if (localConnectionIdIssueBudget(conn, path_id) == 0) break;
         const sequence_number = _internal.nextLocalCidSequence(conn, path_id);
-        if (path_id == 0) {
-            try queueNewConnectionId(
-                conn,
-                sequence_number,
-                provision.retire_prior_to,
-                provision.connection_id,
-                provision.stateless_reset_token,
-            );
-        } else {
-            try conn.queuePathNewConnectionId(
-                path_id,
-                sequence_number,
-                provision.retire_prior_to,
-                provision.connection_id,
-                provision.stateless_reset_token,
-            );
-        }
+        try queueLocalConnectionId(
+            conn,
+            path_id,
+            sequence_number,
+            provision.retire_prior_to,
+            provision.connection_id,
+            provision.stateless_reset_token,
+        );
         queued += 1;
     }
 
@@ -564,22 +642,12 @@ pub fn registerPeerCidForTesting(
 }
 
 pub fn peerCidActiveCountForPath(conn: *const Connection, path_id: u32) usize {
-    var count: usize = 0;
-    for (conn.peer_cids.items) |item| {
-        if (item.path_id == path_id) count += 1;
-    }
-    return count;
+    return cidActiveCountForPath(conn.peer_cids.items, path_id);
 }
 
 fn promotePeerCidForPath(conn: *Connection, path_id: u32) void {
     const path = conn.paths.get(path_id) orelse return;
-    path.path.peer_cid = .{};
-    for (conn.peer_cids.items) |item| {
-        if (item.path_id == path_id) {
-            path.path.peer_cid = item.cid;
-            break;
-        }
-    }
+    path.path.peer_cid = firstCidForPath(conn.peer_cids.items, path_id) orelse .{};
     if (path_id == 0) {
         conn.peer_dcid = path.path.peer_cid;
         conn.peer_dcid_set = conn.peer_dcid.len != 0;
@@ -591,30 +659,16 @@ fn retirePeerCidsPriorTo(
     path_id: u32,
     retire_prior_to: u64,
 ) void {
-    var i: usize = 0;
-    var affected_current = false;
     const current = if (conn.paths.get(path_id)) |path| path.path.peer_cid else ConnectionId{};
-    while (i < conn.peer_cids.items.len) {
-        const item = conn.peer_cids.items[i];
-        if (item.path_id == path_id and item.sequence_number < retire_prior_to) {
-            if (ConnectionId.eql(item.cid, current)) affected_current = true;
-            _ = conn.peer_cids.orderedRemove(i);
-            continue;
-        }
-        i += 1;
+    if (removeCidsPriorTo(&conn.peer_cids, path_id, retire_prior_to, current)) {
+        promotePeerCidForPath(conn, path_id);
     }
-    if (affected_current) promotePeerCidForPath(conn, path_id);
 }
 
 pub fn retirePeerCidsForPath(conn: *Connection, path_id: u32) void {
-    var i: usize = 0;
-    while (i < conn.peer_cids.items.len) {
-        if (conn.peer_cids.items[i].path_id == path_id) {
-            _ = conn.peer_cids.orderedRemove(i);
-            continue;
-        }
-        i += 1;
-    }
+    // Peer sequence numbers arrive as wire varints (<= 2^62 - 1), so a
+    // `retire_prior_to` of maxInt(u64) sweeps every entry on the path.
+    _ = removeCidsPriorTo(&conn.peer_cids, path_id, std.math.maxInt(u64), .{});
     promotePeerCidForPath(conn, path_id);
 }
 

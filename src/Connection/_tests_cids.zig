@@ -528,6 +528,33 @@ test "PATH_RETIRE_CONNECTION_ID drops pending advertisements and allows replenis
     try std.testing.expectEqual(@as(u64, 3), conn.pending_frames.path_new_connection_ids.items[1].sequence_number);
 }
 
+test "queuePathNewConnectionId on path 0 advertises via NEW_CONNECTION_ID and stays droppable" {
+    // Path 0 has no path-scoped CID flavour: the add side must park a
+    // path-0 advertisement in the NEW_CONNECTION_ID queue — the queue
+    // `replenishConnectionIds` fills and the only queue
+    // `dropPendingLocalCidAdvertisement(conn, 0, ...)` sweeps on
+    // RETIRE_CONNECTION_ID (RFC 9000 §19.15 / §19.16;
+    // draft-ietf-quic-multipath-21 §6.3 covers paths 1+ only). Before
+    // the add and drop sides shared an owner, a path-0 entry parked in
+    // `path_new_connection_ids` by this API was undroppable.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    conn.cached_peer_transport_params = .{ .active_connection_id_limit = 3 };
+    try conn.setLocalScid(&.{0xa0});
+    try conn.queuePathNewConnectionId(0, 1, 0, &.{0xa1}, @splat(0xa1));
+
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.path_new_connection_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.new_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.pending_frames.new_connection_ids.items[0].sequence_number);
+
+    conn.handleRetireConnectionId(.{ .sequence_number = 1 });
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.new_connection_ids.items.len);
+}
+
 test "RETIRE_CONNECTION_ID emits with retransmit metadata and requeues on loss" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

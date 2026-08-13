@@ -3,15 +3,12 @@
 //! `pendingPathCidsBlocked` / `clearPendingPathCidsBlocked` API; the
 //! methods on `Connection` are thin wrappers that delegate here.
 
-const std = @import("std");
 const state_mod = @import("../Connection.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const PathCidsBlockedInfo = state_mod.PathCidsBlockedInfo;
 const max_supported_path_id = state_mod.max_supported_path_id;
-const path_mod = @import("../conn/path.zig");
-const ConnectionId = path_mod.ConnectionId;
-const frame_types = @import("../frame/types.zig");
+const conn_cids = @import("cids.zig");
 const _internal = @import("_internal.zig");
 
 /// Queue a PATH_ABANDON frame for the given multipath path. Coalesces
@@ -63,7 +60,10 @@ pub fn queuePathStatus(
 /// Queue a PATH_NEW_CONNECTION_ID frame for the multipath path-scoped
 /// CID issuance flow. Validates `cid` length, issuance budget, and
 /// uniqueness; remembers the local CID so packets bearing it can be
-/// authenticated. draft-ietf-quic-multipath-21 §6.3.
+/// authenticated. draft-ietf-quic-multipath-21 §6.3. Path 0 has no
+/// path-scoped flavour: passing `path_id == 0` advertises via a plain
+/// NEW_CONNECTION_ID frame (RFC 9000 §19.15), matching
+/// `replenishConnectionIds` and `dropPendingLocalCidAdvertisement`.
 pub fn queuePathNewConnectionId(
     conn: *Connection,
     path_id: u32,
@@ -72,28 +72,7 @@ pub fn queuePathNewConnectionId(
     cid: []const u8,
     stateless_reset_token: [16]u8,
 ) Error!void {
-    if (cid.len > path_mod.max_cid_len) return Error.DcidTooLong;
-    try _internal.ensureCanIssueCidForPathId(conn, path_id);
-    try _internal.ensureCanIssueLocalCid(conn, path_id, sequence_number, retire_prior_to, cid.len);
-    const local_cid = ConnectionId.fromSlice(cid);
-    try _internal.ensureLocalCidAvailable(conn, path_id, sequence_number, local_cid);
-    for (conn.pending_frames.path_new_connection_ids.items) |item| {
-        if (item.path_id == path_id and item.sequence_number == sequence_number) {
-            if (!std.mem.eql(u8, item.connection_id.slice(), cid)) return Error.ConnectionIdAlreadyInUse;
-            return;
-        }
-    }
-    var connection_id: frame_types.ConnId = .{ .len = @intCast(cid.len) };
-    @memcpy(connection_id.bytes[0..cid.len], cid);
-    try _internal.rememberLocalCid(conn, path_id, sequence_number, retire_prior_to, local_cid, stateless_reset_token);
-    try conn.pending_frames.path_new_connection_ids.append(conn.allocator, .{
-        .path_id = path_id,
-        .sequence_number = sequence_number,
-        .retire_prior_to = retire_prior_to,
-        .connection_id = connection_id,
-        .stateless_reset_token = stateless_reset_token,
-    });
-    _internal.refreshConnectionIdEventsForPath(conn, path_id);
+    return conn_cids.queueLocalConnectionId(conn, path_id, sequence_number, retire_prior_to, cid, stateless_reset_token);
 }
 
 /// Queue a PATH_RETIRE_CONNECTION_ID frame asking the peer to drop the
