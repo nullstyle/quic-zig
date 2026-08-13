@@ -5,7 +5,43 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.12.0] - 2026-08-12
+
+The shape release. BBRv3 lands as the third congestion controller —
+opt-in, on a new per-packet delivery-rate measurement spine — and the
+two long-standing API-shape debts close while the pre-release breaking
+window is open: a `Connection` now has one address for its whole life,
+and the package sheds its redundant `_zig` suffix. One migration for
+downstreams covers all of it, plus the two availability fixes below
+(a peer could end either bundled UDP loop).
+
+Verified toolchain: zig 0.17.0-dev.1683+5ceec001b.
+
+Headline numbers (m5max dev machine; impairment cells are in-process
+deterministic virtual time — identical seeds, machine-independent;
+the goodput figure is wall-clock in-process; every BBR number is
+measured OPT-IN via `congestion_control = .bbr`, the shipped default
+is still CUBIC):
+
+- BBR vs CUBIC on the 10 Mbit bottleneck cells: line-rate parity
+  (9.71 vMbps) with peak queueing delay **85.6 ms → 16.7 ms (5.1×
+  shorter queue)**; on the new shallow 25 ms buffer cell, tail drops
+  **15 → 0**.
+- BBR vs CUBIC, 64 MiB wall-clock bulk transfer: **249.9 → 266.5 MB/s
+  (+6.7%)** — pacing at the modeled bandwidth beats window bursts
+  even without a bottleneck.
+- BBR vs CUBIC on the fixed-delay 1% loss cell: **53.6 → 1252 vMbps
+  (23×)** — regime-specific (that cell has no bandwidth constraint;
+  the bottleneck+loss cell shows parity, not fireworks), but it is
+  the loss-tolerance BBR exists to provide.
+- `Connection` is **~1.2 MB smaller** than 0.11.0 (the two
+  Initial/Handshake trackers moved to one heap slab) at
+  `@sizeOf(Connection)` = 152,224 bytes, and its address is now
+  stable for life.
+- Honest cost, measured and rebaselined: the sent-packet-tracker
+  churn micro pays for the 40 bytes of per-packet delivery-rate
+  stamps, **46.9 → 61.5 ns/op** (still ~113× better than the
+  pre-0.11.0 cliff); end-to-end goodput impact −1%.
 
 ### Changed (BREAKING)
 
