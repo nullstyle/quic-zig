@@ -5,7 +5,20 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.13.0] - 2026-08-13
+
+The integration release. Everything in it exists because a downstream
+shipped v0.12.0 and reported back within the day: the three surfaces
+the first HTTP/3 embedder asked for — a one-shot
+`ConnectionEvent.early_data` (replacing a status poll that the
+rejection path makes unreliable by design), send-window introspection
+for real backpressure, and the 0-RTT surface promoted to the Stable
+tier — plus a 1.35 MiB-per-connection memory return from right-sizing
+the Initial/Handshake sent-packet trackers, closing out the warm-up
+footprint growth that same downstream measured across
+v0.10.1 → v0.12.0. No wire-behavior changes; defaults unchanged.
+
+Verified toolchain: zig 0.17.0-dev.1683+5ceec001b.
 
 ### Added
 
