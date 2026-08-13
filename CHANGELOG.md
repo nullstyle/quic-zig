@@ -5,7 +5,15 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.13.1] - 2026-08-13
+
+The restyle release: internal-only. The whole codebase now reads like
+the zig compiler's (file-as-struct, Sema-style spokes, decl-alias
+method re-exports) with zero embedder-visible change — same API, same
+wire behavior, byte-identical deterministic cells. Downstreams: a pin
+bump should require no code changes at all.
+
+Verified toolchain: zig 0.17.0-dev.1683+5ceec001b.
 
 ### Changed
 

@@ -71,10 +71,10 @@ The public Zig module name is `quic`.
 ### Consuming this package
 
 Fetch a tagged release into your `build.zig.zon` — substitute the
-current tag (`v0.13.0` as of this writing):
+current tag (`v0.13.1` as of this writing):
 
 ```sh
-zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.13.0.tar.gz
+zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.13.1.tar.gz
 ```
 
 Pin the **archive tarball URL exactly as above** — not a
