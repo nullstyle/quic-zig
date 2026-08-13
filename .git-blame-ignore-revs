@@ -4,3 +4,4 @@
 # GitHub's blame UI honors this file automatically.
 cc5aded55f3f10e6c8b603600a568313b04f3e5b  # server.zig file-as-struct de-indent
 455c198  # Server/Config file-as-struct de-indent
+c95899b  # client.zig file-as-struct de-indent

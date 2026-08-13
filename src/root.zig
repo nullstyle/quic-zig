@@ -103,7 +103,7 @@ pub const PreferredAddressConfig = @import("Server.zig").PreferredAddressConfig;
 /// client. Like `Server`, it owns the TLS context and per-Initial
 /// random DCID/SCID generation; the embedder still owns the UDP
 /// socket, the clock, and the returned `Connection` lifecycle.
-pub const Client = @import("client.zig");
+pub const Client = @import("Client.zig");
 
 /// The per-connection state machine. See `conn.Connection` for the
 /// full method surface. The implementation is split across
@@ -344,7 +344,7 @@ test {
     _ = alt_addr;
     _ = qlog;
     _ = @import("Server.zig");
-    _ = @import("client.zig");
+    _ = @import("Client.zig");
 }
 
 test "phase 0: builds and links against boringssl-zig" {
