@@ -567,6 +567,47 @@ test "STREAMS_BLOCKED is queued when local stream opening hits peer limit" {
     try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.streams_blocked_bidi);
 }
 
+test "uni STREAMS_BLOCKED is queued, requeued on loss, and cleared by MAX_STREAMS" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    conn.peer_max_streams_uni = 0;
+    try std.testing.expectError(Error.StreamLimitExceeded, conn.openUni(2));
+    try std.testing.expectEqual(@as(?u64, 0), conn.localStreamsBlockedAt(false));
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_frames.streams_blocked_uni);
+
+    const event = conn.pollEvent().?;
+    try std.testing.expect(event == .flow_blocked);
+    try std.testing.expectEqual(FlowBlockedSource.local, event.flow_blocked.source);
+    try std.testing.expectEqual(FlowBlockedKind.streams, event.flow_blocked.kind);
+    try std.testing.expectEqual(@as(?bool, false), event.flow_blocked.bidi);
+
+    // Pretend the frame was emitted, then lost: while the local uni
+    // blocked state still matches, the loss path requeues it.
+    conn.pending_frames.streams_blocked_uni = null;
+    var packet: SentPacketTracker.SentPacket = .{
+        .pn = 9,
+        .sent_time_us = 1_000,
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+    };
+    defer packet.deinit(allocator);
+    try packet.addRetransmitFrame(allocator, .{ .streams_blocked = .{
+        .bidi = false,
+        .maximum_streams = 0,
+    } });
+    try std.testing.expect(try conn.dispatchLostControlFrames(&packet));
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_frames.streams_blocked_uni);
+
+    conn.handleMaxStreams(.{ .bidi = false, .maximum_streams = 1 });
+    try std.testing.expectEqual(@as(?u64, null), conn.localStreamsBlockedAt(false));
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.streams_blocked_uni);
+}
+
 test "blocked frames emit with retransmit metadata and requeue on loss" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

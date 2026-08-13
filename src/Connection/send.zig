@@ -11,6 +11,7 @@
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
 const conn_recv_dispatch = @import("recv_dispatch.zig");
+const conn_flow = @import("flow.zig");
 const conn_qlog = @import("qlog.zig");
 const conn_keys = @import("keys.zig");
 const conn_paths = @import("paths.zig");
@@ -791,17 +792,14 @@ pub fn pollLevelOnPath(
     }
     if (app_control and (conn.pending_frames.max_streams_bidi != null or conn.pending_frames.max_streams_uni != null)) {
         const bidi = conn.pending_frames.max_streams_bidi != null;
+        const pending = conn_flow.pendingMaxStreamsSlot(conn, bidi);
         const ms: frame_types.MaxStreams = .{
             .bidi = bidi,
-            .maximum_streams = if (bidi) conn.pending_frames.max_streams_bidi.? else conn.pending_frames.max_streams_uni.?,
+            .maximum_streams = pending.*.?,
         };
         if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .max_streams = ms })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_streams = ms });
-            if (bidi) {
-                conn.pending_frames.max_streams_bidi = null;
-            } else {
-                conn.pending_frames.max_streams_uni = null;
-            }
+            pending.* = null;
             ack_eliciting = true;
         }
     }
@@ -823,17 +821,14 @@ pub fn pollLevelOnPath(
     }
     if (app_control and (conn.pending_frames.streams_blocked_bidi != null or conn.pending_frames.streams_blocked_uni != null)) {
         const bidi = conn.pending_frames.streams_blocked_bidi != null;
+        const pending = conn_flow.pendingStreamsBlockedSlot(conn, bidi);
         const sb: frame_types.StreamsBlocked = .{
             .bidi = bidi,
-            .maximum_streams = if (bidi) conn.pending_frames.streams_blocked_bidi.? else conn.pending_frames.streams_blocked_uni.?,
+            .maximum_streams = pending.*.?,
         };
         if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .streams_blocked = sb })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .streams_blocked = sb });
-            if (bidi) {
-                conn.pending_frames.streams_blocked_bidi = null;
-            } else {
-                conn.pending_frames.streams_blocked_uni = null;
-            }
+            pending.* = null;
             ack_eliciting = true;
         }
     }

@@ -104,6 +104,36 @@ pub fn shouldQueueReceiveCredit(consumed: u64, advertised: u64, window: u64) boo
     return advertised - consumed <= window / 2;
 }
 
+// The bidi/uni stream-count machinery is field-for-field symmetric:
+// RFC 9000 §19.11/§19.14 define one processing rule for MAX_STREAMS
+// and STREAMS_BLOCKED in both directions; only the frame's type bit
+// differs. These slot selectors keep each algorithm written once
+// instead of mirrored per direction. `Connection` is heap-allocated
+// and pointer-stable and `pending_frames` is an embedded value field,
+// so the returned pointers stay valid across a call.
+
+// INTERNAL: pub for direct sibling import (streams.zig).
+pub fn localMaxStreamsSlot(conn: *Connection, bidi: bool) *u64 {
+    return if (bidi) &conn.local_max_streams_bidi else &conn.local_max_streams_uni;
+}
+
+fn peerStreamsBlockedSlot(conn: *Connection, bidi: bool) *?u64 {
+    return if (bidi) &conn.peer_streams_blocked_bidi else &conn.peer_streams_blocked_uni;
+}
+
+fn localStreamsBlockedSlot(conn: *Connection, bidi: bool) *?u64 {
+    return if (bidi) &conn.local_streams_blocked_bidi else &conn.local_streams_blocked_uni;
+}
+
+pub fn pendingMaxStreamsSlot(conn: *Connection, bidi: bool) *?u64 {
+    return if (bidi) &conn.pending_frames.max_streams_bidi else &conn.pending_frames.max_streams_uni;
+}
+
+// INTERNAL: pub for direct sibling import (send.zig).
+pub fn pendingStreamsBlockedSlot(conn: *Connection, bidi: bool) *?u64 {
+    return if (bidi) &conn.pending_frames.streams_blocked_bidi else &conn.pending_frames.streams_blocked_uni;
+}
+
 pub fn queueMaxStreams(conn: *Connection, bidi: bool, maximum_streams: u64) void {
     // Graceful shutdown withholds all further stream credit: the peer's
     // limit freezes at its current value, so it cannot open new streams
@@ -117,24 +147,16 @@ pub fn queueMaxStreams(conn: *Connection, bidi: bool, maximum_streams: u64) void
     // §19.11: a peer MUST ignore MAX_STREAMS that does not advance.
     // Locally we mirror that — no point clearing peer-blocked state
     // or re-queuing a frame that doesn't move the cursor.
-    const current = if (bidi) conn.local_max_streams_bidi else conn.local_max_streams_uni;
-    if (bounded_maximum_streams <= current) return;
-    if (bidi) {
-        conn.local_max_streams_bidi = bounded_maximum_streams;
-        if (conn.peer_streams_blocked_bidi) |limit| {
-            if (bounded_maximum_streams > limit) conn.peer_streams_blocked_bidi = null;
-        }
-        if (conn.pending_frames.max_streams_bidi == null or bounded_maximum_streams > conn.pending_frames.max_streams_bidi.?) {
-            conn.pending_frames.max_streams_bidi = bounded_maximum_streams;
-        }
-    } else {
-        conn.local_max_streams_uni = bounded_maximum_streams;
-        if (conn.peer_streams_blocked_uni) |limit| {
-            if (bounded_maximum_streams > limit) conn.peer_streams_blocked_uni = null;
-        }
-        if (conn.pending_frames.max_streams_uni == null or bounded_maximum_streams > conn.pending_frames.max_streams_uni.?) {
-            conn.pending_frames.max_streams_uni = bounded_maximum_streams;
-        }
+    const local_max = localMaxStreamsSlot(conn, bidi);
+    if (bounded_maximum_streams <= local_max.*) return;
+    local_max.* = bounded_maximum_streams;
+    const peer_blocked = peerStreamsBlockedSlot(conn, bidi);
+    if (peer_blocked.*) |limit| {
+        if (bounded_maximum_streams > limit) peer_blocked.* = null;
+    }
+    const pending = pendingMaxStreamsSlot(conn, bidi);
+    if (pending.* == null or bounded_maximum_streams > pending.*.?) {
+        pending.* = bounded_maximum_streams;
     }
 }
 
@@ -186,18 +208,14 @@ pub fn maybeReturnPeerStreamCredit(conn: *Connection, s: *Stream) void {
         return;
     }
     s.stream_count_credit_returned = true;
-    if (conn_streams.streamIsBidi(s.id)) {
-        maybeQueueBatchedMaxStreams(conn, true);
-    } else {
-        maybeQueueBatchedMaxStreams(conn, false);
-    }
+    maybeQueueBatchedMaxStreams(conn, conn_streams.streamIsBidi(s.id));
 }
 
 fn maybeQueueBatchedMaxStreams(conn: *Connection, bidi: bool) void {
-    const current = if (bidi) conn.local_max_streams_bidi else conn.local_max_streams_uni;
+    const current = localMaxStreamsSlot(conn, bidi).*;
     if (current >= max_streams_per_connection) return;
 
-    const opened = if (bidi) conn.peer_opened_streams_bidi else conn.peer_opened_streams_uni;
+    const opened = conn_streams.peerOpenedStreamsSlot(conn, bidi).*;
     const remaining = current -| opened;
     // Fire MAX_STREAMS once the peer has consumed at least a quarter of
     // the current limit (i.e. <= 3/4 of the cap remains). The previous
@@ -348,66 +366,36 @@ pub fn clearLocalStreamDataBlocked(
 }
 
 pub fn noteStreamsBlocked(conn: *Connection, bidi: bool, maximum_streams: u64) void {
-    if (bidi) {
-        const changed = conn.local_streams_blocked_bidi == null or conn.local_streams_blocked_bidi.? != maximum_streams;
-        conn.local_streams_blocked_bidi = maximum_streams;
-        if (changed) {
-            conn.pending_frames.streams_blocked_bidi = maximum_streams;
-            recordFlowBlockedEvent(conn, .{
-                .source = .local,
-                .kind = .streams,
-                .limit = maximum_streams,
-                .bidi = true,
-            });
-        }
-    } else {
-        const changed = conn.local_streams_blocked_uni == null or conn.local_streams_blocked_uni.? != maximum_streams;
-        conn.local_streams_blocked_uni = maximum_streams;
-        if (changed) {
-            conn.pending_frames.streams_blocked_uni = maximum_streams;
-            recordFlowBlockedEvent(conn, .{
-                .source = .local,
-                .kind = .streams,
-                .limit = maximum_streams,
-                .bidi = false,
-            });
-        }
+    const local_blocked = localStreamsBlockedSlot(conn, bidi);
+    const changed = local_blocked.* == null or local_blocked.*.? != maximum_streams;
+    local_blocked.* = maximum_streams;
+    if (changed) {
+        pendingStreamsBlockedSlot(conn, bidi).* = maximum_streams;
+        recordFlowBlockedEvent(conn, .{
+            .source = .local,
+            .kind = .streams,
+            .limit = maximum_streams,
+            .bidi = bidi,
+        });
     }
 }
 
 pub fn requeueStreamsBlocked(conn: *Connection, item: frame_types.StreamsBlocked) bool {
-    if (item.bidi) {
-        if (conn.local_streams_blocked_bidi == null or
-            conn.local_streams_blocked_bidi.? != item.maximum_streams)
-        {
-            return false;
-        }
-        conn.pending_frames.streams_blocked_bidi = item.maximum_streams;
-    } else {
-        if (conn.local_streams_blocked_uni == null or
-            conn.local_streams_blocked_uni.? != item.maximum_streams)
-        {
-            return false;
-        }
-        conn.pending_frames.streams_blocked_uni = item.maximum_streams;
+    const local_blocked = localStreamsBlockedSlot(conn, item.bidi).*;
+    if (local_blocked == null or local_blocked.? != item.maximum_streams) {
+        return false;
     }
+    pendingStreamsBlockedSlot(conn, item.bidi).* = item.maximum_streams;
     return true;
 }
 
 pub fn clearLocalStreamsBlocked(conn: *Connection, bidi: bool, new_limit: u64) void {
-    if (bidi) {
-        if (conn.local_streams_blocked_bidi) |limit| {
-            if (new_limit > limit) conn.local_streams_blocked_bidi = null;
-        }
-        if (conn.pending_frames.streams_blocked_bidi) |limit| {
-            if (new_limit > limit) conn.pending_frames.streams_blocked_bidi = null;
-        }
-    } else {
-        if (conn.local_streams_blocked_uni) |limit| {
-            if (new_limit > limit) conn.local_streams_blocked_uni = null;
-        }
-        if (conn.pending_frames.streams_blocked_uni) |limit| {
-            if (new_limit > limit) conn.pending_frames.streams_blocked_uni = null;
-        }
+    const local_blocked = localStreamsBlockedSlot(conn, bidi);
+    if (local_blocked.*) |limit| {
+        if (new_limit > limit) local_blocked.* = null;
+    }
+    const pending = pendingStreamsBlockedSlot(conn, bidi);
+    if (pending.*) |limit| {
+        if (new_limit > limit) pending.* = null;
     }
 }

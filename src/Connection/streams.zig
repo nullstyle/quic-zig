@@ -224,6 +224,21 @@ pub fn initialSendStreamLimit(conn: *const Connection, id: u64) u64 {
     return params.initial_max_stream_data_bidi_local;
 }
 
+// Direction-symmetric stream-count accounting slots; see the note on
+// the matching bidi/uni slot accessors in flow.zig.
+fn peerMaxStreamsSlot(conn: *Connection, bidi: bool) *u64 {
+    return if (bidi) &conn.peer_max_streams_bidi else &conn.peer_max_streams_uni;
+}
+
+fn localOpenedStreamsSlot(conn: *Connection, bidi: bool) *u64 {
+    return if (bidi) &conn.local_opened_streams_bidi else &conn.local_opened_streams_uni;
+}
+
+// INTERNAL: pub for direct sibling import (flow.zig).
+pub fn peerOpenedStreamsSlot(conn: *Connection, bidi: bool) *u64 {
+    return if (bidi) &conn.peer_opened_streams_bidi else &conn.peer_opened_streams_uni;
+}
+
 fn recordLocalStreamOpen(conn: *Connection, id: u64) Error!void {
     // During graceful shutdown we open no new local streams; in-flight
     // streams keep draining. Single chokepoint for openBidi/openUni and
@@ -232,19 +247,14 @@ fn recordLocalStreamOpen(conn: *Connection, id: u64) Error!void {
     const idx = streamIndex(id);
     if (idx >= max_stream_count_limit) return Error.InvalidStreamId;
     const next = idx + 1;
-    if (streamIsBidi(id)) {
-        if (idx >= conn.peer_max_streams_bidi) {
-            conn.noteStreamsBlocked(true, conn.peer_max_streams_bidi);
-            return Error.StreamLimitExceeded;
-        }
-        if (next > conn.local_opened_streams_bidi) conn.local_opened_streams_bidi = next;
-    } else {
-        if (idx >= conn.peer_max_streams_uni) {
-            conn.noteStreamsBlocked(false, conn.peer_max_streams_uni);
-            return Error.StreamLimitExceeded;
-        }
-        if (next > conn.local_opened_streams_uni) conn.local_opened_streams_uni = next;
+    const bidi = streamIsBidi(id);
+    const peer_max = peerMaxStreamsSlot(conn, bidi).*;
+    if (idx >= peer_max) {
+        conn.noteStreamsBlocked(bidi, peer_max);
+        return Error.StreamLimitExceeded;
     }
+    const opened = localOpenedStreamsSlot(conn, bidi);
+    if (next > opened.*) opened.* = next;
 }
 
 pub fn recordPeerStreamOpenOrClose(conn: *Connection, id: u64) bool {
@@ -254,19 +264,16 @@ pub fn recordPeerStreamOpenOrClose(conn: *Connection, id: u64) bool {
         return false;
     }
     const next = idx + 1;
-    if (streamIsBidi(id)) {
-        if (idx >= conn.local_max_streams_bidi) {
-            conn.close(true, transport_error_stream_limit, "peer exceeded bidirectional stream limit");
-            return false;
-        }
-        if (next > conn.peer_opened_streams_bidi) conn.peer_opened_streams_bidi = next;
-    } else {
-        if (idx >= conn.local_max_streams_uni) {
-            conn.close(true, transport_error_stream_limit, "peer exceeded unidirectional stream limit");
-            return false;
-        }
-        if (next > conn.peer_opened_streams_uni) conn.peer_opened_streams_uni = next;
+    const bidi = streamIsBidi(id);
+    if (idx >= conn_flow.localMaxStreamsSlot(conn, bidi).*) {
+        conn.close(true, transport_error_stream_limit, if (bidi)
+            "peer exceeded bidirectional stream limit"
+        else
+            "peer exceeded unidirectional stream limit");
+        return false;
     }
+    const opened = peerOpenedStreamsSlot(conn, bidi);
+    if (next > opened.*) opened.* = next;
     return true;
 }
 
@@ -303,7 +310,7 @@ fn notePeerStreamReaped(conn: *Connection, id: u64) void {
     const bidi = streamIsBidi(id);
     const bits = if (bidi) &conn.peer_reaped_bits_bidi else &conn.peer_reaped_bits_uni;
     const below = if (bidi) &conn.peer_reaped_below_bidi else &conn.peer_reaped_below_uni;
-    const opened = if (bidi) conn.peer_opened_streams_bidi else conn.peer_opened_streams_uni;
+    const opened = peerOpenedStreamsSlot(conn, bidi).*;
     bits.set(@intCast(idx));
     // Coalesce: advance the watermark across consecutive reaped bits.
     // The `< opened` guard is load-bearing for paths that reap a
