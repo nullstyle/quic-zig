@@ -47,7 +47,7 @@
 const std = @import("std");
 
 const Client = @import("../Client.zig");
-const conn_state = @import("../conn/state.zig");
+const conn_state = @import("../Connection.zig");
 const Connection = conn_state.Connection;
 const path_mod = @import("../conn/path.zig");
 const socket_opts = @import("socket_opts.zig");

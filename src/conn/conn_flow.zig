@@ -7,7 +7,7 @@
 // conn_recv_flow_handlers.zig.
 
 const std = @import("std");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const conn_streams = @import("conn_streams.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;

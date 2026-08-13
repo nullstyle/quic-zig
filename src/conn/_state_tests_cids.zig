@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const state = @import("state.zig");
+const state = @import("../Connection.zig");
 const Connection = state.Connection;
 const ConnectionId = state.ConnectionId;
 const ConnectionIdReplenishReason = state.ConnectionIdReplenishReason;

@@ -5,7 +5,7 @@
 // methods on `Connection` are thin thunks that delegate here.
 
 const std = @import("std");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const conn_datagram = @import("conn_datagram.zig");
 const conn_qlog = @import("conn_qlog.zig");
 const conn_loss = @import("conn_loss.zig");

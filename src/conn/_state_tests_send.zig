@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const state = @import("state.zig");
+const state = @import("../Connection.zig");
 const Connection = state.Connection;
 const frame_mod = state.frame_mod;
 const max_recv_plaintext = state.max_recv_plaintext;

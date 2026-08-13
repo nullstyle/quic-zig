@@ -9,7 +9,7 @@
 // here.
 
 const std = @import("std");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
 const conn_qlog = @import("conn_qlog.zig");
 const conn_keys = @import("conn_keys.zig");

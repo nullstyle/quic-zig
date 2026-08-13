@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const conn_recv_stream_control_handlers = @import("conn_recv_stream_control_handlers.zig");
 const conn_recv_multipath_handlers = @import("conn_recv_multipath_handlers.zig");
 const conn_recv_packet_handlers = @import("conn_recv_packet_handlers.zig");

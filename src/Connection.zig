@@ -51,55 +51,55 @@ const std = @import("std");
 const boringssl = @import("boringssl");
 const c = boringssl.raw;
 
-pub const level_mod = @import("../tls/level.zig");
-pub const wire_header = @import("../wire/header.zig");
-pub const short_packet_mod = @import("../wire/short_packet.zig");
-pub const long_packet_mod = @import("../wire/long_packet.zig");
-pub const initial_keys_mod = @import("../wire/initial.zig");
-pub const transport_params_mod = @import("../tls/transport_params.zig");
-pub const early_data_context_mod = @import("../tls/early_data_context.zig");
-pub const varint = @import("../wire/varint.zig");
-pub const frame_mod = @import("../frame/root.zig");
-pub const frame_types = @import("../frame/types.zig");
-pub const ack_range_mod = @import("../frame/ack_range.zig");
-pub const ack_tracker_mod = @import("AckTracker.zig");
-pub const send_stream_mod = @import("SendStream.zig");
-pub const recv_stream_mod = @import("RecvStream.zig");
-pub const pn_space_mod = @import("PnSpace.zig");
-pub const sent_packets_mod = @import("SentPacketTracker.zig");
-pub const loss_recovery_mod = @import("loss_recovery.zig");
-pub const path_mod = @import("path.zig");
-pub const congestion_mod = @import("congestion.zig");
-pub const rtt_mod = @import("RttEstimator.zig");
-pub const flow_control_mod = @import("flow_control.zig");
-pub const event_queue_mod = @import("event_queue.zig");
-pub const pending_frames_mod = @import("PendingFrameQueues.zig");
-pub const lifecycle_mod = @import("lifecycle.zig");
-pub const stateless_reset_mod = @import("stateless_reset.zig");
-pub const path_frame_queue = @import("path_frame_queue.zig");
-pub const pacing_mod = @import("Pacer.zig");
-pub const socket_opts_mod = @import("../transport/socket_opts.zig");
-pub const _internal = @import("_internal.zig");
-const conn_recv_flow_handlers = @import("conn_recv_flow_handlers.zig");
-const conn_recv_cid_token_handlers = @import("conn_recv_cid_token_handlers.zig");
-const conn_recv_multipath_handlers = @import("conn_recv_multipath_handlers.zig");
-const conn_recv_stream_control_handlers = @import("conn_recv_stream_control_handlers.zig");
-const conn_recv_packet_handlers = @import("conn_recv_packet_handlers.zig");
-const conn_recv_ack_handlers = @import("conn_recv_ack_handlers.zig");
-const conn_qlog = @import("conn_qlog.zig");
-const conn_keys = @import("conn_keys.zig");
-const conn_version = @import("conn_version.zig");
-const conn_cids = @import("conn_cids.zig");
-const conn_streams = @import("conn_streams.zig");
-const conn_datagram = @import("conn_datagram.zig");
-const conn_flow = @import("conn_flow.zig");
-const conn_paths = @import("conn_paths.zig");
-const conn_migration = @import("conn_migration.zig");
-const conn_loss = @import("conn_loss.zig");
-const conn_recv_data_handlers = @import("conn_recv_data_handlers.zig");
-const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
-const conn_send = @import("conn_send.zig");
-const conn_stats = @import("conn_stats.zig");
+pub const level_mod = @import("tls/level.zig");
+pub const wire_header = @import("wire/header.zig");
+pub const short_packet_mod = @import("wire/short_packet.zig");
+pub const long_packet_mod = @import("wire/long_packet.zig");
+pub const initial_keys_mod = @import("wire/initial.zig");
+pub const transport_params_mod = @import("tls/transport_params.zig");
+pub const early_data_context_mod = @import("tls/early_data_context.zig");
+pub const varint = @import("wire/varint.zig");
+pub const frame_mod = @import("frame/root.zig");
+pub const frame_types = @import("frame/types.zig");
+pub const ack_range_mod = @import("frame/ack_range.zig");
+pub const ack_tracker_mod = @import("conn/AckTracker.zig");
+pub const send_stream_mod = @import("conn/SendStream.zig");
+pub const recv_stream_mod = @import("conn/RecvStream.zig");
+pub const pn_space_mod = @import("conn/PnSpace.zig");
+pub const sent_packets_mod = @import("conn/SentPacketTracker.zig");
+pub const loss_recovery_mod = @import("conn/loss_recovery.zig");
+pub const path_mod = @import("conn/path.zig");
+pub const congestion_mod = @import("conn/congestion.zig");
+pub const rtt_mod = @import("conn/RttEstimator.zig");
+pub const flow_control_mod = @import("conn/flow_control.zig");
+pub const event_queue_mod = @import("conn/event_queue.zig");
+pub const pending_frames_mod = @import("conn/PendingFrameQueues.zig");
+pub const lifecycle_mod = @import("conn/lifecycle.zig");
+pub const stateless_reset_mod = @import("conn/stateless_reset.zig");
+pub const path_frame_queue = @import("conn/path_frame_queue.zig");
+pub const pacing_mod = @import("conn/Pacer.zig");
+pub const socket_opts_mod = @import("transport/socket_opts.zig");
+pub const _internal = @import("conn/_internal.zig");
+const conn_recv_flow_handlers = @import("conn/conn_recv_flow_handlers.zig");
+const conn_recv_cid_token_handlers = @import("conn/conn_recv_cid_token_handlers.zig");
+const conn_recv_multipath_handlers = @import("conn/conn_recv_multipath_handlers.zig");
+const conn_recv_stream_control_handlers = @import("conn/conn_recv_stream_control_handlers.zig");
+const conn_recv_packet_handlers = @import("conn/conn_recv_packet_handlers.zig");
+const conn_recv_ack_handlers = @import("conn/conn_recv_ack_handlers.zig");
+const conn_qlog = @import("conn/conn_qlog.zig");
+const conn_keys = @import("conn/conn_keys.zig");
+const conn_version = @import("conn/conn_version.zig");
+const conn_cids = @import("conn/conn_cids.zig");
+const conn_streams = @import("conn/conn_streams.zig");
+const conn_datagram = @import("conn/conn_datagram.zig");
+const conn_flow = @import("conn/conn_flow.zig");
+const conn_paths = @import("conn/conn_paths.zig");
+const conn_migration = @import("conn/conn_migration.zig");
+const conn_loss = @import("conn/conn_loss.zig");
+const conn_recv_data_handlers = @import("conn/conn_recv_data_handlers.zig");
+const conn_recv_dispatch = @import("conn/conn_recv_dispatch.zig");
+const conn_send = @import("conn/conn_send.zig");
+const conn_stats = @import("conn/conn_stats.zig");
 
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
@@ -465,7 +465,7 @@ pub const max_application_ack_lower_ranges: u64 = 16;
 /// datagram before tripping the gate. Beyond that, additional frames
 /// are skipped (see RFC 9000 §19.3 — ACK is not ack-eliciting and
 /// dropping does not affect connection liveness).
-pub const incoming_ack_range_cap: u64 = 4 * @import("../frame/decode.zig").max_incoming_ack_ranges;
+pub const incoming_ack_range_cap: u64 = 4 * @import("frame/decode.zig").max_incoming_ack_ranges;
 /// Per-`handle`-cycle ceiling on RETIRE_CONNECTION_ID frames. The
 /// `active_connection_id_limit` hard cap is 16 (transport_params.zig);
 /// 4× that gives steady-state churn headroom for a legitimate peer
@@ -4899,5 +4899,5 @@ const method: boringssl.tls.quic.Method = .{
 // `comptime`) so non-test builds never analyze the test tree —
 // ziglang's std convention for exactly this hook.
 test {
-    _ = @import("_state_tests.zig");
+    _ = @import("conn/_state_tests.zig");
 }

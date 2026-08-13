@@ -28,7 +28,7 @@
 //!    that `Connection` drains in `pollLevel`.
 
 /// Connection state machine: handshake, send/receive, streams, migration, close.
-pub const state = @import("state.zig");
+pub const state = @import("../Connection.zig");
 /// Pending control-frame queues drained by `Connection.pollLevel`.
 pub const pending_frames = @import("PendingFrameQueues.zig");
 /// Close/draining lifecycle state extracted from `state.Connection`

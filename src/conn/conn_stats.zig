@@ -7,7 +7,7 @@
 // reaps, and connection teardown.
 
 const std = @import("std");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const path_mod = @import("path.zig");
 const conn_paths = @import("conn_paths.zig");
 const conn_streams = @import("conn_streams.zig");

@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const state = @import("state.zig");
+const state = @import("../Connection.zig");
 const Connection = state.Connection;
 const util = @import("_test_util.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;

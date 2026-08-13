@@ -10,7 +10,7 @@
 // conn_recv_ack_handlers.zig.
 
 const std = @import("std");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const conn_qlog = @import("conn_qlog.zig");
 const conn_paths = @import("conn_paths.zig");
 const conn_streams = @import("conn_streams.zig");

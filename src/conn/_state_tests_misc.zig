@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const state = @import("state.zig");
+const state = @import("../Connection.zig");
 const EncryptionLevel = state.EncryptionLevel;
 const level_mod = state.level_mod;
 

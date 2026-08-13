@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const state = @import("state.zig");
+const state = @import("../Connection.zig");
 const Connection = state.Connection;
 const TimerKind = state.TimerKind;
 const default_mtu = state.default_mtu;

@@ -5,7 +5,7 @@
 // type declared in this file so the `quic.conn.state.*` public
 // path keeps resolving.
 
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const Connection = state_mod.Connection;
 const EncryptionLevel = state_mod.EncryptionLevel;
 const ConnectionId = state_mod.ConnectionId;

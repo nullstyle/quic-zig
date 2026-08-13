@@ -5,7 +5,7 @@
 // `Connection` are thin thunks that delegate here.
 
 const std = @import("std");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const conn_flow = @import("conn_flow.zig");
 const conn_streams = @import("conn_streams.zig");
 const Connection = state_mod.Connection;

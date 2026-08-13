@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const state_mod = @import("state.zig");
+const state_mod = @import("../Connection.zig");
 const conn_paths = @import("conn_paths.zig");
 const conn_keys = @import("conn_keys.zig");
 const conn_qlog = @import("conn_qlog.zig");
