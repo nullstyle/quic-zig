@@ -101,6 +101,611 @@ const conn_recv_dispatch = @import("conn/conn_recv_dispatch.zig");
 const conn_send = @import("conn/conn_send.zig");
 const conn_stats = @import("conn/conn_stats.zig");
 
+// -- Connection fields (Compilation.zig anatomy: alias, imports,
+// fields, then types and methods) ------------------------------
+
+allocator: std.mem.Allocator,
+role: Role,
+/// Owned SSL handle from the caller-provided `boringssl.tls.Context`.
+/// The Context outlives the Connection (caller-managed).
+inner: boringssl.tls.Conn,
+
+/// Inbox of CRYPTO frame bytes received from the peer at each
+/// encryption level. The peer's `add_handshake_data` callback
+/// appends here; `advance` drains via `provideQuicData`.
+inbox: [4]CryptoBuffer = .{ .{}, .{}, .{}, .{} },
+
+/// Per-level secret bookkeeping. Updated by the
+/// `set_read_secret` / `set_write_secret` callbacks.
+levels: [4]PerLevelState = .{ .{}, .{}, .{}, .{} },
+
+/// Peer pointer for the in-process mock transport tests; real
+/// deployments don't set this (they ship CRYPTO bytes via QUIC
+/// packets through a `transport.Transport` — see `src/transport/`).
+peer: ?*Connection = null,
+
+/// Last alert byte received via the `send_alert` callback, if
+/// any. Non-null = handshake should be torn down.
+alert: ?u8 = null,
+
+/// **Test-only.** When set, the migration gate in
+/// `recordAuthenticatedDatagramAddress` bypasses its
+/// `handshakeDone()` check so peer-address-change tests can fire
+/// migration without driving a full TLS handshake. Production
+/// code MUST NOT set this — it disables RFC 9000 §9.6 / hardening
+/// guide §4.8 enforcement.
+test_only_force_handshake_for_migration: bool = false,
+
+/// Whether to encode the locally-recorded close-reason string into
+/// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
+/// secure-by-default redaction: internal parser-error strings like
+/// "ack of unsent packet" or "connection id reused across paths"
+/// are useful telemetry for the embedder but reveal implementation
+/// detail to the peer (parser fingerprinting, internal state
+/// names). Local introspection is unaffected — `lifecycle.record`
+/// always captures the reason for embedder-side observability,
+/// and `nextEvent` surfaces it via `CloseEvent.reason`.
+///
+/// Embedders that want the reason on the wire (debug builds,
+/// internal load tests, etc.) can flip this to `true`.
+reveal_close_reason_on_wire: bool = false,
+
+/// Hard ceiling on `bytes_resident` (per-connection memory DoS cap).
+/// Sums every byte sitting in peer-controlled reassembly /
+/// queue buffers — CRYPTO `crypto_pending`, RFC 9221 inbound
+/// DATAGRAMs, and per-stream send/recv reassembly buffers. When
+/// a fresh allocation would push the running total past this
+/// cap, the handler closes the connection with
+/// `transport_error_excessive_load` instead of letting the
+/// allocation land. Defaults to `default_max_connection_memory`
+/// (32 MiB); `Server.Config.max_connection_memory` threads onto
+/// every accepted slot.
+///
+/// Tuning note: per-buffer caps already exist
+/// (`max_pending_crypto_bytes_per_level = 64 KiB`,
+/// `max_pending_datagram_bytes = 64 KiB`,
+/// `max_initial_stream_receive_window = 16 MiB`,
+/// `default_max_buffered_send = 1 MiB`). This is the *aggregate*
+/// guard that prevents a peer from opening many streams at once
+/// and inflating the connection's host RSS even when each
+/// individual buffer stays under its own cap.
+max_connection_memory: u64 = default_max_connection_memory,
+
+/// Number of ack-eliciting application packets received before
+/// forcing an immediate ACK (RFC 9000 §13.2.1 ¶2: "An endpoint
+/// MUST acknowledge ack-eliciting packets within its advertised
+/// max_ack_delay, with the following exception: it MUST send an
+/// immediate ACK for ack-eliciting packets that are received after
+/// receiving at least 2 ack-eliciting packets without sending an
+/// ACK..."). RFC 9000 §13.2.2 lets implementations tune this
+/// threshold; 2 is the RFC-recommended starting point.
+/// Set lower (e.g. 1) to ACK every ack-eliciting packet
+/// immediately — useful in low-RTT environments where the
+/// `max_ack_delay` deadline rarely fires. Set higher to amortize
+/// ACK overhead at the cost of triggering more peer PTOs.
+/// `Server.Config` and `Client.Config` thread the chosen value
+/// onto every Connection at construction time.
+delayed_ack_packet_threshold: u8 = application_ack_eliciting_threshold,
+
+/// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168). When
+/// `true` (the default), quic will:
+///   * count incoming `EcnCodepoint` markings into per-PN-space
+///     `recv_ect0` / `recv_ect1` / `recv_ce` counters,
+///   * emit `0x03` ACK frames carrying those counts whenever any
+///     received packet at that level was ECN-marked,
+///   * validate peer-reported counts on incoming ACKs per
+///     §13.4.2 and react to CE bumps via the NewReno
+///     congestion controller.
+///
+/// When `false`, the codec is otherwise unchanged but no marking
+/// signal is propagated either way; outgoing ACKs stay at type
+/// `0x02`. Embedders flip this off only on environments known to
+/// bleach ECN bits (some legacy NATs / firewalls), or when
+/// running tests that need a deterministic congestion control
+/// path.
+ecn_enabled: bool = true,
+/// IP-layer ECN codepoint observed on the most recently received
+/// (and decrypted) datagram. Set by `handle` from the cmsg the
+/// embedder plumbs in; consumed by the per-packet handlers when
+/// they record received PNs into the level's `PnSpace`.
+/// `not_ect` is the conservative default — the embedder
+/// hasn't surfaced any TOS byte for this datagram.
+last_recv_ecn: socket_opts_mod.EcnCodepoint = .not_ect,
+
+/// Running total of bytes currently resident in peer-controlled
+/// buffers — see `max_connection_memory`. Mutated by
+/// `tryReserveResidentBytes` / `releaseResidentBytes` at every
+/// allocation / free site that holds peer-supplied bytes.
+/// Monotonically non-negative — any release that would underflow
+/// the counter clamps at zero and asserts in debug builds.
+bytes_resident: u64 = 0,
+
+/// Connection-level packet-number bookkeeping for Initial and
+/// Handshake (RFC 9000 §12.3). Application PN spaces live in
+/// `paths` so multipath can allocate one space per active path.
+pn_spaces: [2]PnSpace = .{ .{}, .{} },
+/// Sent-packet tracker for connection-level PN spaces. Application
+/// packets live in `paths.primary().sent`; Initial/Handshake stay
+/// here because QUIC multipath only widens the Application space.
+/// Initial + Handshake sent-packet trackers. The tracker headers
+/// live inline (slot storage is tracker-owned heap, armed in
+/// `initClientAt`/`initServerAt`, freed in `deinit`) — the old
+/// `*[2]` slab existed only because trackers used to embed their
+/// 4096-slot arrays by value, which put ~1.5 MB on every stack
+/// frame constructing a Connection. The application-level tracker
+/// lives on each PathState (heap via PathSet).
+sent: [2]SentPacketTracker,
+/// Multipath-capable Application path set. Path id 0 is always the
+/// initial path and owns Application PN/ACK/sent/RTT/congestion.
+paths: PathSet = .{},
+multipath_enabled: bool = false,
+local_max_path_id: u32 = 0,
+peer_max_path_id: u32 = 0,
+peer_paths_blocked_at: ?u32 = null,
+peer_path_cids_blocked_path_id: ?u32 = null,
+peer_path_cids_blocked_next_sequence: u64 = 0,
+current_incoming_path_id: u32 = 0,
+current_incoming_addr: ?Address = null,
+last_authenticated_path_id: ?u32 = null,
+poll_addr_override: ?Address = null,
+/// PTO backoff count for Initial and Handshake. Application PTO
+/// backoff is per-path in `PathState.pto_count`. Reset when an
+/// ACK newly acknowledges ack-eliciting data in that space.
+pto_count: [2]u32 = .{ 0, 0 },
+/// PING probes requested by PTO for Initial and Handshake when no
+/// retransmittable data is immediately available.
+pending_ping: [2]bool = .{ false, false },
+
+/// Per-encryption-level outbox of CRYPTO bytes the TLS bridge
+/// has handed us via `add_handshake_data`. `poll` packs these
+/// into outgoing CRYPTO frames at the matching level.
+outbox: [4]CryptoBuffer = .{ .{}, .{}, .{}, .{} },
+/// Highest CRYPTO offset we've handed to the peer at each level.
+/// Used to set the `offset` field on the next CRYPTO frame.
+crypto_send_offset: [4]u64 = .{ 0, 0, 0, 0 },
+/// Highest CRYPTO offset we've fed back to BoringSSL at each
+/// level (one past the last byte of in-order data delivered via
+/// `provideQuicData`).
+crypto_recv_offset: [4]u64 = .{ 0, 0, 0, 0 },
+/// Per-level reassembly queue for CRYPTO frames received out
+/// of order. Each entry holds bytes whose `offset` is strictly
+/// greater than `crypto_recv_offset[lvl]`. Drained whenever
+/// `crypto_recv_offset` catches up to the lowest entry.
+/// quic-go (and many real stacks) routinely fragment the
+/// ClientHello into out-of-order CRYPTO frames inside a single
+/// Initial; without reassembly the handshake stalls.
+crypto_pending: [4]std.ArrayList(CryptoChunk) = .{ .empty, .empty, .empty, .empty },
+crypto_pending_bytes: [4]usize = .{ 0, 0, 0, 0 },
+/// CRYPTO bytes that were sent in lost packets and need to be
+/// retransmitted at their original offsets.
+crypto_retx: [4]std.ArrayList(CryptoChunk) = .{ .empty, .empty, .empty, .empty },
+/// CRYPTO bytes currently in sent packets awaiting ACK/loss.
+sent_crypto: [4]std.ArrayList(SentCryptoChunk) = .{ .empty, .empty, .empty, .empty },
+
+/// Per-stream state, keyed by stream id.
+streams: std.AutoHashMapUnmanaged(u64, *Stream) = .empty,
+/// Monotonic connection-local key for STREAM send bookkeeping.
+/// Wire packet numbers are scoped by packet-number space/path;
+/// SendStream needs one global key to avoid multipath PN collisions.
+next_stream_packet_key: u64 = 0,
+
+next_datagram_id: u64 = 0,
+
+/// Next Status Sequence Number to mint for an
+/// `ALTERNATIVE_V4/V6_ADDRESS` frame
+/// (draft-munizaga-quic-alternative-server-address-00 §6 ¶5).
+/// Both frame types share one monotonically-increasing space.
+next_alternative_address_sequence: u64 = 0,
+
+/// DCID we put on outgoing packets (the peer chose this; client
+/// learns it from the server's first Initial SCID, or
+/// NEW_CONNECTION_ID). Zero-length CIDs are valid — `peer_dcid_set`
+/// distinguishes "explicitly empty" from "never set".
+peer_dcid: ConnectionId = .{},
+peer_dcid_set: bool = false,
+/// SCID we identify ourselves with — appears as SCID on outgoing
+/// long-header packets, and the peer puts it (or another CID we
+/// issued) as DCID on every incoming packet. Zero-length is valid.
+local_scid: ConnectionId = .{},
+local_scid_set: bool = false,
+/// Stable Source CID used on Initial, Handshake, and 0-RTT long
+/// headers. Peers can retire CID sequence 0 before the Initial or
+/// Handshake packet spaces are fully quiet, but the long-header SCID
+/// still has to remain the one advertised by the handshake transport
+/// parameter.
+initial_source_cid: ConnectionId = .{},
+initial_source_cid_set: bool = false,
+/// Original DCID used for Initial-key derivation (RFC 9001 §5.2).
+/// Active QUIC wire-format version for this connection. Drives
+/// the Initial-key salt + HKDF labels (RFC 9001 §5.2 / RFC 9368
+/// §3.3.1, §3.3.2), the long-header packet-type bit layout
+/// (RFC 9000 §17.2 / RFC 9368 §3.2), and the Retry integrity
+/// constants (RFC 9001 §5.8 / RFC 9368 §3.3.3). Defaults to
+/// QUIC v1; embedders that opt in to v2 set this via
+/// `setVersion` after `initClient` / `initServer`. Once an
+/// Initial is sealed or opened the value is effectively
+/// immutable (changing it would re-derive Initial keys against
+/// a different salt).
+version: u32 = quic_version_1,
+
+/// RFC 9368 §6 compatible-version-negotiation upgrade target,
+/// stashed by the server's `Server.preparseUpgradeTarget` and
+/// applied by the server's `dispatchToSlot` after the first
+/// `handleWithEcn` consumes the wire-version Initial under
+/// wire-version keys. `null` means no upgrade is pending.
+/// Server-side only; clients leave this null. See
+/// `setPendingVersionUpgrade` / `applyPendingVersionUpgrade`.
+pending_version_upgrade: ?u32 = null,
+
+/// RFC 9368 §6 ¶6/¶7 downgrade-attack guard: wire version on the
+/// FIRST Initial we observed. Captured BEFORE any compatible-
+/// version-negotiation upgrade flips `self.version`, so the
+/// server-side check in `validatePeerTransportRole` can compare
+/// the client's advertised `version_information.chosen_version`
+/// against the actual on-wire version of the client's Initial,
+/// even after `applyPendingVersionUpgrade` has retargeted
+/// `self.version` to the upgrade target. Set by `acceptInitial`
+/// on the server side; left `null` on the client side (the client
+/// only ever sends a single wire version on its first Initial,
+/// which equals `self.version` at the time the params are
+/// validated, so the simpler `advertised_versions[0] !=
+/// self.version` check in the client branch is sufficient).
+initial_wire_version: ?u32 = null,
+
+/// Client side: the random DCID it sent on the very first Initial.
+/// Server side: same value, recovered from that incoming Initial.
+initial_dcid: ConnectionId = .{},
+initial_dcid_set: bool = false,
+/// Stable copy of the client's first Initial DCID. If Retry is
+/// accepted, `initial_dcid` changes to the Retry SCID for key
+/// derivation, while this value remains the Original DCID used for
+/// Retry integrity and transport-parameter validation.
+original_initial_dcid: ConnectionId = .{},
+original_initial_dcid_set: bool = false,
+retry_source_cid: ConnectionId = .{},
+retry_source_cid_set: bool = false,
+retry_accepted: bool = false,
+retry_token: std.ArrayList(u8) = .empty,
+
+/// Cached Initial-level packet keys. Derived once `initial_dcid`
+/// is set; cleared if `initial_dcid` is rotated (e.g. after
+/// receiving a Retry, RFC 9001 §5.2). Direction-specific (server
+/// uses `is_server=true` derivation for write).
+initial_keys_read: ?short_packet_mod.PacketKeys = null,
+initial_keys_write: ?short_packet_mod.PacketKeys = null,
+/// Latched true the first time `discardInitialKeys` fires (i.e.
+/// when Handshake or higher secrets are installed). Once set,
+/// `ensureInitialKeys` is a no-op — the discard is one-way and
+/// any subsequent Initial-level packet can't be sealed/opened
+/// with re-derived keys. RFC 9001 §5.7 ¶3.
+initial_keys_discarded: bool = false,
+/// Latched true when `discardHandshakeKeys` fires. RFC 9001 §4.9.2:
+/// "An endpoint MUST discard its handshake keys when the TLS
+/// handshake is confirmed (Section 4.1.2)." For the client, that
+/// confirmation event is receipt of HANDSHAKE_DONE (RFC 9001
+/// §4.1.2 ¶2); for the server, it is delivery of the client's
+/// Finished message (which equals `handshakeDone()` returning
+/// true). Once latched, `pnSpaceForLevel(.handshake)` and
+/// `sentForLevel(.handshake)` are dead — `tick` skips them and
+/// `packetKeys(.handshake, ...)` returns null because the
+/// per-level secret material has been zeroed.
+handshake_keys_discarded: bool = false,
+/// Latched true on the client when a HANDSHAKE_DONE frame is
+/// processed (RFC 9001 §4.1.2 ¶2). Drives `discardHandshakeKeys`
+/// in `applyPostFrameProcessing` and short-circuits any further
+/// Handshake-level activity (PTO, loss detection, retransmit).
+/// Server-side this stays false — the equivalent latch is
+/// `inner.handshakeDone()`, which already covers the §4.9.2
+/// "TLS handshake is confirmed" trigger for the server role.
+received_handshake_done: bool = false,
+/// Sequence number of the locally-issued CID the next-handled
+/// datagram was addressed to, or `null` when unknown. Set by
+/// `Server` from its routing table before each `Connection.handle`
+/// invocation; consumed by `handleRetireConnectionId` to enforce
+/// RFC 9000 §19.16 ¶3 (a peer MUST NOT retire the CID it just
+/// used to send to us — PROTOCOL_VIOLATION).
+current_incoming_local_cid_seq: ?u64 = null,
+
+/// Cumulative count of ACK ranges processed across every ACK /
+/// PATH_ACK frame in the current `handle` cycle. Reset on entry to
+/// `handle`. Incremented by `range_count + 1` per frame (the +1
+/// accounts for `first_range`, which is real but encoded out of
+/// the gap-list). The decoder already caps each individual frame
+/// at `frame.decode.max_incoming_ack_ranges = 256`; without a
+/// per-cycle ceiling, an attacker on N paths could submit
+/// N × 256 ranges per datagram and force unbounded
+/// loss-detection walks. We cap at `incoming_ack_range_cap` —
+/// enough headroom for legitimate multipath aggregation across
+/// ~4 active paths in one datagram, not enough to amplify.
+incoming_ack_range_count: u64 = 0,
+/// Cumulative count of RETIRE_CONNECTION_ID frames processed in
+/// the current `handle` cycle. Reset on entry to `handle`.
+/// Bounded at `incoming_retire_cid_cap` so a peer flooding
+/// retires inside one datagram is treated as adversarial and
+/// closed with PROTOCOL_VIOLATION rather than allowed to spend
+/// CPU walking `local_cids` once per frame.
+incoming_retire_cid_count: u64 = 0,
+
+/// Application key-update lifecycle. QUIC key updates derive new
+/// packet-protection key/IV from "quic ku" while retaining the
+/// original header-protection key. Read side keeps previous/current/next
+/// epochs so delayed old-phase packets survive until the 3x-PTO discard
+/// timer; write side tracks ACK-gating and AEAD packet limits.
+app_read_previous: ?ApplicationKeyEpoch = null,
+app_read_current: ?ApplicationKeyEpoch = null,
+app_read_next: ?ApplicationKeyEpoch = null,
+app_write_current: ?ApplicationKeyEpoch = null,
+app_write_update_pending_ack: bool = false,
+app_next_local_update_after_us: ?u64 = null,
+app_failed_auth_packets: u64 = 0,
+app_key_update_limits: ApplicationKeyUpdateLimits = .{},
+qlog_callback: ?QlogCallback = null,
+qlog_user_data: ?*anyopaque = null,
+/// Optional embedder policy that gates peer migrations to a new
+/// 4-tuple (RFC 9000 §9). When `null`, every authenticated
+/// migration candidate is accepted and validated. See
+/// `setMigrationCallback`.
+migration_callback: ?MigrationCallback = null,
+migration_user_data: ?*anyopaque = null,
+/// Opt-in for high-volume per-packet qlog events
+/// (`packet_sent`, `packet_received`, `packet_lost`). Disabled by
+/// default so production callers don't pay for every packet
+/// crossing the boundary.
+qlog_packet_events: bool = false,
+/// Whether `connection_started` has fired yet. Single-shot.
+qlog_started: bool = false,
+/// Last close-state we emitted for `connection_state_updated`.
+qlog_last_state: CloseState = .open,
+/// Whether `parameters_set` fired.
+qlog_params_emitted: bool = false,
+/// Last congestion controller phase emitted (so we don't spam
+/// transitions). `null` means no snapshot has been taken yet.
+qlog_last_congestion_state: ?QlogCongestionState = null,
+
+// -- cheap aggregate counters used by PathStats --
+/// Total packets we've sent (across all paths/levels).
+qlog_packets_sent: u64 = 0,
+/// Total packets we've successfully received (post-AEAD).
+qlog_packets_received: u64 = 0,
+/// Total packets declared lost.
+qlog_packets_lost: u64 = 0,
+/// Total UDP payload bytes we've sent.
+qlog_bytes_sent: u64 = 0,
+/// Total UDP payload bytes the peer has sent us.
+qlog_bytes_received: u64 = 0,
+
+/// Local datagram budget for outgoing packets. Functions as the
+/// connection-wide ceiling: per-path PMTU values discovered via
+/// RFC 8899 DPLPMTUD must not exceed this. Negotiated peer
+/// `max_udp_payload_size` lowers this in `validatePeerTransportLimits`.
+mtu: usize = default_mtu,
+
+/// RFC 8899 DPLPMTUD configuration. Threaded onto every
+/// `PathState` at creation time. The Connection-level field
+/// defaults to `enable = false` so direct `Connection.createClient
+/// / initServer` callers (mainly internal test fixtures) keep the
+/// static-MTU behaviour. The public `Server.Config
+/// .pmtud` and `Client.Config.pmtud` wrappers default to enabled
+/// (`PmtudConfig{}` with `enable = true`) and call
+/// `setPmtudConfig` after `initClient` / `initServer`, so
+/// production embedders get DPLPMTUD without any extra wiring.
+pmtud_config: path_mod.PmtudConfig = .{ .enable = false },
+
+/// Congestion-control algorithm used by every path's controller.
+/// A mutable posture switch like `ecn_enabled`: wrappers thread
+/// `Config.congestion_control` through `setCongestionAlgorithm`
+/// right after `initClient`/`initServer`; paths created later
+/// (multipath, migration) inherit it at construction.
+cc_algorithm: congestion_mod.Algorithm = .cubic,
+
+/// RFC 9406 HyStart++ configuration for every path's controller.
+/// A posture switch like `cc_algorithm`; wrappers thread
+/// `Config.enable_hystart` here right after init.
+cc_hystart: congestion_mod.HyStartConfig = .{},
+
+/// RFC 9002 §7.7 packet pacing. On by default; `false` restores
+/// the pre-0.11 burst-a-full-cwnd emission timing exactly (the
+/// rollback lever). Wrappers thread `Config.enable_pacing` here.
+pacing_enabled: bool = true,
+
+/// Local parameters handed to BoringSSL. Kept here too so ACK
+/// delay and idle timers can use the negotiated local values.
+local_transport_params: TransportParams = .{},
+/// True once `setTransportParams` has encoded and pushed the local
+/// parameters. Guards the `setLocalScid` ordering contract: the first
+/// SCID latch must happen before this, so its Initial Source Connection
+/// ID (RFC 9000 §7.3) makes it into the advertised parameters.
+local_transport_params_set: bool = false,
+/// Receive-side connection flow-control limit we have advertised
+/// through transport parameters / MAX_DATA.
+local_max_data: u64 = 0,
+/// Sum of per-stream receive high-water marks the peer has forced.
+peer_sent_stream_data: u64 = 0,
+/// Send-side connection flow-control limit advertised by the peer.
+peer_max_data: u64 = std.math.maxInt(u64),
+/// Sum of new stream bytes we have put on the wire.
+we_sent_stream_data: u64 = 0,
+/// Stream-count limits. `local_*` governs peer-created streams;
+/// `peer_*` governs streams opened through the public API. Unknown
+/// peer limits are permissive until peer transport params arrive.
+local_max_streams_bidi: u64 = 0,
+local_max_streams_uni: u64 = 0,
+peer_max_streams_bidi: u64 = std.math.maxInt(u64),
+peer_max_streams_uni: u64 = std.math.maxInt(u64),
+peer_opened_streams_bidi: u64 = 0,
+peer_opened_streams_uni: u64 = 0,
+local_opened_streams_bidi: u64 = 0,
+local_opened_streams_uni: u64 = 0,
+/// `pollEvent` watermarks for `stream_opened` emission: peer-opened
+/// stream indices in [surfaced, peer_opened_streams_*) have not been
+/// surfaced to the embedder yet. Peer indices open contiguously
+/// (RFC 9000 §3.2), so chasing the count is lossless — no queue, no
+/// overflow, O(1) state.
+surfaced_peer_streams_bidi: u64 = 0,
+surfaced_peer_streams_uni: u64 = 0,
+/// One-shot latch for `ConnectionEvent.handshake_established`.
+handshake_established_surfaced: bool = false,
+/// Latch for the one-shot `ConnectionEvent.early_data`: set once
+/// the 0-RTT outcome has been surfaced (or, for connections that
+/// never attempted 0-RTT, once the handshake finishes with
+/// `.not_offered` — after which the status can never change and
+/// `pollEvent` stops consulting BoringSSL).
+early_data_surfaced: bool = false,
+/// Rotating cursor for the RFC 9218 send scheduler's round-robin among
+/// equal-urgency *incremental* streams: each application packet advances it
+/// past the incremental stream that led, so a different one leads next
+/// packet (non-incremental streams are unaffected — they keep strict
+/// stream-id order). See `collectSendableStreamsByPriority`.
+priority_rr_cursor: u64 = 0,
+// Contiguous "reaped" watermark per peer-initiated direction: the
+// count k such that every peer stream index in [0, k) was created
+// and reaped (RFC 9000 §3.2). A STREAM/RESET_STREAM for an absent
+// peer stream with index < the watermark is a post-terminal frame
+// and is ignored rather than resurrecting the stream (which would
+// forget its locked final size / reset state). The bitset records
+// reaped-but-not-yet-coalesced indices in the bounded window
+// [peer_reaped_below_*, peer_opened_streams_*); the watermark only
+// ever advances across a contiguous run of reaped indices from the
+// bottom, so an implicitly-opened-but-never-created lower index
+// (whose bit is never set) permanently halts the run and its later
+// first data still flows to the normal create path. Bounded: every
+// creatable peer index is < local_max_streams_* <=
+// max_streams_per_connection (4096), so the fixed bitset is always
+// in range and adds a constant 2×512 B per connection.
+peer_reaped_below_bidi: u64 = 0,
+peer_reaped_below_uni: u64 = 0,
+peer_reaped_bits_bidi: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
+peer_reaped_bits_uni: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
+/// Decoded peer parameters once BoringSSL exposes them.
+cached_peer_transport_params: ?TransportParams = null,
+/// The peer's transport parameters as REMEMBERED from a prior
+/// connection, supplied by the embedder for a 0-RTT resumption
+/// (BoringSSL does not carry peer transport params across resumption,
+/// and they can't be recovered from the one-way early-data context
+/// digest). Used only to bound early-data (0-RTT) sends *before* the
+/// real `cached_peer_transport_params` arrive on this connection. RFC
+/// 9001 §4.6.1 guarantees the server MUST NOT lower these on
+/// resumption, so seeding limits from them can only under-grant vs
+/// the real params, never over-grant.
+remembered_peer_transport_params: ?TransportParams = null,
+/// The peer's transport-parameter stateless reset token is bound
+/// to its initial source CID. Register it once; later peer DCID
+/// rotation is driven by NEW_CONNECTION_ID metadata.
+peer_transport_reset_token_installed: bool = false,
+/// Per-connection opt-in for sending queued application bytes in
+/// 0-RTT packets. Session resumption can still happen when this is
+/// false; quic just waits for 1-RTT before emitting app data.
+early_data_send_enabled: bool = false,
+/// Once BoringSSL reports rejection, every tracked 0-RTT packet is
+/// removed from flight and its STREAM bytes are put back on the
+/// send queue exactly once.
+early_data_rejection_processed: bool = false,
+
+/// Last send/receive activity on this connection, in the same
+/// microsecond clock the embedder passes to `handle` / `poll` /
+/// `tick`. Zero means no packet activity has been observed yet.
+///
+/// Stable, embedder-readable observation point: layers above
+/// (e.g. an HTTP/3 session enforcing request deadlines) read this
+/// directly as the connection clock rather than threading their
+/// own timestamp through every call. Read-only for embedders —
+/// quic maintains it.
+last_activity_us: u64 = 0,
+
+/// Close/draining lifecycle: pending CONNECTION_CLOSE, closing/
+/// draining deadlines, rate-limit bookkeeping, sticky close event,
+/// and the reason-phrase buffer. See `lifecycle.zig`.
+lifecycle: LifecycleState = .{},
+/// Set whenever an inbound packet authenticates under our keys
+/// while the connection is in RFC 9000 §10.2.1's closing state.
+/// `handle` consumes this flag after the per-datagram loop and
+/// re-arms `pending_close` if the §10.2.1 ¶3 rate-limit allows,
+/// so the peer gets a fresh CONNECTION_CLOSE. Cleared on every
+/// `handle` entry so the signal only reflects the current
+/// datagram.
+closing_state_attribution_observed: bool = false,
+
+/// Peer-issued connection IDs we've stashed via NEW_CONNECTION_ID.
+/// `consumeFreshPeerCidForMigration` draws from this set; it is
+/// also where a peer's `active_connection_id_limit` violation
+/// surfaces (§5.1.1).
+peer_cids: std.ArrayList(IssuedCid) = .empty,
+/// Locally-issued connection IDs, keyed by path, used to map
+/// incoming short-header DCIDs back to draft multipath path IDs.
+local_cids: std.ArrayList(IssuedCid) = .empty,
+/// Server-only HANDSHAKE_DONE delivery. The frame is ack-eliciting
+/// and must be retransmitted on loss until the client confirms the
+/// handshake.
+pending_handshake_done: bool = false,
+handshake_done_queued_once: bool = false,
+/// Graceful-shutdown latch (`beginGracefulShutdown`). While set, local
+/// stream opens are refused with `Error.ShuttingDown` and no further
+/// MAX_STREAMS credit is granted (the peer's stream limit freezes at
+/// its current value), so both sides quiesce new-stream creation while
+/// in-flight streams complete. Independent of the RFC 9000 §10 close
+/// state — the connection stays open until the embedder calls `close`.
+graceful_shutdown: bool = false,
+flow_blocked_events: event_queue_mod.EventQueue(FlowBlockedInfo, max_flow_blocked_events) = .{},
+connection_id_events: event_queue_mod.EventQueue(ConnectionIdReplenishInfo, max_connection_id_events) = .{},
+datagram_send_events: event_queue_mod.EventQueue(StoredDatagramSendEvent, max_datagram_send_events) = .{},
+/// Received `ALTERNATIVE_V4/V6_ADDRESS` events
+/// (draft-munizaga-quic-alternative-server-address-00 §6) the
+/// embedder hasn't drained via `pollEvent` yet. Bounded at
+/// `max_alternative_address_events` (16) with drop-oldest
+/// eviction. Eviction is semantically safe under §6 ¶5
+/// monotonicity — the latest update always supersedes older
+/// ones — but a sluggish embedder polling on a chatty peer can
+/// miss intermediate state. The high-watermark is preserved on
+/// `highest_alternative_address_sequence_seen` so the embedder
+/// can detect that updates were dropped (sequence gap between
+/// the latest polled event and `highestAlternativeAddressSequenceSeen()`).
+alternative_server_address_events: event_queue_mod.EventQueue(AlternativeServerAddressEvent, max_alternative_address_events) = .{},
+/// Highest §6 ¶5 Status Sequence Number we've already observed.
+/// `null` until the first frame arrives. Drives the receive-side
+/// monotonicity gate: equal-or-lower numbers are absorbed silently
+/// (idempotent retransmit / out-of-order delivery).
+highest_alternative_address_sequence_seen: ?u64 = null,
+local_data_blocked_at: ?u64 = null,
+local_stream_data_blocked: std.ArrayList(frame_types.StreamDataBlocked) = .empty,
+local_streams_blocked_bidi: ?u64 = null,
+local_streams_blocked_uni: ?u64 = null,
+peer_data_blocked_at: ?u64 = null,
+peer_stream_data_blocked: std.ArrayList(frame_types.StreamDataBlocked) = .empty,
+peer_streams_blocked_bidi: ?u64 = null,
+peer_streams_blocked_uni: ?u64 = null,
+/// Bytes the application has drained from all receive streams.
+recv_stream_bytes_read: u64 = 0,
+
+/// All control-frame backlog the connection owes the peer at the
+/// application encryption level — flow-control window updates,
+/// STOP_SENDING, NEW_CONNECTION_ID/RETIRE_CONNECTION_ID, the
+/// PATH_CHALLENGE/PATH_RESPONSE pair, multipath draft-21
+/// bookkeeping, and queued DATAGRAMs in both directions. The
+/// hot-path drain in `pollLevel` walks each subqueue in order.
+pending_frames: pending_frames_mod.PendingFrameQueues = .empty,
+
+/// Client-side callback fired when a NEW_TOKEN frame arrives at
+/// application encryption level (RFC 9000 §8.1.3). Embedders
+/// stash the bytes for use as the long-header Token on a future
+/// connection's first Initial. Server-side connections never
+/// fire this — peers MUST NOT send NEW_TOKEN to a server.
+new_token_callback: ?NewTokenCallback = null,
+new_token_user_data: ?*anyopaque = null,
+
+/// Construct a client-side `Connection` in place at `conn` and
+/// wire it to its TLS state immediately — `conn` must already sit
+/// at its final, stable address (the TLS callbacks keep
+/// `*Connection` in SSL ex-data, and completion-style transports
+/// hand Connection-owned buffers to the kernel; a Connection
+/// NEVER moves after this call). Most embedders want
+/// `createClient`, which pairs this with heap placement; this
+/// entry point exists for caller-owned storage (arenas, pools,
+/// static slots) and pairs with `deinit`.
+///
+/// `tls_ctx` must be a client-mode `boringssl.tls.Context` and
+/// stays caller-owned; `server_name` becomes the SNI hostname
+/// (copied by BoringSSL — the slice does not need to outlive this
+/// call).
 /// Encryption level (Initial / Handshake / 0-RTT / 1-RTT) — RFC 9001 §2.1.
 pub const EncryptionLevel = level_mod.EncryptionLevel;
 /// Read or write half-direction selector for keying material.
@@ -1038,608 +1643,6 @@ pub const CryptoBuffer = struct {
 /// `handleDatagram` / `handleClientInitial` / `handleStatelessReset`, drive
 /// time forward with `tick`, pull outgoing datagrams via `pollDatagram`, and
 /// observe lifecycle changes through `nextEvent` / `nextTimer`.
-allocator: std.mem.Allocator,
-role: Role,
-/// Owned SSL handle from the caller-provided `boringssl.tls.Context`.
-/// The Context outlives the Connection (caller-managed).
-inner: boringssl.tls.Conn,
-
-/// Inbox of CRYPTO frame bytes received from the peer at each
-/// encryption level. The peer's `add_handshake_data` callback
-/// appends here; `advance` drains via `provideQuicData`.
-inbox: [4]CryptoBuffer = .{ .{}, .{}, .{}, .{} },
-
-/// Per-level secret bookkeeping. Updated by the
-/// `set_read_secret` / `set_write_secret` callbacks.
-levels: [4]PerLevelState = .{ .{}, .{}, .{}, .{} },
-
-/// Peer pointer for the in-process mock transport tests; real
-/// deployments don't set this (they ship CRYPTO bytes via QUIC
-/// packets through a `transport.Transport` — see `src/transport/`).
-peer: ?*Connection = null,
-
-/// Last alert byte received via the `send_alert` callback, if
-/// any. Non-null = handshake should be torn down.
-alert: ?u8 = null,
-
-/// **Test-only.** When set, the migration gate in
-/// `recordAuthenticatedDatagramAddress` bypasses its
-/// `handshakeDone()` check so peer-address-change tests can fire
-/// migration without driving a full TLS handshake. Production
-/// code MUST NOT set this — it disables RFC 9000 §9.6 / hardening
-/// guide §4.8 enforcement.
-test_only_force_handshake_for_migration: bool = false,
-
-/// Whether to encode the locally-recorded close-reason string into
-/// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
-/// secure-by-default redaction: internal parser-error strings like
-/// "ack of unsent packet" or "connection id reused across paths"
-/// are useful telemetry for the embedder but reveal implementation
-/// detail to the peer (parser fingerprinting, internal state
-/// names). Local introspection is unaffected — `lifecycle.record`
-/// always captures the reason for embedder-side observability,
-/// and `nextEvent` surfaces it via `CloseEvent.reason`.
-///
-/// Embedders that want the reason on the wire (debug builds,
-/// internal load tests, etc.) can flip this to `true`.
-reveal_close_reason_on_wire: bool = false,
-
-/// Hard ceiling on `bytes_resident` (per-connection memory DoS cap).
-/// Sums every byte sitting in peer-controlled reassembly /
-/// queue buffers — CRYPTO `crypto_pending`, RFC 9221 inbound
-/// DATAGRAMs, and per-stream send/recv reassembly buffers. When
-/// a fresh allocation would push the running total past this
-/// cap, the handler closes the connection with
-/// `transport_error_excessive_load` instead of letting the
-/// allocation land. Defaults to `default_max_connection_memory`
-/// (32 MiB); `Server.Config.max_connection_memory` threads onto
-/// every accepted slot.
-///
-/// Tuning note: per-buffer caps already exist
-/// (`max_pending_crypto_bytes_per_level = 64 KiB`,
-/// `max_pending_datagram_bytes = 64 KiB`,
-/// `max_initial_stream_receive_window = 16 MiB`,
-/// `default_max_buffered_send = 1 MiB`). This is the *aggregate*
-/// guard that prevents a peer from opening many streams at once
-/// and inflating the connection's host RSS even when each
-/// individual buffer stays under its own cap.
-max_connection_memory: u64 = default_max_connection_memory,
-
-/// Number of ack-eliciting application packets received before
-/// forcing an immediate ACK (RFC 9000 §13.2.1 ¶2: "An endpoint
-/// MUST acknowledge ack-eliciting packets within its advertised
-/// max_ack_delay, with the following exception: it MUST send an
-/// immediate ACK for ack-eliciting packets that are received after
-/// receiving at least 2 ack-eliciting packets without sending an
-/// ACK..."). RFC 9000 §13.2.2 lets implementations tune this
-/// threshold; 2 is the RFC-recommended starting point.
-/// Set lower (e.g. 1) to ACK every ack-eliciting packet
-/// immediately — useful in low-RTT environments where the
-/// `max_ack_delay` deadline rarely fires. Set higher to amortize
-/// ACK overhead at the cost of triggering more peer PTOs.
-/// `Server.Config` and `Client.Config` thread the chosen value
-/// onto every Connection at construction time.
-delayed_ack_packet_threshold: u8 = application_ack_eliciting_threshold,
-
-/// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168). When
-/// `true` (the default), quic will:
-///   * count incoming `EcnCodepoint` markings into per-PN-space
-///     `recv_ect0` / `recv_ect1` / `recv_ce` counters,
-///   * emit `0x03` ACK frames carrying those counts whenever any
-///     received packet at that level was ECN-marked,
-///   * validate peer-reported counts on incoming ACKs per
-///     §13.4.2 and react to CE bumps via the NewReno
-///     congestion controller.
-///
-/// When `false`, the codec is otherwise unchanged but no marking
-/// signal is propagated either way; outgoing ACKs stay at type
-/// `0x02`. Embedders flip this off only on environments known to
-/// bleach ECN bits (some legacy NATs / firewalls), or when
-/// running tests that need a deterministic congestion control
-/// path.
-ecn_enabled: bool = true,
-/// IP-layer ECN codepoint observed on the most recently received
-/// (and decrypted) datagram. Set by `handle` from the cmsg the
-/// embedder plumbs in; consumed by the per-packet handlers when
-/// they record received PNs into the level's `PnSpace`.
-/// `not_ect` is the conservative default — the embedder
-/// hasn't surfaced any TOS byte for this datagram.
-last_recv_ecn: socket_opts_mod.EcnCodepoint = .not_ect,
-
-/// Running total of bytes currently resident in peer-controlled
-/// buffers — see `max_connection_memory`. Mutated by
-/// `tryReserveResidentBytes` / `releaseResidentBytes` at every
-/// allocation / free site that holds peer-supplied bytes.
-/// Monotonically non-negative — any release that would underflow
-/// the counter clamps at zero and asserts in debug builds.
-bytes_resident: u64 = 0,
-
-/// Connection-level packet-number bookkeeping for Initial and
-/// Handshake (RFC 9000 §12.3). Application PN spaces live in
-/// `paths` so multipath can allocate one space per active path.
-pn_spaces: [2]PnSpace = .{ .{}, .{} },
-/// Sent-packet tracker for connection-level PN spaces. Application
-/// packets live in `paths.primary().sent`; Initial/Handshake stay
-/// here because QUIC multipath only widens the Application space.
-/// Initial + Handshake sent-packet trackers. The tracker headers
-/// live inline (slot storage is tracker-owned heap, armed in
-/// `initClientAt`/`initServerAt`, freed in `deinit`) — the old
-/// `*[2]` slab existed only because trackers used to embed their
-/// 4096-slot arrays by value, which put ~1.5 MB on every stack
-/// frame constructing a Connection. The application-level tracker
-/// lives on each PathState (heap via PathSet).
-sent: [2]SentPacketTracker,
-/// Multipath-capable Application path set. Path id 0 is always the
-/// initial path and owns Application PN/ACK/sent/RTT/congestion.
-paths: PathSet = .{},
-multipath_enabled: bool = false,
-local_max_path_id: u32 = 0,
-peer_max_path_id: u32 = 0,
-peer_paths_blocked_at: ?u32 = null,
-peer_path_cids_blocked_path_id: ?u32 = null,
-peer_path_cids_blocked_next_sequence: u64 = 0,
-current_incoming_path_id: u32 = 0,
-current_incoming_addr: ?Address = null,
-last_authenticated_path_id: ?u32 = null,
-poll_addr_override: ?Address = null,
-/// PTO backoff count for Initial and Handshake. Application PTO
-/// backoff is per-path in `PathState.pto_count`. Reset when an
-/// ACK newly acknowledges ack-eliciting data in that space.
-pto_count: [2]u32 = .{ 0, 0 },
-/// PING probes requested by PTO for Initial and Handshake when no
-/// retransmittable data is immediately available.
-pending_ping: [2]bool = .{ false, false },
-
-/// Per-encryption-level outbox of CRYPTO bytes the TLS bridge
-/// has handed us via `add_handshake_data`. `poll` packs these
-/// into outgoing CRYPTO frames at the matching level.
-outbox: [4]CryptoBuffer = .{ .{}, .{}, .{}, .{} },
-/// Highest CRYPTO offset we've handed to the peer at each level.
-/// Used to set the `offset` field on the next CRYPTO frame.
-crypto_send_offset: [4]u64 = .{ 0, 0, 0, 0 },
-/// Highest CRYPTO offset we've fed back to BoringSSL at each
-/// level (one past the last byte of in-order data delivered via
-/// `provideQuicData`).
-crypto_recv_offset: [4]u64 = .{ 0, 0, 0, 0 },
-/// Per-level reassembly queue for CRYPTO frames received out
-/// of order. Each entry holds bytes whose `offset` is strictly
-/// greater than `crypto_recv_offset[lvl]`. Drained whenever
-/// `crypto_recv_offset` catches up to the lowest entry.
-/// quic-go (and many real stacks) routinely fragment the
-/// ClientHello into out-of-order CRYPTO frames inside a single
-/// Initial; without reassembly the handshake stalls.
-crypto_pending: [4]std.ArrayList(CryptoChunk) = .{ .empty, .empty, .empty, .empty },
-crypto_pending_bytes: [4]usize = .{ 0, 0, 0, 0 },
-/// CRYPTO bytes that were sent in lost packets and need to be
-/// retransmitted at their original offsets.
-crypto_retx: [4]std.ArrayList(CryptoChunk) = .{ .empty, .empty, .empty, .empty },
-/// CRYPTO bytes currently in sent packets awaiting ACK/loss.
-sent_crypto: [4]std.ArrayList(SentCryptoChunk) = .{ .empty, .empty, .empty, .empty },
-
-/// Per-stream state, keyed by stream id.
-streams: std.AutoHashMapUnmanaged(u64, *Stream) = .empty,
-/// Monotonic connection-local key for STREAM send bookkeeping.
-/// Wire packet numbers are scoped by packet-number space/path;
-/// SendStream needs one global key to avoid multipath PN collisions.
-next_stream_packet_key: u64 = 0,
-
-next_datagram_id: u64 = 0,
-
-/// Next Status Sequence Number to mint for an
-/// `ALTERNATIVE_V4/V6_ADDRESS` frame
-/// (draft-munizaga-quic-alternative-server-address-00 §6 ¶5).
-/// Both frame types share one monotonically-increasing space.
-next_alternative_address_sequence: u64 = 0,
-
-/// DCID we put on outgoing packets (the peer chose this; client
-/// learns it from the server's first Initial SCID, or
-/// NEW_CONNECTION_ID). Zero-length CIDs are valid — `peer_dcid_set`
-/// distinguishes "explicitly empty" from "never set".
-peer_dcid: ConnectionId = .{},
-peer_dcid_set: bool = false,
-/// SCID we identify ourselves with — appears as SCID on outgoing
-/// long-header packets, and the peer puts it (or another CID we
-/// issued) as DCID on every incoming packet. Zero-length is valid.
-local_scid: ConnectionId = .{},
-local_scid_set: bool = false,
-/// Stable Source CID used on Initial, Handshake, and 0-RTT long
-/// headers. Peers can retire CID sequence 0 before the Initial or
-/// Handshake packet spaces are fully quiet, but the long-header SCID
-/// still has to remain the one advertised by the handshake transport
-/// parameter.
-initial_source_cid: ConnectionId = .{},
-initial_source_cid_set: bool = false,
-/// Original DCID used for Initial-key derivation (RFC 9001 §5.2).
-/// Active QUIC wire-format version for this connection. Drives
-/// the Initial-key salt + HKDF labels (RFC 9001 §5.2 / RFC 9368
-/// §3.3.1, §3.3.2), the long-header packet-type bit layout
-/// (RFC 9000 §17.2 / RFC 9368 §3.2), and the Retry integrity
-/// constants (RFC 9001 §5.8 / RFC 9368 §3.3.3). Defaults to
-/// QUIC v1; embedders that opt in to v2 set this via
-/// `setVersion` after `initClient` / `initServer`. Once an
-/// Initial is sealed or opened the value is effectively
-/// immutable (changing it would re-derive Initial keys against
-/// a different salt).
-version: u32 = quic_version_1,
-
-/// RFC 9368 §6 compatible-version-negotiation upgrade target,
-/// stashed by the server's `Server.preparseUpgradeTarget` and
-/// applied by the server's `dispatchToSlot` after the first
-/// `handleWithEcn` consumes the wire-version Initial under
-/// wire-version keys. `null` means no upgrade is pending.
-/// Server-side only; clients leave this null. See
-/// `setPendingVersionUpgrade` / `applyPendingVersionUpgrade`.
-pending_version_upgrade: ?u32 = null,
-
-/// RFC 9368 §6 ¶6/¶7 downgrade-attack guard: wire version on the
-/// FIRST Initial we observed. Captured BEFORE any compatible-
-/// version-negotiation upgrade flips `self.version`, so the
-/// server-side check in `validatePeerTransportRole` can compare
-/// the client's advertised `version_information.chosen_version`
-/// against the actual on-wire version of the client's Initial,
-/// even after `applyPendingVersionUpgrade` has retargeted
-/// `self.version` to the upgrade target. Set by `acceptInitial`
-/// on the server side; left `null` on the client side (the client
-/// only ever sends a single wire version on its first Initial,
-/// which equals `self.version` at the time the params are
-/// validated, so the simpler `advertised_versions[0] !=
-/// self.version` check in the client branch is sufficient).
-initial_wire_version: ?u32 = null,
-
-/// Client side: the random DCID it sent on the very first Initial.
-/// Server side: same value, recovered from that incoming Initial.
-initial_dcid: ConnectionId = .{},
-initial_dcid_set: bool = false,
-/// Stable copy of the client's first Initial DCID. If Retry is
-/// accepted, `initial_dcid` changes to the Retry SCID for key
-/// derivation, while this value remains the Original DCID used for
-/// Retry integrity and transport-parameter validation.
-original_initial_dcid: ConnectionId = .{},
-original_initial_dcid_set: bool = false,
-retry_source_cid: ConnectionId = .{},
-retry_source_cid_set: bool = false,
-retry_accepted: bool = false,
-retry_token: std.ArrayList(u8) = .empty,
-
-/// Cached Initial-level packet keys. Derived once `initial_dcid`
-/// is set; cleared if `initial_dcid` is rotated (e.g. after
-/// receiving a Retry, RFC 9001 §5.2). Direction-specific (server
-/// uses `is_server=true` derivation for write).
-initial_keys_read: ?short_packet_mod.PacketKeys = null,
-initial_keys_write: ?short_packet_mod.PacketKeys = null,
-/// Latched true the first time `discardInitialKeys` fires (i.e.
-/// when Handshake or higher secrets are installed). Once set,
-/// `ensureInitialKeys` is a no-op — the discard is one-way and
-/// any subsequent Initial-level packet can't be sealed/opened
-/// with re-derived keys. RFC 9001 §5.7 ¶3.
-initial_keys_discarded: bool = false,
-/// Latched true when `discardHandshakeKeys` fires. RFC 9001 §4.9.2:
-/// "An endpoint MUST discard its handshake keys when the TLS
-/// handshake is confirmed (Section 4.1.2)." For the client, that
-/// confirmation event is receipt of HANDSHAKE_DONE (RFC 9001
-/// §4.1.2 ¶2); for the server, it is delivery of the client's
-/// Finished message (which equals `handshakeDone()` returning
-/// true). Once latched, `pnSpaceForLevel(.handshake)` and
-/// `sentForLevel(.handshake)` are dead — `tick` skips them and
-/// `packetKeys(.handshake, ...)` returns null because the
-/// per-level secret material has been zeroed.
-handshake_keys_discarded: bool = false,
-/// Latched true on the client when a HANDSHAKE_DONE frame is
-/// processed (RFC 9001 §4.1.2 ¶2). Drives `discardHandshakeKeys`
-/// in `applyPostFrameProcessing` and short-circuits any further
-/// Handshake-level activity (PTO, loss detection, retransmit).
-/// Server-side this stays false — the equivalent latch is
-/// `inner.handshakeDone()`, which already covers the §4.9.2
-/// "TLS handshake is confirmed" trigger for the server role.
-received_handshake_done: bool = false,
-/// Sequence number of the locally-issued CID the next-handled
-/// datagram was addressed to, or `null` when unknown. Set by
-/// `Server` from its routing table before each `Connection.handle`
-/// invocation; consumed by `handleRetireConnectionId` to enforce
-/// RFC 9000 §19.16 ¶3 (a peer MUST NOT retire the CID it just
-/// used to send to us — PROTOCOL_VIOLATION).
-current_incoming_local_cid_seq: ?u64 = null,
-
-/// Cumulative count of ACK ranges processed across every ACK /
-/// PATH_ACK frame in the current `handle` cycle. Reset on entry to
-/// `handle`. Incremented by `range_count + 1` per frame (the +1
-/// accounts for `first_range`, which is real but encoded out of
-/// the gap-list). The decoder already caps each individual frame
-/// at `frame.decode.max_incoming_ack_ranges = 256`; without a
-/// per-cycle ceiling, an attacker on N paths could submit
-/// N × 256 ranges per datagram and force unbounded
-/// loss-detection walks. We cap at `incoming_ack_range_cap` —
-/// enough headroom for legitimate multipath aggregation across
-/// ~4 active paths in one datagram, not enough to amplify.
-incoming_ack_range_count: u64 = 0,
-/// Cumulative count of RETIRE_CONNECTION_ID frames processed in
-/// the current `handle` cycle. Reset on entry to `handle`.
-/// Bounded at `incoming_retire_cid_cap` so a peer flooding
-/// retires inside one datagram is treated as adversarial and
-/// closed with PROTOCOL_VIOLATION rather than allowed to spend
-/// CPU walking `local_cids` once per frame.
-incoming_retire_cid_count: u64 = 0,
-
-/// Application key-update lifecycle. QUIC key updates derive new
-/// packet-protection key/IV from "quic ku" while retaining the
-/// original header-protection key. Read side keeps previous/current/next
-/// epochs so delayed old-phase packets survive until the 3x-PTO discard
-/// timer; write side tracks ACK-gating and AEAD packet limits.
-app_read_previous: ?ApplicationKeyEpoch = null,
-app_read_current: ?ApplicationKeyEpoch = null,
-app_read_next: ?ApplicationKeyEpoch = null,
-app_write_current: ?ApplicationKeyEpoch = null,
-app_write_update_pending_ack: bool = false,
-app_next_local_update_after_us: ?u64 = null,
-app_failed_auth_packets: u64 = 0,
-app_key_update_limits: ApplicationKeyUpdateLimits = .{},
-qlog_callback: ?QlogCallback = null,
-qlog_user_data: ?*anyopaque = null,
-/// Optional embedder policy that gates peer migrations to a new
-/// 4-tuple (RFC 9000 §9). When `null`, every authenticated
-/// migration candidate is accepted and validated. See
-/// `setMigrationCallback`.
-migration_callback: ?MigrationCallback = null,
-migration_user_data: ?*anyopaque = null,
-/// Opt-in for high-volume per-packet qlog events
-/// (`packet_sent`, `packet_received`, `packet_lost`). Disabled by
-/// default so production callers don't pay for every packet
-/// crossing the boundary.
-qlog_packet_events: bool = false,
-/// Whether `connection_started` has fired yet. Single-shot.
-qlog_started: bool = false,
-/// Last close-state we emitted for `connection_state_updated`.
-qlog_last_state: CloseState = .open,
-/// Whether `parameters_set` fired.
-qlog_params_emitted: bool = false,
-/// Last congestion controller phase emitted (so we don't spam
-/// transitions). `null` means no snapshot has been taken yet.
-qlog_last_congestion_state: ?QlogCongestionState = null,
-
-// -- cheap aggregate counters used by PathStats --
-/// Total packets we've sent (across all paths/levels).
-qlog_packets_sent: u64 = 0,
-/// Total packets we've successfully received (post-AEAD).
-qlog_packets_received: u64 = 0,
-/// Total packets declared lost.
-qlog_packets_lost: u64 = 0,
-/// Total UDP payload bytes we've sent.
-qlog_bytes_sent: u64 = 0,
-/// Total UDP payload bytes the peer has sent us.
-qlog_bytes_received: u64 = 0,
-
-/// Local datagram budget for outgoing packets. Functions as the
-/// connection-wide ceiling: per-path PMTU values discovered via
-/// RFC 8899 DPLPMTUD must not exceed this. Negotiated peer
-/// `max_udp_payload_size` lowers this in `validatePeerTransportLimits`.
-mtu: usize = default_mtu,
-
-/// RFC 8899 DPLPMTUD configuration. Threaded onto every
-/// `PathState` at creation time. The Connection-level field
-/// defaults to `enable = false` so direct `Connection.createClient
-/// / initServer` callers (mainly internal test fixtures) keep the
-/// static-MTU behaviour. The public `Server.Config
-/// .pmtud` and `Client.Config.pmtud` wrappers default to enabled
-/// (`PmtudConfig{}` with `enable = true`) and call
-/// `setPmtudConfig` after `initClient` / `initServer`, so
-/// production embedders get DPLPMTUD without any extra wiring.
-pmtud_config: path_mod.PmtudConfig = .{ .enable = false },
-
-/// Congestion-control algorithm used by every path's controller.
-/// A mutable posture switch like `ecn_enabled`: wrappers thread
-/// `Config.congestion_control` through `setCongestionAlgorithm`
-/// right after `initClient`/`initServer`; paths created later
-/// (multipath, migration) inherit it at construction.
-cc_algorithm: congestion_mod.Algorithm = .cubic,
-
-/// RFC 9406 HyStart++ configuration for every path's controller.
-/// A posture switch like `cc_algorithm`; wrappers thread
-/// `Config.enable_hystart` here right after init.
-cc_hystart: congestion_mod.HyStartConfig = .{},
-
-/// RFC 9002 §7.7 packet pacing. On by default; `false` restores
-/// the pre-0.11 burst-a-full-cwnd emission timing exactly (the
-/// rollback lever). Wrappers thread `Config.enable_pacing` here.
-pacing_enabled: bool = true,
-
-/// Local parameters handed to BoringSSL. Kept here too so ACK
-/// delay and idle timers can use the negotiated local values.
-local_transport_params: TransportParams = .{},
-/// True once `setTransportParams` has encoded and pushed the local
-/// parameters. Guards the `setLocalScid` ordering contract: the first
-/// SCID latch must happen before this, so its Initial Source Connection
-/// ID (RFC 9000 §7.3) makes it into the advertised parameters.
-local_transport_params_set: bool = false,
-/// Receive-side connection flow-control limit we have advertised
-/// through transport parameters / MAX_DATA.
-local_max_data: u64 = 0,
-/// Sum of per-stream receive high-water marks the peer has forced.
-peer_sent_stream_data: u64 = 0,
-/// Send-side connection flow-control limit advertised by the peer.
-peer_max_data: u64 = std.math.maxInt(u64),
-/// Sum of new stream bytes we have put on the wire.
-we_sent_stream_data: u64 = 0,
-/// Stream-count limits. `local_*` governs peer-created streams;
-/// `peer_*` governs streams opened through the public API. Unknown
-/// peer limits are permissive until peer transport params arrive.
-local_max_streams_bidi: u64 = 0,
-local_max_streams_uni: u64 = 0,
-peer_max_streams_bidi: u64 = std.math.maxInt(u64),
-peer_max_streams_uni: u64 = std.math.maxInt(u64),
-peer_opened_streams_bidi: u64 = 0,
-peer_opened_streams_uni: u64 = 0,
-local_opened_streams_bidi: u64 = 0,
-local_opened_streams_uni: u64 = 0,
-/// `pollEvent` watermarks for `stream_opened` emission: peer-opened
-/// stream indices in [surfaced, peer_opened_streams_*) have not been
-/// surfaced to the embedder yet. Peer indices open contiguously
-/// (RFC 9000 §3.2), so chasing the count is lossless — no queue, no
-/// overflow, O(1) state.
-surfaced_peer_streams_bidi: u64 = 0,
-surfaced_peer_streams_uni: u64 = 0,
-/// One-shot latch for `ConnectionEvent.handshake_established`.
-handshake_established_surfaced: bool = false,
-/// Latch for the one-shot `ConnectionEvent.early_data`: set once
-/// the 0-RTT outcome has been surfaced (or, for connections that
-/// never attempted 0-RTT, once the handshake finishes with
-/// `.not_offered` — after which the status can never change and
-/// `pollEvent` stops consulting BoringSSL).
-early_data_surfaced: bool = false,
-/// Rotating cursor for the RFC 9218 send scheduler's round-robin among
-/// equal-urgency *incremental* streams: each application packet advances it
-/// past the incremental stream that led, so a different one leads next
-/// packet (non-incremental streams are unaffected — they keep strict
-/// stream-id order). See `collectSendableStreamsByPriority`.
-priority_rr_cursor: u64 = 0,
-// Contiguous "reaped" watermark per peer-initiated direction: the
-// count k such that every peer stream index in [0, k) was created
-// and reaped (RFC 9000 §3.2). A STREAM/RESET_STREAM for an absent
-// peer stream with index < the watermark is a post-terminal frame
-// and is ignored rather than resurrecting the stream (which would
-// forget its locked final size / reset state). The bitset records
-// reaped-but-not-yet-coalesced indices in the bounded window
-// [peer_reaped_below_*, peer_opened_streams_*); the watermark only
-// ever advances across a contiguous run of reaped indices from the
-// bottom, so an implicitly-opened-but-never-created lower index
-// (whose bit is never set) permanently halts the run and its later
-// first data still flows to the normal create path. Bounded: every
-// creatable peer index is < local_max_streams_* <=
-// max_streams_per_connection (4096), so the fixed bitset is always
-// in range and adds a constant 2×512 B per connection.
-peer_reaped_below_bidi: u64 = 0,
-peer_reaped_below_uni: u64 = 0,
-peer_reaped_bits_bidi: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
-peer_reaped_bits_uni: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
-/// Decoded peer parameters once BoringSSL exposes them.
-cached_peer_transport_params: ?TransportParams = null,
-/// The peer's transport parameters as REMEMBERED from a prior
-/// connection, supplied by the embedder for a 0-RTT resumption
-/// (BoringSSL does not carry peer transport params across resumption,
-/// and they can't be recovered from the one-way early-data context
-/// digest). Used only to bound early-data (0-RTT) sends *before* the
-/// real `cached_peer_transport_params` arrive on this connection. RFC
-/// 9001 §4.6.1 guarantees the server MUST NOT lower these on
-/// resumption, so seeding limits from them can only under-grant vs
-/// the real params, never over-grant.
-remembered_peer_transport_params: ?TransportParams = null,
-/// The peer's transport-parameter stateless reset token is bound
-/// to its initial source CID. Register it once; later peer DCID
-/// rotation is driven by NEW_CONNECTION_ID metadata.
-peer_transport_reset_token_installed: bool = false,
-/// Per-connection opt-in for sending queued application bytes in
-/// 0-RTT packets. Session resumption can still happen when this is
-/// false; quic just waits for 1-RTT before emitting app data.
-early_data_send_enabled: bool = false,
-/// Once BoringSSL reports rejection, every tracked 0-RTT packet is
-/// removed from flight and its STREAM bytes are put back on the
-/// send queue exactly once.
-early_data_rejection_processed: bool = false,
-
-/// Last send/receive activity on this connection, in the same
-/// microsecond clock the embedder passes to `handle` / `poll` /
-/// `tick`. Zero means no packet activity has been observed yet.
-///
-/// Stable, embedder-readable observation point: layers above
-/// (e.g. an HTTP/3 session enforcing request deadlines) read this
-/// directly as the connection clock rather than threading their
-/// own timestamp through every call. Read-only for embedders —
-/// quic maintains it.
-last_activity_us: u64 = 0,
-
-/// Close/draining lifecycle: pending CONNECTION_CLOSE, closing/
-/// draining deadlines, rate-limit bookkeeping, sticky close event,
-/// and the reason-phrase buffer. See `lifecycle.zig`.
-lifecycle: LifecycleState = .{},
-/// Set whenever an inbound packet authenticates under our keys
-/// while the connection is in RFC 9000 §10.2.1's closing state.
-/// `handle` consumes this flag after the per-datagram loop and
-/// re-arms `pending_close` if the §10.2.1 ¶3 rate-limit allows,
-/// so the peer gets a fresh CONNECTION_CLOSE. Cleared on every
-/// `handle` entry so the signal only reflects the current
-/// datagram.
-closing_state_attribution_observed: bool = false,
-
-/// Peer-issued connection IDs we've stashed via NEW_CONNECTION_ID.
-/// `consumeFreshPeerCidForMigration` draws from this set; it is
-/// also where a peer's `active_connection_id_limit` violation
-/// surfaces (§5.1.1).
-peer_cids: std.ArrayList(IssuedCid) = .empty,
-/// Locally-issued connection IDs, keyed by path, used to map
-/// incoming short-header DCIDs back to draft multipath path IDs.
-local_cids: std.ArrayList(IssuedCid) = .empty,
-/// Server-only HANDSHAKE_DONE delivery. The frame is ack-eliciting
-/// and must be retransmitted on loss until the client confirms the
-/// handshake.
-pending_handshake_done: bool = false,
-handshake_done_queued_once: bool = false,
-/// Graceful-shutdown latch (`beginGracefulShutdown`). While set, local
-/// stream opens are refused with `Error.ShuttingDown` and no further
-/// MAX_STREAMS credit is granted (the peer's stream limit freezes at
-/// its current value), so both sides quiesce new-stream creation while
-/// in-flight streams complete. Independent of the RFC 9000 §10 close
-/// state — the connection stays open until the embedder calls `close`.
-graceful_shutdown: bool = false,
-flow_blocked_events: event_queue_mod.EventQueue(FlowBlockedInfo, max_flow_blocked_events) = .{},
-connection_id_events: event_queue_mod.EventQueue(ConnectionIdReplenishInfo, max_connection_id_events) = .{},
-datagram_send_events: event_queue_mod.EventQueue(StoredDatagramSendEvent, max_datagram_send_events) = .{},
-/// Received `ALTERNATIVE_V4/V6_ADDRESS` events
-/// (draft-munizaga-quic-alternative-server-address-00 §6) the
-/// embedder hasn't drained via `pollEvent` yet. Bounded at
-/// `max_alternative_address_events` (16) with drop-oldest
-/// eviction. Eviction is semantically safe under §6 ¶5
-/// monotonicity — the latest update always supersedes older
-/// ones — but a sluggish embedder polling on a chatty peer can
-/// miss intermediate state. The high-watermark is preserved on
-/// `highest_alternative_address_sequence_seen` so the embedder
-/// can detect that updates were dropped (sequence gap between
-/// the latest polled event and `highestAlternativeAddressSequenceSeen()`).
-alternative_server_address_events: event_queue_mod.EventQueue(AlternativeServerAddressEvent, max_alternative_address_events) = .{},
-/// Highest §6 ¶5 Status Sequence Number we've already observed.
-/// `null` until the first frame arrives. Drives the receive-side
-/// monotonicity gate: equal-or-lower numbers are absorbed silently
-/// (idempotent retransmit / out-of-order delivery).
-highest_alternative_address_sequence_seen: ?u64 = null,
-local_data_blocked_at: ?u64 = null,
-local_stream_data_blocked: std.ArrayList(frame_types.StreamDataBlocked) = .empty,
-local_streams_blocked_bidi: ?u64 = null,
-local_streams_blocked_uni: ?u64 = null,
-peer_data_blocked_at: ?u64 = null,
-peer_stream_data_blocked: std.ArrayList(frame_types.StreamDataBlocked) = .empty,
-peer_streams_blocked_bidi: ?u64 = null,
-peer_streams_blocked_uni: ?u64 = null,
-/// Bytes the application has drained from all receive streams.
-recv_stream_bytes_read: u64 = 0,
-
-/// All control-frame backlog the connection owes the peer at the
-/// application encryption level — flow-control window updates,
-/// STOP_SENDING, NEW_CONNECTION_ID/RETIRE_CONNECTION_ID, the
-/// PATH_CHALLENGE/PATH_RESPONSE pair, multipath draft-21
-/// bookkeeping, and queued DATAGRAMs in both directions. The
-/// hot-path drain in `pollLevel` walks each subqueue in order.
-pending_frames: pending_frames_mod.PendingFrameQueues = .empty,
-
-/// Client-side callback fired when a NEW_TOKEN frame arrives at
-/// application encryption level (RFC 9000 §8.1.3). Embedders
-/// stash the bytes for use as the long-header Token on a future
-/// connection's first Initial. Server-side connections never
-/// fire this — peers MUST NOT send NEW_TOKEN to a server.
-new_token_callback: ?NewTokenCallback = null,
-new_token_user_data: ?*anyopaque = null,
-
-/// Construct a client-side `Connection` in place at `conn` and
-/// wire it to its TLS state immediately — `conn` must already sit
-/// at its final, stable address (the TLS callbacks keep
-/// `*Connection` in SSL ex-data, and completion-style transports
-/// hand Connection-owned buffers to the kernel; a Connection
-/// NEVER moves after this call). Most embedders want
-/// `createClient`, which pairs this with heap placement; this
-/// entry point exists for caller-owned storage (arenas, pools,
-/// static slots) and pairs with `deinit`.
-///
-/// `tls_ctx` must be a client-mode `boringssl.tls.Context` and
-/// stays caller-owned; `server_name` becomes the SNI hostname
-/// (copied by BoringSSL — the slice does not need to outlive this
-/// call).
 pub fn initClientAt(
     conn: *Connection,
     allocator: std.mem.Allocator,
