@@ -510,6 +510,61 @@ test "NEW_TOKEN mint produces fixed-length 96-byte tokens with random nonce" {
     try std.testing.expect(!std.mem.eql(u8, &dst, &dst2));
 }
 
+test "NEW_TOKEN KAT: validate pins the v1 wire format" {
+    // Known-answer token minted by the v1 codec under `testing_key`
+    // with now_us = 1_700_000_000_000_000, lifetime_us =
+    // 3_600_000_000, client_address = "ip4:203.0.113.7:443",
+    // quic_version = 1. Mint is nondeterministic (random nonce), but
+    // `validate` over these fixed bytes is fully deterministic.
+    //
+    // If this test starts failing, the wire format changed and every
+    // outstanding NEW_TOKEN in the field just got invalidated. Since
+    // NEW_TOKENs are expected to outlive Retry tokens by orders of
+    // magnitude and survive server restarts, that must be a
+    // deliberate, versioned decision (bump the domain separator) —
+    // never a refactor side effect.
+    const kat = [_]u8{
+        0xd7, 0x1e, 0x08, 0x58, 0x01, 0xf2, 0x5f, 0xd9, 0x75, 0xf0, 0xeb, 0x5d,
+        0x5a, 0xe8, 0xc7, 0xed, 0x7c, 0x10, 0x6d, 0xa6, 0x76, 0x7c, 0xec, 0xa1,
+        0x8c, 0x2d, 0xe8, 0xdc, 0x80, 0x51, 0x6f, 0x99, 0x69, 0x29, 0x30, 0x20,
+        0x63, 0x30, 0x90, 0xda, 0x67, 0x1c, 0x5c, 0xea, 0xbf, 0xcc, 0x8c, 0xe9,
+        0x94, 0xbe, 0xf6, 0x56, 0xfc, 0x8b, 0x02, 0xc8, 0x4f, 0x4b, 0xee, 0xe9,
+        0x14, 0x6a, 0xd9, 0xdc, 0x32, 0x6e, 0xc1, 0x71, 0xdc, 0x2f, 0xcb, 0x12,
+        0xee, 0x10, 0x6b, 0xeb, 0xcd, 0xa7, 0x95, 0x0b, 0x86, 0x9e, 0x6d, 0x23,
+        0x78, 0x1e, 0x51, 0x67, 0x59, 0x91, 0x16, 0xd5, 0x5c, 0xf7, 0xea, 0x60,
+    };
+    const addr = "ip4:203.0.113.7:443";
+
+    try std.testing.expectEqual(ValidationResult.valid, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_100_000_000,
+        .client_address = addr,
+    }));
+    // Same bytes against shifted expectations — pins each recovered
+    // field, not just AEAD integrity.
+    try std.testing.expectEqual(ValidationResult.expired, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_003_600_000_001,
+        .client_address = addr,
+    }));
+    try std.testing.expectEqual(ValidationResult.not_yet_valid, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_699_999_999_999_999,
+        .client_address = addr,
+    }));
+    try std.testing.expectEqual(ValidationResult.wrong_version, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_100_000_000,
+        .client_address = addr,
+        .quic_version = 0x6b3343cf,
+    }));
+    try std.testing.expectEqual(ValidationResult.invalid, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_100_000_000,
+        .client_address = "ip4:203.0.113.7:444",
+    }));
+}
+
 // -- fuzz harness --------------------------------------------------------
 //
 // Drive `validate` with arbitrary bytes and a fuzzer-chosen address.

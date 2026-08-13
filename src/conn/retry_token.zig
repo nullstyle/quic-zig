@@ -591,6 +591,81 @@ test "Retry token mint produces fixed-length 96-byte tokens" {
     try std.testing.expect(!std.mem.eql(u8, &dst, &dst2));
 }
 
+test "Retry token KAT: validate pins the v2 wire format" {
+    // Known-answer token minted by the v2 codec under `testing_key`
+    // with now_us = 1_700_000_000_000_000, lifetime_us = 30_000_000,
+    // client_address = "ip4:203.0.113.7:443", original_dcid =
+    // 01..08, retry_scid = aa bb cc dd ee ff 11 22, quic_version = 1.
+    // Mint is nondeterministic (random nonce), but `validate` over
+    // these fixed bytes is fully deterministic.
+    //
+    // If this test starts failing, the wire format changed and every
+    // outstanding Retry token just got invalidated — that must be a
+    // deliberate, versioned decision (bump the domain separator),
+    // never a refactor side effect.
+    const kat = [_]u8{
+        0x2d, 0x18, 0x9e, 0xbb, 0x1f, 0x18, 0x20, 0x14, 0xcc, 0x7e, 0x23, 0x9c,
+        0x00, 0xef, 0xef, 0xd2, 0x7b, 0x5e, 0x18, 0x02, 0x18, 0x1e, 0xf6, 0xe4,
+        0x46, 0x54, 0x63, 0x0f, 0x97, 0xe1, 0xa0, 0xff, 0xb7, 0x97, 0xdb, 0xb5,
+        0xeb, 0xcc, 0xf8, 0xed, 0x8e, 0xe8, 0x8b, 0x95, 0x0b, 0x91, 0xee, 0xfa,
+        0xc6, 0x13, 0xa8, 0xf3, 0xdc, 0x71, 0x41, 0xd3, 0x50, 0x45, 0xdc, 0xc6,
+        0x3e, 0x75, 0x32, 0x49, 0x2f, 0xb6, 0xc7, 0x3c, 0x0c, 0xb6, 0x3b, 0xd6,
+        0x5a, 0x5d, 0xab, 0xf2, 0xa4, 0x2a, 0xbd, 0x8d, 0xb2, 0x7f, 0x63, 0xca,
+        0x42, 0x61, 0x28, 0xeb, 0xb9, 0xb4, 0x77, 0x27, 0x62, 0xfb, 0x03, 0x28,
+    };
+    const addr = "ip4:203.0.113.7:443";
+    const odcid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+    const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22 };
+
+    try std.testing.expectEqual(ValidationResult.valid, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_010_000_000,
+        .client_address = addr,
+        .original_dcid = &odcid,
+        .retry_scid = &scid,
+    }));
+    // Same bytes against shifted expectations — pins each recovered
+    // field, not just AEAD integrity.
+    try std.testing.expectEqual(ValidationResult.expired, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_030_000_001,
+        .client_address = addr,
+        .original_dcid = &odcid,
+        .retry_scid = &scid,
+    }));
+    try std.testing.expectEqual(ValidationResult.not_yet_valid, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_699_999_999_999_999,
+        .client_address = addr,
+        .original_dcid = &odcid,
+        .retry_scid = &scid,
+    }));
+    try std.testing.expectEqual(ValidationResult.wrong_version, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_010_000_000,
+        .client_address = addr,
+        .original_dcid = &odcid,
+        .retry_scid = &scid,
+        .quic_version = 0x6b3343cf,
+    }));
+    const wrong_odcid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x09 };
+    try std.testing.expectEqual(ValidationResult.invalid, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_010_000_000,
+        .client_address = addr,
+        .original_dcid = &wrong_odcid,
+        .retry_scid = &scid,
+    }));
+    const wrong_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x23 };
+    try std.testing.expectEqual(ValidationResult.invalid, validate(&kat, .{
+        .key = &testing_key,
+        .now_us = 1_700_000_010_000_000,
+        .client_address = addr,
+        .original_dcid = &odcid,
+        .retry_scid = &wrong_scid,
+    }));
+}
+
 // -- fuzz harness --------------------------------------------------------
 //
 // Drive `validate` with arbitrary bytes and a fuzzer-chosen set of
