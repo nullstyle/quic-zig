@@ -19,7 +19,7 @@ const bbr_mod = @import("congestion_bbr.zig");
 const cubic_mod = @import("congestion_cubic.zig");
 const delivery_rate = @import("delivery_rate.zig");
 const hystart_mod = @import("hystart.zig");
-const pacing_mod = @import("pacing.zig");
+const pacing_mod = @import("Pacer.zig");
 
 /// RFC 9406 HyStart++ state/config, shared by both controllers.
 pub const HyStart = hystart_mod.State;

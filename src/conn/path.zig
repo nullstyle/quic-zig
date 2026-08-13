@@ -19,11 +19,11 @@ const std = @import("std");
 
 const congestion_mod = @import("congestion.zig");
 const delivery_rate_mod = @import("delivery_rate.zig");
-const pacing_mod = @import("pacing.zig");
+const pacing_mod = @import("Pacer.zig");
 const pn_space_mod = @import("PnSpace.zig");
 const path_validator_mod = @import("PathValidator.zig");
 const rtt_mod = @import("RttEstimator.zig");
-const sent_packets_mod = @import("sent_packets.zig");
+const sent_packets_mod = @import("SentPacketTracker.zig");
 
 /// Re-export of the per-path NewReno congestion controller.
 pub const NewReno = congestion_mod.NewReno;

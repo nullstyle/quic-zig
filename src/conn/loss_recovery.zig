@@ -11,9 +11,9 @@ const ack_range = @import("../frame/ack_range.zig");
 const frame_types = @import("../frame/types.zig");
 
 const PnSpace = @import("PnSpace.zig").PnSpace;
-const SentPacketTracker = @import("sent_packets.zig").SentPacketTracker;
-const SentPacket = @import("sent_packets.zig").SentPacket;
-const sent_packets_max_tracked = @import("sent_packets.zig").max_tracked;
+const SentPacketTracker = @import("SentPacketTracker.zig").SentPacketTracker;
+const SentPacket = @import("SentPacketTracker.zig").SentPacket;
+const sent_packets_max_tracked = @import("SentPacketTracker.zig").max_tracked;
 const RttEstimator = @import("RttEstimator.zig").RttEstimator;
 const granularity_us = @import("RttEstimator.zig").granularity_us;
 

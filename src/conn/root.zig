@@ -30,7 +30,7 @@
 /// Connection state machine: handshake, send/receive, streams, migration, close.
 pub const state = @import("state.zig");
 /// Pending control-frame queues drained by `Connection.pollLevel`.
-pub const pending_frames = @import("pending_frames.zig");
+pub const pending_frames = @import("PendingFrameQueues.zig");
 /// Close/draining lifecycle state extracted from `state.Connection`
 /// (RFC 9000 §10).
 pub const lifecycle = @import("lifecycle.zig");
@@ -41,7 +41,7 @@ pub const pn_space = @import("PnSpace.zig");
 /// RFC 9002 §5 round-trip-time estimator.
 pub const rtt = @import("RttEstimator.zig");
 /// RFC 9002 §A.1 per-PN-space sent-packet tracker.
-pub const sent_packets = @import("sent_packets.zig");
+pub const sent_packets = @import("SentPacketTracker.zig");
 /// RFC 9002 §7 + Appendix B NewReno congestion control.
 pub const congestion = @import("congestion.zig");
 /// Delivery-rate estimation for rate-based congestion control
@@ -50,7 +50,7 @@ pub const delivery_rate = @import("delivery_rate.zig");
 /// RFC 9002 §6 ACK processing and loss detection primitives.
 pub const loss_recovery = @import("loss_recovery.zig");
 /// RFC 9002 §7.7 token-bucket packet pacing.
-pub const pacing = @import("pacing.zig");
+pub const pacing = @import("Pacer.zig");
 /// RFC 9406 HyStart++ slow-start exit, shared by both controllers.
 pub const hystart = @import("hystart.zig");
 /// RFC 9000 §4 connection-, stream-, and stream-count flow control.
@@ -58,9 +58,9 @@ pub const flow_control = @import("flow_control.zig");
 /// RFC 9000 §8.2 PATH_CHALLENGE/PATH_RESPONSE state machine.
 pub const path_validator = @import("PathValidator.zig");
 /// RFC 9000 §3.1 send-side stream buffer and FIN/RESET handling.
-pub const send_stream = @import("send_stream.zig");
+pub const send_stream = @import("SendStream.zig");
 /// RFC 9000 §3.2 receive-side stream reassembly and RESET handling.
-pub const recv_stream = @import("recv_stream.zig");
+pub const recv_stream = @import("RecvStream.zig");
 /// Per-path 4-tuple bundle: CIDs, anti-amp, validation, RTT, congestion.
 pub const path = @import("path.zig");
 /// RFC 9000 §8.1.2 stateless Retry token mint/validate.

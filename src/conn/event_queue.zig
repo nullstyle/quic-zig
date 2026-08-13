@@ -13,7 +13,7 @@
 
 const std = @import("std");
 
-const sent_packets_mod = @import("sent_packets.zig");
+const sent_packets_mod = @import("SentPacketTracker.zig");
 
 /// Whether a flow-control block was hit on the local side or reported by the peer.
 pub const FlowBlockedSource = enum {

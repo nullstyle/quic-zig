@@ -30,7 +30,7 @@
 //! instead of trapping.
 
 const std = @import("std");
-const sent_packets = @import("sent_packets.zig");
+const sent_packets = @import("SentPacketTracker.zig");
 
 const us_per_s: u64 = std.time.us_per_s;
 

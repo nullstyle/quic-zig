@@ -14,7 +14,7 @@ const std = @import("std");
 const congestion = @import("congestion.zig");
 const delivery_rate = @import("delivery_rate.zig");
 const hystart_mod = @import("hystart.zig");
-const pacing_mod = @import("pacing.zig");
+const pacing_mod = @import("Pacer.zig");
 
 /// CUBIC multiplicative-decrease factor β_cubic = 0.7 (RFC 9438 §4.6).
 pub const beta_num: u64 = 7;

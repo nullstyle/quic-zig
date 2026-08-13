@@ -7,3 +7,4 @@ cc5aded55f3f10e6c8b603600a568313b04f3e5b  # server.zig file-as-struct de-indent
 c95899b5ec6b6fa5e07031a26432a71e6bc978b5  # client.zig file-as-struct de-indent
 e61727724404069fdda96599152270854a3999b3  # tls/lb file-as-struct de-indents
 10967a3e953ed185f480763b614fe903462c57d9  # conn wave A file-as-struct de-indents
+ebfc28a943c18f01a571ac3b1d5c626561470fad  # conn wave B file-as-struct de-indents
