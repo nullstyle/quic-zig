@@ -3489,6 +3489,19 @@ pub const Connection = struct {
         self.early_data_rejection_processed = true;
     }
 
+    /// RFC 9001 §4.6.2: the server rejected 0-RTT, so everything sent
+    /// under early-data keys must be re-sent under 1-RTT keys.
+    ///
+    /// CONTRACT — load-bearing downstream, do not weaken silently:
+    /// rejection requeues the SAME stream bytes and control frames
+    /// VERBATIM for 1-RTT retransmission. No stream is reset, no data
+    /// is dropped, and nothing is reordered beyond normal retransmit
+    /// scheduling; the packets are explicitly NOT congestion losses.
+    /// http3-zig builds its HTTP/3 early-data guarantees (RFC 9114
+    /// §7.2.4.2 remembered-settings replay) directly on this verbatim
+    /// behavior. If a reset-streams-on-rejection policy is ever
+    /// wanted, add it as a second explicit mode beside this one —
+    /// changing this default breaks a consumer contract.
     pub fn requeueRejectedEarlyData(self: *Connection) Error!void {
         for (self.paths.paths.items) |*path| {
             var i: u32 = 0;
