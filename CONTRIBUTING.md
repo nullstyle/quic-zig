@@ -69,8 +69,10 @@ modes:
   `$ITERS` and let it run.
 - **Pre-release gate (~10 minutes).** Before a release is tagged, a
   completed green run of `.github/workflows/rc-fuzz.yml` must exist for
-  the release commit. Default budget is `50000` per target (37 targets,
-  so ~1.85M executions). Unlike the weekly fuzz job, this gate is
+  the release commit. Default budget is `50000` per target (38 targets
+  as of 2026-08-13 — count them with `grep -rc 'std.testing.fuzz('
+  src --include='*.zig'` rather than trusting this sentence — so
+  ~1.9M executions). Unlike the weekly fuzz job, this gate is
   blocking. Anyone — maintainer, contributor, or an agent session — can
   dispatch it (`gh workflow run rc-fuzz.yml --ref <ref>`) and tag on
   green; the gate is about the evidence existing, not about who pushes
@@ -247,6 +249,11 @@ Rules that keep the seam clean:
 An unreferenced alias to a nonexistent decl compiles silently (lazy
 analysis) and detonates on first use — when you delete a decl, grep
 for aliases to it rather than trusting the build.
+
+Mechanical restyle commits (whole-file de-indents, rename-only moves)
+are listed in `.git-blame-ignore-revs`; run `git config
+blame.ignoreRevsFile .git-blame-ignore-revs` once locally and `git
+blame` skips them (GitHub's blame UI honors the file automatically).
 
 ## Style
 
