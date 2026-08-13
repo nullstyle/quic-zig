@@ -175,6 +175,11 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         requireDecl(Conn, "earlyDataStatus");
         requireDecl(Conn, "earlyDataReason");
         requireDecl(Conn, "setEarlyDataEnabled");
+        requireDecl(Conn, "streamArrivedInEarlyData");
+        requireDecl(Conn, "setEarlyDataContextForParams");
+        // The status enum is part of the Stable surface: embedders
+        // switch on it (HTTP/3 remembered-settings replay).
+        _ = quic.EarlyDataStatus;
         // Wrapper config: ticket capture (client) and 0-RTT replay
         // context + proactive CID replenish (server).
         _ = std.meta.fieldInfo(quic.Client.Config, .new_session_callback);

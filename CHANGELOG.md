@@ -5,6 +5,18 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Changed
+
+- **The 0-RTT / early-data surface is Stable tier** —
+  `earlyDataStatus` (+ `EarlyDataStatus`), `earlyDataReason`,
+  `setEarlyDataEnabled`, `streamArrivedInEarlyData`, and
+  `setEarlyDataContextForParams` join the compile-checked Stable list
+  (`tests/e2e/public_api_smoke.zig`), promoted at the request of the
+  first downstream shipping HTTP/3 early data on them. The verbatim
+  requeue-on-rejection behavior is documented as part of the surface.
+
 ## [0.12.0] - 2026-08-12
 
 The shape release. BBRv3 lands as the third congestion controller —

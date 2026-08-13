@@ -32,6 +32,14 @@ refined before 1.0, but changes will be deliberate, called out in
 - **Lifecycle:** `beginGracefulShutdown` / `gracefulShutdownActive`,
   `close`, `ConnectionPhase`, `CloseState`, `CloseEvent`.
 - **Datagrams:** `sendDatagram` / `sendDatagramTracked`, `receiveDatagram`.
+- **0-RTT / early data:** `earlyDataStatus` (and the `EarlyDataStatus`
+  enum), `earlyDataReason`, `setEarlyDataEnabled`,
+  `streamArrivedInEarlyData`, `setEarlyDataContextForParams`, plus the
+  wrapper knobs already covered above (`Client.Config.resumption_state`,
+  `Server.Config.early_data`, `Server.Config.early_data_application_context`).
+  The rejection contract is part of the surface: rejected early data is
+  requeued VERBATIM for 1-RTT (see `requeueRejectedEarlyData`'s CONTRACT
+  block) — downstream HTTP/3 early-data support builds on it.
 - **Flow-control introspection** and the qlog-style event callbacks.
 - **`ConnectionEvent`** — subject to the forward-compatibility contract
   below.
