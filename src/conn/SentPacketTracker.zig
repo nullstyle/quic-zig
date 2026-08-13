@@ -404,10 +404,7 @@ pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
     }
     self.packets[self.count] = p;
     self.count += 1;
-    if (p.in_flight) {
-        self.bytes_in_flight += p.bytes;
-        if (p.ack_eliciting) self.ack_eliciting_in_flight += p.bytes;
-    }
+    self.addInFlight(p);
 }
 
 /// Overwrite a removed slot with a canonical, fully-defined
@@ -519,10 +516,7 @@ pub fn removeRangeWithError(
     while (i < end) : (i += 1) {
         const packet = &self.packets[i];
         if (packet.dead) continue;
-        if (packet.in_flight) {
-            self.bytes_in_flight -= packet.bytes;
-            if (packet.ack_eliciting) self.ack_eliciting_in_flight -= packet.bytes;
-        }
+        self.subInFlight(packet.*);
         const pn = packet.pn;
         const result = on_remove(context, packet);
         tombstone(packet, pn);

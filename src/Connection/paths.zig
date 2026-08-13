@@ -12,6 +12,7 @@ const boringssl = @import("boringssl");
 const state_mod = @import("../Connection.zig");
 const conn_qlog = @import("qlog.zig");
 const conn_cids = @import("cids.zig");
+const conn_loss = @import("loss.zig");
 const conn_recv_multipath_handlers = @import("recv_multipath_handlers.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
@@ -300,6 +301,33 @@ pub fn newPathChallengeToken(conn: *Connection) Error![8]u8 {
     var token: [8]u8 = undefined;
     try boringssl.crypto.rand.fillBytes(&token);
     return token;
+}
+
+/// Arm PATH_CHALLENGE for a migration on `path`: mints a fresh
+/// token, arms the validator with the RFC 9000 §8.2.4 `3 * PTO`
+/// timeout, stamps the path's last-challenge clock so the rate
+/// limiter in `recordAuthenticatedDatagramAddress` can throttle
+/// subsequent peer-initiated migration attempts, and queues the
+/// frame for the next `poll`. Shared tail of the three migration
+/// triggers (`handlePeerAddressChange`, `beginClientActiveMigration`,
+/// `noteServerLocalAddressChanged`); `probePathId` deliberately
+/// stays separate — it takes a caller-supplied token/timeout and
+/// does not feed the migration rate limiter.
+pub fn armMigrationPathChallenge(
+    conn: *Connection,
+    path: *PathState,
+    now_us: u64,
+) Error!void {
+    const token = try newPathChallengeToken(
+        conn,
+    );
+    const timeout_us = Connection.saturatingMul(
+        conn_loss.ptoDurationForApplicationPath(conn, path),
+        3,
+    );
+    path.path.validator.beginChallenge(token, now_us, timeout_us);
+    path.path.last_path_challenge_at_us = now_us;
+    queuePathChallengeOnPath(conn, path.id, token);
 }
 
 fn resetPathRecoveryAfterMigration(

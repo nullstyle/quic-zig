@@ -34,7 +34,6 @@ const RttEstimator = state_mod.RttEstimator;
 const short_packet_mod = state_mod.short_packet_mod;
 const socket_opts_mod = state_mod.socket_opts_mod;
 const stateless_reset_mod = state_mod.stateless_reset_mod;
-const _internal = state_mod._internal;
 const max_recv_plaintext = state_mod.max_recv_plaintext;
 const Address = state_mod.Address;
 const PathState = state_mod.PathState;
@@ -539,6 +538,25 @@ pub fn dispatchFrames(
         {
             return;
         }
+        // draft-munizaga-quic-alternative-server-address-00 §6.
+        // ALTERNATIVE_V4/V6_ADDRESS frames are gated by the
+        // `alternative_address` transport parameter (§4) — only
+        // a server may send them, and only after the client
+        // advertised support. Receipt outside that envelope is
+        // a peer protocol violation. One gate for both frame
+        // types: the §4/§7 negotiation policy reads only the
+        // role and the negotiated parameter, never the address
+        // payload, so it must not be able to diverge per family.
+        if (isAlternativeAddressFrame(f) and
+            (conn.role != .client or !conn.localAdvertisedAlternativeAddress()))
+        {
+            conn.close(
+                true,
+                transport_error_protocol_violation,
+                "alternative_address frame without negotiation",
+            );
+            return;
+        }
         switch (f) {
             .padding, .ping => {},
             .handshake_done => {
@@ -635,38 +653,8 @@ pub fn dispatchFrames(
             },
             .retire_connection_id => |rc| conn.handleRetireConnectionId(rc),
             .new_token => |nt| conn.handleNewToken(nt),
-            // draft-munizaga-quic-alternative-server-address-00 §6.
-            // ALTERNATIVE_V4/V6_ADDRESS frames are gated by the
-            // `alternative_address` transport parameter (§4) — only
-            // a server may send them, and only after the client
-            // advertised support. Receipt outside that envelope is
-            // a peer protocol violation.
-            .alternative_v4_address => |a| {
-                if (conn.role != .client or
-                    !conn.localAdvertisedAlternativeAddress())
-                {
-                    conn.close(
-                        true,
-                        transport_error_protocol_violation,
-                        "alternative_address frame without negotiation",
-                    );
-                    return;
-                }
-                conn.handleAlternativeAddressV4(a);
-            },
-            .alternative_v6_address => |a| {
-                if (conn.role != .client or
-                    !conn.localAdvertisedAlternativeAddress())
-                {
-                    conn.close(
-                        true,
-                        transport_error_protocol_violation,
-                        "alternative_address frame without negotiation",
-                    );
-                    return;
-                }
-                conn.handleAlternativeAddressV6(a);
-            },
+            .alternative_v4_address => |a| conn.handleAlternativeAddressV4(a),
+            .alternative_v6_address => |a| conn.handleAlternativeAddressV6(a),
         }
     }
     if (debugFrames() != null) {
@@ -685,6 +673,18 @@ fn isMultipathFrame(f: frame_types.Frame) bool {
         .max_path_id,
         .paths_blocked,
         .path_cids_blocked,
+        => true,
+        else => false,
+    };
+}
+
+/// draft-munizaga-quic-alternative-server-address-00 §6 frame
+/// classifier feeding the pre-switch negotiation gate in
+/// `dispatchFrames` — both families share one §4/§7 policy check.
+fn isAlternativeAddressFrame(f: frame_types.Frame) bool {
+    return switch (f) {
+        .alternative_v4_address,
+        .alternative_v6_address,
         => true,
         else => false,
     };
@@ -778,24 +778,9 @@ fn validateIncomingMultipathFrame(conn: *Connection, f: frame_types.Frame) bool 
         .paths_blocked => |pb| pathIdAllowedByLocalLimit(conn, pb.maximum_path_id),
         .path_cids_blocked => |pcb| blk: {
             if (!pathIdAllowedByLocalLimit(conn, pcb.path_id)) break :blk false;
-            const next = _internal.nextLocalCidSequence(conn, pcb.path_id);
-            if (pcb.next_sequence_number > next) {
-                conn.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
-                break :blk false;
-            }
-            break :blk true;
+            break :blk conn_recv_multipath_handlers.pathCidsBlockedSeqIsValid(conn, pcb);
         },
-        .max_path_id => |mp| blk: {
-            if (conn.cached_peer_transport_params) |params| {
-                if (params.initial_max_path_id) |initial_max_path_id| {
-                    if (mp.maximum_path_id < initial_max_path_id) {
-                        conn.close(true, transport_error_protocol_violation, "max path id below peer initial limit");
-                        break :blk false;
-                    }
-                }
-            }
-            break :blk true;
-        },
+        .max_path_id => |mp| conn_recv_multipath_handlers.maxPathIdRespectsPeerInitialLimit(conn, mp),
         else => true,
     };
 }

@@ -416,6 +416,34 @@ test "NORMATIVE receiver closes with PROTOCOL_VIOLATION on receipt without negot
     );
 }
 
+test "NORMATIVE receiver closes with PROTOCOL_VIOLATION on V6 receipt without negotiation [draft-munizaga-quic-alternative-server-address-00 §7]" {
+    // IPv6 twin of the gate test above. The §4/§7 negotiation gate
+    // in the frame dispatcher is one shared check for both frame
+    // types; this pins the ALTERNATIVE_V6_ADDRESS half so the two
+    // families cannot silently diverge (a gate tightened only on
+    // the V4 side would leave V6 as a reachable protocol hole).
+    const allocator = std.testing.allocator;
+    var pair = try handshake_fixture.HandshakePair.init(allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    var frame_buf: [64]u8 = undefined;
+    const n = try frame.encode(&frame_buf, .{ .alternative_v6_address = .{
+        .preferred = false,
+        .retire = false,
+        .status_sequence_number = 1,
+        .address = @splat(0x20),
+        .port = 4433,
+    } });
+
+    const close_event = try pair.injectFrameAtClient(frame_buf[0..n]);
+    try std.testing.expect(close_event != null);
+    try std.testing.expectEqual(
+        handshake_fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION,
+        close_event.?.error_code,
+    );
+}
+
 test "NORMATIVE receiver surfaces a typed ALTERNATIVE_V4_ADDRESS event when client advertised support [draft-munizaga-quic-alternative-server-address-00 §6]" {
     // End-to-end: client advertises `alternative_address = true` in
     // its transport parameters during the handshake, server emits an

@@ -87,15 +87,49 @@ pub fn handlePathRetireConnectionId(
     conn_cids.dropPendingLocalCidAdvertisement(conn, rc.path_id, rc.sequence_number);
 }
 
-pub fn handleMaxPathId(conn: *Connection, mp: frame_types.MaxPathId) void {
+/// draft-ietf-quic-multipath-21: a MAX_PATH_ID below the peer's own
+/// `initial_max_path_id` transport parameter would retract path
+/// capacity the handshake already granted — path limits only ever
+/// grow. Closes with PROTOCOL_VIOLATION and returns false on
+/// violation. Single home for the rule and its close reason,
+/// shared by the dispatcher's pre-switch multipath gate
+/// (`validateIncomingMultipathFrame`) and `handleMaxPathId` (which
+/// tests reach directly, bypassing dispatch).
+// INTERNAL: pub for direct sibling import (recv_dispatch.zig).
+pub fn maxPathIdRespectsPeerInitialLimit(conn: *Connection, mp: frame_types.MaxPathId) bool {
     if (conn.cached_peer_transport_params) |params| {
         if (params.initial_max_path_id) |initial_max_path_id| {
             if (mp.maximum_path_id < initial_max_path_id) {
                 conn.close(true, transport_error_protocol_violation, "max path id below peer initial limit");
-                return;
+                return false;
             }
         }
     }
+    return true;
+}
+
+/// draft-ietf-quic-multipath-21: PATH_CIDS_BLOCKED's Next Sequence
+/// Number cannot exceed the next local CID sequence number we would
+/// issue on that path — a peer claiming to be blocked past what we
+/// ever issued is lying about our own allocations. Closes with
+/// PROTOCOL_VIOLATION and returns false on violation. Single home
+/// for the rule and its close reason, shared by the dispatcher's
+/// pre-switch multipath gate (`validateIncomingMultipathFrame`) and
+/// `handlePathCidsBlocked` (which tests reach directly, bypassing
+/// dispatch). Callers gate `pcb.path_id` through
+/// `pathIdAllowedByLocalLimit` first.
+// INTERNAL: pub for direct sibling import (recv_dispatch.zig).
+pub fn pathCidsBlockedSeqIsValid(conn: *Connection, pcb: frame_types.PathCidsBlocked) bool {
+    const next = _internal.nextLocalCidSequence(conn, pcb.path_id);
+    if (pcb.next_sequence_number > next) {
+        conn.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
+        return false;
+    }
+    return true;
+}
+
+pub fn handleMaxPathId(conn: *Connection, mp: frame_types.MaxPathId) void {
+    if (!maxPathIdRespectsPeerInitialLimit(conn, mp)) return;
     if (mp.maximum_path_id > conn.peer_max_path_id) {
         conn.peer_max_path_id = @min(mp.maximum_path_id, max_supported_path_id);
     }
@@ -109,11 +143,7 @@ pub fn handlePathsBlocked(conn: *Connection, pb: frame_types.PathsBlocked) void 
 
 pub fn handlePathCidsBlocked(conn: *Connection, pcb: frame_types.PathCidsBlocked) void {
     if (!conn_recv_dispatch.pathIdAllowedByLocalLimit(conn, pcb.path_id)) return;
-    const next = _internal.nextLocalCidSequence(conn, pcb.path_id);
-    if (pcb.next_sequence_number > next) {
-        conn.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
-        return;
-    }
+    if (!pathCidsBlockedSeqIsValid(conn, pcb)) return;
     conn.peer_path_cids_blocked_path_id = pcb.path_id;
     conn.peer_path_cids_blocked_next_sequence = pcb.next_sequence_number;
     conn_cids.recordConnectionIdsNeeded(conn, pcb.path_id, .path_cids_blocked, pcb.next_sequence_number);

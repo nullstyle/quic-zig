@@ -162,16 +162,7 @@ pub fn handlePeerAddressChange(
 
     path.beginMigration(addr, datagram_len);
 
-    const token = try conn_paths.newPathChallengeToken(
-        conn,
-    );
-    const timeout_us = Connection.saturatingMul(conn.ptoDurationForApplicationPath(path), 3);
-    path.path.validator.beginChallenge(token, now_us, timeout_us);
-    // Stamp the path's last-challenge clock so the rate limiter
-    // in `recordAuthenticatedDatagramAddress` can throttle
-    // subsequent peer-initiated migration attempts.
-    path.path.last_path_challenge_at_us = now_us;
-    conn_paths.queuePathChallengeOnPath(conn, path.id, token);
+    try conn_paths.armMigrationPathChallenge(conn, path, now_us);
 }
 
 /// RFC 9000 §5.1.2 ¶1 helper: pick a peer-issued CID for `path`
@@ -280,16 +271,7 @@ pub fn beginClientActiveMigration(
     // Snapshot rollback state before any mutation so a
     // validation timeout can revert peer_cid / peer_dcid /
     // local_addr cleanly.
-    if (path.migration_rollback == null) {
-        path.migration_rollback = .{
-            .peer_addr = path.path.peer_addr,
-            .peer_addr_set = path.peer_addr_set,
-            .validated = path.path.isValidated(),
-            .bytes_received = path.path.bytes_received,
-            .bytes_sent = path.path.bytes_sent,
-            .state = path.path.state,
-        };
-    }
+    path.snapshotMigrationRollback();
 
     // Rotate to the fresh peer CID per RFC 9000 §5.1.2 ¶1. The
     // first short header we emit after this call carries the new
@@ -319,13 +301,7 @@ pub fn beginClientActiveMigration(
     path.setLocalAddress(new_local_addr);
     path.pending_migration_reset = true;
 
-    const token = try conn_paths.newPathChallengeToken(
-        conn,
-    );
-    const timeout_us = Connection.saturatingMul(conn.ptoDurationForApplicationPath(path), 3);
-    path.path.validator.beginChallenge(token, now_us, timeout_us);
-    path.path.last_path_challenge_at_us = now_us;
-    conn_paths.queuePathChallengeOnPath(conn, path.id, token);
+    try conn_paths.armMigrationPathChallenge(conn, path, now_us);
 }
 
 /// Server-side counterpart to `beginClientActiveMigration`: the
@@ -434,21 +410,10 @@ pub fn noteServerLocalAddressChanged(
     }
 
     // Snapshot pre-migration state for rollback on validator
-    // timeout. We capture the same fields
-    // `beginClientActiveMigration` does so the rollback path is
-    // shared. `peer_addr` doesn't change on a server-side
-    // local-addr flip, but snapshotting it keeps the
+    // timeout. `peer_addr` doesn't change on a server-side
+    // local-addr flip, but the shared snapshot keeps the
     // `MigrationRollback` shape uniform across migration triggers.
-    if (path.migration_rollback == null) {
-        path.migration_rollback = .{
-            .peer_addr = path.path.peer_addr,
-            .peer_addr_set = path.peer_addr_set,
-            .validated = path.path.isValidated(),
-            .bytes_received = path.path.bytes_received,
-            .bytes_sent = path.path.bytes_sent,
-            .state = path.path.state,
-        };
-    }
+    path.snapshotMigrationRollback();
 
     // Update local-address bookkeeping. Like the client-side
     // counterpart, we deliberately do NOT zero `bytes_received` /
@@ -463,13 +428,7 @@ pub fn noteServerLocalAddressChanged(
     path.setLocalAddress(new_local_addr);
     path.pending_migration_reset = true;
 
-    const token = try conn_paths.newPathChallengeToken(
-        conn,
-    );
-    const timeout_us = Connection.saturatingMul(conn.ptoDurationForApplicationPath(path), 3);
-    path.path.validator.beginChallenge(token, now_us, timeout_us);
-    path.path.last_path_challenge_at_us = now_us;
-    conn_paths.queuePathChallengeOnPath(conn, path.id, token);
+    try conn_paths.armMigrationPathChallenge(conn, path, now_us);
 }
 
 pub fn recordAuthenticatedDatagramAddress(

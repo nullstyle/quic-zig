@@ -3151,7 +3151,7 @@ pub fn drainingDurationUs(self: *const Connection) u64 {
     return 3 * self.primaryPathConst().path.rtt.pto(self.peerMaxAckDelayUs());
 }
 
-// INTERNAL: pub for Connection/migration.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/loss.zig and Connection/paths.zig access; not part of the embedder API.
 pub fn saturatingMul(a: u64, b: u64) u64 {
     return std.math.mul(u64, a, b) catch std.math.maxInt(u64);
 }

@@ -560,6 +560,24 @@ pub const PathState = struct {
         self.migration_rollback = null;
     }
 
+    /// Snapshot pre-migration state into `migration_rollback` unless
+    /// one is already held. Idempotent — the first snapshot for a
+    /// migration wins, so a re-fired trigger cannot overwrite the
+    /// true pre-migration state with mid-migration values. The
+    /// fields captured are exactly the set `rollbackFailedMigration`
+    /// restores.
+    pub fn snapshotMigrationRollback(self: *PathState) void {
+        if (self.migration_rollback != null) return;
+        self.migration_rollback = .{
+            .peer_addr = self.path.peer_addr,
+            .peer_addr_set = self.peer_addr_set,
+            .validated = self.path.isValidated(),
+            .bytes_received = self.path.bytes_received,
+            .bytes_sent = self.path.bytes_sent,
+            .state = self.path.state,
+        };
+    }
+
     /// Begin a migration to `peer_addr`. Snapshots current state into
     /// `migration_rollback` (if not already snapshotted), zeros the
     /// anti-amp counters, drops validation, and credits the triggering
@@ -569,16 +587,7 @@ pub const PathState = struct {
         peer_addr: Address,
         datagram_len: usize,
     ) void {
-        if (self.migration_rollback == null) {
-            self.migration_rollback = .{
-                .peer_addr = self.path.peer_addr,
-                .peer_addr_set = self.peer_addr_set,
-                .validated = self.path.isValidated(),
-                .bytes_received = self.path.bytes_received,
-                .bytes_sent = self.path.bytes_sent,
-                .state = self.path.state,
-            };
-        }
+        self.snapshotMigrationRollback();
         self.setPeerAddress(peer_addr);
         self.path.validated = false;
         self.path.validator = .{};
