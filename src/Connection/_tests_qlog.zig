@@ -20,6 +20,7 @@ const SentPacketTracker = state.SentPacketTracker;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_aead_limit_reached = state.transport_error_aead_limit_reached;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
+const conn_qlog = @import("qlog.zig");
 const util = @import("_test_util.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
 const installTestApplicationReadSecret = util.installTestApplicationReadSecret;
@@ -367,4 +368,47 @@ test "qlog: pathStats exposes the new connection-level counters" {
     try std.testing.expectEqual(stats.rttvar_us, stats.srtt_us / 2);
     // Slow start phase before any loss.
     try std.testing.expectEqual(path_mod.CongestionState.slow_start, stats.congestion_window_state);
+}
+
+test "qlog: a loss episode emits a recovery congestion state matching pathStats" {
+    // Regression: `emitCongestionStateIfChanged` classified recovery
+    // with `now_us <= recovery_start_time_us`. That boundary holds a
+    // previously-sent packet's SEND time, so the comparison was
+    // effectively never true for a real clock — `.recovery` reached
+    // the trace only when a caller passed a literal 0, which also
+    // stamped the event `at_us = 0`. Fixing the timestamp would have
+    // silently removed `.recovery` from every trace; the predicate
+    // now matches `PathState.stats()`, so the qlog stream and
+    // `pathStats().congestion_window_state` agree.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    var recorder: TestQlogRecorder = .{};
+    conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
+
+    const cc = &conn.primaryPath().path.cc;
+    try std.testing.expectEqual(@as(?u64, null), cc.recoveryStartTimeUs());
+
+    // Enter recovery: a packet sent at t=1s is declared lost, so the
+    // controller latches the recovery boundary at its send time.
+    cc.onPacketLost(1200, 1_000_000);
+    try std.testing.expect(cc.recoveryStartTimeUs() != null);
+
+    // Observed 50 ms later — strictly AFTER the boundary, which is
+    // the case the old predicate got wrong.
+    conn_qlog.emitCongestionStateIfChanged(conn, 1_050_000);
+
+    const ev = recorder.first(.congestion_state_updated) orelse
+        return error.TestExpectedCongestionStateEvent;
+    try std.testing.expectEqual(state.QlogCongestionState.recovery, ev.congestion_state.?);
+    // The timestamp is the real observation time, not 0.
+    try std.testing.expectEqual(@as(u64, 1_050_000), ev.at_us);
+    // And the two observability surfaces agree at the same instant.
+    try std.testing.expectEqual(
+        path_mod.CongestionState.recovery,
+        conn.pathStats(0).?.congestion_window_state,
+    );
 }

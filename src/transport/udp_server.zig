@@ -43,7 +43,12 @@ const udp_batch = @import("udp_batch.zig");
 
 const Net = std.Io.net;
 const Address = path_mod.Address;
-const SendBatch = egress.SendBatch;
+/// Re-export: `SendBatch` moved to `egress.zig` when the server and
+/// client loops were collapsed onto one implementation. Kept `pub`
+/// here so the historical `quic.transport.udp_server.SendBatch` path
+/// that foreign-loop embedders use keeps resolving (same treatment as
+/// `ipAddressToPathAddress` below).
+pub const SendBatch = egress.SendBatch;
 
 /// Default size of the receive buffer scratch space used by the loop.
 /// 64 KiB is the maximum a single UDP datagram can be, and matches

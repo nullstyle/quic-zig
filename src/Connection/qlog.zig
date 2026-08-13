@@ -418,10 +418,17 @@ pub fn emitCongestionStateIfChanged(conn: *Connection, now_us: u64) void {
     if (conn.qlog_callback == null) return;
     const path = conn.primaryPath();
     const cc = &path.path.cc;
+    // Recovery membership is "the controller has an un-cleared
+    // recovery boundary", exactly as `PathState.stats()` reports it.
+    // It is NOT a comparison against `now_us`: the boundary holds a
+    // previously-sent packet's SEND time, and the only comparison
+    // that means anything against it is another sent time (see
+    // `NewReno.isInRecovery`). Comparing `now_us` to it was
+    // effectively never true, so this branch only ever fired back
+    // when a caller passed a literal 0 — which also stamped the
+    // event at_us = 0. Both are fixed; the two views now agree.
     const new_state: QlogCongestionState = blk: {
-        if (cc.recoveryStartTimeUs()) |rec_start| {
-            if (now_us <= rec_start) break :blk .recovery;
-        }
+        if (cc.recoveryStartTimeUs() != null) break :blk .recovery;
         if (cc.isSlowStart()) break :blk .slow_start;
         break :blk .congestion_avoidance;
     };

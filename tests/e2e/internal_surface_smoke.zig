@@ -144,6 +144,11 @@ test "frame / wire / tls / transport / qlog namespaces keep resolving" {
         _ = quic.transport.udp_server.ipAddressToPathAddress;
         _ = quic.transport.udp_server.monotonicNowUs;
         _ = quic.transport.udp_server.pathAddressToIpAddress;
+        // Foreign-loop embedders build their own egress batches with
+        // this; it lives in `egress.zig` now but must stay reachable
+        // at its historical path.
+        _ = quic.transport.udp_server.SendBatch;
+        _ = quic.transport.egress.SendBatch;
 
         _ = quic.qlog.Writer;
     }
