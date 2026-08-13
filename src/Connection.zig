@@ -4902,5 +4902,5 @@ const method: boringssl.tls.quic.Method = .{
 // `comptime`) so non-test builds never analyze the test tree —
 // ziglang's std convention for exactly this hook.
 test {
-    _ = @import("conn/_state_tests.zig");
+    _ = @import("Connection/_tests.zig");
 }

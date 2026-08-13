@@ -124,7 +124,7 @@ fn prepareSender(conn: *Connection) !void {
         .initial_max_stream_data_bidi_remote = 1 << 21,
         .initial_max_streams_bidi = 16,
     });
-    try @import("../conn/_test_util.zig").installTestApplicationWriteSecret(conn);
+    try @import("../Connection/_test_util.zig").installTestApplicationWriteSecret(conn);
     conn.setRememberedPeerTransportParams(.{
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_remote = 1 << 22,
