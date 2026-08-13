@@ -24,7 +24,7 @@ const wire = @import("../wire/root.zig");
 const RetryEcho = @import("dos.zig").RetryEcho;
 
 pub fn openSlotFromInitial(
-    self: *Server,
+    server: *Server,
     bytes: []const u8,
     from: ?Address,
     now_us: u64,
@@ -32,25 +32,25 @@ pub fn openSlotFromInitial(
 ) !*Slot {
     const ids = peekLongHeaderIds(bytes) orelse return error.InvalidInitial;
 
-    const slot = try self.allocator.create(Slot);
-    errdefer self.allocator.destroy(slot);
+    const slot = try server.allocator.create(Slot);
+    errdefer server.allocator.destroy(slot);
 
-    const conn_ptr = try Connection.createServer(self.allocator, self.tls_ctx);
+    const conn_ptr = try Connection.createServer(server.allocator, server.tls_ctx);
     errdefer conn_ptr.destroy();
-    conn_ptr.reveal_close_reason_on_wire = self.reveal_close_reason_on_wire;
-    conn_ptr.max_connection_memory = self.max_connection_memory;
-    conn_ptr.delayed_ack_packet_threshold = self.delayed_ack_packet_threshold;
-    conn_ptr.ecn_enabled = self.ecn_enabled;
+    conn_ptr.reveal_close_reason_on_wire = server.reveal_close_reason_on_wire;
+    conn_ptr.max_connection_memory = server.max_connection_memory;
+    conn_ptr.delayed_ack_packet_threshold = server.delayed_ack_packet_threshold;
+    conn_ptr.ecn_enabled = server.ecn_enabled;
     // RFC 8899 DPLPMTUD: thread the embedder config to the
     // connection. setPmtudConfig also re-initialises every
     // existing path (only the primary at this point), so the
     // per-path pmtu / pmtu_state lands consistent with the config.
-    conn_ptr.setPmtudConfig(self.pmtud_config);
-    conn_ptr.setCongestionAlgorithm(self.congestion_control);
-    conn_ptr.pacing_enabled = self.pacing_enabled;
-    conn_ptr.setHyStartEnabled(self.hystart_enabled);
+    conn_ptr.setPmtudConfig(server.pmtud_config);
+    conn_ptr.setCongestionAlgorithm(server.congestion_control);
+    conn_ptr.pacing_enabled = server.pacing_enabled;
+    conn_ptr.setHyStartEnabled(server.hystart_enabled);
 
-    if (self.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, self.qlog_user_data);
+    if (server.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, server.qlog_user_data);
 
     // Post-Retry connections use the SCID we minted in the Retry
     // packet — that SCID was bound into the token HMAC and is
@@ -63,8 +63,8 @@ pub fn openSlotFromInitial(
         @memcpy(server_scid[0..echo.retry_scid_len], local_scid);
         local_scid = server_scid[0..echo.retry_scid_len];
     } else {
-        try self.mintLocalScid(server_scid[0..self.local_cid_len]);
-        local_scid = server_scid[0..self.local_cid_len];
+        try server.mintLocalScid(server_scid[0..server.local_cid_len]);
+        local_scid = server_scid[0..server.local_cid_len];
     }
     try conn_ptr.setLocalScid(local_scid);
 
@@ -79,7 +79,7 @@ pub fn openSlotFromInitial(
     // currently carries.
     const initial_dcid = ConnectionId.fromSlice(ids.dcid);
 
-    var params = self.transport_params;
+    var params = server.transport_params;
     params.original_destination_connection_id = original_dcid;
     params.initial_source_connection_id = ConnectionId.fromSlice(local_scid);
     if (retry_ctx) |_| {
@@ -100,10 +100,10 @@ pub fn openSlotFromInitial(
     var pa_alt_cid_storage: [20]u8 = undefined;
     var pa_alt_cid_slice: ?[]u8 = null;
     var pa_alt_token: [16]u8 = @splat(0);
-    if (self.preferred_address) |pa_cfg| {
-        const slice = pa_alt_cid_storage[0..self.local_cid_len];
-        try self.mintLocalScid(slice);
-        const key = self.stateless_reset_key orelse unreachable;
+    if (server.preferred_address) |pa_cfg| {
+        const slice = pa_alt_cid_storage[0..server.local_cid_len];
+        try server.mintLocalScid(slice);
+        const key = server.stateless_reset_key orelse unreachable;
         pa_alt_token = conn_mod.stateless_reset.derive(&key, slice) catch
             return Error.RandFailed;
         pa_alt_cid_slice = slice;
@@ -134,21 +134,21 @@ pub fn openSlotFromInitial(
     //   (b) building `params.compatibleVersions = [chosen, ...]`
     //       so the EE points at the upgrade target,
     //   (c) calling `acceptInitial`, which pushes those params to
-    //       BoringSSL and (separately) sets `self.version` to the
+    //       BoringSSL and (separately) sets `server.version` to the
     //       wire version so `handleInitial` opens this datagram
     //       under wire-version keys,
-    //   (d) flipping `self.version` to `chosen` AFTER the first
+    //   (d) flipping `server.version` to `chosen` AFTER the first
     //       `handleWithEcn` returns (in `dispatchToSlot`), so
     //       outbound packets sealed by `poll` go out under the
     //       upgrade-target keys.
     var ch_complete: bool = false;
-    const upgrade_target = server_vneg.preparseUpgradeTarget(self, bytes, ids.version, &ch_complete);
+    const upgrade_target = server_vneg.preparseUpgradeTarget(server, bytes, ids.version, &ch_complete);
     const chosen_version: u32 = upgrade_target orelse ids.version;
-    if (self.versions.len > 1) {
+    if (server.versions.len > 1) {
         var ordered: [16]u32 = undefined;
         ordered[0] = chosen_version;
         var n: usize = 1;
-        for (self.versions) |v| {
+        for (server.versions) |v| {
             if (v == chosen_version) continue;
             if (n >= ordered.len) break;
             ordered[n] = v;
@@ -170,18 +170,18 @@ pub fn openSlotFromInitial(
     // connections for a stable config. Failures degrade to
     // "0-RTT refused, connection proceeds" — except OOM, which the
     // accept path already treats as fatal.
-    if (self.enable_0rtt and self.alpn_protocols.len > 0) {
+    if (server.enable_0rtt and server.alpn_protocols.len > 0) {
         _ = conn_ptr.setEarlyDataContextForParams(
             params,
-            self.alpn_protocols[0],
-            self.early_data_application_context,
+            server.alpn_protocols[0],
+            server.early_data_application_context,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {},
         };
     }
     // Stash the upgrade target so `dispatchToSlot` can flip
-    // `self.version` after the first `handleWithEcn` consumes the
+    // `server.version` after the first `handleWithEcn` consumes the
     // wire-version Initial under wire-version keys.
     if (upgrade_target) |upgraded| {
         if (upgraded != ids.version) {
@@ -199,13 +199,13 @@ pub fn openSlotFromInitial(
     // are non-fatal — the slot simply commits to the wire
     // version, which is always spec-compliant.
     const want_pending = !ch_complete and
-        self.versions.len > 1 and
+        server.versions.len > 1 and
         wire.initial.isSupportedVersion(ids.version);
     var pending_upgrade: ?*PendingUpgradeState = null;
     if (want_pending) {
-        pending_upgrade = server_vneg.openPendingUpgrade(self, bytes, ids.version);
+        pending_upgrade = server_vneg.openPendingUpgrade(server, bytes, ids.version);
     }
-    errdefer if (pending_upgrade) |pu| self.allocator.destroy(pu);
+    errdefer if (pending_upgrade) |pu| server.allocator.destroy(pu);
 
     // Queue NEW_CONNECTION_ID(seq=1) carrying the alt-CID minted
     // for `preferred_address`. RFC 9000 §5.1.1 ¶6 says the client
@@ -240,20 +240,20 @@ pub fn openSlotFromInitial(
         .initial_dcid = initial_dcid,
         .peer_addr = from,
         .last_activity_us = now_us,
-        .slot_id = self.next_slot_id,
-        .tls_generation = self.current_generation,
+        .slot_id = server.next_slot_id,
+        .tls_generation = server.current_generation,
         .pending_upgrade = pending_upgrade,
         .last_recv_socket_idx = 0,
     };
-    self.next_slot_id +%= 1;
+    server.next_slot_id +%= 1;
 
     // Reserve a slot in the CID table for the initial DCID. If
     // this fails, the slot was never made visible to the router
     // and the deferred errdefer will tear down the Connection.
-    try self.cid_table.put(self.allocator, cidKeyFromConnectionId(initial_dcid), slot);
-    errdefer _ = self.cid_table.remove(cidKeyFromConnectionId(initial_dcid));
+    try server.cid_table.put(server.allocator, cidKeyFromConnectionId(initial_dcid), slot);
+    errdefer _ = server.cid_table.remove(cidKeyFromConnectionId(initial_dcid));
 
-    try self.slots.append(self.allocator, slot);
+    try server.slots.append(server.allocator, slot);
     return slot;
 }
 
@@ -297,7 +297,7 @@ pub fn slotErrorCloseCode(err: anyerror) struct { code: u64, reason: []const u8 
 }
 
 pub fn dispatchToSlot(
-    self: *Server,
+    server: *Server,
     slot: *Slot,
     bytes: []u8,
     from: ?Address,
@@ -309,11 +309,11 @@ pub fn dispatchToSlot(
     // the in-use CID. `null` (no DCID match) leaves the gate
     // inert — that path is the pre-routing-table bootstrap case
     // for a brand-new Initial.
-    const dcid_opt = peekDcidForServer(bytes, self.local_cid_len);
+    const dcid_opt = peekDcidForServer(bytes, server.local_cid_len);
     const seq_opt: ?u64 = if (dcid_opt) |d| slot.conn.findLocalCidSequence(d) else null;
     slot.conn.setIncomingLocalCidSeq(seq_opt);
     defer slot.conn.setIncomingLocalCidSeq(null);
-    slot.conn.handleWithEcn(bytes, from, self.last_feed_ecn, now_us) catch |err| switch (err) {
+    slot.conn.handleWithEcn(bytes, from, server.last_feed_ecn, now_us) catch |err| switch (err) {
         // OOM is fatal for the whole server — propagate. The
         // surrounding `feed` will return `OutOfMemory` to the
         // embedder, who can decide whether to retry, scale, or
@@ -337,7 +337,7 @@ pub fn dispatchToSlot(
     // keys and BoringSSL has consumed the ClientHello (producing
     // an EE that already embeds our chosen-version transport
     // params, since `openSlotFromInitial` set those before the
-    // handshake advanced). Flip `self.version` to the upgrade
+    // handshake advanced). Flip `server.version` to the upgrade
     // target so the next `poll` seals the response Initial under
     // the upgrade-target keys. Idempotent / no-op when no
     // upgrade was pending.

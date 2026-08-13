@@ -81,7 +81,7 @@ fn ceDelta(
 }
 
 const LevelAckDispatchCtx = struct {
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     ack: frame_types.Ack,
     now_us: u64,
@@ -99,7 +99,7 @@ fn dispatchAckedAtLevel(
     ctx: *LevelAckDispatchCtx,
     acked: *sent_packets_mod.SentPacket,
 ) Error!void {
-    defer acked.deinit(ctx.self.allocator);
+    defer acked.deinit(ctx.conn.allocator);
     if (acked.pn == ctx.ack.largest_acked) {
         ctx.largest_acked_send_time_us.* = acked.sent_time_us;
         ctx.largest_acked_ack_eliciting.* = acked.ack_eliciting;
@@ -129,16 +129,16 @@ fn dispatchAckedAtLevel(
         } else {
             ctx.any_regular_acked.* = true;
         }
-        ctx.self.onApplicationPacketAckedForKeys(acked, ctx.now_us);
-        try conn_loss.dispatchAckedPacketToStreams(ctx.self, acked);
+        ctx.conn.onApplicationPacketAckedForKeys(acked, ctx.now_us);
+        try conn_loss.dispatchAckedPacketToStreams(ctx.conn, acked);
     }
-    conn_loss.discardSentCryptoForPacket(ctx.self, ctx.lvl, acked.pn);
-    conn_loss.dispatchAckedControlFrames(ctx.self, acked);
-    conn_datagram.recordDatagramAcked(ctx.self, acked);
+    conn_loss.discardSentCryptoForPacket(ctx.conn, ctx.lvl, acked.pn);
+    conn_loss.dispatchAckedControlFrames(ctx.conn, acked);
+    conn_datagram.recordDatagramAcked(ctx.conn, acked);
 }
 
 const PathAckDispatchCtx = struct {
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
     ack: frame_types.Ack,
     now_us: u64,
@@ -155,7 +155,7 @@ fn dispatchAckedOnPath(
     ctx: *PathAckDispatchCtx,
     acked: *sent_packets_mod.SentPacket,
 ) Error!void {
-    defer acked.deinit(ctx.self.allocator);
+    defer acked.deinit(ctx.conn.allocator);
     if (acked.pn == ctx.ack.largest_acked) {
         ctx.largest_acked_send_time_us.* = acked.sent_time_us;
         ctx.largest_acked_ack_eliciting.* = acked.ack_eliciting;
@@ -179,15 +179,15 @@ fn dispatchAckedOnPath(
     } else {
         ctx.any_regular_acked.* = true;
     }
-    try conn_loss.dispatchAckedPacketToStreams(ctx.self, acked);
-    ctx.self.onApplicationPacketAckedForKeys(acked, ctx.now_us);
-    conn_loss.discardSentCryptoForPacket(ctx.self, .application, acked.pn);
-    conn_loss.dispatchAckedControlFrames(ctx.self, acked);
-    conn_datagram.recordDatagramAcked(ctx.self, acked);
+    try conn_loss.dispatchAckedPacketToStreams(ctx.conn, acked);
+    ctx.conn.onApplicationPacketAckedForKeys(acked, ctx.now_us);
+    conn_loss.discardSentCryptoForPacket(ctx.conn, .application, acked.pn);
+    conn_loss.dispatchAckedControlFrames(ctx.conn, acked);
+    conn_datagram.recordDatagramAcked(ctx.conn, acked);
 }
 
 pub fn handleAckAtLevel(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     a: frame_types.Ack,
     now_us: u64,
@@ -196,12 +196,12 @@ pub fn handleAckAtLevel(
     //   1. the SendStream(s) named on the packet (application level
     //      only) — routed in O(1) per ref via the per-packet stream_id,
     //   2. the per-level SentPacketTracker.
-    const pn_space = self.pnSpaceForLevel(lvl);
-    const sent = self.sentForLevel(lvl);
+    const pn_space = conn.pnSpaceForLevel(lvl);
+    const sent = conn.sentForLevel(lvl);
     // The path that owns 1-RTT in-flight bookkeeping. For Initial /
     // Handshake we still consult it (the primary) so RFC 8899
     // counters stay coherent, but no probes ride those levels.
-    const ack_path: *PathState = self.primaryPath();
+    const ack_path: *PathState = conn.primaryPath();
     // RFC 9000 §13.1 / RFC 9002 §A.3: an ACK that claims a packet
     // number we never sent (largest_acked >= next_pn) is a
     // PROTOCOL_VIOLATION. We must reject it before updating
@@ -209,7 +209,7 @@ pub fn handleAckAtLevel(
     // poison packet-threshold loss detection on legitimate
     // in-flight packets.
     if (a.largest_acked >= pn_space.next_pn) {
-        self.close(true, transport_error_protocol_violation, "ack of unsent packet");
+        conn.close(true, transport_error_protocol_violation, "ack of unsent packet");
         return;
     }
     // RFC 9000 §13.4.2: validate peer-reported ECN counts BEFORE
@@ -221,7 +221,7 @@ pub fn handleAckAtLevel(
     // overall, but this space is bleached).
     const prev_ecn_seen = pn_space.peer_ack_ecn_seen;
     const prev_ce = pn_space.peer_ack_ce;
-    const ecn_ok = if (self.ecn_enabled) validateAndApplyAckEcn(pn_space, a.ecn_counts) else true;
+    const ecn_ok = if (conn.ecn_enabled) validateAndApplyAckEcn(pn_space, a.ecn_counts) else true;
     if (!ecn_ok) {
         pn_space.validation = .failed;
     }
@@ -235,7 +235,7 @@ pub fn handleAckAtLevel(
     var pmtud_probe_acked = false;
     var any_regular_acked = false;
     var dispatch_ctx: LevelAckDispatchCtx = .{
-        .self = self,
+        .conn = conn,
         .lvl = lvl,
         .ack = a,
         .now_us = now_us,
@@ -275,8 +275,8 @@ pub fn handleAckAtLevel(
     if (lvl == .application) {
         if (pmtud_probe_acked) {
             _ = ack_path.pmtudOnProbeAcked(
-                self.pmtud_config.probe_step,
-                self.pmtud_config.max_mtu,
+                conn.pmtud_config.probe_step,
+                conn.pmtud_config.max_mtu,
             );
         }
         if (any_regular_acked) ack_path.pmtudOnRegularAcked();
@@ -286,24 +286,24 @@ pub fn handleAckAtLevel(
     var rtt_sampled = false;
     if (largest_acked_send_time_us) |sent_time_us| {
         if (largest_acked_ack_eliciting and now_us >= sent_time_us) {
-            const ack_delay_us = scaledAckDelayUs(a.ack_delay, self.peerAckDelayExponent());
-            self.rttForLevel(lvl).update(
+            const ack_delay_us = scaledAckDelayUs(a.ack_delay, conn.peerAckDelayExponent());
+            conn.rttForLevel(lvl).update(
                 now_us - sent_time_us,
                 ack_delay_us,
-                self.handshakeDone(),
-                self.peerMaxAckDelayUs(),
+                conn.handshakeDone(),
+                conn.peerMaxAckDelayUs(),
             );
             rtt_sampled = true;
         }
     }
-    if (any_ack_eliciting_newly_acked) self.ptoCountForLevel(lvl).* = 0;
+    if (any_ack_eliciting_newly_acked) conn.ptoCountForLevel(lvl).* = 0;
     if (in_flight_bytes_acked > 0) {
         if (lvl == .application) {
-            self.ccForApplication().onPacketAcked(
+            conn.ccForApplication().onPacketAcked(
                 in_flight_bytes_acked,
                 newest_acked_sent_time_us,
                 now_us,
-                self.rttForLevel(lvl).smoothed_rtt_us,
+                conn.rttForLevel(lvl).smoothed_rtt_us,
                 sent.bytes_in_flight,
             );
         }
@@ -311,10 +311,10 @@ pub fn handleAckAtLevel(
     // RFC 9406 HyStart++: feed the processed ACK after cwnd growth, so
     // an exit decision applies to the window this ACK just produced.
     if (lvl == .application) {
-        self.ccForApplication().onAckProcessed(
+        conn.ccForApplication().onAckProcessed(
             a.largest_acked,
-            if (rtt_sampled) self.rttForLevel(lvl).latest_rtt_us else null,
-            self.pnSpaceForLevel(lvl).next_pn,
+            if (rtt_sampled) conn.rttForLevel(lvl).latest_rtt_us else null,
+            conn.pnSpaceForLevel(lvl).next_pn,
         );
     }
 
@@ -334,12 +334,12 @@ pub fn handleAckAtLevel(
         0;
     if (ce_delta_packets > 0) {
         const ce_anchor = if (newest_acked_sent_time_us != 0) newest_acked_sent_time_us else now_us;
-        self.ccForApplication().onCongestionEvent(ce_anchor);
+        conn.ccForApplication().onCongestionEvent(ce_anchor);
     }
 
     // Loss detection at the same level — packet-threshold only
     // (time-threshold lives in `tick`).
-    try conn_loss.detectLossesByPacketThresholdAtLevel(self, lvl);
+    try conn_loss.detectLossesByPacketThresholdAtLevel(conn, lvl);
 
     // Close the delivery-rate sampler's ACK event AFTER loss
     // detection, so `newly_lost` covers everything this ACK declared
@@ -347,21 +347,21 @@ pub fn handleAckAtLevel(
     // with the post-ACK, post-loss in-flight residue (the draft's
     // C.inflight at model-update time).
     if (lvl == .application) {
-        const min_rtt_us = self.rttForLevel(lvl).min_rtt_us;
+        const min_rtt_us = conn.rttForLevel(lvl).min_rtt_us;
         if (ack_path.path.delivery.generateRateSample(min_rtt_us, ce_delta_packets)) |rs| {
-            self.ccForApplication().onDeliveryRateSample(&rs, now_us, sent.bytes_in_flight);
+            conn.ccForApplication().onDeliveryRateSample(&rs, now_us, sent.bytes_in_flight);
         }
     }
 
     // Snapshot metrics + congestion phase after a meaningful ACK.
     if (any_ack_eliciting_newly_acked or in_flight_bytes_acked > 0) {
-        conn_qlog.emitCongestionStateIfChanged(self, now_us);
-        conn_qlog.emitMetricsSnapshot(self, now_us);
+        conn_qlog.emitCongestionStateIfChanged(conn, now_us);
+        conn_qlog.emitMetricsSnapshot(conn, now_us);
     }
 }
 
 pub fn handleApplicationAckOnPath(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
     a: frame_types.Ack,
     now_us: u64,
@@ -369,7 +369,7 @@ pub fn handleApplicationAckOnPath(
     // RFC 9000 §13.1 / RFC 9002 §A.3: reject ACKs claiming PNs
     // we never sent on this path.
     if (a.largest_acked >= path.app_pn_space.next_pn) {
-        self.close(true, transport_error_protocol_violation, "ack of unsent packet");
+        conn.close(true, transport_error_protocol_violation, "ack of unsent packet");
         return;
     }
     // §13.4.2 ECN validation, twin of `handleAckAtLevel`. Multipath
@@ -378,7 +378,7 @@ pub fn handleApplicationAckOnPath(
     // single-path handler for the per-step rationale.
     const prev_ecn_seen = path.app_pn_space.peer_ack_ecn_seen;
     const prev_ce = path.app_pn_space.peer_ack_ce;
-    const ecn_ok = if (self.ecn_enabled) validateAndApplyAckEcn(&path.app_pn_space, a.ecn_counts) else true;
+    const ecn_ok = if (conn.ecn_enabled) validateAndApplyAckEcn(&path.app_pn_space, a.ecn_counts) else true;
     if (!ecn_ok) {
         path.app_pn_space.validation = .failed;
     }
@@ -393,7 +393,7 @@ pub fn handleApplicationAckOnPath(
     var pmtud_probe_acked = false;
     var any_regular_acked = false;
     var dispatch_ctx: PathAckDispatchCtx = .{
-        .self = self,
+        .conn = conn,
         .path = path,
         .ack = a,
         .now_us = now_us,
@@ -421,8 +421,8 @@ pub fn handleApplicationAckOnPath(
     }
     if (pmtud_probe_acked) {
         _ = path.pmtudOnProbeAcked(
-            self.pmtud_config.probe_step,
-            self.pmtud_config.max_mtu,
+            conn.pmtud_config.probe_step,
+            conn.pmtud_config.max_mtu,
         );
     }
     if (any_regular_acked) path.pmtudOnRegularAcked();
@@ -430,12 +430,12 @@ pub fn handleApplicationAckOnPath(
     var rtt_sampled = false;
     if (largest_acked_send_time_us) |sent_time_us| {
         if (largest_acked_ack_eliciting and now_us >= sent_time_us) {
-            const ack_delay_us = scaledAckDelayUs(a.ack_delay, self.peerAckDelayExponent());
+            const ack_delay_us = scaledAckDelayUs(a.ack_delay, conn.peerAckDelayExponent());
             path.path.rtt.update(
                 now_us - sent_time_us,
                 ack_delay_us,
-                self.handshakeDone(),
-                self.peerMaxAckDelayUs(),
+                conn.handshakeDone(),
+                conn.peerMaxAckDelayUs(),
             );
             rtt_sampled = true;
         }
@@ -467,7 +467,7 @@ pub fn handleApplicationAckOnPath(
         path.path.cc.onCongestionEvent(ce_anchor);
     }
 
-    try self.detectLossesByPacketThresholdOnApplicationPath(path);
+    try conn.detectLossesByPacketThresholdOnApplicationPath(path);
 
     // Close the sampler's ACK event after loss detection — twin of
     // `handleAckAtLevel`; see there for the ordering rationale.
@@ -477,14 +477,14 @@ pub fn handleApplicationAckOnPath(
 
     // Snapshot metrics + congestion phase after a meaningful ACK.
     if (any_ack_eliciting_newly_acked or in_flight_bytes_acked > 0) {
-        conn_qlog.emitCongestionStateIfChanged(self, now_us);
-        conn_qlog.emitMetricsSnapshot(self, now_us);
+        conn_qlog.emitCongestionStateIfChanged(conn, now_us);
+        conn_qlog.emitMetricsSnapshot(conn, now_us);
     }
 }
 
 pub fn dispatchLostControlFrames(
-    self: *Connection,
+    conn: *Connection,
     packet: *const sent_packets_mod.SentPacket,
 ) Error!bool {
-    return self.dispatchLostControlFramesOnPath(packet, self.activePath().id);
+    return conn.dispatchLostControlFramesOnPath(packet, conn.activePath().id);
 }

@@ -36,39 +36,39 @@ fn backoffDuration(base: u64, count: u32) u64 {
     return base << shift;
 }
 
-pub fn basePtoDurationForLevel(self: *const Connection, lvl: EncryptionLevel) u64 {
+pub fn basePtoDurationForLevel(conn: *const Connection, lvl: EncryptionLevel) u64 {
     const max_ack_delay_us: u64 = switch (lvl) {
         .initial, .handshake => 0,
-        .early_data, .application => self.peerMaxAckDelayUs(),
+        .early_data, .application => conn.peerMaxAckDelayUs(),
     };
-    return self.rttForLevelConst(lvl).pto(max_ack_delay_us);
+    return conn.rttForLevelConst(lvl).pto(max_ack_delay_us);
 }
 
-pub fn ptoDurationForLevel(self: *const Connection, lvl: EncryptionLevel) u64 {
-    return backoffDuration(basePtoDurationForLevel(self, lvl), self.ptoCountForLevelConst(lvl).*);
+pub fn ptoDurationForLevel(conn: *const Connection, lvl: EncryptionLevel) u64 {
+    return backoffDuration(basePtoDurationForLevel(conn, lvl), conn.ptoCountForLevelConst(lvl).*);
 }
 
-fn basePtoDurationForApplicationPath(self: *const Connection, path: *const PathState) u64 {
-    return path.path.rtt.pto(self.peerMaxAckDelayUs());
+fn basePtoDurationForApplicationPath(conn: *const Connection, path: *const PathState) u64 {
+    return path.path.rtt.pto(conn.peerMaxAckDelayUs());
 }
 
-pub fn ptoDurationForApplicationPath(self: *const Connection, path: *const PathState) u64 {
-    return backoffDuration(basePtoDurationForApplicationPath(self, path), path.pto_count);
+pub fn ptoDurationForApplicationPath(conn: *const Connection, path: *const PathState) u64 {
+    return backoffDuration(basePtoDurationForApplicationPath(conn, path), path.pto_count);
 }
 
-pub fn largestApplicationPtoDurationUs(self: *const Connection) u64 {
+pub fn largestApplicationPtoDurationUs(conn: *const Connection) u64 {
     var largest: u64 = 0;
-    for (self.paths.paths.items) |*path| {
+    for (conn.paths.paths.items) |*path| {
         if (path.path.state == .failed) continue;
-        largest = @max(largest, ptoDurationForApplicationPath(self, path));
+        largest = @max(largest, ptoDurationForApplicationPath(conn, path));
     }
-    if (largest == 0) largest = ptoDurationForApplicationPath(self, self.primaryPathConst());
+    if (largest == 0) largest = ptoDurationForApplicationPath(conn, conn.primaryPathConst());
     return largest;
 }
 
-pub fn retiredPathRetentionUs(self: *const Connection) u64 {
+pub fn retiredPathRetentionUs(conn: *const Connection) u64 {
     return Connection.saturatingMul(3, largestApplicationPtoDurationUs(
-        self,
+        conn,
     ));
 }
 
@@ -78,10 +78,10 @@ pub fn considerDeadline(best: *?TimerDeadline, candidate: TimerDeadline) void {
     }
 }
 
-pub fn lossDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 {
-    const pn_space = self.pnSpaceForLevelConst(lvl);
-    const sent = self.sentForLevelConst(lvl);
-    const rtt = self.rttForLevelConst(lvl);
+pub fn lossDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 {
+    const pn_space = conn.pnSpaceForLevelConst(lvl);
+    const sent = conn.sentForLevelConst(lvl);
+    const rtt = conn.rttForLevelConst(lvl);
     const largest_acked = pn_space.largest_acked_sent orelse return null;
     const reference_rtt = @max(rtt.latest_rtt_us, rtt.smoothed_rtt_us);
     const time_threshold = @max(
@@ -102,8 +102,8 @@ pub fn lossDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 
     return best;
 }
 
-pub fn lossDeadlineForApplicationPath(self: *const Connection, path: *const PathState) ?u64 {
-    _ = self;
+pub fn lossDeadlineForApplicationPath(conn: *const Connection, path: *const PathState) ?u64 {
+    _ = conn;
     const largest_acked = path.app_pn_space.largest_acked_sent orelse return null;
     const reference_rtt = @max(path.path.rtt.latest_rtt_us, path.path.rtt.smoothed_rtt_us);
     const time_threshold = @max(
@@ -124,8 +124,8 @@ pub fn lossDeadlineForApplicationPath(self: *const Connection, path: *const Path
     return best;
 }
 
-pub fn ptoDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 {
-    const sent = self.sentForLevelConst(lvl);
+pub fn ptoDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 {
+    const sent = conn.sentForLevelConst(lvl);
     var oldest: ?u64 = null;
     var i: u32 = 0;
     while (i < sent.count) : (i += 1) {
@@ -135,10 +135,10 @@ pub fn ptoDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 {
         if (oldest == null or p.sent_time_us < oldest.?) oldest = p.sent_time_us;
     }
     const sent_at = oldest orelse return null;
-    return sent_at +| ptoDurationForLevel(self, lvl);
+    return sent_at +| ptoDurationForLevel(conn, lvl);
 }
 
-pub fn ptoDeadlineForApplicationPath(self: *const Connection, path: *const PathState) ?u64 {
+pub fn ptoDeadlineForApplicationPath(conn: *const Connection, path: *const PathState) ?u64 {
     var oldest: ?u64 = null;
     var i: u32 = 0;
     while (i < path.sent.count) : (i += 1) {
@@ -148,22 +148,22 @@ pub fn ptoDeadlineForApplicationPath(self: *const Connection, path: *const PathS
         if (oldest == null or p.sent_time_us < oldest.?) oldest = p.sent_time_us;
     }
     const sent_at = oldest orelse return null;
-    return sent_at +| ptoDurationForApplicationPath(self, path);
+    return sent_at +| ptoDurationForApplicationPath(conn, path);
 }
 
-pub fn idleDeadline(self: *const Connection) ?u64 {
-    if (self.last_activity_us == 0) return null;
-    const timeout = self.idleTimeoutUs() orelse return null;
-    return self.last_activity_us +| timeout;
+pub fn idleDeadline(conn: *const Connection) ?u64 {
+    if (conn.last_activity_us == 0) return null;
+    const timeout = conn.idleTimeoutUs() orelse return null;
+    return conn.last_activity_us +| timeout;
 }
 
 pub fn dispatchAckedPacketToStreams(
-    self: *Connection,
+    conn: *Connection,
     packet: *const sent_packets_mod.SentPacket,
 ) Error!void {
     var refs = packet.streamRefs();
     while (refs.next()) |ref| {
-        const s = self.streams.get(ref.stream_id) orelse continue;
+        const s = conn.streams.get(ref.stream_id) orelse continue;
         // Snapshot the send-buffer length so we can release the
         // matching budget when the ack advances the stream's
         // contiguous-acked floor (RFC 9000 §3.1: bytes ≤ floor are
@@ -174,18 +174,18 @@ pub fn dispatchAckedPacketToStreams(
             else => return e,
         };
         const after = s.send.bytes.items.len;
-        if (after < before) self.releaseResidentBytes(before - after);
+        if (after < before) conn.releaseResidentBytes(before - after);
     }
 }
 
 pub fn dispatchLostPacketToStreams(
-    self: *Connection,
+    conn: *Connection,
     packet: *const sent_packets_mod.SentPacket,
 ) Error!bool {
     var any = false;
     var refs = packet.streamRefs();
     while (refs.next()) |ref| {
-        const s = self.streams.get(ref.stream_id) orelse continue;
+        const s = conn.streams.get(ref.stream_id) orelse continue;
         s.send.onPacketLost(ref.stream_key) catch |e| switch (e) {
             send_stream_mod.Error.UnknownPacket => continue,
             else => return e,
@@ -196,17 +196,17 @@ pub fn dispatchLostPacketToStreams(
 }
 
 pub fn discardSentCryptoForPacket(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     pn: u64,
 ) void {
     const idx = lvl.idx();
     var i: usize = 0;
-    while (i < self.sent_crypto[idx].items.len) {
-        const chunk = self.sent_crypto[idx].items[i];
+    while (i < conn.sent_crypto[idx].items.len) {
+        const chunk = conn.sent_crypto[idx].items[i];
         if (chunk.pn == pn) {
-            const removed = self.sent_crypto[idx].orderedRemove(i);
-            self.allocator.free(removed.data);
+            const removed = conn.sent_crypto[idx].orderedRemove(i);
+            conn.allocator.free(removed.data);
             continue;
         }
         i += 1;
@@ -214,19 +214,19 @@ pub fn discardSentCryptoForPacket(
 }
 
 fn requeueSentCryptoForPacket(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     pn: u64,
 ) Error!bool {
     const idx = lvl.idx();
     var any = false;
     var i: usize = 0;
-    while (i < self.sent_crypto[idx].items.len) {
-        const chunk = self.sent_crypto[idx].items[i];
+    while (i < conn.sent_crypto[idx].items.len) {
+        const chunk = conn.sent_crypto[idx].items[i];
         if (chunk.pn == pn) {
-            try self.crypto_retx[idx].ensureUnusedCapacity(self.allocator, 1);
-            const removed = self.sent_crypto[idx].orderedRemove(i);
-            self.crypto_retx[idx].appendAssumeCapacity(.{
+            try conn.crypto_retx[idx].ensureUnusedCapacity(conn.allocator, 1);
+            const removed = conn.sent_crypto[idx].orderedRemove(i);
+            conn.crypto_retx[idx].appendAssumeCapacity(.{
                 .offset = removed.offset,
                 .data = removed.data,
             });
@@ -239,13 +239,13 @@ fn requeueSentCryptoForPacket(
 }
 
 pub fn dispatchAckedControlFrames(
-    self: *Connection,
+    conn: *Connection,
     packet: *const sent_packets_mod.SentPacket,
 ) void {
     for (packet.retransmit_frames.items) |frame| {
         switch (frame) {
             .reset_stream => |rs| {
-                const s = self.streams.get(rs.stream_id) orelse continue;
+                const s = conn.streams.get(rs.stream_id) orelse continue;
                 if (s.send.reset) |r| {
                     if (r.error_code == rs.application_error_code and
                         r.final_size == rs.final_size)
@@ -260,7 +260,7 @@ pub fn dispatchAckedControlFrames(
 }
 
 pub fn dispatchLostControlFramesOnPath(
-    self: *Connection,
+    conn: *Connection,
     packet: *const sent_packets_mod.SentPacket,
     path_id: u32,
 ) Error!bool {
@@ -268,32 +268,32 @@ pub fn dispatchLostControlFramesOnPath(
     for (packet.retransmit_frames.items) |frame| {
         switch (frame) {
             .max_data => |md| {
-                conn_flow.queueMaxData(self, md.maximum_data);
+                conn_flow.queueMaxData(conn, md.maximum_data);
                 any = true;
             },
             .max_stream_data => |msd| {
                 try conn_flow.queueMaxStreamData(
-                    self,
+                    conn,
                     msd.stream_id,
                     msd.maximum_stream_data,
                 );
                 any = true;
             },
             .max_streams => |ms| {
-                self.queueMaxStreams(ms.bidi, ms.maximum_streams);
+                conn.queueMaxStreams(ms.bidi, ms.maximum_streams);
                 any = true;
             },
             .data_blocked => |db| {
-                any = conn_flow.requeueDataBlocked(self, db.maximum_data) or any;
+                any = conn_flow.requeueDataBlocked(conn, db.maximum_data) or any;
             },
             .stream_data_blocked => |sdb| {
-                any = (try conn_flow.requeueStreamDataBlocked(self, sdb)) or any;
+                any = (try conn_flow.requeueStreamDataBlocked(conn, sdb)) or any;
             },
             .streams_blocked => |sb| {
-                any = conn_flow.requeueStreamsBlocked(self, sb) or any;
+                any = conn_flow.requeueStreamsBlocked(conn, sb) or any;
             },
             .new_connection_id => |nc| {
-                try self.queueNewConnectionId(
+                try conn.queueNewConnectionId(
                     nc.sequence_number,
                     nc.retire_prior_to,
                     nc.connection_id.slice(),
@@ -302,36 +302,36 @@ pub fn dispatchLostControlFramesOnPath(
                 any = true;
             },
             .retire_connection_id => |rc| {
-                try self.queueRetireConnectionId(rc.sequence_number);
+                try conn.queueRetireConnectionId(rc.sequence_number);
                 any = true;
             },
             .handshake_done => {
-                self.pending_handshake_done = true;
+                conn.pending_handshake_done = true;
                 any = true;
             },
             .stop_sending => |ss| {
-                try conn_streams.queueStopSending(self, .{
+                try conn_streams.queueStopSending(conn, .{
                     .stream_id = ss.stream_id,
                     .application_error_code = ss.application_error_code,
                 });
                 any = true;
             },
             .path_response => |pr| {
-                if (self.pending_frames.path_response == null) {
-                    self.queuePathResponseOnPath(path_id, pr.data, null);
+                if (conn.pending_frames.path_response == null) {
+                    conn.queuePathResponseOnPath(path_id, pr.data, null);
                 }
                 any = true;
             },
             .path_challenge => |pc| {
-                if (self.pending_frames.path_challenge == null and
-                    conn_paths.shouldRequeuePathChallenge(self, path_id, pc.data))
+                if (conn.pending_frames.path_challenge == null and
+                    conn_paths.shouldRequeuePathChallenge(conn, path_id, pc.data))
                 {
-                    conn_paths.queuePathChallengeOnPath(self, path_id, pc.data);
+                    conn_paths.queuePathChallengeOnPath(conn, path_id, pc.data);
                     any = true;
                 }
             },
             .reset_stream => |rs| {
-                const s = self.streams.get(rs.stream_id) orelse continue;
+                const s = conn.streams.get(rs.stream_id) orelse continue;
                 if (s.send.reset) |r| {
                     if (r.error_code == rs.application_error_code and
                         r.final_size == rs.final_size)
@@ -342,19 +342,19 @@ pub fn dispatchLostControlFramesOnPath(
                 any = true;
             },
             .path_abandon => |pa| {
-                try self.queuePathAbandon(pa.path_id, pa.error_code);
+                try conn.queuePathAbandon(pa.path_id, pa.error_code);
                 any = true;
             },
             .path_status_backup => |ps| {
-                try self.queuePathStatus(ps.path_id, false, ps.sequence_number);
+                try conn.queuePathStatus(ps.path_id, false, ps.sequence_number);
                 any = true;
             },
             .path_status_available => |ps| {
-                try self.queuePathStatus(ps.path_id, true, ps.sequence_number);
+                try conn.queuePathStatus(ps.path_id, true, ps.sequence_number);
                 any = true;
             },
             .path_new_connection_id => |nc| {
-                try self.queuePathNewConnectionId(
+                try conn.queuePathNewConnectionId(
                     nc.path_id,
                     nc.sequence_number,
                     nc.retire_prior_to,
@@ -364,19 +364,19 @@ pub fn dispatchLostControlFramesOnPath(
                 any = true;
             },
             .path_retire_connection_id => |rc| {
-                try self.queuePathRetireConnectionId(rc.path_id, rc.sequence_number);
+                try conn.queuePathRetireConnectionId(rc.path_id, rc.sequence_number);
                 any = true;
             },
             .max_path_id => |mp| {
-                self.queueMaxPathId(mp.maximum_path_id);
+                conn.queueMaxPathId(mp.maximum_path_id);
                 any = true;
             },
             .paths_blocked => |pb| {
-                self.queuePathsBlocked(pb.maximum_path_id);
+                conn.queuePathsBlocked(pb.maximum_path_id);
                 any = true;
             },
             .path_cids_blocked => |pcb| {
-                self.queuePathCidsBlocked(pcb.path_id, pcb.next_sequence_number);
+                conn.queuePathCidsBlocked(pcb.path_id, pcb.next_sequence_number);
                 any = true;
             },
             .new_token => |item| {
@@ -384,11 +384,11 @@ pub fn dispatchLostControlFramesOnPath(
                 // retransmittable list; if the application
                 // hasn't already queued a fresh NEW_TOKEN over
                 // the top, restage the bytes from the lost copy.
-                if (self.pending_frames.new_token == null) {
+                if (conn.pending_frames.new_token == null) {
                     var stage: pending_frames_mod.NewTokenItem = .{};
                     @memcpy(stage.bytes[0..item.len], item.slice());
                     stage.len = item.len;
-                    self.pending_frames.new_token = stage;
+                    conn.pending_frames.new_token = stage;
                     any = true;
                 }
             },
@@ -403,15 +403,15 @@ pub fn dispatchLostControlFramesOnPath(
                 // semantic update (which IPv4 address, what flags),
                 // so the requeued frame keeps its original
                 // sequence number.
-                try self.pending_frames.alternative_addresses.append(
-                    self.allocator,
+                try conn.pending_frames.alternative_addresses.append(
+                    conn.allocator,
                     .{ .v4 = a },
                 );
                 any = true;
             },
             .alternative_v6_address => |a| {
-                try self.pending_frames.alternative_addresses.append(
-                    self.allocator,
+                try conn.pending_frames.alternative_addresses.append(
+                    conn.allocator,
                     .{ .v6 = a },
                 );
                 any = true;
@@ -422,26 +422,26 @@ pub fn dispatchLostControlFramesOnPath(
 }
 
 pub fn requeueLostPacket(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     packet: *const sent_packets_mod.SentPacket,
 ) Error!bool {
-    return requeueLostPacketOnPath(self, lvl, packet, self.activePath().id);
+    return requeueLostPacketOnPath(conn, lvl, packet, conn.activePath().id);
 }
 
 fn requeueLostPacketOnPath(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     packet: *const sent_packets_mod.SentPacket,
     path_id: u32,
 ) Error!bool {
     var any = false;
-    conn_datagram.recordDatagramLost(self, packet);
+    conn_datagram.recordDatagramLost(conn, packet);
     if (lvl == .application or lvl == .early_data or packet.is_early_data) {
-        any = (try dispatchLostPacketToStreams(self, packet)) or any;
+        any = (try dispatchLostPacketToStreams(conn, packet)) or any;
     }
-    any = (try requeueSentCryptoForPacket(self, lvl, packet.pn)) or any;
-    any = (try dispatchLostControlFramesOnPath(self, packet, path_id)) or any;
+    any = (try requeueSentCryptoForPacket(conn, lvl, packet.pn)) or any;
+    any = (try dispatchLostControlFramesOnPath(conn, packet, path_id)) or any;
     return any;
 }
 
@@ -465,36 +465,36 @@ pub fn isPersistentCongestionFromBasePto(base_pto_us: u64, stats: LossStats) boo
 }
 
 fn isPersistentCongestion(
-    self: *const Connection,
+    conn: *const Connection,
     lvl: EncryptionLevel,
     stats: LossStats,
 ) bool {
     return isPersistentCongestionFromBasePto(
-        basePtoDurationForLevel(self, lvl),
+        basePtoDurationForLevel(conn, lvl),
         stats,
     );
 }
 
 fn onPacketsLostAtLevel(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     stats: LossStats,
 ) void {
     if (stats.in_flight_bytes_lost == 0) return;
     if (lvl == .application) {
-        const cc = self.ccForApplication();
+        const cc = conn.ccForApplication();
         cc.onPacketLost(
             stats.in_flight_bytes_lost,
             stats.largest_lost_sent_time_us,
         );
-        if (isPersistentCongestion(self, lvl, stats)) {
+        if (isPersistentCongestion(conn, lvl, stats)) {
             cc.onPersistentCongestion();
         }
     }
 }
 
 fn onApplicationPathPacketsLost(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
     stats: LossStats,
 ) void {
@@ -504,7 +504,7 @@ fn onApplicationPathPacketsLost(
         stats.largest_lost_sent_time_us,
     );
     if (isPersistentCongestionFromBasePto(
-        basePtoDurationForApplicationPath(self, path),
+        basePtoDurationForApplicationPath(conn, path),
         stats,
     )) {
         path.path.cc.onPersistentCongestion();
@@ -518,13 +518,13 @@ fn onApplicationPathPacketsLost(
 /// congestion-control processing. RFC 8899 §4.4 explicitly says
 /// probe loss MUST NOT trigger CC reactions.
 fn pmtudHandleProbeLossIfMatches(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
     lost: *const sent_packets_mod.SentPacket,
 ) bool {
     const probe_pn = path.pmtu_probe_pn orelse return false;
     if (probe_pn != lost.pn) return false;
-    _ = path.pmtudOnProbeLost(self.pmtud_config.probe_threshold);
+    _ = path.pmtudOnProbeLost(conn.pmtud_config.probe_threshold);
     return true;
 }
 
@@ -532,21 +532,21 @@ fn pmtudHandleProbeLossIfMatches(
 /// (non-probe) packet declared lost on this path. Increments the
 /// consecutive-regular-loss counter; at the threshold, halves
 /// `pmtu` (down to `initial_mtu`) and re-enters search.
-fn pmtudHandleRegularLoss(self: *Connection, path: *PathState) void {
-    if (!self.pmtud_config.enable) return;
+fn pmtudHandleRegularLoss(conn: *Connection, path: *PathState) void {
+    if (!conn.pmtud_config.enable) return;
     if (path.pmtu_state == .disabled) return;
     _ = path.pmtudOnRegularLost(
-        self.pmtud_config.probe_threshold,
-        self.pmtud_config.initial_mtu,
+        conn.pmtud_config.probe_threshold,
+        conn.pmtud_config.initial_mtu,
     );
 }
 
 pub fn detectLossesByPacketThresholdAtLevel(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
 ) Error!void {
-    const pn_space = self.pnSpaceForLevel(lvl);
-    const sent = self.sentForLevel(lvl);
+    const pn_space = conn.pnSpaceForLevel(lvl);
+    const sent = conn.sentForLevel(lvl);
     const largest_acked_opt = pn_space.largest_acked_sent;
     if (largest_acked_opt == null) return;
     const largest_acked = largest_acked_opt.?;
@@ -555,24 +555,24 @@ pub fn detectLossesByPacketThresholdAtLevel(
     // until the multipath split (per `sentForLevel`). RFC 8899
     // probes only ride .application, so we only consult the
     // probe state when this is the application level.
-    const path: *PathState = self.primaryPath();
+    const path: *PathState = conn.primaryPath();
 
     var i: u32 = 0;
     var stats: LossStats = .{};
     const PacketThresholdCtx = struct {
-        self: *Connection,
+        conn: *Connection,
         lvl: EncryptionLevel,
         path: *PathState,
         stats: *LossStats,
 
         fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
-            defer lost.deinit(ctx.self.allocator);
-            conn_qlog.emitPacketLost(ctx.self, ctx.lvl, lost.pn, @intCast(lost.bytes), .packet_threshold);
+            defer lost.deinit(ctx.conn.allocator);
+            conn_qlog.emitPacketLost(ctx.conn, ctx.lvl, lost.pn, @intCast(lost.bytes), .packet_threshold);
             const is_probe = ctx.lvl == .application and
-                pmtudHandleProbeLossIfMatches(ctx.self, ctx.path, lost);
+                pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
             // Always requeue stream / control frames so a probe
             // that coalesced legitimate payload still progresses.
-            _ = try requeueLostPacket(ctx.self, ctx.lvl, lost);
+            _ = try requeueLostPacket(ctx.conn, ctx.lvl, lost);
             if (is_probe) {
                 // RFC 8899 §4.4: probe loss MUST NOT trigger CC
                 // reactions. Skip the LossStats add so neither
@@ -590,11 +590,11 @@ pub fn detectLossesByPacketThresholdAtLevel(
                 const info = ctx.path.path.delivery.onPacketLost(lost);
                 ctx.path.path.cc.onPacketNewlyLost(&info);
             }
-            if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.self, ctx.path);
+            if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.conn, ctx.path);
         }
     };
     var ctx: PacketThresholdCtx = .{
-        .self = self,
+        .conn = conn,
         .lvl = lvl,
         .path = path,
         .stats = &stats,
@@ -620,14 +620,14 @@ pub fn detectLossesByPacketThresholdAtLevel(
         }
         i += 1;
     }
-    self.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(self, lvl, stats, .packet_threshold);
-    onPacketsLostAtLevel(self, lvl, stats);
-    conn_qlog.emitCongestionStateIfChanged(self, 0);
+    conn.qlog_packets_lost +|= stats.count;
+    conn_qlog.emitLossDetected(conn, lvl, stats, .packet_threshold);
+    onPacketsLostAtLevel(conn, lvl, stats);
+    conn_qlog.emitCongestionStateIfChanged(conn, 0);
 }
 
 pub fn detectLossesByPacketThresholdOnApplicationPath(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
 ) Error!void {
     const largest_acked_opt = path.app_pn_space.largest_acked_sent;
@@ -638,15 +638,15 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
     var i: u32 = 0;
     var stats: LossStats = .{};
     const PathPacketThresholdCtx = struct {
-        self: *Connection,
+        conn: *Connection,
         path: *PathState,
         stats: *LossStats,
 
         fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
-            defer lost.deinit(ctx.self.allocator);
-            conn_qlog.emitPacketLost(ctx.self, .application, lost.pn, @intCast(lost.bytes), .packet_threshold);
-            const is_probe = pmtudHandleProbeLossIfMatches(ctx.self, ctx.path, lost);
-            _ = try requeueLostPacketOnPath(ctx.self, .application, lost, ctx.path.id);
+            defer lost.deinit(ctx.conn.allocator);
+            conn_qlog.emitPacketLost(ctx.conn, .application, lost.pn, @intCast(lost.bytes), .packet_threshold);
+            const is_probe = pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
+            _ = try requeueLostPacketOnPath(ctx.conn, .application, lost, ctx.path.id);
             if (is_probe) return;
             ctx.stats.add(lost.*);
             // Delivery-rate sampler C.lost + per-packet inlet, per-path twin.
@@ -654,11 +654,11 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
                 const info = ctx.path.path.delivery.onPacketLost(lost);
                 ctx.path.path.cc.onPacketNewlyLost(&info);
             }
-            pmtudHandleRegularLoss(ctx.self, ctx.path);
+            pmtudHandleRegularLoss(ctx.conn, ctx.path);
         }
     };
     var ctx: PathPacketThresholdCtx = .{
-        .self = self,
+        .conn = conn,
         .path = path,
         .stats = &stats,
     };
@@ -682,18 +682,18 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
         }
         i += 1;
     }
-    self.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(self, .application, stats, .packet_threshold);
-    onApplicationPathPacketsLost(self, path, stats);
-    conn_qlog.emitCongestionStateIfChanged(self, 0);
+    conn.qlog_packets_lost +|= stats.count;
+    conn_qlog.emitLossDetected(conn, .application, stats, .packet_threshold);
+    onApplicationPathPacketsLost(conn, path, stats);
+    conn_qlog.emitCongestionStateIfChanged(conn, 0);
 }
 
 pub fn detectLossesByTimeThresholdAtLevel(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     now_us: u64,
 ) Error!void {
-    const rtt = self.rttForLevelConst(lvl);
+    const rtt = conn.rttForLevelConst(lvl);
     const reference_rtt = @max(rtt.latest_rtt_us, rtt.smoothed_rtt_us);
     const time_threshold = @max(
         reference_rtt * loss_recovery_mod.time_threshold_num /
@@ -702,25 +702,25 @@ pub fn detectLossesByTimeThresholdAtLevel(
     );
     if (now_us <= time_threshold) return;
     const cutoff = now_us - time_threshold;
-    const pn_space = self.pnSpaceForLevel(lvl);
-    const sent = self.sentForLevel(lvl);
+    const pn_space = conn.pnSpaceForLevel(lvl);
+    const sent = conn.sentForLevel(lvl);
     const largest_acked_opt = pn_space.largest_acked_sent;
-    const path: *PathState = self.primaryPath();
+    const path: *PathState = conn.primaryPath();
 
     var i: u32 = 0;
     var stats: LossStats = .{};
     const TimeThresholdCtx = struct {
-        self: *Connection,
+        conn: *Connection,
         lvl: EncryptionLevel,
         path: *PathState,
         stats: *LossStats,
 
         fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
-            defer lost.deinit(ctx.self.allocator);
-            conn_qlog.emitPacketLost(ctx.self, ctx.lvl, lost.pn, @intCast(lost.bytes), .time_threshold);
+            defer lost.deinit(ctx.conn.allocator);
+            conn_qlog.emitPacketLost(ctx.conn, ctx.lvl, lost.pn, @intCast(lost.bytes), .time_threshold);
             const is_probe = ctx.lvl == .application and
-                pmtudHandleProbeLossIfMatches(ctx.self, ctx.path, lost);
-            _ = try requeueLostPacket(ctx.self, ctx.lvl, lost);
+                pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
+            _ = try requeueLostPacket(ctx.conn, ctx.lvl, lost);
             if (is_probe) return;
             ctx.stats.add(lost.*);
             // Delivery-rate sampler C.lost accounting (in-flight
@@ -732,11 +732,11 @@ pub fn detectLossesByTimeThresholdAtLevel(
                 const info = ctx.path.path.delivery.onPacketLost(lost);
                 ctx.path.path.cc.onPacketNewlyLost(&info);
             }
-            if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.self, ctx.path);
+            if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.conn, ctx.path);
         }
     };
     var ctx: TimeThresholdCtx = .{
-        .self = self,
+        .conn = conn,
         .lvl = lvl,
         .path = path,
         .stats = &stats,
@@ -763,14 +763,14 @@ pub fn detectLossesByTimeThresholdAtLevel(
         }
         i += 1;
     }
-    self.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(self, lvl, stats, .time_threshold);
-    onPacketsLostAtLevel(self, lvl, stats);
-    conn_qlog.emitCongestionStateIfChanged(self, now_us);
+    conn.qlog_packets_lost +|= stats.count;
+    conn_qlog.emitLossDetected(conn, lvl, stats, .time_threshold);
+    onPacketsLostAtLevel(conn, lvl, stats);
+    conn_qlog.emitCongestionStateIfChanged(conn, now_us);
 }
 
 pub fn detectLossesByTimeThresholdOnApplicationPath(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
     now_us: u64,
 ) Error!void {
@@ -788,15 +788,15 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
     var i: u32 = 0;
     var stats: LossStats = .{};
     const PathTimeThresholdCtx = struct {
-        self: *Connection,
+        conn: *Connection,
         path: *PathState,
         stats: *LossStats,
 
         fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
-            defer lost.deinit(ctx.self.allocator);
-            conn_qlog.emitPacketLost(ctx.self, .application, lost.pn, @intCast(lost.bytes), .time_threshold);
-            const is_probe = pmtudHandleProbeLossIfMatches(ctx.self, ctx.path, lost);
-            _ = try requeueLostPacketOnPath(ctx.self, .application, lost, ctx.path.id);
+            defer lost.deinit(ctx.conn.allocator);
+            conn_qlog.emitPacketLost(ctx.conn, .application, lost.pn, @intCast(lost.bytes), .time_threshold);
+            const is_probe = pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
+            _ = try requeueLostPacketOnPath(ctx.conn, .application, lost, ctx.path.id);
             if (is_probe) return;
             ctx.stats.add(lost.*);
             // Delivery-rate sampler C.lost + per-packet inlet, per-path twin.
@@ -804,11 +804,11 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
                 const info = ctx.path.path.delivery.onPacketLost(lost);
                 ctx.path.path.cc.onPacketNewlyLost(&info);
             }
-            pmtudHandleRegularLoss(ctx.self, ctx.path);
+            pmtudHandleRegularLoss(ctx.conn, ctx.path);
         }
     };
     var ctx: PathTimeThresholdCtx = .{
-        .self = self,
+        .conn = conn,
         .path = path,
         .stats = &stats,
     };
@@ -834,18 +834,18 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
         }
         i += 1;
     }
-    self.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(self, .application, stats, .time_threshold);
-    onApplicationPathPacketsLost(self, path, stats);
-    conn_qlog.emitCongestionStateIfChanged(self, now_us);
+    conn.qlog_packets_lost +|= stats.count;
+    conn_qlog.emitLossDetected(conn, .application, stats, .time_threshold);
+    onApplicationPathPacketsLost(conn, path, stats);
+    conn_qlog.emitCongestionStateIfChanged(conn, now_us);
 }
 
 fn firePtoAtLevel(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
 ) Error!bool {
-    const sent = self.sentForLevel(lvl);
-    const path: *PathState = self.primaryPath();
+    const sent = conn.sentForLevel(lvl);
+    const path: *PathState = conn.primaryPath();
     var i: u32 = 0;
     while (i < sent.count) : (i += 1) {
         const p = sent.packets[i];
@@ -853,18 +853,18 @@ fn firePtoAtLevel(
         if (!p.ack_eliciting) continue;
 
         var lost = sent.removeAt(i);
-        defer lost.deinit(self.allocator);
-        conn_qlog.emitPacketLost(self, lvl, lost.pn, @intCast(lost.bytes), .pto_probe);
+        defer lost.deinit(conn.allocator);
+        conn_qlog.emitPacketLost(conn, lvl, lost.pn, @intCast(lost.bytes), .pto_probe);
         // RFC 8899 §4.4: a probe expired by PTO counts as a probe
         // loss, NOT a regular loss; CC stays unaffected. The
         // requeue path still runs so coalesced control / stream
         // frames go back into the queue.
         const is_probe = lvl == .application and
-            pmtudHandleProbeLossIfMatches(self, path, &lost);
-        const requeued = try requeueLostPacket(self, lvl, &lost);
+            pmtudHandleProbeLossIfMatches(conn, path, &lost);
+        const requeued = try requeueLostPacket(conn, lvl, &lost);
         if (is_probe) {
-            self.pendingPingForLevel(lvl).* = false;
-            self.ptoCountForLevel(lvl).* +|= 1;
+            conn.pendingPingForLevel(lvl).* = false;
+            conn.ptoCountForLevel(lvl).* +|= 1;
             return true;
         }
         var stats: LossStats = .{};
@@ -875,19 +875,19 @@ fn firePtoAtLevel(
             const info = path.path.delivery.onPacketLost(&lost);
             path.path.cc.onPacketNewlyLost(&info);
         }
-        self.qlog_packets_lost +|= stats.count;
-        conn_qlog.emitLossDetected(self, lvl, stats, .pto_probe);
-        onPacketsLostAtLevel(self, lvl, stats);
+        conn.qlog_packets_lost +|= stats.count;
+        conn_qlog.emitLossDetected(conn, lvl, stats, .pto_probe);
+        onPacketsLostAtLevel(conn, lvl, stats);
 
-        self.pendingPingForLevel(lvl).* = !requeued;
-        self.ptoCountForLevel(lvl).* +|= 1;
+        conn.pendingPingForLevel(lvl).* = !requeued;
+        conn.ptoCountForLevel(lvl).* +|= 1;
         return true;
     }
     return false;
 }
 
 fn firePtoOnApplicationPath(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
 ) Error!bool {
     var i: u32 = 0;
@@ -897,10 +897,10 @@ fn firePtoOnApplicationPath(
         if (!p.ack_eliciting) continue;
 
         var lost = path.sent.removeAt(i);
-        defer lost.deinit(self.allocator);
-        conn_qlog.emitPacketLost(self, .application, lost.pn, @intCast(lost.bytes), .pto_probe);
-        const is_probe = pmtudHandleProbeLossIfMatches(self, path, &lost);
-        const requeued = try requeueLostPacketOnPath(self, .application, &lost, path.id);
+        defer lost.deinit(conn.allocator);
+        conn_qlog.emitPacketLost(conn, .application, lost.pn, @intCast(lost.bytes), .pto_probe);
+        const is_probe = pmtudHandleProbeLossIfMatches(conn, path, &lost);
+        const requeued = try requeueLostPacketOnPath(conn, .application, &lost, path.id);
         if (is_probe) {
             path.pending_ping = false;
             path.pto_count +|= 1;
@@ -913,9 +913,9 @@ fn firePtoOnApplicationPath(
             const info = path.path.delivery.onPacketLost(&lost);
             path.path.cc.onPacketNewlyLost(&info);
         }
-        self.qlog_packets_lost +|= stats.count;
-        conn_qlog.emitLossDetected(self, .application, stats, .pto_probe);
-        onApplicationPathPacketsLost(self, path, stats);
+        conn.qlog_packets_lost +|= stats.count;
+        conn_qlog.emitLossDetected(conn, .application, stats, .pto_probe);
+        onApplicationPathPacketsLost(conn, path, stats);
 
         path.pending_ping = !requeued;
         if (requeued and path.pto_probe_count < 2) path.pto_probe_count += 1;
@@ -926,21 +926,21 @@ fn firePtoOnApplicationPath(
 }
 
 pub fn fireDuePtoAtLevel(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     now_us: u64,
 ) Error!void {
-    const deadline = ptoDeadlineForLevel(self, lvl) orelse return;
+    const deadline = ptoDeadlineForLevel(conn, lvl) orelse return;
     if (now_us < deadline) return;
-    _ = try firePtoAtLevel(self, lvl);
+    _ = try firePtoAtLevel(conn, lvl);
 }
 
 pub fn fireDuePtoOnApplicationPath(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
     now_us: u64,
 ) Error!void {
-    const deadline = ptoDeadlineForApplicationPath(self, path) orelse return;
+    const deadline = ptoDeadlineForApplicationPath(conn, path) orelse return;
     if (now_us < deadline) return;
-    _ = try firePtoOnApplicationPath(self, path);
+    _ = try firePtoOnApplicationPath(conn, path);
 }

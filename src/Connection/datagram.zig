@@ -19,55 +19,55 @@ const IncomingDatagram = state_mod.IncomingDatagram;
 const max_pending_datagram_bytes = state_mod.max_pending_datagram_bytes;
 const max_recv_plaintext = state_mod.max_recv_plaintext;
 
-fn recordDatagramSendEvent(self: *Connection, event: StoredDatagramSendEvent) void {
-    self.datagram_send_events.push(event);
+fn recordDatagramSendEvent(conn: *Connection, event: StoredDatagramSendEvent) void {
+    conn.datagram_send_events.push(event);
 }
 
-pub fn recordDatagramAcked(self: *Connection, packet: *const sent_packets_mod.SentPacket) void {
+pub fn recordDatagramAcked(conn: *Connection, packet: *const sent_packets_mod.SentPacket) void {
     const event = event_queue_mod.datagramEventFromPacket(packet) orelse return;
-    recordDatagramSendEvent(self, .{ .acked = event });
+    recordDatagramSendEvent(conn, .{ .acked = event });
 }
 
-pub fn recordDatagramLost(self: *Connection, packet: *const sent_packets_mod.SentPacket) void {
+pub fn recordDatagramLost(conn: *Connection, packet: *const sent_packets_mod.SentPacket) void {
     const event = event_queue_mod.datagramEventFromPacket(packet) orelse return;
-    recordDatagramSendEvent(self, .{ .lost = event });
+    recordDatagramSendEvent(conn, .{ .lost = event });
 }
 
 // Doc comment lives on the `Connection.sendDatagram` thunk in Connection.zig.
-pub fn sendDatagram(self: *Connection, payload: []const u8) Error!void {
-    _ = try sendDatagramTracked(self, payload);
+pub fn sendDatagram(conn: *Connection, payload: []const u8) Error!void {
+    _ = try sendDatagramTracked(conn, payload);
 }
 
 // Doc comment lives on the `Connection.sendDatagramTracked` thunk in Connection.zig.
-pub fn sendDatagramTracked(self: *Connection, payload: []const u8) Error!u64 {
+pub fn sendDatagramTracked(conn: *Connection, payload: []const u8) Error!u64 {
     const max_payload = try maxDatagramPayload(
-        self,
+        conn,
     );
     if (payload.len > max_payload) return Error.DatagramTooLarge;
-    if (self.pending_frames.send_datagrams.items.len >= max_pending_datagram_count) {
+    if (conn.pending_frames.send_datagrams.items.len >= max_pending_datagram_count) {
         return Error.DatagramQueueFull;
     }
     if (payload.len > max_pending_datagram_bytes or
-        self.pending_frames.send_datagram_bytes > max_pending_datagram_bytes - payload.len)
+        conn.pending_frames.send_datagram_bytes > max_pending_datagram_bytes - payload.len)
     {
         return Error.DatagramQueueFull;
     }
-    const copy = try self.allocator.alloc(u8, payload.len);
-    errdefer self.allocator.free(copy);
+    const copy = try conn.allocator.alloc(u8, payload.len);
+    errdefer conn.allocator.free(copy);
     @memcpy(copy, payload);
-    if (self.next_datagram_id == std.math.maxInt(u64)) return Error.DatagramIdExhausted;
-    const id = self.next_datagram_id;
-    self.next_datagram_id += 1;
-    try self.pending_frames.send_datagrams.append(self.allocator, .{
+    if (conn.next_datagram_id == std.math.maxInt(u64)) return Error.DatagramIdExhausted;
+    const id = conn.next_datagram_id;
+    conn.next_datagram_id += 1;
+    try conn.pending_frames.send_datagrams.append(conn.allocator, .{
         .id = id,
         .data = copy,
     });
-    self.pending_frames.send_datagram_bytes += payload.len;
+    conn.pending_frames.send_datagram_bytes += payload.len;
     return id;
 }
 
 // Doc comment lives on the `Connection.maxDatagramPayload` thunk in Connection.zig.
-pub fn maxDatagramPayload(self: *const Connection) Error!usize {
+pub fn maxDatagramPayload(conn: *const Connection) Error!usize {
     // Room a 1-RTT packet + DATAGRAM frame need around the payload. The
     // reserve matches the historical `default_mtu`-derived ceiling at the
     // 1200-byte floor, so behavior there is unchanged and only the
@@ -75,8 +75,8 @@ pub fn maxDatagramPayload(self: *const Connection) Error!usize {
     const packet_reserve: usize = default_mtu - max_outbound_datagram_payload_size;
     // Grow/shrink with the active path's PMTU, but never past the
     // plaintext buffer the send path builds a packet into.
-    var limit: usize = @min(self.pmtu() -| packet_reserve, max_recv_plaintext);
-    if (self.cached_peer_transport_params) |params| {
+    var limit: usize = @min(conn.pmtu() -| packet_reserve, max_recv_plaintext);
+    if (conn.cached_peer_transport_params) |params| {
         if (params.max_datagram_frame_size == 0) return Error.DatagramUnavailable;
         limit = @min(limit, @as(usize, @intCast(params.max_datagram_frame_size)));
     }
@@ -84,26 +84,26 @@ pub fn maxDatagramPayload(self: *const Connection) Error!usize {
 }
 
 // Doc comment lives on the `Connection.receiveDatagram` thunk in Connection.zig.
-pub fn receiveDatagram(self: *Connection, dst: []u8) ?usize {
-    const item = receiveDatagramInfo(self, dst) orelse return null;
+pub fn receiveDatagram(conn: *Connection, dst: []u8) ?usize {
+    const item = receiveDatagramInfo(conn, dst) orelse return null;
     return item.len;
 }
 
 // Doc comment lives on the `Connection.receiveDatagramInfo` thunk in Connection.zig.
-pub fn receiveDatagramInfo(self: *Connection, dst: []u8) ?IncomingDatagram {
-    const item = self.pending_frames.popRecvDatagram() orelse return null;
-    defer self.allocator.free(item.data);
+pub fn receiveDatagramInfo(conn: *Connection, dst: []u8) ?IncomingDatagram {
+    const item = conn.pending_frames.popRecvDatagram() orelse return null;
+    defer conn.allocator.free(item.data);
     // Hardening guide §3.5 / §8: pair the resident-bytes release
     // with the queue dequeue. `popRecvDatagram` already decrements
     // `recv_datagram_bytes`; this drops the matching cents from
     // the global resident-bytes counter.
-    defer self.releaseResidentBytes(item.data.len);
+    defer conn.releaseResidentBytes(item.data.len);
     const n = @min(dst.len, item.data.len);
     @memcpy(dst[0..n], item.data[0..n]);
     return .{ .len = n, .arrived_in_early_data = item.arrived_in_early_data };
 }
 
 /// Number of inbound DATAGRAMs queued for the app to read.
-pub fn pendingDatagrams(self: *const Connection) usize {
-    return self.pending_frames.recv_datagrams.items.len;
+pub fn pendingDatagrams(conn: *const Connection) usize {
+    return conn.pending_frames.recv_datagrams.items.len;
 }

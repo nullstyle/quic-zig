@@ -50,15 +50,15 @@ pub const ConnectionStats = struct {
 
 // One-line pointer per the extraction convention: full doc on the
 // `Connection.stats` thunk in Connection.zig.
-pub fn stats(self: *const Connection) ConnectionStats {
-    const active_id = conn_paths.activePathId(self);
-    const ps = conn_paths.pathStats(self, active_id);
+pub fn stats(conn: *const Connection) ConnectionStats {
+    const active_id = conn_paths.activePathId(conn);
+    const ps = conn_paths.pathStats(conn, active_id);
     return .{
-        .bytes_sent = self.qlog_bytes_sent,
-        .bytes_received = self.qlog_bytes_received,
-        .packets_sent = self.qlog_packets_sent,
-        .packets_received = self.qlog_packets_received,
-        .packets_lost = self.qlog_packets_lost,
+        .bytes_sent = conn.qlog_bytes_sent,
+        .bytes_received = conn.qlog_bytes_received,
+        .packets_sent = conn.qlog_packets_sent,
+        .packets_received = conn.qlog_packets_received,
+        .packets_lost = conn.qlog_packets_lost,
 
         .active_path_id = active_id,
         .cwnd = if (ps) |p| p.cwnd else 0,
@@ -68,9 +68,9 @@ pub fn stats(self: *const Connection) ConnectionStats {
         .min_rtt_us = if (ps) |p| p.min_rtt_us else 0,
         .rttvar_us = if (ps) |p| p.rttvar_us else 0,
         .congestion_state = if (ps) |p| p.congestion_window_state else .slow_start,
-        .pmtu = self.pmtu(),
+        .pmtu = conn.pmtu(),
 
-        .streams_open = conn_streams.streamCount(self),
-        .close_state = self.closeState(),
+        .streams_open = conn_streams.streamCount(conn),
+        .close_state = conn.closeState(),
     };
 }

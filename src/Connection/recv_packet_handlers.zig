@@ -33,29 +33,29 @@ const max_recv_plaintext = state_mod.max_recv_plaintext;
 /// either ignore it (if the peer still lists v1) or terminate the
 /// connection if no compatible version is offered.
 pub fn handleVersionNegotiation(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     now_us: u64,
 ) usize {
-    if (self.role != .client or self.inner.handshakeDone()) return bytes.len;
+    if (conn.role != .client or conn.inner.handshakeDone()) return bytes.len;
     const parsed = wire_header.parse(bytes, 0) catch return bytes.len;
     if (parsed.header != .version_negotiation) return bytes.len;
     const vn = parsed.header.version_negotiation;
-    if (!self.local_scid_set or !self.initial_dcid_set) return bytes.len;
-    if (!std.mem.eql(u8, vn.dcid.slice(), self.local_scid.slice())) return bytes.len;
-    const odcid = if (self.original_initial_dcid_set)
-        self.original_initial_dcid
+    if (!conn.local_scid_set or !conn.initial_dcid_set) return bytes.len;
+    if (!std.mem.eql(u8, vn.dcid.slice(), conn.local_scid.slice())) return bytes.len;
+    const odcid = if (conn.original_initial_dcid_set)
+        conn.original_initial_dcid
     else
-        self.initial_dcid;
+        conn.initial_dcid;
     if (!std.mem.eql(u8, vn.scid.slice(), odcid.slice())) return bytes.len;
     // The connection's currently-active version must NOT appear in the
     // VN list — RFC 8999 §6 / RFC 9000 §6 say a peer MUST send VN only
     // when it does NOT support our version. If our version is listed,
     // we silently ignore the VN per the same spec text (this includes
     // the v1↔v2 case where a server happens to support both).
-    if (conn_recv_dispatch.versionListContains(vn, self.version)) return bytes.len;
+    if (conn_recv_dispatch.versionListContains(vn, conn.version)) return bytes.len;
 
-    self.enterClosed(
+    conn.enterClosed(
         .version_negotiation,
         .transport,
         0,
@@ -72,49 +72,49 @@ pub fn handleVersionNegotiation(
 /// updates, and dispatches frames. Stateless-reset detection is folded
 /// into both the no-keys and decryption-failure branches.
 pub fn handleShort(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
-    const app_path = self.incomingShortPath(bytes) orelse
-        conn_paths.pathForId(self, self.current_incoming_path_id);
-    self.current_incoming_path_id = app_path.id;
+    const app_path = conn.incomingShortPath(bytes) orelse
+        conn_paths.pathForId(conn, conn.current_incoming_path_id);
+    conn.current_incoming_path_id = app_path.id;
     const app_pn_space = &app_path.app_pn_space;
     const largest_received = if (app_pn_space.received.largest) |l| l else 0;
-    const multipath_path_id: ?u32 = if (self.multipathNegotiated()) app_path.id else null;
-    if (self.app_read_current == null) {
-        if (self.isKnownStatelessReset(bytes)) {
-            conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .stateless_reset);
-            self.enterStatelessReset(now_us);
+    const multipath_path_id: ?u32 = if (conn.multipathNegotiated()) app_path.id else null;
+    if (conn.app_read_current == null) {
+        if (conn.isKnownStatelessReset(bytes)) {
+            conn_qlog.emitPacketDropped(conn, .application, @intCast(bytes.len), .stateless_reset);
+            conn.enterStatelessReset(now_us);
         } else {
-            conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .keys_unavailable);
+            conn_qlog.emitPacketDropped(conn, .application, @intCast(bytes.len), .keys_unavailable);
         }
         return bytes.len;
     }
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
     const open_result = (try conn_recv_dispatch.openApplicationPacket(
-        self,
+        conn,
         &pt_buf,
         bytes,
         app_path,
         largest_received,
         multipath_path_id,
     )) orelse {
-        if (self.isKnownStatelessReset(bytes)) {
-            conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .stateless_reset);
-            self.enterStatelessReset(now_us);
+        if (conn.isKnownStatelessReset(bytes)) {
+            conn_qlog.emitPacketDropped(conn, .application, @intCast(bytes.len), .stateless_reset);
+            conn.enterStatelessReset(now_us);
             return bytes.len;
         }
-        conn_qlog.emitPacketDropped(self, .application, @intCast(bytes.len), .decryption_failure);
+        conn_qlog.emitPacketDropped(conn, .application, @intCast(bytes.len), .decryption_failure);
         conn_keys.noteApplicationAuthFailure(
-            self,
+            conn,
         );
         return bytes.len;
     };
     if (open_result.slot == .next) {
-        try self.promoteApplicationReadKeys(now_us);
-        try conn_keys.maybeRespondToPeerKeyUpdate(self, now_us);
+        try conn.promoteApplicationReadKeys(now_us);
+        try conn_keys.maybeRespondToPeerKeyUpdate(conn, now_us);
     }
     const opened = open_result.opened;
 
@@ -123,21 +123,21 @@ pub fn handleShort(
     // post-HP first byte (it's mixed into the AAD), so a non-zero
     // value is a peer protocol violation.
     if (opened.reserved_bits != 0) {
-        self.close(true, transport_error_protocol_violation, "non-zero short-header reserved bits");
+        conn.close(true, transport_error_protocol_violation, "non-zero short-header reserved bits");
         return bytes.len;
     }
 
-    self.last_authenticated_path_id = app_path.id;
+    conn.last_authenticated_path_id = app_path.id;
     if (conn_recv_dispatch.closingAttributionOnly(
-        self,
+        conn,
     )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. Decrypt has
         // succeeded; mark the observation, scan for a peer CC,
         // and skip everything else (no ACK tracker update, no
         // dispatchFrames). The outer `handle` re-arms a CC
         // retransmit subject to the SHOULD-rate-limit.
-        self.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
+        conn.closing_state_attribution_observed = true;
+        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
         return bytes.len;
     }
     // Detect a duplicate application PN *before* recording it. A
@@ -149,12 +149,12 @@ pub fn handleShort(
     // idempotent, so only DATAGRAM is actually harmed — but skipping the
     // whole dispatch on a duplicate is both correct and cheaper.
     const duplicate_pn = app_pn_space.received.contains(opened.pn);
-    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, self.delayed_ack_packet_threshold);
-    app_pn_space.onPacketReceivedWithEcn(self.last_recv_ecn);
-    self.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(self, .application, opened.pn, @intCast(bytes.len), conn_recv_dispatch.countFrames(opened.payload));
+    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, conn.delayed_ack_packet_threshold);
+    app_pn_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
+    conn.qlog_packets_received +|= 1;
+    conn_qlog.emitPacketReceived(conn, .application, opened.pn, @intCast(bytes.len), conn_recv_dispatch.countFrames(opened.payload));
     if (!duplicate_pn) {
-        try self.dispatchFrames(.application, opened.payload, now_us);
+        try conn.dispatchFrames(.application, opened.payload, now_us);
     }
     return bytes.len;
 }
@@ -164,7 +164,7 @@ pub fn handleShort(
 /// bytes before any key derivation. Both roles validate the long-header
 /// reserved-bits gate, then dispatch frames at the .initial level.
 pub fn handleInitial(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
@@ -172,28 +172,28 @@ pub fn handleInitial(
     // unprotected long-header bytes before any decryption can
     // happen. RFC 9001 §5.2 derives Initial keys from the DCID
     // the client put on its first Initial.
-    if (self.role == .server and !self.initial_dcid_set) {
+    if (conn.role == .server and !conn.initial_dcid_set) {
         if (bytes.len < 6) {
-            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .header_decode_failure);
+            conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .header_decode_failure);
             return bytes.len;
         }
         const dcid_len = bytes[5];
         if (dcid_len > path_mod.max_cid_len) {
-            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .header_decode_failure);
+            conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .header_decode_failure);
             return bytes.len;
         }
         if (bytes.len < @as(usize, 6) + dcid_len) {
-            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .header_decode_failure);
+            conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .header_decode_failure);
             return bytes.len;
         }
-        try self.setInitialDcid(bytes[6 .. 6 + dcid_len]);
+        try conn.setInitialDcid(bytes[6 .. 6 + dcid_len]);
     }
     // RFC 9368 §6 client-side compatible-version-negotiation upgrade
     // detection: the server may answer the client's wire-version
     // Initial under a *different* version drawn from the client's
     // advertised `version_information.available_versions`. When that
     // happens, the inbound long-header version field will not match
-    // `self.version`. Try to flip our active version so Initial-key
+    // `conn.version`. Try to flip our active version so Initial-key
     // derivation below picks up the upgrade-target salt + HKDF labels.
     //
     // Defensive: `clientAcceptCompatibleVersion` re-validates the role,
@@ -204,28 +204,28 @@ pub fn handleInitial(
     // spec-compliant fallback). The check is gated on the receive-side
     // Initial space being empty so a stale-but-on-wire-version Initial
     // arriving after the upgrade can't accidentally flip us back.
-    if (self.role == .client and bytes.len >= 5) {
+    if (conn.role == .client and bytes.len >= 5) {
         const inbound_version = std.mem.readInt(u32, bytes[1..5], .big);
-        if (inbound_version != self.version and self.pnSpaceForLevel(.initial).received.largest == null) {
-            _ = self.clientAcceptCompatibleVersion(inbound_version);
+        if (inbound_version != conn.version and conn.pnSpaceForLevel(.initial).received.largest == null) {
+            _ = conn.clientAcceptCompatibleVersion(inbound_version);
         }
     }
     try conn_keys.ensureInitialKeys(
-        self,
+        conn,
     );
-    const r_keys_opt = self.initial_keys_read;
+    const r_keys_opt = conn.initial_keys_read;
     const r_keys = r_keys_opt orelse {
-        conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .keys_unavailable);
+        conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     };
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
     const opened = long_packet_mod.openInitial(&pt_buf, bytes, .{
         .keys = &r_keys,
-        .largest_received = if (self.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
+        .largest_received = if (conn.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
     }) catch |e| switch (e) {
         boringssl.crypto.aead.Error.Auth => {
-            conn_qlog.emitPacketDropped(self, .initial, @intCast(bytes.len), .decryption_failure);
+            conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .decryption_failure);
             return bytes.len;
         },
         else => return e,
@@ -236,51 +236,51 @@ pub fn handleInitial(
     // the post-HP first byte by now, so a non-zero value is a
     // peer protocol violation.
     if (opened.reserved_bits != 0) {
-        self.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
+        conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
         return bytes.len;
     }
 
     // Server side: discover peer's CIDs from the very first Initial.
-    if (self.role == .server) {
-        if (!self.peer_dcid_set) {
-            self.peer_dcid = ConnectionId.fromSlice(opened.scid.slice());
-            self.peer_dcid_set = true;
+    if (conn.role == .server) {
+        if (!conn.peer_dcid_set) {
+            conn.peer_dcid = ConnectionId.fromSlice(opened.scid.slice());
+            conn.peer_dcid_set = true;
         }
-        if (!self.initial_dcid_set) {
-            self.initial_dcid = ConnectionId.fromSlice(opened.dcid.slice());
-            self.initial_dcid_set = true;
+        if (!conn.initial_dcid_set) {
+            conn.initial_dcid = ConnectionId.fromSlice(opened.dcid.slice());
+            conn.initial_dcid_set = true;
             try conn_keys.ensureInitialKeys(
-                self,
+                conn,
             );
         }
         conn_qlog.emitConnectionStartedOnce(
-            self,
+            conn,
         );
     }
-    if (self.role == .client) {
+    if (conn.role == .client) {
         const server_scid = ConnectionId.fromSlice(opened.scid.slice());
-        if (!ConnectionId.eql(self.primaryPath().path.peer_cid, server_scid)) {
-            try self.setPeerDcid(server_scid.slice());
+        if (!ConnectionId.eql(conn.primaryPath().path.peer_cid, server_scid)) {
+            try conn.setPeerDcid(server_scid.slice());
         }
     }
 
-    self.last_authenticated_path_id = self.current_incoming_path_id;
+    conn.last_authenticated_path_id = conn.current_incoming_path_id;
     if (conn_recv_dispatch.closingAttributionOnly(
-        self,
+        conn,
     )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
-        self.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
+        conn.closing_state_attribution_observed = true;
+        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
         return opened.bytes_consumed;
     }
     {
-        const initial_space = self.pnSpaceForLevel(.initial);
+        const initial_space = conn.pnSpaceForLevel(.initial);
         initial_space.recordReceivedPacket(opened.pn, now_us / 1000, Connection.packetPayloadAckEliciting(opened.payload));
-        initial_space.onPacketReceivedWithEcn(self.last_recv_ecn);
+        initial_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
     }
-    self.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(self, .initial, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
-    try self.dispatchFrames(.initial, opened.payload, now_us);
+    conn.qlog_packets_received +|= 1;
+    conn_qlog.emitPacketReceived(conn, .initial, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
+    try conn.dispatchFrames(.initial, opened.payload, now_us);
     return opened.bytes_consumed;
 }
 
@@ -290,12 +290,12 @@ pub fn handleInitial(
 /// the next Initial flight goes out under the server-supplied DCID
 /// and carries the token.
 pub fn handleRetry(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
     _ = now_us;
-    if (self.role != .client or self.retry_accepted or self.inner.handshakeDone()) {
+    if (conn.role != .client or conn.retry_accepted or conn.inner.handshakeDone()) {
         return bytes.len;
     }
     const parsed = wire_header.parse(bytes, 0) catch return bytes.len;
@@ -306,14 +306,14 @@ pub fn handleRetry(
     // drop. RFC 9368 §3.3.3 ties the integrity tag to the Retry's
     // version, so a mismatched version here would also fail tag
     // validation a few lines below.
-    if (retry.version != self.version) return bytes.len;
-    if (!self.local_scid_set or !self.initial_dcid_set) return bytes.len;
-    if (!std.mem.eql(u8, retry.dcid.slice(), self.local_scid.slice())) return bytes.len;
+    if (retry.version != conn.version) return bytes.len;
+    if (!conn.local_scid_set or !conn.initial_dcid_set) return bytes.len;
+    if (!std.mem.eql(u8, retry.dcid.slice(), conn.local_scid.slice())) return bytes.len;
 
-    const odcid = if (self.original_initial_dcid_set)
-        self.original_initial_dcid
+    const odcid = if (conn.original_initial_dcid_set)
+        conn.original_initial_dcid
     else
-        self.initial_dcid;
+        conn.initial_dcid;
     if (std.mem.eql(u8, retry.scid.slice(), odcid.slice())) {
         return bytes.len;
     }
@@ -322,15 +322,15 @@ pub fn handleRetry(
         return bytes.len;
     }
 
-    try self.retry_token.resize(self.allocator, retry.retry_token.len);
-    @memcpy(self.retry_token.items, retry.retry_token);
-    self.retry_source_cid = ConnectionId.fromSlice(retry.scid.slice());
-    self.retry_source_cid_set = true;
-    self.retry_accepted = true;
+    try conn.retry_token.resize(conn.allocator, retry.retry_token.len);
+    @memcpy(conn.retry_token.items, retry.retry_token);
+    conn.retry_source_cid = ConnectionId.fromSlice(retry.scid.slice());
+    conn.retry_source_cid_set = true;
+    conn.retry_accepted = true;
 
-    try self.setPeerDcid(retry.scid.slice());
-    try self.setInitialDcid(retry.scid.slice());
-    try self.resetInitialRecoveryForRetry();
+    try conn.setPeerDcid(retry.scid.slice());
+    try conn.setInitialDcid(retry.scid.slice());
+    try conn.resetInitialRecoveryForRetry();
     return bytes.len;
 }
 
@@ -339,25 +339,25 @@ pub fn handleRetry(
 /// under the early-data read keys, gate on the long-header reserved
 /// bits, and dispatch frames at the .early_data level.
 pub fn handleZeroRtt(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
-    if (self.role != .server) {
-        conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .other);
+    if (conn.role != .server) {
+        conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .other);
         return bytes.len;
     }
-    if (self.inner.earlyDataStatus() == .rejected) {
-        conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .keys_unavailable);
+    if (conn.inner.earlyDataStatus() == .rejected) {
+        conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     }
 
-    const r_keys_opt = try self.packetKeys(.early_data, .read);
+    const r_keys_opt = try conn.packetKeys(.early_data, .read);
     const r_keys = r_keys_opt orelse {
-        conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .keys_unavailable);
+        conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     };
-    const app_path = conn_paths.pathForId(self, self.current_incoming_path_id);
+    const app_path = conn_paths.pathForId(conn, conn.current_incoming_path_id);
     const app_pn_space = &app_path.app_pn_space;
     const largest_received = if (app_pn_space.received.largest) |l| l else 0;
 
@@ -367,7 +367,7 @@ pub fn handleZeroRtt(
         .largest_received = largest_received,
     }) catch |e| switch (e) {
         boringssl.crypto.aead.Error.Auth => {
-            conn_qlog.emitPacketDropped(self, .early_data, @intCast(bytes.len), .decryption_failure);
+            conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .decryption_failure);
             return bytes.len;
         },
         else => return e,
@@ -375,24 +375,24 @@ pub fn handleZeroRtt(
 
     // RFC 9000 §17.2.1 ¶17 long-header Reserved Bits gate.
     if (opened.reserved_bits != 0) {
-        self.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
+        conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
         return bytes.len;
     }
 
-    self.last_authenticated_path_id = app_path.id;
+    conn.last_authenticated_path_id = app_path.id;
     if (conn_recv_dispatch.closingAttributionOnly(
-        self,
+        conn,
     )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
-        self.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
+        conn.closing_state_attribution_observed = true;
+        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
         return opened.bytes_consumed;
     }
-    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, self.delayed_ack_packet_threshold);
-    app_pn_space.onPacketReceivedWithEcn(self.last_recv_ecn);
-    self.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(self, .early_data, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
-    try self.dispatchFrames(.early_data, opened.payload, now_us);
+    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, conn.delayed_ack_packet_threshold);
+    app_pn_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
+    conn.qlog_packets_received +|= 1;
+    conn_qlog.emitPacketReceived(conn, .early_data, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
+    try conn.dispatchFrames(.early_data, opened.payload, now_us);
     return opened.bytes_consumed;
 }
 
@@ -400,23 +400,23 @@ pub fn handleZeroRtt(
 /// Decrypt under the Handshake read keys, gate on long-header reserved
 /// bits, then dispatch frames at the .handshake level.
 pub fn handleHandshake(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
-    const r_keys_opt = try self.packetKeys(.handshake, .read);
+    const r_keys_opt = try conn.packetKeys(.handshake, .read);
     const r_keys = r_keys_opt orelse {
-        conn_qlog.emitPacketDropped(self, .handshake, @intCast(bytes.len), .keys_unavailable);
+        conn_qlog.emitPacketDropped(conn, .handshake, @intCast(bytes.len), .keys_unavailable);
         return bytes.len;
     };
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
     const opened = long_packet_mod.openHandshake(&pt_buf, bytes, .{
         .keys = &r_keys,
-        .largest_received = if (self.pnSpaceForLevel(.handshake).received.largest) |l| l else 0,
+        .largest_received = if (conn.pnSpaceForLevel(.handshake).received.largest) |l| l else 0,
     }) catch |e| switch (e) {
         boringssl.crypto.aead.Error.Auth => {
-            conn_qlog.emitPacketDropped(self, .handshake, @intCast(bytes.len), .decryption_failure);
+            conn_qlog.emitPacketDropped(conn, .handshake, @intCast(bytes.len), .decryption_failure);
             return bytes.len;
         },
         else => return e,
@@ -424,34 +424,34 @@ pub fn handleHandshake(
 
     // RFC 9000 §17.2.1 ¶17 long-header Reserved Bits gate.
     if (opened.reserved_bits != 0) {
-        self.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
+        conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
         return bytes.len;
     }
 
-    self.last_authenticated_path_id = self.current_incoming_path_id;
+    conn.last_authenticated_path_id = conn.current_incoming_path_id;
     // RFC 9000 §8.1: a successfully decrypted Handshake packet from the
     // peer authenticates the source address (only the genuine peer holds
     // Handshake-level keys). For servers, this lifts the 3x
     // anti-amplification cap on the path. Idempotent if already
     // validated (e.g. via PATH_RESPONSE during migration).
-    if (self.role == .server) {
-        conn_paths.pathForId(self, self.current_incoming_path_id).path.markValidated();
+    if (conn.role == .server) {
+        conn_paths.pathForId(conn, conn.current_incoming_path_id).path.markValidated();
     }
     if (conn_recv_dispatch.closingAttributionOnly(
-        self,
+        conn,
     )) {
         // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
-        self.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(self, opened.payload, now_us);
+        conn.closing_state_attribution_observed = true;
+        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
         return opened.bytes_consumed;
     }
     {
-        const handshake_space = self.pnSpaceForLevel(.handshake);
+        const handshake_space = conn.pnSpaceForLevel(.handshake);
         handshake_space.recordReceivedPacket(opened.pn, now_us / 1000, Connection.packetPayloadAckEliciting(opened.payload));
-        handshake_space.onPacketReceivedWithEcn(self.last_recv_ecn);
+        handshake_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
     }
-    self.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(self, .handshake, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
-    try self.dispatchFrames(.handshake, opened.payload, now_us);
+    conn.qlog_packets_received +|= 1;
+    conn_qlog.emitPacketReceived(conn, .handshake, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
+    try conn.dispatchFrames(.handshake, opened.payload, now_us);
     return opened.bytes_consumed;
 }

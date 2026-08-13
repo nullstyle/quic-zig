@@ -22,11 +22,11 @@ const path_mod = state_mod.path_mod;
 /// servers that need to seed CID/transport-parameter state
 /// from the very first datagram before TLS can advance.
 pub fn acceptInitial(
-    self: *Connection,
+    conn: *Connection,
     bytes: []const u8,
     params: TransportParams,
 ) Error!void {
-    if (self.role != .server) return Error.NotServerContext;
+    if (conn.role != .server) return Error.NotServerContext;
     if (bytes.len < 6) return Error.InsufficientBytes;
     if ((bytes[0] & 0x80) == 0) return Error.NotInitialPacket; // bit 7 clear → short header
     // RFC 9368 §3.2: the v2 long-header type rotation puts Initial
@@ -42,17 +42,17 @@ pub fn acceptInitial(
     // Retry-tag construction all key off the right RFC 9001 §5
     // / RFC 9368 §3.3 constants. Invalidates any pre-existing
     // Initial keys via `setVersion`.
-    if (version != self.version) setVersion(self, version);
+    if (version != conn.version) setVersion(conn, version);
     // RFC 9368 §6 ¶6/¶7 downgrade-attack guard: snapshot the wire
     // version of the FIRST Initial we accepted, BEFORE any
-    // compatible-version upgrade flips `self.version`. The client's
+    // compatible-version upgrade flips `conn.version`. The client's
     // `version_information.chosen_version` (parsed later from the
     // ClientHello transport params) MUST equal this — otherwise a
     // path attacker rewrote the wire version while leaving the
     // ClientHello intact. Latched once: subsequent `acceptInitial`
     // calls (e.g. retransmits) leave the snapshot alone.
-    if (self.initial_wire_version == null) {
-        self.initial_wire_version = version;
+    if (conn.initial_wire_version == null) {
+        conn.initial_wire_version = version;
     }
 
     const dcid_len = bytes[5];
@@ -67,9 +67,9 @@ pub fn acceptInitial(
     if (bytes.len < pos + @as(usize, scid_len)) return Error.InsufficientBytes;
     const scid = bytes[pos .. pos + scid_len];
 
-    try setInitialDcid(self, dcid);
-    try self.setPeerDcid(scid);
-    try self.setTransportParams(params);
+    try setInitialDcid(conn, dcid);
+    try conn.setPeerDcid(scid);
+    try conn.setTransportParams(params);
 }
 
 fn longHeaderCids(bytes: []const u8) Error!struct {
@@ -113,12 +113,12 @@ fn initialHeaderCids(bytes: []const u8) Error!struct {
 /// response to a client's unsupported-version long-header packet.
 /// `supported_versions` is encoded in preference order.
 pub fn writeVersionNegotiation(
-    self: *Connection,
+    conn: *Connection,
     dst: []u8,
     client_packet: []const u8,
     supported_versions: []const u32,
 ) Error!usize {
-    if (self.role != .server) return error.NotServerContext;
+    if (conn.role != .server) return error.NotServerContext;
     if (supported_versions.len == 0) return error.InvalidVersionNegotiation;
     if (supported_versions.len > 16) return error.BufferTooSmall;
     const cids = try longHeaderCids(client_packet);
@@ -142,13 +142,13 @@ pub fn writeVersionNegotiation(
 /// The Retry's version field mirrors the client's Initial so the
 /// peer can validate under the matching constants.
 pub fn writeRetry(
-    self: *Connection,
+    conn: *Connection,
     dst: []u8,
     client_initial: []const u8,
     retry_scid: []const u8,
     retry_token: []const u8,
 ) Error!usize {
-    if (self.role != .server) return error.NotServerContext;
+    if (conn.role != .server) return error.NotServerContext;
     const cids = try longHeaderCids(client_initial);
     // Make sure the leading long-header packet really is an Initial
     // under the client's chosen version (RFC 9368 §3.2 v2 layout
@@ -172,16 +172,16 @@ pub fn writeRetry(
 /// DCID it received on the client's first Initial. Per RFC 9000
 /// the initial DCID is at least 8 bytes, so `len == 0` here is
 /// always "unset".
-pub fn setInitialDcid(self: *Connection, dcid: []const u8) Error!void {
+pub fn setInitialDcid(conn: *Connection, dcid: []const u8) Error!void {
     if (dcid.len > path_mod.max_cid_len) return Error.DcidTooLong;
-    if (!self.original_initial_dcid_set) {
-        self.original_initial_dcid = ConnectionId.fromSlice(dcid);
-        self.original_initial_dcid_set = true;
+    if (!conn.original_initial_dcid_set) {
+        conn.original_initial_dcid = ConnectionId.fromSlice(dcid);
+        conn.original_initial_dcid_set = true;
     }
-    self.initial_dcid = ConnectionId.fromSlice(dcid);
-    self.initial_dcid_set = true;
-    self.initial_keys_read = null;
-    self.initial_keys_write = null;
+    conn.initial_dcid = ConnectionId.fromSlice(dcid);
+    conn.initial_dcid_set = true;
+    conn.initial_keys_read = null;
+    conn.initial_keys_write = null;
 }
 
 /// Set the active QUIC wire-format version. The Initial-keys
@@ -192,13 +192,13 @@ pub fn setInitialDcid(self: *Connection, dcid: []const u8) Error!void {
 /// MUST switch versions only at construction time or via the
 /// compatible-version-negotiation upgrade path before either side
 /// has emitted an Initial under the previous version.
-pub fn setVersion(self: *Connection, version: u32) void {
-    if (self.version == version) return;
-    self.version = version;
-    if (self.initial_keys_read) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
-    if (self.initial_keys_write) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
-    self.initial_keys_read = null;
-    self.initial_keys_write = null;
+pub fn setVersion(conn: *Connection, version: u32) void {
+    if (conn.version == version) return;
+    conn.version = version;
+    if (conn.initial_keys_read) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
+    if (conn.initial_keys_write) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
+    conn.initial_keys_read = null;
+    conn.initial_keys_write = null;
 }
 
 /// RFC 9368 §6 server-side hook: stash an upgrade target so a
@@ -209,14 +209,14 @@ pub fn setVersion(self: *Connection, version: u32) void {
 /// and before the embedder's `poll` would seal the EE-bearing
 /// response under what would otherwise still be the wire-version
 /// keys. Calling with `null` clears the pending upgrade. Idempotent.
-pub fn setPendingVersionUpgrade(self: *Connection, version: ?u32) void {
-    self.pending_version_upgrade = version;
+pub fn setPendingVersionUpgrade(conn: *Connection, version: ?u32) void {
+    conn.pending_version_upgrade = version;
 }
 
 /// Returns the currently-pending upgrade target, or `null` if
 /// none was stashed via `setPendingVersionUpgrade`.
-pub fn pendingVersionUpgrade(self: *const Connection) ?u32 {
-    return self.pending_version_upgrade;
+pub fn pendingVersionUpgrade(conn: *const Connection) ?u32 {
+    return conn.pending_version_upgrade;
 }
 
 /// Apply any RFC 9368 §6 pending version upgrade. The wire-
@@ -227,11 +227,11 @@ pub fn pendingVersionUpgrade(self: *const Connection) ?u32 {
 /// version stream is discarded. Returns `true` when a flip
 /// happened (so the caller can emit observability), `false`
 /// otherwise.
-pub fn applyPendingVersionUpgrade(self: *Connection) bool {
-    const target = self.pending_version_upgrade orelse return false;
-    self.pending_version_upgrade = null;
-    if (target == self.version) return false;
-    setVersion(self, target);
+pub fn applyPendingVersionUpgrade(conn: *Connection) bool {
+    const target = conn.pending_version_upgrade orelse return false;
+    conn.pending_version_upgrade = null;
+    if (target == conn.version) return false;
+    setVersion(conn, target);
     return true;
 }
 
@@ -257,17 +257,17 @@ pub fn applyPendingVersionUpgrade(self: *Connection) bool {
 ///    decision window). Caller treats this as "leave version
 ///    alone"; the inbound packet will then fail AEAD auth and be
 ///    dropped, which is the spec-compliant fallback.
-pub fn clientAcceptCompatibleVersion(self: *Connection, version: u32) bool {
-    if (self.role != .client) return false;
+pub fn clientAcceptCompatibleVersion(conn: *Connection, version: u32) bool {
+    if (conn.role != .client) return false;
     // Same-version is reported as "nothing to do" (false) so
     // callers can distinguish a real flip from a no-op.
-    if (version == self.version) return false;
+    if (version == conn.version) return false;
     // The decision window closes once Initial keys are dropped
     // (discardInitialKeys, post-handshake-confirm) — beyond that,
-    // flipping `self.version` would desync the long-header type-bit
+    // flipping `conn.version` would desync the long-header type-bit
     // decoder against in-flight packets.
-    if (self.initial_keys_discarded) return false;
-    if (self.inner.handshakeDone()) return false;
+    if (conn.initial_keys_discarded) return false;
+    if (conn.inner.handshakeDone()) return false;
     // Defensive: only accept versions whose Initial keys we can
     // derive. RFC 9368 §6 only defines v1↔v2; an unknown version
     // here would have been a configuration accident upstream.
@@ -277,8 +277,8 @@ pub fn clientAcceptCompatibleVersion(self: *Connection, version: u32) bool {
     // pick one of the versions" the client listed). The list
     // includes the wire version at index 0 plus every
     // compatible_version from `Client.Config`.
-    const advertised = self.local_transport_params.compatibleVersions();
+    const advertised = conn.local_transport_params.compatibleVersions();
     if (std.mem.indexOfScalar(u32, advertised, version) == null) return false;
-    setVersion(self, version);
+    setVersion(conn, version);
     return true;
 }

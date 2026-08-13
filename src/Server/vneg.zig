@@ -19,8 +19,8 @@ const peekLongHeaderIds = wire_peek.peekLongHeaderIds;
 
 /// True if `version` is one of the wire-format versions this
 /// server is configured to accept. Drives the VN gate in `feed`.
-pub fn versionAccepted(self: *const Server, version: u32) bool {
-    for (self.versions) |v| {
+pub fn versionAccepted(server: *const Server, version: u32) bool {
+    for (server.versions) |v| {
         if (v == version) return true;
     }
     return false;
@@ -62,7 +62,7 @@ pub fn versionAccepted(self: *const Server, version: u32) bool {
 /// parse never closes the connection or surfaces an error to the
 /// caller — it is purely advisory.
 pub fn preparseUpgradeTarget(
-    self: *const Server,
+    server: *const Server,
     bytes: []const u8,
     wire_version: u32,
     ch_complete: *bool,
@@ -71,7 +71,7 @@ pub fn preparseUpgradeTarget(
     // Multi-version mode is the only case where an upgrade is
     // possible. With a single configured version there is nothing
     // to choose between.
-    if (self.versions.len <= 1) return null;
+    if (server.versions.len <= 1) return null;
     // Only Initial-key-derivable wire versions support compatible
     // version negotiation. Higher layers reject everything else
     // via `versionAccepted` upstream, but stay defensive.
@@ -88,7 +88,7 @@ pub fn preparseUpgradeTarget(
     const ch = wire.vneg_preparse.reassembleClientHello(&ch_buf, plaintext) orelse return null;
     ch_complete.* = true;
 
-    return upgradeTargetFromCh(self, ch);
+    return upgradeTargetFromCh(server, ch);
 }
 
 /// Steps 3-5 of the §6 pre-parse: walk a contiguous ClientHello
@@ -97,10 +97,10 @@ pub fn preparseUpgradeTarget(
 /// server's configured preference list. Shared by the single-shot
 /// `preparseUpgradeTarget` and the streaming `advancePendingUpgrade`
 /// paths so both produce bit-identical decisions for any given CH.
-fn upgradeTargetFromCh(self: *const Server, ch: []const u8) ?u32 {
+fn upgradeTargetFromCh(server: *const Server, ch: []const u8) ?u32 {
     const qtp = wire.vneg_preparse.findQuicTransportParamsExt(ch) orelse return null;
     const info = wire.vneg_preparse.findVersionInformation(qtp) orelse return null;
-    return wire.vneg_preparse.chooseUpgradeVersion(self.versions, info.available());
+    return wire.vneg_preparse.chooseUpgradeVersion(server.versions, info.available());
 }
 
 /// Decrypt a single inbound Initial under the wire-version keys,
@@ -147,20 +147,20 @@ fn decryptInitialPreparse(
 /// Initial frame stream — in either case the slot commits to
 /// the wire version.
 pub fn openPendingUpgrade(
-    self: *Server,
+    server: *Server,
     bytes: []const u8,
     wire_version: u32,
 ) ?*PendingUpgradeState {
-    const pu = self.allocator.create(PendingUpgradeState) catch return null;
+    const pu = server.allocator.create(PendingUpgradeState) catch return null;
     pu.init(wire_version);
     pu.initials_seen = 1;
     var pt_buf: [conn_mod.state.max_recv_plaintext]u8 = undefined;
     const plain = decryptInitialPreparse(bytes, wire_version, &pt_buf) orelse {
-        self.allocator.destroy(pu);
+        server.allocator.destroy(pu);
         return null;
     };
     _ = pu.rc.feed(plain) catch {
-        self.allocator.destroy(pu);
+        server.allocator.destroy(pu);
         return null;
     };
     return pu;
@@ -188,7 +188,7 @@ pub fn openPendingUpgrade(
 /// version's — and any frame the reassembler rejects (overflow,
 /// unexpected frame type, conflicting overlap) drops the pending
 /// state immediately.
-pub fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void {
+pub fn advancePendingUpgrade(server: *Server, slot: *Slot, bytes: []const u8) void {
     const pu = slot.pending_upgrade orelse return;
 
     // Only Initial-typed long-header datagrams advance the
@@ -198,11 +198,11 @@ pub fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void
     // has already moved past Initial — drop pending state and
     // commit to the wire version.
     const ids = peekLongHeaderIds(bytes) orelse {
-        dropPendingUpgrade(self, slot);
+        dropPendingUpgrade(server, slot);
         return;
     };
     if (!isInitialLongHeader(bytes, ids.version) or ids.version != pu.wire_version) {
-        dropPendingUpgrade(self, slot);
+        dropPendingUpgrade(server, slot);
         return;
     }
 
@@ -211,7 +211,7 @@ pub fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void
     // version commitment (still spec-compliant) so we don't
     // accumulate unbounded decrypt CPU under their control.
     if (pu.initials_seen >= PendingUpgradeState.max_initial_packets) {
-        dropPendingUpgrade(self, slot);
+        dropPendingUpgrade(server, slot);
         return;
     }
     pu.initials_seen += 1;
@@ -230,7 +230,7 @@ pub fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void
         // Malformed frame stream or oversize CH. Falls back to
         // wire version — drop pending state so we don't keep
         // re-evaluating broken inputs.
-        dropPendingUpgrade(self, slot);
+        dropPendingUpgrade(server, slot);
         return;
     };
     const ch = maybe_ch orelse return; // Still waiting for more bytes.
@@ -238,9 +238,9 @@ pub fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void
     // CH complete — make the §6 decision. Whether we upgrade or
     // commit to the wire version, the pending state can be
     // dropped: the decision is final.
-    const upgrade_target = upgradeTargetFromCh(self, ch);
+    const upgrade_target = upgradeTargetFromCh(server, ch);
     const wire_version = pu.wire_version;
-    dropPendingUpgrade(self, slot);
+    dropPendingUpgrade(server, slot);
 
     const chosen = upgrade_target orelse wire_version;
     if (chosen == wire_version) return; // No upgrade.
@@ -257,7 +257,7 @@ pub fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void
     var ordered: [16]u32 = undefined;
     ordered[0] = chosen;
     var n: usize = 1;
-    for (self.versions) |v| {
+    for (server.versions) |v| {
         if (v == chosen) continue;
         if (n >= ordered.len) break;
         ordered[n] = v;
@@ -271,10 +271,10 @@ pub fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void
 /// Free and unhook the per-slot multi-Initial pre-parse buffer.
 /// Idempotent. Called once the upgrade decision is final or when
 /// the per-slot Initial budget is exhausted.
-fn dropPendingUpgrade(self: *Server, slot: *Slot) void {
+fn dropPendingUpgrade(server: *Server, slot: *Slot) void {
     const pu = slot.pending_upgrade orelse return;
     slot.pending_upgrade = null;
-    self.allocator.destroy(pu);
+    server.allocator.destroy(pu);
 }
 
 /// Encode a Version Negotiation packet into the response queue.
@@ -285,7 +285,7 @@ fn dropPendingUpgrade(self: *Server, slot: *Slot) void {
 /// swapped (RFC 8999 §6) and the unused bits are left as the
 /// encoder default.
 pub fn queueVersionNegotiation(
-    self: *Server,
+    server: *Server,
     dst_addr: Address,
     client_packet: []const u8,
 ) !void {
@@ -296,8 +296,8 @@ pub fn queueVersionNegotiation(
     // wire-level VN encoder handles the rest. Capped at 16 entries
     // so we don't overflow the inline `entry.bytes` budget.
     var versions_bytes: [16 * 4]u8 = undefined;
-    const count = @min(self.versions.len, 16);
-    for (self.versions[0..count], 0..) |v, i| {
+    const count = @min(server.versions.len, 16);
+    for (server.versions[0..count], 0..) |v, i| {
         std.mem.writeInt(u32, versions_bytes[i * 4 ..][0..4], v, .big);
     }
 
@@ -307,7 +307,7 @@ pub fn queueVersionNegotiation(
         .versions_bytes = versions_bytes[0 .. count * 4],
     } });
     entry.len = written;
-    try self.queueStatelessResponse(entry);
+    try server.queueStatelessResponse(entry);
 }
 
 // -- NEW_TOKEN ------------------------------------------------------

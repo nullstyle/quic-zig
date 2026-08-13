@@ -18,11 +18,11 @@ const tls_mod = @import("../tls/root.zig");
 /// `draining_tls_contexts`. A `generation` matching
 /// `current_generation` is a no-op (the current context isn't a
 /// draining entry until the next `replaceTlsContext`).
-pub fn releaseGeneration(self: *Server, generation: u32) void {
-    if (generation == self.current_generation) return;
+pub fn releaseGeneration(server: *Server, generation: u32) void {
+    if (generation == server.current_generation) return;
     var idx: usize = 0;
-    while (idx < self.draining_tls_contexts.items.len) : (idx += 1) {
-        const entry = &self.draining_tls_contexts.items[idx];
+    while (idx < server.draining_tls_contexts.items.len) : (idx += 1) {
+        const entry = &server.draining_tls_contexts.items[idx];
         if (entry.generation != generation) continue;
         // invariant: refcount > 0 — every live slot at this
         // generation contributed exactly one. Reaping a slot
@@ -31,7 +31,7 @@ pub fn releaseGeneration(self: *Server, generation: u32) void {
         entry.refcount -= 1;
         if (entry.refcount == 0) {
             entry.ctx.deinit();
-            _ = self.draining_tls_contexts.swapRemove(idx);
+            _ = server.draining_tls_contexts.swapRemove(idx);
         }
         return;
     }
@@ -104,7 +104,7 @@ pub fn antiReplayEarlyDataTrampoline(
 }
 
 // Doc comment lives on the `Server.replaceTlsContext` thunk in Server.zig.
-pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
+pub fn replaceTlsContext(server: *Server, reload: TlsReload) Error!void {
     var new_ctx: boringssl.tls.Context = switch (reload) {
         .pem => |pem| blk: {
             if (pem.cert_pem.len == 0 or pem.key_pem.len == 0) return Error.InvalidConfig;
@@ -112,15 +112,15 @@ pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
                 .verify = .none,
                 .min_version = boringssl.raw.TLS1_3_VERSION,
                 .max_version = boringssl.raw.TLS1_3_VERSION,
-                .alpn = self.alpn_protocols,
-                .early_data_enabled = self.enable_0rtt,
+                .alpn = server.alpn_protocols,
+                .early_data_enabled = server.enable_0rtt,
             });
             errdefer ctx.deinit();
             try ctx.loadCertChainAndKey(pem.cert_pem, pem.key_pem);
             // Carry the init-time mTLS posture onto the
             // replacement context — a cert rotation must not
             // silently stop verifying clients.
-            if (self.client_ca_pem) |ca| {
+            if (server.client_ca_pem) |ca| {
                 try tls_mod.pem.installTrustAnchors(ctx, ca, .require_peer_cert);
             }
             // Same for the 0-RTT anti-replay hook: `Server.init`
@@ -129,8 +129,8 @@ pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
             // silently accept replayed 0-RTT flights for every
             // ticket minted after the swap (RFC 9001 §5.6 /
             // hardening §5.2).
-            if (self.enable_0rtt) {
-                if (self.early_data_anti_replay) |tracker| {
+            if (server.enable_0rtt) {
+                if (server.early_data_anti_replay) |tracker| {
                     try ctx.setAllowEarlyDataCallback(
                         antiReplayEarlyDataTrampoline,
                         @ptrCast(tracker),
@@ -146,7 +146,7 @@ pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
         // silently stop verifying clients (and flip-flop back on
         // a later `.pem` reload). mTLS servers rotate via `.pem`.
         .override => |ctx| blk: {
-            if (self.client_ca_pem != null) return Error.InvalidConfig;
+            if (server.client_ca_pem != null) return Error.InvalidConfig;
             break :blk ctx;
         },
     };
@@ -160,8 +160,8 @@ pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
     // Count live slots at the current generation so we know how
     // many references the about-to-drain context still holds.
     var refs: usize = 0;
-    const gen_to_drain = self.current_generation;
-    for (self.slots.items) |slot| {
+    const gen_to_drain = server.current_generation;
+    for (server.slots.items) |slot| {
         if (slot.tls_generation == gen_to_drain) refs += 1;
     }
 
@@ -169,20 +169,20 @@ pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
     // is owned and still referenced — `appendBounded`-style call
     // would also work, but doing it now means an OOM here leaves
     // both the old context and the slot table untouched.
-    if (self.owns_tls and refs > 0) {
-        try self.draining_tls_contexts.append(self.allocator, .{
-            .ctx = self.tls_ctx,
+    if (server.owns_tls and refs > 0) {
+        try server.draining_tls_contexts.append(server.allocator, .{
+            .ctx = server.tls_ctx,
             .generation = gen_to_drain,
             .refcount = refs,
         });
-    } else if (self.owns_tls and refs == 0) {
+    } else if (server.owns_tls and refs == 0) {
         // Owned but no live slots reference it — drop immediately.
-        self.tls_ctx.deinit();
+        server.tls_ctx.deinit();
     }
     // If !owns_tls, the embedder retains ownership of the
     // pre-swap context — we just forget the pointer.
 
-    self.tls_ctx = new_ctx;
-    self.owns_tls = true;
-    self.current_generation +%= 1;
+    server.tls_ctx = new_ctx;
+    server.owns_tls = true;
+    server.current_generation +%= 1;
 }

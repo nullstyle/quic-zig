@@ -237,7 +237,7 @@ pub const RateLimitSnapshot = struct {
 /// On a denial of `false`, the caller drops the LogEvent silently
 /// — there is no nested log about the dropped log.
 fn acceptLogRate(
-    self: *Server,
+    server: *Server,
     addr: Address,
     cap: u64,
     now_us: u64,
@@ -246,14 +246,14 @@ fn acceptLogRate(
     // Direct sibling call: dos.zig owns the source-rate table
     // maintenance; routing it through a Server method thunk hid the
     // dependency (the thunks are gone — 95a4472 rule).
-    if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-        server_dos.pruneSourceRate(self, now_us);
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-            server_dos.evictOldestSourceRate(self);
+    if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
+        server_dos.pruneSourceRate(server, now_us);
+        if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
+            server_dos.evictOldestSourceRate(server);
         }
     }
 
-    const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
+    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
         // OOM on the rate table: deny the log rather than risk
         // unbounded emission. Mirrors `acceptSourceRate`.
         return false;
@@ -269,7 +269,7 @@ fn acceptLogRate(
     }
 
     const elapsed = now_us -% gop.value_ptr.log_window_start_us;
-    if (elapsed >= self.source_rate_window_us) {
+    if (elapsed >= server.source_rate_window_us) {
         gop.value_ptr.log_count = 1;
         gop.value_ptr.log_window_start_us = now_us;
         return true;
@@ -284,9 +284,9 @@ fn acceptLogRate(
 /// by the per-source log rate limit (log-flood DoS defense) when
 /// the event carries a source address — events with `from = null`
 /// (or a variant that doesn't bind to a peer) bypass the gate.
-pub fn emitLog(self: *Server, ev: LogEvent) void {
-    if (self.log_callback == null) return;
-    if (self.max_log_events_per_source) |cap| {
+pub fn emitLog(server: *Server, ev: LogEvent) void {
+    if (server.log_callback == null) return;
+    if (server.max_log_events_per_source) |cap| {
         if (logEventSource(ev)) |addr| {
             // `acceptLogRate` allocates on first hit per source —
             // OOM there denies the log rather than crash. We pass
@@ -303,13 +303,13 @@ pub fn emitLog(self: *Server, ev: LogEvent) void {
             // `acceptLogRate` an in-feed `now_us` via a ledger
             // captured at feed entry. We do that via
             // `last_feed_now_us`, set at the top of every `feed`.
-            if (!acceptLogRate(self, addr, cap, self.last_feed_now_us)) {
-                self.feeds_log_rate_limited += 1;
+            if (!acceptLogRate(server, addr, cap, server.last_feed_now_us)) {
+                server.feeds_log_rate_limited += 1;
                 return;
             }
         }
     }
-    self.log_callback.?(self.log_user_data, ev);
+    server.log_callback.?(server.log_user_data, ev);
 }
 
 /// Snapshot the server's instrumentation gauges and counters.
@@ -318,31 +318,31 @@ pub fn emitLog(self: *Server, ev: LogEvent) void {
 /// any user callback. Embedders typically call this on a fixed
 /// schedule and forward to their metrics pipeline (Prometheus,
 /// statsd, OpenTelemetry).
-pub fn metricsSnapshot(self: *const Server) MetricsSnapshot {
+pub fn metricsSnapshot(server: *const Server) MetricsSnapshot {
     return .{
-        .live_connections = @intCast(self.slots.items.len),
-        .routing_table_size = @intCast(self.cid_table.count()),
-        .source_rate_table_size = @intCast(self.source_rate_table.count()),
-        .retry_state_table_size = @intCast(self.retry_state_table.count()),
-        .stateless_queue_depth = @intCast(self.stateless_responses.items.len),
-        .stateless_queue_high_water = self.stateless_queue_high_water,
-        .feeds_routed = self.feeds_routed,
-        .feeds_accepted = self.feeds_accepted,
-        .feeds_dropped = self.feeds_dropped,
-        .feeds_rate_limited = self.feeds_rate_limited,
-        .feeds_table_full = self.feeds_table_full,
-        .feeds_version_negotiated = self.feeds_version_negotiated,
-        .feeds_retry_sent = self.feeds_retry_sent,
-        .feeds_initial_too_small = self.feeds_initial_too_small,
-        .feeds_vn_rate_limited = self.feeds_vn_rate_limited,
-        .feeds_listener_rate_limited = self.feeds_listener_rate_limited,
-        .feeds_listener_byte_rate_limited = self.feeds_listener_byte_rate_limited,
-        .feeds_source_bandwidth_limited = self.feeds_source_bandwidth_limited,
-        .egress_local_faults = self.egress_local_faults,
-        .feeds_log_rate_limited = self.feeds_log_rate_limited,
-        .retries_validated = self.retries_validated,
-        .stateless_responses_evicted = self.stateless_responses_evicted,
-        .slots_reaped = self.slots_reaped,
+        .live_connections = @intCast(server.slots.items.len),
+        .routing_table_size = @intCast(server.cid_table.count()),
+        .source_rate_table_size = @intCast(server.source_rate_table.count()),
+        .retry_state_table_size = @intCast(server.retry_state_table.count()),
+        .stateless_queue_depth = @intCast(server.stateless_responses.items.len),
+        .stateless_queue_high_water = server.stateless_queue_high_water,
+        .feeds_routed = server.feeds_routed,
+        .feeds_accepted = server.feeds_accepted,
+        .feeds_dropped = server.feeds_dropped,
+        .feeds_rate_limited = server.feeds_rate_limited,
+        .feeds_table_full = server.feeds_table_full,
+        .feeds_version_negotiated = server.feeds_version_negotiated,
+        .feeds_retry_sent = server.feeds_retry_sent,
+        .feeds_initial_too_small = server.feeds_initial_too_small,
+        .feeds_vn_rate_limited = server.feeds_vn_rate_limited,
+        .feeds_listener_rate_limited = server.feeds_listener_rate_limited,
+        .feeds_listener_byte_rate_limited = server.feeds_listener_byte_rate_limited,
+        .feeds_source_bandwidth_limited = server.feeds_source_bandwidth_limited,
+        .egress_local_faults = server.egress_local_faults,
+        .feeds_log_rate_limited = server.feeds_log_rate_limited,
+        .retries_validated = server.retries_validated,
+        .stateless_responses_evicted = server.stateless_responses_evicted,
+        .slots_reaped = server.slots_reaped,
     };
 }
 
@@ -359,10 +359,10 @@ pub fn metricsSnapshot(self: *const Server) MetricsSnapshot {
 /// millisecond on commodity hardware; the snapshot is meant for
 /// occasional polling (every few seconds), not the per-packet
 /// hot path.
-pub fn rateLimitSnapshot(self: *const Server) RateLimitSnapshot {
+pub fn rateLimitSnapshot(server: *const Server) RateLimitSnapshot {
     var snap: RateLimitSnapshot = .{
-        .table_size = self.source_rate_table.count(),
-        .cumulative_rejections = self.feeds_rate_limited,
+        .table_size = server.source_rate_table.count(),
+        .cumulative_rejections = server.feeds_rate_limited,
         .top_offenders = @splat(.{ .addr = .unspecified, .recent_count = 0, .window_start_us = 0 }),
         .top_offender_count = 0,
     };
@@ -371,7 +371,7 @@ pub fn rateLimitSnapshot(self: *const Server) RateLimitSnapshot {
     // the first position whose count is below ours and shift
     // everything after it down by one. Bounded scan because the
     // top-N array is fixed at 16.
-    var it = self.source_rate_table.iterator();
+    var it = server.source_rate_table.iterator();
     while (it.next()) |entry| {
         const row: RateLimitSnapshot.SourceRow = .{
             .addr = entry.key_ptr.*,

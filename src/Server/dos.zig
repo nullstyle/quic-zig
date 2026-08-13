@@ -44,7 +44,7 @@ const Slot = Server.Slot;
 /// good enough for DoS-deflecting purposes; it allows up to 2x
 /// the cap across two adjacent windows in pathological timing.
 pub fn acceptSourceRate(
-    self: *Server,
+    server: *Server,
     addr: Address,
     cap: u64,
     now_us: u64,
@@ -52,18 +52,18 @@ pub fn acceptSourceRate(
     // Lazy eviction when the table is at capacity. Pruning
     // every call is wasteful; only pay the O(table) cost when
     // we're about to add an entry that would overflow.
-    if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-        pruneSourceRate(self, now_us);
+    if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
+        pruneSourceRate(server, now_us);
         // If pruning didn't make room, drop the most stale
         // entry to guarantee progress.
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
+        if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
             evictOldestSourceRate(
-                self,
+                server,
             );
         }
     }
 
-    const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
+    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
         // OOM on the rate table is a cheap soft fail: deny the
         // accept rather than continue without protection.
         return false;
@@ -74,7 +74,7 @@ pub fn acceptSourceRate(
     }
 
     const elapsed = now_us -% gop.value_ptr.window_start_us;
-    if (elapsed >= self.source_rate_window_us) {
+    if (elapsed >= server.source_rate_window_us) {
         gop.value_ptr.* = .{ .count = 1, .window_start_us = now_us };
         return true;
     }
@@ -89,22 +89,22 @@ pub fn acceptSourceRate(
 /// pair so VN floods don't burn the per-source Initial budget
 /// (and vice versa). Returns `true` when emission is permitted.
 pub fn acceptVnRate(
-    self: *Server,
+    server: *Server,
     addr: Address,
     cap: u64,
     now_us: u64,
 ) bool {
     // Lazy eviction shared with `acceptSourceRate`.
-    if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-        pruneSourceRate(self, now_us);
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
+    if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
+        pruneSourceRate(server, now_us);
+        if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
             evictOldestSourceRate(
-                self,
+                server,
             );
         }
     }
 
-    const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
+    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
         // OOM on the rate table: deny the VN rather than continue
         // unprotected. Mirrors `acceptSourceRate` policy.
         return false;
@@ -120,7 +120,7 @@ pub fn acceptVnRate(
     }
 
     const elapsed = now_us -% gop.value_ptr.vn_window_start_us;
-    if (elapsed >= self.source_rate_window_us) {
+    if (elapsed >= server.source_rate_window_us) {
         gop.value_ptr.vn_count = 1;
         gop.value_ptr.vn_window_start_us = now_us;
         return true;
@@ -145,23 +145,23 @@ pub fn acceptVnRate(
 /// listener gates so the global aggregate ceiling still bounds
 /// total bandwidth even with every source's bucket full.
 pub fn acceptSourceBandwidth(
-    self: *Server,
+    server: *Server,
     addr: Address,
     bytes_charged: u64,
     cap_per_second: u64,
     now_us: u64,
 ) bool {
     // Lazy eviction shared with the rest of the per-source helpers.
-    if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-        pruneSourceRate(self, now_us);
-        if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
+    if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
+        pruneSourceRate(server, now_us);
+        if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
             evictOldestSourceRate(
-                self,
+                server,
             );
         }
     }
 
-    const gop = self.source_rate_table.getOrPut(self.allocator, addr) catch {
+    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
         // OOM on the rate table: deny the datagram rather than
         // continue unprotected. Mirrors `acceptSourceRate` policy.
         return false;
@@ -204,8 +204,8 @@ pub fn acceptSourceBandwidth(
 
 // INTERNAL: pub for direct sibling import (server/observability.zig);
 // not part of the embedder API. The Server method thunk was demoted.
-pub fn pruneSourceRate(self: *Server, now_us: u64) void {
-    var it = self.source_rate_table.iterator();
+pub fn pruneSourceRate(server: *Server, now_us: u64) void {
+    var it = server.source_rate_table.iterator();
     while (it.next()) |entry| {
         const init_elapsed = now_us -% entry.value_ptr.window_start_us;
         const vn_elapsed = now_us -% entry.value_ptr.vn_window_start_us;
@@ -218,20 +218,20 @@ pub fn pruneSourceRate(self: *Server, now_us: u64) void {
         // separately so a long-idle source still pays the
         // refill-from-empty bootstrap rather than getting a free
         // full-bucket reset on its next packet.
-        if (init_elapsed >= self.source_rate_window_us and
-            vn_elapsed >= self.source_rate_window_us and
-            log_elapsed >= self.source_rate_window_us and
+        if (init_elapsed >= server.source_rate_window_us and
+            vn_elapsed >= server.source_rate_window_us and
+            log_elapsed >= server.source_rate_window_us and
             bandwidth_elapsed >= bandwidth_idle_threshold_us)
         {
-            _ = self.source_rate_table.remove(entry.key_ptr.*);
+            _ = server.source_rate_table.remove(entry.key_ptr.*);
         }
     }
 }
 
 // INTERNAL: pub for direct sibling import (server/observability.zig);
 // not part of the embedder API. The Server method thunk was demoted.
-pub fn evictOldestSourceRate(self: *Server) void {
-    var it = self.source_rate_table.iterator();
+pub fn evictOldestSourceRate(server: *Server) void {
+    var it = server.source_rate_table.iterator();
     var oldest_addr: ?Address = null;
     var oldest_start: u64 = std.math.maxInt(u64);
     while (it.next()) |entry| {
@@ -240,18 +240,18 @@ pub fn evictOldestSourceRate(self: *Server) void {
             oldest_addr = entry.key_ptr.*;
         }
     }
-    if (oldest_addr) |addr| _ = self.source_rate_table.remove(addr);
+    if (oldest_addr) |addr| _ = server.source_rate_table.remove(addr);
 }
 
 // -- Version Negotiation -------------------------------------------
 
 pub fn maybeIssueNewToken(
-    self: *Server,
+    server: *Server,
     slot: *Slot,
     from: ?Address,
     now_us: u64,
 ) void {
-    const key_ptr = if (self.new_token_key) |*k| k else return;
+    const key_ptr = if (server.new_token_key) |*k| k else return;
     if (slot.new_token_emitted) return;
     if (!slot.conn.handshakeDone()) return;
     const addr = from orelse return;
@@ -262,7 +262,7 @@ pub fn maybeIssueNewToken(
     _ = new_token_mod.mint(&token, .{
         .key = key_ptr,
         .now_us = now_us,
-        .lifetime_us = self.new_token_lifetime_us,
+        .lifetime_us = server.new_token_lifetime_us,
         .client_address = ctx,
         // Bind the connection's negotiated version. Validation on a
         // returning Initial checks against that Initial's wire
@@ -338,13 +338,13 @@ pub const RetryEcho = struct {
 /// peer through a fresh Retry round-trip rather than dropping
 /// the connection.
 pub fn applyRetryGate(
-    self: *Server,
+    server: *Server,
     addr: Address,
     bytes: []const u8,
     now_us: u64,
 ) Error!RetryDecision {
-    const retry_key = if (self.retry_token_key) |*k| k else null;
-    const new_token_key = if (self.new_token_key) |*k| k else null;
+    const retry_key = if (server.retry_token_key) |*k| k else null;
+    const new_token_key = if (server.new_token_key) |*k| k else null;
     if (retry_key == null and new_token_key == null) return .none;
 
     const ids = peekLongHeaderIds(bytes) orelse return .drop;
@@ -379,12 +379,12 @@ pub fn applyRetryGate(
     // operator opted out of Retry).
     const key_ptr = retry_key orelse return .none;
 
-    const existing = self.retry_state_table.get(addr);
+    const existing = server.retry_state_table.get(addr);
 
     // No echoed token: the peer is on its first Initial. Mint a
     // Retry, queue it, and require the next Initial to echo.
     if (token == null or token.?.len == 0) {
-        mintAndQueueRetry(self, addr, ids, now_us, key_ptr) catch |err| switch (err) {
+        mintAndQueueRetry(server, addr, ids, now_us, key_ptr) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return .drop,
         };
@@ -395,7 +395,7 @@ pub fn applyRetryGate(
     // overflow, restarted, etc.). Re-mint a fresh Retry; the peer
     // will retry with a new round-trip.
     const state = existing orelse {
-        mintAndQueueRetry(self, addr, ids, now_us, key_ptr) catch |err| switch (err) {
+        mintAndQueueRetry(server, addr, ids, now_us, key_ptr) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return .drop,
         };
@@ -440,7 +440,7 @@ pub fn applyRetryGate(
 const RetryMintError = Error || error{RetryEncodeFailed};
 
 fn mintAndQueueRetry(
-    self: *Server,
+    server: *Server,
     addr: Address,
     ids: LongHeaderIds,
     now_us: u64,
@@ -452,11 +452,11 @@ fn mintAndQueueRetry(
     // are already useless because their tokens won't validate.
     // Only fall back to oldest-eviction if the table is still
     // at capacity (i.e., every entry is within its lifetime).
-    if (self.retry_state_table.count() >= self.retry_state_table_capacity) {
-        pruneExpiredRetryState(self, now_us);
-        if (self.retry_state_table.count() >= self.retry_state_table_capacity) {
+    if (server.retry_state_table.count() >= server.retry_state_table_capacity) {
+        pruneExpiredRetryState(server, now_us);
+        if (server.retry_state_table.count() >= server.retry_state_table_capacity) {
             evictOldestRetryState(
-                self,
+                server,
             );
         }
     }
@@ -466,8 +466,8 @@ fn mintAndQueueRetry(
     // token HMAC binds to it so a replayed Retry can't authorize
     // a different connection.
     var retry_scid: [20]u8 = @splat(0);
-    const retry_scid_len = self.local_cid_len;
-    try self.mintLocalScid(retry_scid[0..retry_scid_len]);
+    const retry_scid_len = server.local_cid_len;
+    try server.mintLocalScid(retry_scid[0..retry_scid_len]);
 
     var addr_buf: [Address.context_max_len]u8 = undefined;
     const ctx = addressContext(&addr_buf, addr);
@@ -475,7 +475,7 @@ fn mintAndQueueRetry(
     _ = retry_token_mod.mint(&token, .{
         .key = key_ptr,
         .now_us = now_us,
-        .lifetime_us = self.retry_token_lifetime_us,
+        .lifetime_us = server.retry_token_lifetime_us,
         .client_address = ctx,
         .original_dcid = ids.dcid,
         .retry_scid = retry_scid[0..retry_scid_len],
@@ -493,11 +493,11 @@ fn mintAndQueueRetry(
     }) catch return error.RetryEncodeFailed;
     entry.len = written;
 
-    try self.queueStatelessResponse(entry);
+    try server.queueStatelessResponse(entry);
 
     // Record the retry state so we can validate the echoed
     // token in the peer's next Initial.
-    const gop = try self.retry_state_table.getOrPut(self.allocator, addr);
+    const gop = try server.retry_state_table.getOrPut(server.allocator, addr);
     gop.value_ptr.* = .{
         .retry_scid = retry_scid,
         .retry_scid_len = retry_scid_len,
@@ -506,8 +506,8 @@ fn mintAndQueueRetry(
     };
 }
 
-fn evictOldestRetryState(self: *Server) void {
-    var it = self.retry_state_table.iterator();
+fn evictOldestRetryState(server: *Server) void {
+    var it = server.retry_state_table.iterator();
     var oldest_addr: ?Address = null;
     var oldest_us: u64 = std.math.maxInt(u64);
     while (it.next()) |entry| {
@@ -516,7 +516,7 @@ fn evictOldestRetryState(self: *Server) void {
             oldest_addr = entry.key_ptr.*;
         }
     }
-    if (oldest_addr) |a| _ = self.retry_state_table.remove(a);
+    if (oldest_addr) |a| _ = server.retry_state_table.remove(a);
 }
 
 /// Drop every retry-state entry whose token has expired
@@ -525,12 +525,12 @@ fn evictOldestRetryState(self: *Server) void {
 /// so freeing their slot is always safe and means the table
 /// fills with usable round-trips before any eviction policy
 /// has to fire.
-fn pruneExpiredRetryState(self: *Server, now_us: u64) void {
-    const lifetime = self.retry_token_lifetime_us;
+fn pruneExpiredRetryState(server: *Server, now_us: u64) void {
+    const lifetime = server.retry_token_lifetime_us;
     var stale_buf: [32]Address = undefined;
     while (true) {
         var n: usize = 0;
-        var it = self.retry_state_table.iterator();
+        var it = server.retry_state_table.iterator();
         while (it.next()) |entry| {
             if (n >= stale_buf.len) break;
             const age = now_us -% entry.value_ptr.minted_at_us;
@@ -540,7 +540,7 @@ fn pruneExpiredRetryState(self: *Server, now_us: u64) void {
             }
         }
         if (n == 0) return;
-        for (stale_buf[0..n]) |addr| _ = self.retry_state_table.remove(addr);
+        for (stale_buf[0..n]) |addr| _ = server.retry_state_table.remove(addr);
         // If we evicted a full batch there may be more — loop
         // to keep sweeping. Bounded by the table size, so
         // this terminates.

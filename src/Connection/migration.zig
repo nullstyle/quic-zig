@@ -21,16 +21,16 @@ const min_path_challenge_interval_us = state_mod.min_path_challenge_interval_us;
 
 // Doc comment lives on the `Connection.setMigrationCallback` thunk in Connection.zig.
 pub fn setMigrationCallback(
-    self: *Connection,
+    conn: *Connection,
     callback: ?MigrationCallback,
     user_data: ?*anyopaque,
 ) void {
-    self.migration_callback = callback;
-    self.migration_user_data = user_data;
+    conn.migration_callback = callback;
+    conn.migration_user_data = user_data;
 }
 
-pub fn peerSupportsAlternativeAddress(self: *const Connection) bool {
-    const params = self.cached_peer_transport_params orelse return false;
+pub fn peerSupportsAlternativeAddress(conn: *const Connection) bool {
+    const params = conn.cached_peer_transport_params orelse return false;
     return params.alternative_address;
 }
 
@@ -39,8 +39,8 @@ pub fn peerSupportsAlternativeAddress(self: *const Connection) bool {
 /// in the frame dispatcher: a client that didn't advertise
 /// support is in a peer protocol-violation state on receipt of
 /// any ALT_*_ADDRESS frame.
-pub fn localAdvertisedAlternativeAddress(self: *const Connection) bool {
-    return self.local_transport_params.alternative_address;
+pub fn localAdvertisedAlternativeAddress(conn: *const Connection) bool {
+    return conn.local_transport_params.alternative_address;
 }
 
 /// Queue an ALTERNATIVE_V4_ADDRESS frame
@@ -60,21 +60,21 @@ pub fn localAdvertisedAlternativeAddress(self: *const Connection) bool {
 /// functionally unreachable but bounded explicitly so the wire
 /// contract can never silently break.
 pub fn advertiseAlternativeV4Address(
-    self: *Connection,
+    conn: *Connection,
     address: [4]u8,
     port: u16,
     opts: AdvertiseAlternativeAddressOptions,
 ) Error!u64 {
-    if (self.role != .server) return Error.NotServerContext;
+    if (conn.role != .server) return Error.NotServerContext;
     if (!peerSupportsAlternativeAddress(
-        self,
+        conn,
     )) {
         return Error.AlternativeAddressNotNegotiated;
     }
     const seq = try allocAlternativeAddressSequence(
-        self,
+        conn,
     );
-    try self.pending_frames.alternative_addresses.append(self.allocator, .{
+    try conn.pending_frames.alternative_addresses.append(conn.allocator, .{
         .v4 = .{
             .preferred = opts.preferred,
             .retire = opts.retire,
@@ -90,21 +90,21 @@ pub fn advertiseAlternativeV4Address(
 /// — same role gate, same shared sequence-number space, same
 /// `AlternativeAddressSequenceExhausted` boundary handling.
 pub fn advertiseAlternativeV6Address(
-    self: *Connection,
+    conn: *Connection,
     address: [16]u8,
     port: u16,
     opts: AdvertiseAlternativeAddressOptions,
 ) Error!u64 {
-    if (self.role != .server) return Error.NotServerContext;
+    if (conn.role != .server) return Error.NotServerContext;
     if (!peerSupportsAlternativeAddress(
-        self,
+        conn,
     )) {
         return Error.AlternativeAddressNotNegotiated;
     }
     const seq = try allocAlternativeAddressSequence(
-        self,
+        conn,
     );
-    try self.pending_frames.alternative_addresses.append(self.allocator, .{
+    try conn.pending_frames.alternative_addresses.append(conn.allocator, .{
         .v6 = .{
             .preferred = opts.preferred,
             .retire = opts.retire,
@@ -124,17 +124,17 @@ pub fn advertiseAlternativeV6Address(
 /// two distinct logical updates with the same sequence number,
 /// which the receiver would dedupe as a retransmit and drop the
 /// second update on the floor.
-fn allocAlternativeAddressSequence(self: *Connection) Error!u64 {
-    const seq = self.next_alternative_address_sequence;
+fn allocAlternativeAddressSequence(conn: *Connection) Error!u64 {
+    const seq = conn.next_alternative_address_sequence;
     if (seq == std.math.maxInt(u64)) {
         return Error.AlternativeAddressSequenceExhausted;
     }
-    self.next_alternative_address_sequence = seq + 1;
+    conn.next_alternative_address_sequence = seq + 1;
     return seq;
 }
 
 pub fn handlePeerAddressChange(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
     addr: Address,
     datagram_len: usize,
@@ -152,26 +152,26 @@ pub fn handlePeerAddressChange(
     // where the peer never sent a NEW_CONNECTION_ID. The
     // conformance test for §5.1.2 ¶1 exercises the rotate-when-
     // available path explicitly.
-    if (consumeFreshPeerCidForMigration(self, path)) |fresh_cid| {
+    if (consumeFreshPeerCidForMigration(conn, path)) |fresh_cid| {
         path.path.peer_cid = fresh_cid;
         if (path.id == 0) {
-            self.peer_dcid = fresh_cid;
-            self.peer_dcid_set = true;
+            conn.peer_dcid = fresh_cid;
+            conn.peer_dcid_set = true;
         }
     }
 
     path.beginMigration(addr, datagram_len);
 
     const token = try conn_paths.newPathChallengeToken(
-        self,
+        conn,
     );
-    const timeout_us = Connection.saturatingMul(self.ptoDurationForApplicationPath(path), 3);
+    const timeout_us = Connection.saturatingMul(conn.ptoDurationForApplicationPath(path), 3);
     path.path.validator.beginChallenge(token, now_us, timeout_us);
     // Stamp the path's last-challenge clock so the rate limiter
     // in `recordAuthenticatedDatagramAddress` can throttle
     // subsequent peer-initiated migration attempts.
     path.path.last_path_challenge_at_us = now_us;
-    conn_paths.queuePathChallengeOnPath(self, path.id, token);
+    conn_paths.queuePathChallengeOnPath(conn, path.id, token);
 }
 
 /// RFC 9000 §5.1.2 ¶1 helper: pick a peer-issued CID for `path`
@@ -183,17 +183,17 @@ pub fn handlePeerAddressChange(
 /// Removes the chosen CID from `peer_cids` so a subsequent
 /// migration can't pick the same one again.
 pub fn consumeFreshPeerCidForMigration(
-    self: *Connection,
+    conn: *Connection,
     path: *PathState,
 ) ?ConnectionId {
     const current = path.path.peer_cid;
     var i: usize = 0;
-    while (i < self.peer_cids.items.len) : (i += 1) {
-        const item = self.peer_cids.items[i];
+    while (i < conn.peer_cids.items.len) : (i += 1) {
+        const item = conn.peer_cids.items[i];
         if (item.path_id != path.id) continue;
         if (ConnectionId.eql(item.cid, current)) continue;
         const chosen = item.cid;
-        _ = self.peer_cids.orderedRemove(i);
+        _ = conn.peer_cids.orderedRemove(i);
         return chosen;
     }
     return null;
@@ -245,31 +245,31 @@ pub fn consumeFreshPeerCidForMigration(
 /// validation settles), and `MigrationNoFreshPeerCid` (retry after
 /// the peer issues a NEW_CONNECTION_ID).
 pub fn beginClientActiveMigration(
-    self: *Connection,
+    conn: *Connection,
     new_local_addr: Address,
     now_us: u64,
 ) Error!void {
-    if (self.role != .client) return Error.NotClientContext;
-    const handshake_complete = self.handshakeDone() or self.test_only_force_handshake_for_migration;
+    if (conn.role != .client) return Error.NotClientContext;
+    const handshake_complete = conn.handshakeDone() or conn.test_only_force_handshake_for_migration;
     if (!handshake_complete) {
         // Mirror the diagnostic the peer-driven gate emits: §9.6
         // forbids migration before handshake confirmation. Even
         // though this is a local trigger rather than a peer event,
         // the wire effect is the same — we'd be sending PATH_CHALLENGE
         // off an unauthenticated path.
-        conn_qlog.emitQlog(self, .{
+        conn_qlog.emitQlog(conn, .{
             .name = .migration_path_failed,
-            .path_id = self.activePath().id,
+            .path_id = conn.activePath().id,
             .migration_fail_reason = .pre_handshake,
         });
         return Error.MigrationPreHandshake;
     }
-    const path = self.activePath();
+    const path = conn.activePath();
     if (path.path.validator.status == .pending) {
         return Error.MigrationValidationPending;
     }
-    const fresh_cid = consumeFreshPeerCidForMigration(self, path) orelse {
-        conn_qlog.emitQlog(self, .{
+    const fresh_cid = consumeFreshPeerCidForMigration(conn, path) orelse {
+        conn_qlog.emitQlog(conn, .{
             .name = .migration_path_failed,
             .path_id = path.id,
             .migration_fail_reason = .no_fresh_peer_cid,
@@ -297,8 +297,8 @@ pub fn beginClientActiveMigration(
     // check looks for in the client pcap.
     path.path.peer_cid = fresh_cid;
     if (path.id == 0) {
-        self.peer_dcid = fresh_cid;
-        self.peer_dcid_set = true;
+        conn.peer_dcid = fresh_cid;
+        conn.peer_dcid_set = true;
     }
 
     // Update local address bookkeeping. We deliberately do NOT
@@ -320,12 +320,12 @@ pub fn beginClientActiveMigration(
     path.pending_migration_reset = true;
 
     const token = try conn_paths.newPathChallengeToken(
-        self,
+        conn,
     );
-    const timeout_us = Connection.saturatingMul(self.ptoDurationForApplicationPath(path), 3);
+    const timeout_us = Connection.saturatingMul(conn.ptoDurationForApplicationPath(path), 3);
     path.path.validator.beginChallenge(token, now_us, timeout_us);
     path.path.last_path_challenge_at_us = now_us;
-    conn_paths.queuePathChallengeOnPath(self, path.id, token);
+    conn_paths.queuePathChallengeOnPath(conn, path.id, token);
 }
 
 /// Server-side counterpart to `beginClientActiveMigration`: the
@@ -395,27 +395,27 @@ pub fn beginClientActiveMigration(
 /// pending (mirrors the diagnostic shape of
 /// `beginClientActiveMigration`).
 pub fn noteServerLocalAddressChanged(
-    self: *Connection,
+    conn: *Connection,
     new_local_addr: Address,
     now_us: u64,
 ) Error!void {
-    if (self.role != .server) return Error.NotServerContext;
+    if (conn.role != .server) return Error.NotServerContext;
     // RFC 9000 §5.1.1 / §18.2: only meaningful when the server
     // has advertised a `preferred_address` to follow. Embedders
     // that have not configured one shouldn't be calling this API.
-    if (self.local_transport_params.preferred_address == null) {
+    if (conn.local_transport_params.preferred_address == null) {
         return Error.PreferredAddressNotAdvertised;
     }
-    const handshake_complete = self.handshakeDone() or self.test_only_force_handshake_for_migration;
+    const handshake_complete = conn.handshakeDone() or conn.test_only_force_handshake_for_migration;
     if (!handshake_complete) {
-        conn_qlog.emitQlog(self, .{
+        conn_qlog.emitQlog(conn, .{
             .name = .migration_path_failed,
-            .path_id = self.activePath().id,
+            .path_id = conn.activePath().id,
             .migration_fail_reason = .pre_handshake,
         });
         return Error.PathLimitExceeded;
     }
-    const path = self.activePath();
+    const path = conn.activePath();
 
     // Idempotence: a follow-up datagram for the same migrated
     // local-addr (e.g. a duplicate or stale buffered packet) just
@@ -464,22 +464,22 @@ pub fn noteServerLocalAddressChanged(
     path.pending_migration_reset = true;
 
     const token = try conn_paths.newPathChallengeToken(
-        self,
+        conn,
     );
-    const timeout_us = Connection.saturatingMul(self.ptoDurationForApplicationPath(path), 3);
+    const timeout_us = Connection.saturatingMul(conn.ptoDurationForApplicationPath(path), 3);
     path.path.validator.beginChallenge(token, now_us, timeout_us);
     path.path.last_path_challenge_at_us = now_us;
-    conn_paths.queuePathChallengeOnPath(self, path.id, token);
+    conn_paths.queuePathChallengeOnPath(conn, path.id, token);
 }
 
 pub fn recordAuthenticatedDatagramAddress(
-    self: *Connection,
+    conn: *Connection,
     path_id: u32,
     addr: Address,
     datagram_len: usize,
     now_us: u64,
 ) Error!void {
-    const path = conn_paths.pathForId(self, path_id);
+    const path = conn_paths.pathForId(conn, path_id);
     if (!path.peer_addr_set) {
         path.setPeerAddress(addr);
         path.path.onDatagramReceived(datagram_len);
@@ -500,8 +500,8 @@ pub fn recordAuthenticatedDatagramAddress(
     // peer to anchor connection state to a half-handshaked
     // 4-tuple. Drop the datagram (no anti-amp credit, no
     // PATH_CHALLENGE) and surface the event in qlog.
-    if (!self.handshakeDone() and !self.test_only_force_handshake_for_migration) {
-        conn_qlog.emitQlog(self, .{
+    if (!conn.handshakeDone() and !conn.test_only_force_handshake_for_migration) {
+        conn_qlog.emitQlog(conn, .{
             .name = .migration_path_failed,
             .path_id = path_id,
             .migration_fail_reason = .pre_handshake,
@@ -518,7 +518,7 @@ pub fn recordAuthenticatedDatagramAddress(
     // to one challenge per `min_path_challenge_interval_us`.
     if (path.path.last_path_challenge_at_us) |last_us| {
         if (now_us -| last_us < min_path_challenge_interval_us) {
-            conn_qlog.emitQlog(self, .{
+            conn_qlog.emitQlog(conn, .{
                 .name = .migration_path_failed,
                 .path_id = path_id,
                 .migration_fail_reason = .rate_limited,
@@ -527,9 +527,9 @@ pub fn recordAuthenticatedDatagramAddress(
         }
     }
 
-    if (self.migration_callback) |callback| {
+    if (conn.migration_callback) |callback| {
         const current = path.peerAddress();
-        const verdict = callback(self.migration_user_data, self, addr, current);
+        const verdict = callback(conn.migration_user_data, conn, addr, current);
         if (verdict == .deny) {
             // RFC 9000 §9 / design note: the triggering datagram
             // already decrypted cleanly under the existing path's
@@ -537,7 +537,7 @@ pub fn recordAuthenticatedDatagramAddress(
             // existing 4-tuple. Don't migrate; let the peer keep
             // using the old address.
             path.path.onDatagramReceived(datagram_len);
-            conn_qlog.emitQlog(self, .{
+            conn_qlog.emitQlog(conn, .{
                 .name = .migration_path_failed,
                 .path_id = path_id,
                 .migration_fail_reason = .policy_denied,
@@ -545,27 +545,27 @@ pub fn recordAuthenticatedDatagramAddress(
             return;
         }
     }
-    try handlePeerAddressChange(self, path, addr, datagram_len, now_us);
+    try handlePeerAddressChange(conn, path, addr, datagram_len, now_us);
 }
 
-pub fn incomingShortPath(self: *Connection, bytes: []const u8) ?*PathState {
+pub fn incomingShortPath(conn: *Connection, bytes: []const u8) ?*PathState {
     if (bytes.len < 1) return null;
     var best: ?*PathState = null;
     var best_len: u8 = 0;
-    for (self.local_cids.items) |item| {
+    for (conn.local_cids.items) |item| {
         const cid = item.cid.slice();
         if (cid.len == 0) continue;
         if (bytes.len < 1 + cid.len) continue;
         if (!std.mem.eql(u8, bytes[1 .. 1 + cid.len], cid)) continue;
         if (cid.len > best_len) {
-            if (self.paths.get(item.path_id)) |path| {
+            if (conn.paths.get(item.path_id)) |path| {
                 best = path;
                 best_len = @intCast(cid.len);
             }
         }
     }
     if (best != null) return best;
-    for (self.paths.paths.items) |*p| {
+    for (conn.paths.paths.items) |*p| {
         const cid = p.path.local_cid.slice();
         if (cid.len == 0) continue;
         if (bytes.len < 1 + cid.len) continue;
@@ -582,11 +582,11 @@ pub fn incomingShortPath(self: *Connection, bytes: []const u8) ?*PathState {
 /// equal-or-lower is dropped (idempotent retransmit / out-of-
 /// order delivery).
 pub fn handleAlternativeAddressV4(
-    self: *Connection,
+    conn: *Connection,
     a: frame_types.AlternativeV4Address,
 ) void {
-    if (!acceptAltAddrSequence(self, a.status_sequence_number)) return;
-    self.alternative_server_address_events.push(.{ .v4 = .{
+    if (!acceptAltAddrSequence(conn, a.status_sequence_number)) return;
+    conn.alternative_server_address_events.push(.{ .v4 = .{
         .address = a.address,
         .port = a.port,
         .status_sequence_number = a.status_sequence_number,
@@ -598,11 +598,11 @@ pub fn handleAlternativeAddressV4(
 /// IPv6 sibling of `handleAlternativeAddressV4`. Same monotonicity
 /// rules — V4 and V6 share the §6 ¶5 sequence space.
 pub fn handleAlternativeAddressV6(
-    self: *Connection,
+    conn: *Connection,
     a: frame_types.AlternativeV6Address,
 ) void {
-    if (!acceptAltAddrSequence(self, a.status_sequence_number)) return;
-    self.alternative_server_address_events.push(.{ .v6 = .{
+    if (!acceptAltAddrSequence(conn, a.status_sequence_number)) return;
+    conn.alternative_server_address_events.push(.{ .v6 = .{
         .address = a.address,
         .port = a.port,
         .status_sequence_number = a.status_sequence_number,
@@ -616,11 +616,11 @@ pub fn handleAlternativeAddressV6(
 /// as a side-effect on accept. Older or equal numbers return
 /// false (idempotent retransmit / out-of-order delivery — §6 ¶5
 /// is sender-side).
-fn acceptAltAddrSequence(self: *Connection, seq: u64) bool {
-    if (self.highest_alternative_address_sequence_seen) |highest| {
+fn acceptAltAddrSequence(conn: *Connection, seq: u64) bool {
+    if (conn.highest_alternative_address_sequence_seen) |highest| {
         if (seq <= highest) return false;
     }
-    self.highest_alternative_address_sequence_seen = seq;
+    conn.highest_alternative_address_sequence_seen = seq;
     return true;
 }
 
@@ -629,8 +629,8 @@ fn acceptAltAddrSequence(self: *Connection, seq: u64) bool {
 /// (draft-munizaga-quic-alternative-server-address-00 §6 ¶5), or
 /// `null` when no frame has arrived yet. Useful for tests and
 /// embedder-side debugging.
-pub fn highestAlternativeAddressSequenceSeen(self: *const Connection) ?u64 {
-    return self.highest_alternative_address_sequence_seen;
+pub fn highestAlternativeAddressSequenceSeen(conn: *const Connection) ?u64 {
+    return conn.highest_alternative_address_sequence_seen;
 }
 
 /// Allow / deny verdict returned by a `MigrationCallback`. The

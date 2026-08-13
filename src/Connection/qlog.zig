@@ -235,27 +235,27 @@ pub const QlogCallback = *const fn (user_data: ?*anyopaque, event: QlogEvent) vo
 
 // Doc comment lives on the `Connection.setQlogCallback` thunk in Connection.zig.
 pub fn setQlogCallback(
-    self: *Connection,
+    conn: *Connection,
     callback: ?QlogCallback,
     user_data: ?*anyopaque,
 ) void {
-    self.qlog_callback = callback;
-    self.qlog_user_data = user_data;
+    conn.qlog_callback = callback;
+    conn.qlog_user_data = user_data;
     // The earliest moment a sink exists is the right moment for
     // `connection_started` (once-guarded; a null install is a no-op).
     // Historically the client side emitted this from bind(), which
     // ran before the wrapper installed its callback — the event was
     // silently dropped for every wrapper user.
-    if (callback != null) emitConnectionStartedOnce(self);
+    if (callback != null) emitConnectionStartedOnce(conn);
 }
 
 // Doc comment lives on the `Connection.setQlogPacketEvents` thunk in Connection.zig.
-pub fn setQlogPacketEvents(self: *Connection, enabled: bool) void {
-    self.qlog_packet_events = enabled;
+pub fn setQlogPacketEvents(conn: *Connection, enabled: bool) void {
+    conn.qlog_packet_events = enabled;
 }
 
-pub fn emitQlog(self: *Connection, event: QlogEvent) void {
-    if (self.qlog_callback) |callback| callback(self.qlog_user_data, event);
+pub fn emitQlog(conn: *Connection, event: QlogEvent) void {
+    if (conn.qlog_callback) |callback| callback(conn.qlog_user_data, event);
 }
 
 fn qlogPnSpaceFromLevel(lvl: EncryptionLevel) QlogPnSpace {
@@ -277,26 +277,26 @@ fn qlogPacketKindFromLevel(lvl: EncryptionLevel) QlogPacketKind {
 
 /// One-shot `connection_started` emitter. Called from `bind` for
 /// clients and from the handshake-progress callback for servers.
-pub fn emitConnectionStartedOnce(self: *Connection) void {
-    if (self.qlog_callback == null or self.qlog_started) return;
-    self.qlog_started = true;
-    emitQlog(self, .{
+pub fn emitConnectionStartedOnce(conn: *Connection) void {
+    if (conn.qlog_callback == null or conn.qlog_started) return;
+    conn.qlog_started = true;
+    emitQlog(conn, .{
         .name = .connection_started,
-        .role = self.role,
-        .local_scid = if (self.local_scid_set) self.local_scid else null,
-        .peer_scid = if (self.peer_dcid_set) self.peer_dcid else null,
+        .role = conn.role,
+        .local_scid = if (conn.local_scid_set) conn.local_scid else null,
+        .peer_scid = if (conn.peer_dcid_set) conn.peer_dcid else null,
     });
 }
 
 /// Re-evaluate close state and emit a `connection_state_updated`
 /// if it changed since the last emit.
-pub fn emitConnectionStateIfChanged(self: *Connection) void {
-    if (self.qlog_callback == null) return;
-    const new_state = self.closeState();
-    if (new_state == self.qlog_last_state) return;
-    const old = self.qlog_last_state;
-    self.qlog_last_state = new_state;
-    emitQlog(self, .{
+pub fn emitConnectionStateIfChanged(conn: *Connection) void {
+    if (conn.qlog_callback == null) return;
+    const new_state = conn.closeState();
+    if (new_state == conn.qlog_last_state) return;
+    const old = conn.qlog_last_state;
+    conn.qlog_last_state = new_state;
+    emitQlog(conn, .{
         .name = .connection_state_updated,
         .old_state = old,
         .new_state = new_state,
@@ -305,11 +305,11 @@ pub fn emitConnectionStateIfChanged(self: *Connection) void {
 
 /// Emit `parameters_set` when the peer's transport parameters are
 /// first decoded and accepted.
-pub fn emitPeerParametersSet(self: *Connection) void {
-    if (self.qlog_callback == null or self.qlog_params_emitted) return;
-    const params = self.cached_peer_transport_params orelse return;
-    self.qlog_params_emitted = true;
-    emitQlog(self, .{
+pub fn emitPeerParametersSet(conn: *Connection) void {
+    if (conn.qlog_callback == null or conn.qlog_params_emitted) return;
+    const params = conn.cached_peer_transport_params orelse return;
+    conn.qlog_params_emitted = true;
+    emitQlog(conn, .{
         .name = .parameters_set,
         .peer_idle_timeout_ms = params.max_idle_timeout_ms,
         .peer_max_udp_payload_size = params.max_udp_payload_size,
@@ -323,14 +323,14 @@ pub fn emitPeerParametersSet(self: *Connection) void {
 }
 
 pub fn emitPacketSent(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     pn: u64,
     size: u32,
     frames_count: u32,
 ) void {
-    if (!self.qlog_packet_events or self.qlog_callback == null) return;
-    emitQlog(self, .{
+    if (!conn.qlog_packet_events or conn.qlog_callback == null) return;
+    emitQlog(conn, .{
         .name = .packet_sent,
         .level = lvl,
         .pn_space = qlogPnSpaceFromLevel(lvl),
@@ -342,14 +342,14 @@ pub fn emitPacketSent(
 }
 
 pub fn emitPacketReceived(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     pn: u64,
     size: u32,
     frames_count: u32,
 ) void {
-    if (!self.qlog_packet_events or self.qlog_callback == null) return;
-    emitQlog(self, .{
+    if (!conn.qlog_packet_events or conn.qlog_callback == null) return;
+    emitQlog(conn, .{
         .name = .packet_received,
         .level = lvl,
         .pn_space = qlogPnSpaceFromLevel(lvl),
@@ -361,13 +361,13 @@ pub fn emitPacketReceived(
 }
 
 pub fn emitPacketDropped(
-    self: *Connection,
+    conn: *Connection,
     lvl: ?EncryptionLevel,
     size: u32,
     reason: QlogPacketDropReason,
 ) void {
-    if (self.qlog_callback == null) return;
-    emitQlog(self, .{
+    if (conn.qlog_callback == null) return;
+    emitQlog(conn, .{
         .name = .packet_dropped,
         .level = lvl orelse .application,
         .pn_space = if (lvl) |l| qlogPnSpaceFromLevel(l) else null,
@@ -378,13 +378,13 @@ pub fn emitPacketDropped(
 }
 
 pub fn emitLossDetected(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     stats: LossStats,
     reason: QlogLossReason,
 ) void {
-    if (self.qlog_callback == null or stats.count == 0) return;
-    emitQlog(self, .{
+    if (conn.qlog_callback == null or stats.count == 0) return;
+    emitQlog(conn, .{
         .name = .loss_detected,
         .level = lvl,
         .pn_space = qlogPnSpaceFromLevel(lvl),
@@ -395,14 +395,14 @@ pub fn emitLossDetected(
 }
 
 pub fn emitPacketLost(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     pn: u64,
     bytes: u32,
     reason: QlogLossReason,
 ) void {
-    if (!self.qlog_packet_events or self.qlog_callback == null) return;
-    emitQlog(self, .{
+    if (!conn.qlog_packet_events or conn.qlog_callback == null) return;
+    emitQlog(conn, .{
         .name = .packet_lost,
         .level = lvl,
         .pn_space = qlogPnSpaceFromLevel(lvl),
@@ -414,9 +414,9 @@ pub fn emitPacketLost(
 
 /// Compute the current congestion phase for the primary application
 /// path and emit `congestion_state_updated` if it changed.
-pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
-    if (self.qlog_callback == null) return;
-    const path = self.primaryPath();
+pub fn emitCongestionStateIfChanged(conn: *Connection, now_us: u64) void {
+    if (conn.qlog_callback == null) return;
+    const path = conn.primaryPath();
     const cc = &path.path.cc;
     const new_state: QlogCongestionState = blk: {
         if (cc.recoveryStartTimeUs()) |rec_start| {
@@ -425,11 +425,11 @@ pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
         if (cc.isSlowStart()) break :blk .slow_start;
         break :blk .congestion_avoidance;
     };
-    if (self.qlog_last_congestion_state) |prev| {
+    if (conn.qlog_last_congestion_state) |prev| {
         if (prev == new_state) return;
     }
-    self.qlog_last_congestion_state = new_state;
-    emitQlog(self, .{
+    conn.qlog_last_congestion_state = new_state;
+    emitQlog(conn, .{
         .name = .congestion_state_updated,
         .at_us = now_us,
         .congestion_state = new_state,
@@ -441,12 +441,12 @@ pub fn emitCongestionStateIfChanged(self: *Connection, now_us: u64) void {
 
 /// Emit `metrics_updated` with a snapshot of the primary path's
 /// congestion / RTT counters.
-pub fn emitMetricsSnapshot(self: *Connection, now_us: u64) void {
-    if (self.qlog_callback == null) return;
-    const path = self.primaryPath();
+pub fn emitMetricsSnapshot(conn: *Connection, now_us: u64) void {
+    if (conn.qlog_callback == null) return;
+    const path = conn.primaryPath();
     const cc = &path.path.cc;
     const rtt = &path.path.rtt;
-    emitQlog(self, .{
+    emitQlog(conn, .{
         .name = .metrics_updated,
         .at_us = now_us,
         .cwnd = cc.cwndBytes(),
@@ -456,7 +456,7 @@ pub fn emitMetricsSnapshot(self: *Connection, now_us: u64) void {
         .rtt_var_us = rtt.rtt_var_us,
         .min_rtt_us = rtt.min_rtt_us,
         .latest_rtt_us = rtt.latest_rtt_us,
-        .pacing_rate = if (self.pacing_enabled)
+        .pacing_rate = if (conn.pacing_enabled)
             cc.pacingRateBps(rtt.smoothed_rtt_us)
         else
             null,

@@ -46,17 +46,17 @@ const transport_error_protocol_violation = state_mod.transport_error_protocol_vi
 
 // Doc comment lives on the `Connection.handle` thunk in Connection.zig.
 pub fn handle(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     from: ?Address,
     now_us: u64,
 ) Error!void {
-    return handleWithEcn(self, bytes, from, .not_ect, now_us);
+    return handleWithEcn(conn, bytes, from, .not_ect, now_us);
 }
 
 // Doc comment lives on the `Connection.handleWithEcn` thunk in Connection.zig.
 pub fn handleWithEcn(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     from: ?Address,
     ecn: socket_opts_mod.EcnCodepoint,
@@ -67,37 +67,37 @@ pub fn handleWithEcn(
     // received PN in the level's `PnSpace`. Cleared at handle
     // exit so a subsequent test driver call can't accidentally
     // reuse stale state — the cmsg is per-datagram.
-    self.last_recv_ecn = if (self.ecn_enabled) ecn else .not_ect;
-    defer self.last_recv_ecn = .not_ect;
-    const entry_state = self.lifecycle.state();
+    conn.last_recv_ecn = if (conn.ecn_enabled) ecn else .not_ect;
+    defer conn.last_recv_ecn = .not_ect;
+    const entry_state = conn.lifecycle.state();
     if (entry_state == .draining or entry_state == .closed) return;
-    if (entry_state == .closing and self.lifecycle.pending_close != null) return;
+    if (entry_state == .closing and conn.lifecycle.pending_close != null) return;
     // Closing-state attribution accumulator. Cleared on entry so
     // it reflects only this datagram's observations.
-    self.closing_state_attribution_observed = false;
+    conn.closing_state_attribution_observed = false;
     // Per-handle-cycle DoS gates. See `incoming_ack_range_cap` /
     // `incoming_retire_cid_cap` for the rationale.
-    self.incoming_ack_range_count = 0;
-    self.incoming_retire_cid_count = 0;
+    conn.incoming_ack_range_count = 0;
+    conn.incoming_retire_cid_count = 0;
     if (bytes.len > localUdpPayloadLimit(
-        self,
+        conn,
     )) {
-        conn_qlog.emitPacketDropped(self, null, @intCast(bytes.len), .payload_too_large);
-        self.close(true, transport_error_protocol_violation, "udp payload exceeds local limit");
+        conn_qlog.emitPacketDropped(conn, null, @intCast(bytes.len), .payload_too_large);
+        conn.close(true, transport_error_protocol_violation, "udp payload exceeds local limit");
         conn_qlog.emitConnectionStateIfChanged(
-            self,
+            conn,
         );
         return;
     }
     if (bytes.len > 0) {
-        self.last_activity_us = now_us;
-        self.qlog_bytes_received +|= bytes.len;
+        conn.last_activity_us = now_us;
+        conn.qlog_bytes_received +|= bytes.len;
     }
-    const incoming_path_id = self.incomingPathId(from);
-    self.current_incoming_path_id = incoming_path_id;
-    self.current_incoming_addr = from;
-    const incoming_path = conn_paths.pathForId(self, incoming_path_id);
-    const rebind_addr = self.peerAddressChangeCandidate(incoming_path_id, from);
+    const incoming_path_id = conn.incomingPathId(from);
+    conn.current_incoming_path_id = incoming_path_id;
+    conn.current_incoming_addr = from;
+    const incoming_path = conn_paths.pathForId(conn, incoming_path_id);
+    const rebind_addr = conn.peerAddressChangeCandidate(incoming_path_id, from);
     const from_migration_rollback_addr = if (from) |addr|
         incoming_path.matchesMigrationRollbackAddress(addr)
     else
@@ -114,20 +114,20 @@ pub fn handleWithEcn(
     var pos: usize = 0;
     while (pos < bytes.len) {
         const drain_tls_after_packet = shouldDrainTlsAfterPacket(bytes[pos..]);
-        self.last_authenticated_path_id = null;
-        const consumed = try handleOnePacket(self, bytes[pos..], now_us);
+        conn.last_authenticated_path_id = null;
+        const consumed = try handleOnePacket(conn, bytes[pos..], now_us);
         if (consumed == 0) break;
         pos += consumed;
         if (!rebind_recorded) {
             if (rebind_addr) |addr| {
-                if (self.last_authenticated_path_id) |path_id| {
-                    try self.recordAuthenticatedDatagramAddress(path_id, addr, bytes.len, now_us);
+                if (conn.last_authenticated_path_id) |path_id| {
+                    try conn.recordAuthenticatedDatagramAddress(path_id, addr, bytes.len, now_us);
                     rebind_recorded = true;
                 }
             }
         }
         if (shouldStopDatagramLoop(
-            self,
+            conn,
         )) break;
         if (!drain_tls_after_packet) break;
         // Drain CRYPTO into TLS BETWEEN packets, not just at
@@ -136,15 +136,15 @@ pub fn handleWithEcn(
         // to feed it to TLS (deriving Handshake keys) before
         // we can decrypt the trailing Handshake packet.
         try conn_recv_data_handlers.drainInboxIntoTls(
-            self,
+            conn,
         );
     }
     if (conn_recv_data_handlers.cryptoInboxQueued(
-        self,
+        conn,
     ) and !closingAttributionOnly(
-        self,
+        conn,
     )) try conn_recv_data_handlers.drainInboxIntoTls(
-        self,
+        conn,
     );
     // RFC 9001 §4.1.2 ¶2 + §4.9.2: client confirms the handshake
     // when it processes a HANDSHAKE_DONE frame, and an endpoint
@@ -156,29 +156,29 @@ pub fn handleWithEcn(
     // sent tracker before we tear it down. `discardHandshakeKeys`
     // is idempotent — the latch + the function-local guard makes
     // a re-entry on a second HANDSHAKE_DONE a no-op.
-    if (self.received_handshake_done and !self.handshake_keys_discarded) {
-        self.discardHandshakeKeys();
+    if (conn.received_handshake_done and !conn.handshake_keys_discarded) {
+        conn.discardHandshakeKeys();
     }
     // RFC 9000 §10.2.1 ¶3: when in the closing state and an
     // attributed inbound packet arrived during this datagram,
     // re-arm a CONNECTION_CLOSE retransmit (subject to the SHOULD
     // rate-limit). The peer's CC, if any, would have transitioned
     // us to draining via `dispatchFrames` before we get here.
-    maybeRearmClosingStateCloseRepeat(self, now_us);
+    maybeRearmClosingStateCloseRepeat(conn, now_us);
 
     // PATH_CHALLENGE → record-and-tick; the validator will
     // either succeed (echo arrived) or time out at PTO * 3.
-    for (self.paths.paths.items) |*path| {
+    for (conn.paths.paths.items) |*path| {
         path.path.validator.tick(now_us);
         if (path.path.validator.status == .failed) {
-            conn_paths.handlePathValidationFailure(self, path);
+            conn_paths.handlePathValidationFailure(conn, path);
         }
     }
-    if (self.alert) |_| return error.PeerAlerted;
+    if (conn.alert) |_| return error.PeerAlerted;
 }
 
-fn localUdpPayloadLimit(self: *const Connection) usize {
-    return @intCast(@min(self.local_transport_params.max_udp_payload_size, max_supported_udp_payload_size));
+fn localUdpPayloadLimit(conn: *const Connection) usize {
+    return @intCast(@min(conn.local_transport_params.max_udp_payload_size, max_supported_udp_payload_size));
 }
 
 fn shouldDrainTlsAfterPacket(bytes: []const u8) bool {
@@ -202,8 +202,8 @@ fn shouldDrainTlsAfterPacket(bytes: []const u8) bool {
 /// to run the full record-and-dispatch pipeline or the
 /// closing-state-only "scan for peer CONNECTION_CLOSE, otherwise
 /// flag attribution" tail.
-pub fn closingAttributionOnly(self: *const Connection) bool {
-    return self.lifecycle.closing_deadline_us != null and self.lifecycle.pending_close == null and self.lifecycle.draining_deadline_us == null;
+pub fn closingAttributionOnly(conn: *const Connection) bool {
+    return conn.lifecycle.closing_deadline_us != null and conn.lifecycle.pending_close == null and conn.lifecycle.draining_deadline_us == null;
 }
 
 /// Decide whether the per-datagram packet loop should bail out
@@ -212,10 +212,10 @@ pub fn closingAttributionOnly(self: *const Connection) bool {
 /// closing-state attribution mode keeps iterating so a CC tucked
 /// into a later coalesced packet still transitions us to
 /// draining.
-fn shouldStopDatagramLoop(self: *const Connection) bool {
-    const cs = self.lifecycle.state();
+fn shouldStopDatagramLoop(conn: *const Connection) bool {
+    const cs = conn.lifecycle.state();
     if (cs == .draining or cs == .closed) return true;
-    if (cs == .closing and self.lifecycle.pending_close != null) return true;
+    if (cs == .closing and conn.lifecycle.pending_close != null) return true;
     return false;
 }
 
@@ -227,7 +227,7 @@ fn shouldStopDatagramLoop(self: *const Connection) bool {
 /// that is closing is not required to process any received
 /// frame."
 pub fn scanForPeerCloseFrame(
-    self: *Connection,
+    conn: *Connection,
     payload: []const u8,
     now_us: u64,
 ) void {
@@ -235,7 +235,7 @@ pub fn scanForPeerCloseFrame(
     while (it.next() catch return) |f| {
         switch (f) {
             .connection_close => |cc| {
-                self.enterDraining(
+                conn.enterDraining(
                     .peer,
                     closeErrorSpace(cc.is_transport),
                     cc.error_code,
@@ -262,28 +262,28 @@ pub fn scanForPeerCloseFrame(
 /// frames of different sizes or with different error codes, but
 /// the error code in all frames SHOULD be consistent"), keeping
 /// them identical satisfies the SHOULD-consistent guidance.
-fn maybeRearmClosingStateCloseRepeat(self: *Connection, now_us: u64) void {
-    if (!self.closing_state_attribution_observed) return;
-    self.closing_state_attribution_observed = false;
-    if (self.lifecycle.state() != .closing) return;
-    if (self.lifecycle.closing_deadline_us == null) return;
-    if (self.lifecycle.pending_close != null) return;
-    const base = conn_loss.basePtoDurationForLevel(self, .application);
-    if (!self.lifecycle.shouldRearmCloseRepeat(now_us, base)) return;
-    const stored = self.lifecycle.close_event orelse return;
-    self.lifecycle.pending_close = .{
+fn maybeRearmClosingStateCloseRepeat(conn: *Connection, now_us: u64) void {
+    if (!conn.closing_state_attribution_observed) return;
+    conn.closing_state_attribution_observed = false;
+    if (conn.lifecycle.state() != .closing) return;
+    if (conn.lifecycle.closing_deadline_us == null) return;
+    if (conn.lifecycle.pending_close != null) return;
+    const base = conn_loss.basePtoDurationForLevel(conn, .application);
+    if (!conn.lifecycle.shouldRearmCloseRepeat(now_us, base)) return;
+    const stored = conn.lifecycle.close_event orelse return;
+    conn.lifecycle.pending_close = .{
         .is_transport = stored.error_space == .transport,
         .error_code = stored.error_code,
         .frame_type = stored.frame_type,
-        .reason = self.lifecycle.close_reason_buf[0..stored.reason_len],
+        .reason = conn.lifecycle.close_reason_buf[0..stored.reason_len],
     };
     conn_qlog.emitConnectionStateIfChanged(
-        self,
+        conn,
     );
 }
 
 pub fn handleOnePacket(
-    self: *Connection,
+    conn: *Connection,
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
@@ -292,13 +292,13 @@ pub fn handleOnePacket(
 
     if (first & 0x80 == 0) {
         // Short header → 1-RTT, last in datagram.
-        return try self.handleShort(bytes, now_us);
+        return try conn.handleShort(bytes, now_us);
     }
 
     if (bytes.len < 5) return 0;
     const version = std.mem.readInt(u32, bytes[1..5], .big);
     if (version == 0) {
-        return conn_recv_packet_handlers.handleVersionNegotiation(self, bytes, now_us);
+        return conn_recv_packet_handlers.handleVersionNegotiation(conn, bytes, now_us);
     }
 
     // RFC 9368 §3.2: long-header type bits rotate between v1 and
@@ -311,10 +311,10 @@ pub fn handleOnePacket(
     const long_type_bits: u2 = @intCast((first >> 4) & 0x03);
     const long_type = wire_header.longTypeFromBits(version, long_type_bits);
     return switch (long_type) {
-        .initial => try self.handleInitial(bytes, now_us),
-        .zero_rtt => try conn_recv_packet_handlers.handleZeroRtt(self, bytes, now_us),
-        .handshake => try conn_recv_packet_handlers.handleHandshake(self, bytes, now_us),
-        .retry => try self.handleRetry(bytes, now_us),
+        .initial => try conn.handleInitial(bytes, now_us),
+        .zero_rtt => try conn_recv_packet_handlers.handleZeroRtt(conn, bytes, now_us),
+        .handshake => try conn_recv_packet_handlers.handleHandshake(conn, bytes, now_us),
+        .retry => try conn.handleRetry(bytes, now_us),
     };
 }
 
@@ -389,7 +389,7 @@ pub fn countFrames(payload: []const u8) u32 {
 }
 
 pub fn openApplicationPacket(
-    self: *Connection,
+    conn: *Connection,
     pt_buf: *[max_recv_plaintext]u8,
     bytes: []u8,
     app_path: *const PathState,
@@ -397,43 +397,43 @@ pub fn openApplicationPacket(
     multipath_path_id: ?u32,
 ) Error!?ApplicationOpenResult {
     if (try tryOpenApplicationPacketWithEpoch(
-        self,
+        conn,
         pt_buf,
         bytes,
         app_path,
         largest_received,
         multipath_path_id,
-        self.app_read_current,
+        conn.app_read_current,
         .current,
     )) |result| return result;
     if (try tryOpenApplicationPacketWithEpoch(
-        self,
+        conn,
         pt_buf,
         bytes,
         app_path,
         largest_received,
         multipath_path_id,
-        self.app_read_previous,
+        conn.app_read_previous,
         .previous,
     )) |result| return result;
-    if (self.app_read_next == null) try conn_keys.refreshNextApplicationReadKey(
-        self,
+    if (conn.app_read_next == null) try conn_keys.refreshNextApplicationReadKey(
+        conn,
     );
     if (try tryOpenApplicationPacketWithEpoch(
-        self,
+        conn,
         pt_buf,
         bytes,
         app_path,
         largest_received,
         multipath_path_id,
-        self.app_read_next,
+        conn.app_read_next,
         .next,
     )) |result| return result;
     return null;
 }
 
 fn tryOpenApplicationPacketWithEpoch(
-    self: *Connection,
+    conn: *Connection,
     pt_buf: *[max_recv_plaintext]u8,
     bytes: []u8,
     app_path: *const PathState,
@@ -442,7 +442,7 @@ fn tryOpenApplicationPacketWithEpoch(
     maybe_epoch: ?ApplicationKeyEpoch,
     slot: ApplicationReadKeySlot,
 ) Error!?ApplicationOpenResult {
-    _ = self;
+    _ = conn;
     const epoch = maybe_epoch orelse return null;
     const opened = short_packet_mod.open1Rtt(pt_buf, bytes, .{
         .dcid_len = app_path.path.local_cid.len,
@@ -458,7 +458,7 @@ fn tryOpenApplicationPacketWithEpoch(
 }
 
 pub fn dispatchFrames(
-    self: *Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     payload: []const u8,
     now_us: u64,
@@ -478,7 +478,7 @@ pub fn dispatchFrames(
             // an authenticated peer propagates out as a fatal error,
             // tearing down the whole transport loop (client) or being
             // mislabeled as INTERNAL_ERROR (server).
-            self.close(true, transport_error_frame_encoding, "malformed frame");
+            conn.close(true, transport_error_frame_encoding, "malformed frame");
             return;
         };
         const f = maybe_frame orelse break;
@@ -512,30 +512,30 @@ pub fn dispatchFrames(
         if ((lvl == .initial or lvl == .handshake) and
             !frameAllowedInInitialOrHandshake(f))
         {
-            self.close(true, transport_error_protocol_violation, "forbidden frame at Initial/Handshake level");
+            conn.close(true, transport_error_protocol_violation, "forbidden frame at Initial/Handshake level");
             return;
         }
         if (lvl == .early_data and !frameAllowedInEarlyData(f)) {
-            self.close(true, transport_error_protocol_violation, "forbidden frame in 0-RTT");
+            conn.close(true, transport_error_protocol_violation, "forbidden frame in 0-RTT");
             return;
         }
         // RFC 9000 §19.20: HANDSHAKE_DONE is a server-only frame.
         // "A server MUST treat receipt of a HANDSHAKE_DONE frame as
         // a connection error of type PROTOCOL_VIOLATION."
-        if (f == .handshake_done and self.role == .server) {
-            self.close(true, transport_error_protocol_violation, "HANDSHAKE_DONE received by server");
+        if (f == .handshake_done and conn.role == .server) {
+            conn.close(true, transport_error_protocol_violation, "HANDSHAKE_DONE received by server");
             return;
         }
         if (lvl != .application and isMultipathFrame(f)) {
-            self.close(true, transport_error_protocol_violation, "multipath frame outside 1-RTT");
+            conn.close(true, transport_error_protocol_violation, "multipath frame outside 1-RTT");
             return;
         }
-        if (lvl == .application and isMultipathFrame(f) and !self.multipathNegotiated()) {
-            self.close(true, transport_error_protocol_violation, "multipath frame without negotiation");
+        if (lvl == .application and isMultipathFrame(f) and !conn.multipathNegotiated()) {
+            conn.close(true, transport_error_protocol_violation, "multipath frame without negotiation");
             return;
         }
         if (lvl == .application and isMultipathFrame(f) and
-            !validateIncomingMultipathFrame(self, f))
+            !validateIncomingMultipathFrame(conn, f))
         {
             return;
         }
@@ -554,25 +554,25 @@ pub fn dispatchFrames(
                 // `handshake_keys_discarded` to short-circuit a
                 // late peer ACK that arrives after we've cleaned
                 // the sent tracker.
-                self.received_handshake_done = true;
+                conn.received_handshake_done = true;
             },
             .ack => |a| {
-                if (self.exceedsIncomingAckRangeCap(a.range_count)) continue;
-                try self.handleAckAtLevel(lvl, a, now_us);
+                if (conn.exceedsIncomingAckRangeCap(a.range_count)) continue;
+                try conn.handleAckAtLevel(lvl, a, now_us);
             },
             .path_ack => |a| {
-                if (self.exceedsIncomingAckRangeCap(a.range_count)) continue;
-                try self.handlePathAck(a, now_us);
+                if (conn.exceedsIncomingAckRangeCap(a.range_count)) continue;
+                try conn.handlePathAck(a, now_us);
             },
-            .crypto => |cr| try self.handleCrypto(lvl, cr),
-            .stream => |s| try self.handleStream(lvl, s),
-            .reset_stream => |rs| try self.handleResetStream(rs),
-            .datagram => |dg| try self.handleDatagram(lvl, dg),
+            .crypto => |cr| try conn.handleCrypto(lvl, cr),
+            .stream => |s| try conn.handleStream(lvl, s),
+            .reset_stream => |rs| try conn.handleResetStream(rs),
+            .datagram => |dg| try conn.handleDatagram(lvl, dg),
             .path_challenge => |pc| {
-                self.queuePathResponseOnPath(
-                    self.current_incoming_path_id,
+                conn.queuePathResponseOnPath(
+                    conn.current_incoming_path_id,
                     pc.data,
-                    self.current_incoming_addr,
+                    conn.current_incoming_addr,
                 );
                 // RFC 9000 §5.1.2 ¶1: an endpoint MUST NOT use the
                 // same connection ID on different paths. If our
@@ -597,34 +597,34 @@ pub fn dispatchFrames(
                 // what we're already using on this path. The
                 // PATH_RESPONSE we just queued still ships under
                 // the existing DCID, which preserves liveness.
-                const path = conn_paths.pathForId(self, self.current_incoming_path_id);
-                if (conn_migration.consumeFreshPeerCidForMigration(self, path)) |fresh_cid| {
+                const path = conn_paths.pathForId(conn, conn.current_incoming_path_id);
+                if (conn_migration.consumeFreshPeerCidForMigration(conn, path)) |fresh_cid| {
                     path.path.peer_cid = fresh_cid;
                     if (path.id == 0) {
-                        self.peer_dcid = fresh_cid;
-                        self.peer_dcid_set = true;
+                        conn.peer_dcid = fresh_cid;
+                        conn.peer_dcid_set = true;
                     }
                 }
             },
-            .path_response => |pr| self.recordPathResponse(self.current_incoming_path_id, pr.data),
-            .new_connection_id => |nc| try self.handleNewConnectionId(nc),
-            .stop_sending => |ss| try conn_recv_stream_control_handlers.handleStopSending(self, ss),
-            .path_abandon => |pa| conn_recv_multipath_handlers.handlePathAbandon(self, pa, now_us),
-            .path_status_backup => |ps| conn_recv_multipath_handlers.handlePathStatus(self, ps, false),
-            .path_status_available => |ps| conn_recv_multipath_handlers.handlePathStatus(self, ps, true),
-            .path_new_connection_id => |nc| try self.handlePathNewConnectionId(nc),
-            .path_retire_connection_id => |rc| self.handlePathRetireConnectionId(rc),
-            .max_path_id => |mp| self.handleMaxPathId(mp),
-            .paths_blocked => |pb| self.handlePathsBlocked(pb),
-            .path_cids_blocked => |pcb| self.handlePathCidsBlocked(pcb),
-            .max_data => |md| self.handleMaxData(md),
-            .max_stream_data => |msd| self.handleMaxStreamData(msd),
-            .max_streams => |ms| self.handleMaxStreams(ms),
-            .data_blocked => |db| self.handleDataBlocked(db),
-            .stream_data_blocked => |sdb| try self.handleStreamDataBlocked(sdb),
-            .streams_blocked => |sb| self.handleStreamsBlocked(sb),
+            .path_response => |pr| conn.recordPathResponse(conn.current_incoming_path_id, pr.data),
+            .new_connection_id => |nc| try conn.handleNewConnectionId(nc),
+            .stop_sending => |ss| try conn_recv_stream_control_handlers.handleStopSending(conn, ss),
+            .path_abandon => |pa| conn_recv_multipath_handlers.handlePathAbandon(conn, pa, now_us),
+            .path_status_backup => |ps| conn_recv_multipath_handlers.handlePathStatus(conn, ps, false),
+            .path_status_available => |ps| conn_recv_multipath_handlers.handlePathStatus(conn, ps, true),
+            .path_new_connection_id => |nc| try conn.handlePathNewConnectionId(nc),
+            .path_retire_connection_id => |rc| conn.handlePathRetireConnectionId(rc),
+            .max_path_id => |mp| conn.handleMaxPathId(mp),
+            .paths_blocked => |pb| conn.handlePathsBlocked(pb),
+            .path_cids_blocked => |pcb| conn.handlePathCidsBlocked(pcb),
+            .max_data => |md| conn.handleMaxData(md),
+            .max_stream_data => |msd| conn.handleMaxStreamData(msd),
+            .max_streams => |ms| conn.handleMaxStreams(ms),
+            .data_blocked => |db| conn.handleDataBlocked(db),
+            .stream_data_blocked => |sdb| try conn.handleStreamDataBlocked(sdb),
+            .streams_blocked => |sb| conn.handleStreamsBlocked(sb),
             .connection_close => |cc| {
-                self.enterDraining(
+                conn.enterDraining(
                     .peer,
                     closeErrorSpace(cc.is_transport),
                     cc.error_code,
@@ -633,8 +633,8 @@ pub fn dispatchFrames(
                     now_us,
                 );
             },
-            .retire_connection_id => |rc| self.handleRetireConnectionId(rc),
-            .new_token => |nt| self.handleNewToken(nt),
+            .retire_connection_id => |rc| conn.handleRetireConnectionId(rc),
+            .new_token => |nt| conn.handleNewToken(nt),
             // draft-munizaga-quic-alternative-server-address-00 §6.
             // ALTERNATIVE_V4/V6_ADDRESS frames are gated by the
             // `alternative_address` transport parameter (§4) — only
@@ -642,30 +642,30 @@ pub fn dispatchFrames(
             // advertised support. Receipt outside that envelope is
             // a peer protocol violation.
             .alternative_v4_address => |a| {
-                if (self.role != .client or
-                    !self.localAdvertisedAlternativeAddress())
+                if (conn.role != .client or
+                    !conn.localAdvertisedAlternativeAddress())
                 {
-                    self.close(
+                    conn.close(
                         true,
                         transport_error_protocol_violation,
                         "alternative_address frame without negotiation",
                     );
                     return;
                 }
-                self.handleAlternativeAddressV4(a);
+                conn.handleAlternativeAddressV4(a);
             },
             .alternative_v6_address => |a| {
-                if (self.role != .client or
-                    !self.localAdvertisedAlternativeAddress())
+                if (conn.role != .client or
+                    !conn.localAdvertisedAlternativeAddress())
                 {
-                    self.close(
+                    conn.close(
                         true,
                         transport_error_protocol_violation,
                         "alternative_address frame without negotiation",
                     );
                     return;
                 }
-                self.handleAlternativeAddressV6(a);
+                conn.handleAlternativeAddressV6(a);
             },
         }
     }
@@ -753,43 +753,43 @@ fn statelessResetTokenFromDatagram(bytes: []const u8) ?[16]u8 {
     return token;
 }
 
-pub fn isKnownStatelessReset(self: *const Connection, bytes: []const u8) bool {
+pub fn isKnownStatelessReset(conn: *const Connection, bytes: []const u8) bool {
     const token = statelessResetTokenFromDatagram(bytes) orelse return false;
-    for (self.peer_cids.items) |item| {
+    for (conn.peer_cids.items) |item| {
         if (tokenEql(item.stateless_reset_token, token)) return true;
     }
     return false;
 }
 
-pub fn pathIdAllowedByLocalLimit(self: *Connection, path_id: u32) bool {
-    if (path_id <= self.local_max_path_id) return true;
-    self.close(true, transport_error_protocol_violation, "multipath path id exceeds local limit");
+pub fn pathIdAllowedByLocalLimit(conn: *Connection, path_id: u32) bool {
+    if (path_id <= conn.local_max_path_id) return true;
+    conn.close(true, transport_error_protocol_violation, "multipath path id exceeds local limit");
     return false;
 }
 
-fn validateIncomingMultipathFrame(self: *Connection, f: frame_types.Frame) bool {
+fn validateIncomingMultipathFrame(conn: *Connection, f: frame_types.Frame) bool {
     return switch (f) {
-        .path_ack => |pa| pathIdAllowedByLocalLimit(self, pa.path_id),
-        .path_abandon => |pa| pathIdAllowedByLocalLimit(self, pa.path_id),
-        .path_status_backup => |ps| pathIdAllowedByLocalLimit(self, ps.path_id),
-        .path_status_available => |ps| pathIdAllowedByLocalLimit(self, ps.path_id),
-        .path_new_connection_id => |nc| pathIdAllowedByLocalLimit(self, nc.path_id),
-        .path_retire_connection_id => |rc| pathIdAllowedByLocalLimit(self, rc.path_id),
-        .paths_blocked => |pb| pathIdAllowedByLocalLimit(self, pb.maximum_path_id),
+        .path_ack => |pa| pathIdAllowedByLocalLimit(conn, pa.path_id),
+        .path_abandon => |pa| pathIdAllowedByLocalLimit(conn, pa.path_id),
+        .path_status_backup => |ps| pathIdAllowedByLocalLimit(conn, ps.path_id),
+        .path_status_available => |ps| pathIdAllowedByLocalLimit(conn, ps.path_id),
+        .path_new_connection_id => |nc| pathIdAllowedByLocalLimit(conn, nc.path_id),
+        .path_retire_connection_id => |rc| pathIdAllowedByLocalLimit(conn, rc.path_id),
+        .paths_blocked => |pb| pathIdAllowedByLocalLimit(conn, pb.maximum_path_id),
         .path_cids_blocked => |pcb| blk: {
-            if (!pathIdAllowedByLocalLimit(self, pcb.path_id)) break :blk false;
-            const next = _internal.nextLocalCidSequence(self, pcb.path_id);
+            if (!pathIdAllowedByLocalLimit(conn, pcb.path_id)) break :blk false;
+            const next = _internal.nextLocalCidSequence(conn, pcb.path_id);
             if (pcb.next_sequence_number > next) {
-                self.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
+                conn.close(true, transport_error_protocol_violation, "path cids blocked skips local cid sequence");
                 break :blk false;
             }
             break :blk true;
         },
         .max_path_id => |mp| blk: {
-            if (self.cached_peer_transport_params) |params| {
+            if (conn.cached_peer_transport_params) |params| {
                 if (params.initial_max_path_id) |initial_max_path_id| {
                     if (mp.maximum_path_id < initial_max_path_id) {
-                        self.close(true, transport_error_protocol_violation, "max path id below peer initial limit");
+                        conn.close(true, transport_error_protocol_violation, "max path id below peer initial limit");
                         break :blk false;
                     }
                 }

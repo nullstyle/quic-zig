@@ -25,13 +25,13 @@ const ConnectionId = path_mod.ConnectionId;
 /// Validate that the local endpoint is allowed to issue a path-scoped
 /// CID for `path_id`. Returns `Error.PathLimitExceeded` /
 /// `Error.PathNotFound` per draft-ietf-quic-multipath-21 §5.3 / §6.3.
-pub fn ensureCanIssueCidForPathId(self: *const Connection, path_id: u32) Error!void {
+pub fn ensureCanIssueCidForPathId(conn: *const Connection, path_id: u32) Error!void {
     if (path_id == 0) return;
-    if (self.multipathNegotiated() and path_id > self.local_max_path_id) {
+    if (conn.multipathNegotiated() and path_id > conn.local_max_path_id) {
         return Error.PathLimitExceeded;
     }
-    if (self.paths.getConst(path_id) != null) return;
-    if (self.multipathNegotiated()) return;
+    if (conn.paths.getConst(path_id) != null) return;
+    if (conn.multipathNegotiated()) return;
     return Error.PathNotFound;
 }
 
@@ -40,15 +40,15 @@ pub fn ensureCanIssueCidForPathId(self: *const Connection, path_id: u32) Error!v
 /// `(path_id, sequence_number)`. Re-issuing an existing
 /// `(path_id, sequence_number)` is a no-op.
 pub fn ensureCanIssueLocalCid(
-    self: *Connection,
+    conn: *Connection,
     path_id: u32,
     sequence_number: u64,
     retire_prior_to: u64,
     cid_len: usize,
 ) Error!void {
     if (cid_len == 0) return;
-    if (conn_cids.localCidSequenceExists(self, path_id, sequence_number)) return;
-    if (conn_cids.localConnectionIdIssueBudgetAfterRetirePriorTo(self, path_id, retire_prior_to) == 0) {
+    if (conn_cids.localCidSequenceExists(conn, path_id, sequence_number)) return;
+    if (conn_cids.localConnectionIdIssueBudgetAfterRetirePriorTo(conn, path_id, retire_prior_to) == 0) {
         return Error.ConnectionIdLimitExceeded;
     }
 }
@@ -58,13 +58,13 @@ pub fn ensureCanIssueLocalCid(
 /// the SAME `cid` is allowed (idempotent re-advertisement); reusing
 /// with a DIFFERENT cid, or aliasing across pairs, is rejected.
 pub fn ensureLocalCidAvailable(
-    self: *const Connection,
+    conn: *const Connection,
     path_id: u32,
     sequence_number: u64,
     cid: ConnectionId,
 ) Error!void {
     if (cid.len == 0) return;
-    for (self.local_cids.items) |item| {
+    for (conn.local_cids.items) |item| {
         if (item.path_id == path_id and item.sequence_number == sequence_number) {
             if (!ConnectionId.eql(item.cid, cid)) return Error.ConnectionIdAlreadyInUse;
             continue;
@@ -77,7 +77,7 @@ pub fn ensureLocalCidAvailable(
 /// authenticated. Updates the path's high-watermark sequence number and
 /// retires CIDs older than `retire_prior_to` per RFC 9000 §19.16.
 pub fn rememberLocalCid(
-    self: *Connection,
+    conn: *Connection,
     path_id: u32,
     sequence_number: u64,
     retire_prior_to: u64,
@@ -86,11 +86,11 @@ pub fn rememberLocalCid(
 ) Error!void {
     if (cid.len == 0) return;
     if (retire_prior_to > sequence_number) {
-        self.close(true, state_mod.transport_error_protocol_violation, "invalid retire_prior_to");
+        conn.close(true, state_mod.transport_error_protocol_violation, "invalid retire_prior_to");
         return;
     }
-    try ensureLocalCidAvailable(self, path_id, sequence_number, cid);
-    for (self.local_cids.items) |*item| {
+    try ensureLocalCidAvailable(conn, path_id, sequence_number, cid);
+    for (conn.local_cids.items) |*item| {
         if (item.path_id == path_id and item.sequence_number == sequence_number) {
             item.retire_prior_to = retire_prior_to;
             item.cid = cid;
@@ -98,18 +98,18 @@ pub fn rememberLocalCid(
             return;
         }
     }
-    conn_cids.retireLocalCidsPriorTo(self, path_id, retire_prior_to);
-    try self.local_cids.append(self.allocator, .{
+    conn_cids.retireLocalCidsPriorTo(conn, path_id, retire_prior_to);
+    try conn.local_cids.append(conn.allocator, .{
         .path_id = path_id,
         .sequence_number = sequence_number,
         .retire_prior_to = retire_prior_to,
         .cid = cid,
         .stateless_reset_token = stateless_reset_token,
     });
-    if (self.paths.get(path_id)) |path| {
+    if (conn.paths.get(path_id)) |path| {
         if (path.path.local_cid.len == 0 or sequence_number == 0) {
             path.path.local_cid = cid;
-            if (path_id == 0) self.local_scid = cid;
+            if (path_id == 0) conn.local_scid = cid;
         }
         if (sequence_number >= path.next_local_cid_seq) {
             path.next_local_cid_seq = sequence_number + 1;
@@ -120,21 +120,21 @@ pub fn rememberLocalCid(
 /// Refresh queued connection-id events for `path_id` after a CID was
 /// issued: drop events that are no longer needed and recompute remaining
 /// events' replenish targets.
-pub fn refreshConnectionIdEventsForPath(self: *Connection, path_id: u32) void {
+pub fn refreshConnectionIdEventsForPath(conn: *Connection, path_id: u32) void {
     var i: usize = 0;
-    while (i < self.connection_id_events.len) {
-        const slice = self.connection_id_events.slice();
+    while (i < conn.connection_id_events.len) {
+        const slice = conn.connection_id_events.slice();
         if (slice[i].path_id != path_id) {
             i += 1;
             continue;
         }
-        if (!conn_cids.connectionIdEventStillNeeded(self, path_id)) {
-            self.connection_id_events.removeAt(i);
+        if (!conn_cids.connectionIdEventStillNeeded(conn, path_id)) {
+            conn.connection_id_events.removeAt(i);
             continue;
         }
         const event = slice[i];
-        self.connection_id_events.slice()[i] = conn_cids.connectionIdReplenishInfoFor(
-            self,
+        conn.connection_id_events.slice()[i] = conn_cids.connectionIdReplenishInfoFor(
+            conn,
             path_id,
             event.reason,
             event.blocked_next_sequence_number,
@@ -148,9 +148,9 @@ pub fn refreshConnectionIdEventsForPath(self: *Connection, path_id: u32) void {
 /// RFC 9000 §19.16 ("MUST treat receipt of a RETIRE_CONNECTION_ID with
 /// a sequence number that has not been issued as a connection error of
 /// type PROTOCOL_VIOLATION").
-pub fn nextLocalCidSequence(self: *const Connection, path_id: u32) u64 {
+pub fn nextLocalCidSequence(conn: *const Connection, path_id: u32) u64 {
     var next: u64 = 0;
-    for (self.local_cids.items) |item| {
+    for (conn.local_cids.items) |item| {
         if (item.path_id == path_id and item.sequence_number >= next) {
             next = item.sequence_number + 1;
         }
