@@ -6,7 +6,7 @@
 // ...) is unchanged.
 
 const std = @import("std");
-const Server = @import("../server.zig");
+const Server = @import("../Server.zig");
 const server_dos = @import("dos.zig");
 const SlotImpl = Server.Slot;
 const StatelessResponseKind = Server.StatelessResponseKind;

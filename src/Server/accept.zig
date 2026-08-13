@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const Server = @import("../server.zig");
+const Server = @import("../Server.zig");
 const server_vneg = @import("vneg.zig");
 const Slot = Server.Slot;
 const Error = Server.Error;

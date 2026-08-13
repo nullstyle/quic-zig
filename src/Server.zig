@@ -120,13 +120,13 @@ pub const StatelessResponseKind = enum {
     retry,
 };
 
-const server_observability = @import("server/observability.zig");
-const server_dos = @import("server/dos.zig");
-const server_vneg = @import("server/vneg.zig");
-const server_accept = @import("server/accept.zig");
-const server_tls = @import("server/tls_lifecycle.zig");
-const server_routing = @import("server/routing.zig");
-const server_wire_peek = @import("server/wire_peek.zig");
+const server_observability = @import("Server/observability.zig");
+const server_dos = @import("Server/dos.zig");
+const server_vneg = @import("Server/vneg.zig");
+const server_accept = @import("Server/accept.zig");
+const server_tls = @import("Server/tls_lifecycle.zig");
+const server_routing = @import("Server/routing.zig");
+const server_wire_peek = @import("Server/wire_peek.zig");
 const RetryStateEntry = server_dos.RetryStateEntry;
 const RetryDecision = server_dos.RetryDecision;
 const RetryEcho = server_dos.RetryEcho;
@@ -177,7 +177,7 @@ const CidKey = server_wire_peek.CidKey;
 const peekLongHeaderIds = server_wire_peek.peekLongHeaderIds;
 const isInitialLongHeader = server_wire_peek.isInitialLongHeader;
 
-const server_config = @import("server/config.zig");
+const server_config = @import("Server/config.zig");
 /// Alt-address advertisement config for `Config.preferred_address`;
 /// declared in server/config.zig.
 pub const PreferredAddressConfig = server_config.PreferredAddressConfig;

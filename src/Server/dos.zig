@@ -5,7 +5,7 @@
 // Server delegate here via private thunks where hub callers remain.
 
 const std = @import("std");
-const Server = @import("../server.zig");
+const Server = @import("../Server.zig");
 const conn_mod = @import("../conn/root.zig");
 const Address = conn_mod.path.Address;
 const ConnectionId = conn_mod.path.ConnectionId;

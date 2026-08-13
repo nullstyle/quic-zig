@@ -2,3 +2,4 @@
 # rename-only moves). git blame skips them when configured:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 # GitHub's blame UI honors this file automatically.
+cc5aded55f3f10e6c8b603600a568313b04f3e5b  # server.zig file-as-struct de-indent

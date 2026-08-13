@@ -5,7 +5,7 @@
 // helpers live in the wire_peek.zig leaf.
 
 const std = @import("std");
-const Server = @import("../server.zig");
+const Server = @import("../Server.zig");
 const Slot = Server.Slot;
 const Error = Server.Error;
 const wire_peek = @import("wire_peek.zig");

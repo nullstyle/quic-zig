@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const Server = @import("../server.zig");
+const Server = @import("../Server.zig");
 const Error = Server.Error;
 const TlsReload = Server.TlsReload;
 const conn_mod = @import("../conn/root.zig");
