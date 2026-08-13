@@ -930,9 +930,7 @@ pub fn init(config: Config) Error!Server {
 ///     `local_cid_len`, or the previous Server was built without
 ///     a `quic_lb` configuration (no factory to rotate).
 ///   * `RandFailed` — CSPRNG nonce-counter seed failed.
-pub fn installLbConfig(self: *Server, new_cfg: lb_mod.LbConfig) Error!void {
-    return server_routing.installLbConfig(self, new_cfg);
-}
+pub const installLbConfig = server_routing.installLbConfig;
 
 /// Push a fresh NEW_CONNECTION_ID frame to every live slot using
 /// the active LB factory and the configured stateless-reset key.
@@ -953,9 +951,7 @@ pub fn installLbConfig(self: *Server, new_cfg: lb_mod.LbConfig) Error!void {
 /// `Config.stateless_reset_key` is set; embedders typically
 /// reach for it directly only when proactively pushing CIDs
 /// without a config swap.
-pub fn rotateLiveSlotCids(self: *Server) usize {
-    return server_routing.rotateLiveSlotCids(self);
-}
+pub const rotateLiveSlotCids = server_routing.rotateLiveSlotCids;
 
 pub fn deinit(self: *Server) void {
     for (self.slots.items) |slot| {
@@ -1525,9 +1521,7 @@ pub fn reap(self: *Server) usize {
     return reaped;
 }
 
-fn releaseGeneration(self: *Server, generation: u32) void {
-    return server_tls.releaseGeneration(self, generation);
-}
+const releaseGeneration = server_tls.releaseGeneration;
 
 /// Queue `CONNECTION_CLOSE` on every live slot. Embedders should
 /// keep polling and ticking until each slot becomes `.closed`,
@@ -1588,15 +1582,11 @@ pub fn shutdown(self: *Server, error_code: u64, reason: []const u8) void {
 ///
 /// The Server is left untouched on every error: the current
 /// context, slot table, and draining list are all unchanged.
-pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
-    return server_tls.replaceTlsContext(self, reload);
-}
+pub const replaceTlsContext = server_tls.replaceTlsContext;
 
 // -- internals ------------------------------------------------------
 
-fn findSlotForDatagram(self: *Server, bytes: []const u8) ?*Slot {
-    return server_routing.findSlotForDatagram(self, bytes);
-}
+const findSlotForDatagram = server_routing.findSlotForDatagram;
 
 /// Fill `dst` (length `self.local_cid_len`) with a freshly-minted
 /// server-side SCID. With QUIC-LB enabled (`Config.quic_lb`), the
@@ -1628,125 +1618,42 @@ fn findSlotForDatagram(self: *Server, bytes: []const u8) ?*Slot {
 /// need to call this — the Server's existing
 /// `openSlotFromInitial` and `mintAndQueueRetry` paths route
 /// through here automatically.
-pub fn mintLocalScid(self: *Server, dst: []u8) Error!void {
-    return server_routing.mintLocalScid(self, dst);
-}
+pub const mintLocalScid = server_routing.mintLocalScid;
 
-fn openSlotFromInitial(
-    self: *Server,
-    bytes: []const u8,
-    from: ?Address,
-    now_us: u64,
-    retry_ctx: ?RetryEcho,
-) !*Slot {
-    return server_accept.openSlotFromInitial(self, bytes, from, now_us, retry_ctx);
-}
+const openSlotFromInitial = server_accept.openSlotFromInitial;
 
-fn dispatchToSlot(
-    self: *Server,
-    slot: *Slot,
-    bytes: []u8,
-    from: ?Address,
-    now_us: u64,
-) Error!void {
-    return server_accept.dispatchToSlot(self, slot, bytes, from, now_us);
-}
+const dispatchToSlot = server_accept.dispatchToSlot;
 
-fn resyncSlotCids(self: *Server, slot: *Slot) Error!void {
-    return server_routing.resyncSlotCids(self, slot);
-}
+const resyncSlotCids = server_routing.resyncSlotCids;
 
-fn dropAllCidsFromTable(self: *Server, slot: *Slot) void {
-    return server_routing.dropAllCidsFromTable(self, slot);
-}
+const dropAllCidsFromTable = server_routing.dropAllCidsFromTable;
 
-fn acceptSourceRate(
-    self: *Server,
-    addr: Address,
-    cap: u64,
-    now_us: u64,
-) bool {
-    return server_dos.acceptSourceRate(self, addr, cap, now_us);
-}
+const acceptSourceRate = server_dos.acceptSourceRate;
 
-fn acceptVnRate(
-    self: *Server,
-    addr: Address,
-    cap: u64,
-    now_us: u64,
-) bool {
-    return server_dos.acceptVnRate(self, addr, cap, now_us);
-}
+const acceptVnRate = server_dos.acceptVnRate;
 
-fn acceptSourceBandwidth(
-    self: *Server,
-    addr: Address,
-    bytes_charged: u64,
-    cap_per_second: u64,
-    now_us: u64,
-) bool {
-    return server_dos.acceptSourceBandwidth(self, addr, bytes_charged, cap_per_second, now_us);
-}
+const acceptSourceBandwidth = server_dos.acceptSourceBandwidth;
 
 // pruneSourceRate / evictOldestSourceRate thunks demoted: their
 // only method-style caller was server/observability.zig, which
 // now calls server_dos's free functions directly (95a4472 rule —
 // sibling-only thunks don't earn a spot in Server's namespace).
 
-fn versionAccepted(self: *const Server, version: u32) bool {
-    return server_vneg.versionAccepted(self, version);
-}
+const versionAccepted = server_vneg.versionAccepted;
 
-fn preparseUpgradeTarget(
-    self: *const Server,
-    bytes: []const u8,
-    wire_version: u32,
-    ch_complete: *bool,
-) ?u32 {
-    return server_vneg.preparseUpgradeTarget(self, bytes, wire_version, ch_complete);
-}
+const preparseUpgradeTarget = server_vneg.preparseUpgradeTarget;
 
-fn openPendingUpgrade(
-    self: *Server,
-    bytes: []const u8,
-    wire_version: u32,
-) ?*PendingUpgradeState {
-    return server_vneg.openPendingUpgrade(self, bytes, wire_version);
-}
+const openPendingUpgrade = server_vneg.openPendingUpgrade;
 
-fn advancePendingUpgrade(self: *Server, slot: *Slot, bytes: []const u8) void {
-    return server_vneg.advancePendingUpgrade(self, slot, bytes);
-}
+const advancePendingUpgrade = server_vneg.advancePendingUpgrade;
 
-fn queueVersionNegotiation(
-    self: *Server,
-    dst_addr: Address,
-    client_packet: []const u8,
-) !void {
-    return server_vneg.queueVersionNegotiation(self, dst_addr, client_packet);
-}
+const queueVersionNegotiation = server_vneg.queueVersionNegotiation;
 
-fn maybeReplenishConnectionIds(self: *Server, slot: *Slot) void {
-    return server_routing.maybeReplenishConnectionIds(self, slot);
-}
+const maybeReplenishConnectionIds = server_routing.maybeReplenishConnectionIds;
 
-fn maybeIssueNewToken(
-    self: *Server,
-    slot: *Slot,
-    from: ?Address,
-    now_us: u64,
-) void {
-    return server_dos.maybeIssueNewToken(self, slot, from, now_us);
-}
+const maybeIssueNewToken = server_dos.maybeIssueNewToken;
 
-fn applyRetryGate(
-    self: *Server,
-    addr: Address,
-    bytes: []const u8,
-    now_us: u64,
-) Error!RetryDecision {
-    return server_dos.applyRetryGate(self, addr, bytes, now_us);
-}
+const applyRetryGate = server_dos.applyRetryGate;
 
 // INTERNAL: pub for server/ sibling access; not part of the embedder API.
 pub fn queueStatelessResponse(self: *Server, entry: StatelessResponse) Error!void {
@@ -1781,9 +1688,7 @@ pub fn queueStatelessResponse(self: *Server, entry: StatelessResponse) Error!voi
 
 // -- observability -------------------------------------------------
 
-fn emitLog(self: *Server, ev: LogEvent) void {
-    return server_observability.emitLog(self, ev);
-}
+const emitLog = server_observability.emitLog;
 
 /// Snapshot the server's instrumentation gauges and counters.
 /// The returned `MetricsSnapshot` is a flat by-value struct;
@@ -1791,9 +1696,7 @@ fn emitLog(self: *Server, ev: LogEvent) void {
 /// any user callback. Embedders typically call this on a fixed
 /// schedule and forward to their metrics pipeline (Prometheus,
 /// statsd, OpenTelemetry).
-pub fn metricsSnapshot(self: *const Server) MetricsSnapshot {
-    return server_observability.metricsSnapshot(self);
-}
+pub const metricsSnapshot = server_observability.metricsSnapshot;
 
 /// Snapshot the rate-limiter table, returning the top
 /// `RateLimitSnapshot.top_n` (16) sources by `recent_count` in
@@ -1808,9 +1711,7 @@ pub fn metricsSnapshot(self: *const Server) MetricsSnapshot {
 /// millisecond on commodity hardware; the snapshot is meant for
 /// occasional polling (every few seconds), not the per-packet
 /// hot path.
-pub fn rateLimitSnapshot(self: *const Server) RateLimitSnapshot {
-    return server_observability.rateLimitSnapshot(self);
-}
+pub const rateLimitSnapshot = server_observability.rateLimitSnapshot;
 
 /// Project a `PreferredAddressConfig` into the on-wire transport-
 /// parameter struct. The seq-1 CID + token are minted by the caller

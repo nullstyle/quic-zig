@@ -2158,9 +2158,7 @@ pub fn isQuic(self: *Connection) bool {
 /// Install an opt-in qlog-style callback for security/lifecycle
 /// diagnostics. quic never writes logs on its own; embedders can
 /// translate these events into qlog JSON, metrics, or test probes.
-pub fn setQlogCallback(self: *Connection, callback: ?QlogCallback, user_data: ?*anyopaque) void {
-    return conn_qlog.setQlogCallback(self, callback, user_data);
-}
+pub const setQlogCallback = conn_qlog.setQlogCallback;
 
 /// Install an embedder-policy hook that gates peer migrations to
 /// a new 4-tuple (RFC 9000 §9). The callback fires synchronously
@@ -2180,295 +2178,140 @@ pub fn setQlogCallback(self: *Connection, callback: ?QlogCallback, user_data: ?*
 /// The callback receives `*const Connection` so it can read state
 /// but not mutate it. Pass `null` (with any user data) to remove
 /// a previously-installed callback.
-pub fn setMigrationCallback(
-    self: *Connection,
-    callback: ?MigrationCallback,
-    user_data: ?*anyopaque,
-) void {
-    return conn_migration.setMigrationCallback(self, callback, user_data);
-}
+pub const setMigrationCallback = conn_migration.setMigrationCallback;
 
 /// Enable or disable per-packet qlog events
 /// (`packet_sent`, `packet_received`, `packet_lost`). High-volume —
 /// keep off in production unless actively debugging.
-pub fn setQlogPacketEvents(self: *Connection, enabled: bool) void {
-    return conn_qlog.setQlogPacketEvents(self, enabled);
-}
+pub const setQlogPacketEvents = conn_qlog.setQlogPacketEvents;
 
-fn emitConnectionStateIfChanged(self: *Connection) void {
-    return conn_qlog.emitConnectionStateIfChanged(self);
-}
+const emitConnectionStateIfChanged = conn_qlog.emitConnectionStateIfChanged;
 
-pub fn emitPeerParametersSet(self: *Connection) void {
-    return conn_qlog.emitPeerParametersSet(self);
-}
+pub const emitPeerParametersSet = conn_qlog.emitPeerParametersSet;
 
-fn emitPacketSent(self: *Connection, lvl: EncryptionLevel, pn: u64, size: u32, frames_count: u32) void {
-    return conn_qlog.emitPacketSent(self, lvl, pn, size, frames_count);
-}
+const emitPacketSent = conn_qlog.emitPacketSent;
 
-fn emitLossDetected(self: *Connection, lvl: EncryptionLevel, loss_stats: LossStats, reason: QlogLossReason) void {
-    return conn_qlog.emitLossDetected(self, lvl, loss_stats, reason);
-}
+const emitLossDetected = conn_qlog.emitLossDetected;
 
-fn emitPacketLost(self: *Connection, lvl: EncryptionLevel, pn: u64, bytes: u32, reason: QlogLossReason) void {
-    return conn_qlog.emitPacketLost(self, lvl, pn, bytes, reason);
-}
+const emitPacketLost = conn_qlog.emitPacketLost;
 
-pub fn haveSecret(self: *const Connection, lvl: EncryptionLevel, dir: Direction) bool {
-    return conn_keys.haveSecret(self, lvl, dir);
-}
+pub const haveSecret = conn_keys.haveSecret;
 
-pub fn initialKeysActive(self: *const Connection, dir: Direction) bool {
-    return conn_keys.initialKeysActive(self, dir);
-}
+pub const initialKeysActive = conn_keys.initialKeysActive;
 
-pub fn cipherSuite(
-    self: *const Connection,
-    lvl: EncryptionLevel,
-    dir: Direction,
-) ?Suite {
-    return conn_keys.cipherSuite(self, lvl, dir);
-}
+pub const cipherSuite = conn_keys.cipherSuite;
 
-pub fn packetKeys(
-    self: *const Connection,
-    lvl: EncryptionLevel,
-    dir: Direction,
-) Error!?PacketKeys {
-    return conn_keys.packetKeys(self, lvl, dir);
-}
+pub const packetKeys = conn_keys.packetKeys;
 
-pub fn installApplicationSecret(
-    self: *Connection,
-    dir: Direction,
-    material: SecretMaterial,
-) Error!void {
-    return conn_keys.installApplicationSecret(self, dir, material);
-}
+pub const installApplicationSecret = conn_keys.installApplicationSecret;
 
-fn refreshNextApplicationReadKey(self: *Connection) Error!void {
-    return conn_keys.refreshNextApplicationReadKey(self);
-}
+const refreshNextApplicationReadKey = conn_keys.refreshNextApplicationReadKey;
 
-pub fn promoteApplicationReadKeys(self: *Connection, now_us: u64) Error!void {
-    return conn_keys.promoteApplicationReadKeys(self, now_us);
-}
+pub const promoteApplicationReadKeys = conn_keys.promoteApplicationReadKeys;
 
-pub fn canInitiateKeyUpdateAt(self: *const Connection, now_us: u64) bool {
-    return conn_keys.canInitiateKeyUpdateAt(self, now_us);
-}
+pub const canInitiateKeyUpdateAt = conn_keys.canInitiateKeyUpdateAt;
 
-pub fn requestKeyUpdate(self: *Connection, now_us: u64) Error!void {
-    return conn_keys.requestKeyUpdate(self, now_us);
-}
+pub const requestKeyUpdate = conn_keys.requestKeyUpdate;
 
-pub fn keyUpdateStatus(self: *const Connection) ApplicationKeyUpdateStatus {
-    return conn_keys.keyUpdateStatus(self);
-}
+pub const keyUpdateStatus = conn_keys.keyUpdateStatus;
 
-pub fn setApplicationKeyUpdateLimitsForTesting(
-    self: *Connection,
-    limits: ApplicationKeyUpdateLimits,
-) void {
-    return conn_keys.setApplicationKeyUpdateLimitsForTesting(self, limits);
-}
+pub const setApplicationKeyUpdateLimitsForTesting = conn_keys.setApplicationKeyUpdateLimitsForTesting;
 
-pub fn allocApplicationPacketNumberForTesting(self: *Connection) ?u64 {
-    return conn_keys.allocApplicationPacketNumberForTesting(self);
-}
+pub const allocApplicationPacketNumberForTesting = conn_keys.allocApplicationPacketNumberForTesting;
 
-fn applicationWriteKeyPhase(self: *const Connection) bool {
-    return conn_keys.applicationWriteKeyPhase(self);
-}
+const applicationWriteKeyPhase = conn_keys.applicationWriteKeyPhase;
 
-fn prepareApplicationWriteKeys(self: *Connection, now_us: u64) Error!void {
-    return conn_keys.prepareApplicationWriteKeys(self, now_us);
-}
+const prepareApplicationWriteKeys = conn_keys.prepareApplicationWriteKeys;
 
-fn recordApplicationPacketProtected(
-    self: *Connection,
-    sent_packet: *sent_packets_mod.SentPacket,
-) void {
-    return conn_keys.recordApplicationPacketProtected(self, sent_packet);
-}
+const recordApplicationPacketProtected = conn_keys.recordApplicationPacketProtected;
 
-pub fn onApplicationPacketAckedForKeys(
-    self: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
-    now_us: u64,
-) void {
-    return conn_keys.onApplicationPacketAckedForKeys(self, packet, now_us);
-}
+pub const onApplicationPacketAckedForKeys = conn_keys.onApplicationPacketAckedForKeys;
 
-fn discardExpiredApplicationReadKeys(self: *Connection, now_us: u64) void {
-    return conn_keys.discardExpiredApplicationReadKeys(self, now_us);
-}
+const discardExpiredApplicationReadKeys = conn_keys.discardExpiredApplicationReadKeys;
 
-pub fn setPeerDcid(self: *Connection, cid: []const u8) !void {
-    return conn_cids.setPeerDcid(self, cid);
-}
+pub const setPeerDcid = conn_cids.setPeerDcid;
 
-pub fn setLocalScid(self: *Connection, cid: []const u8) !void {
-    return conn_cids.setLocalScid(self, cid);
-}
+pub const setLocalScid = conn_cids.setLocalScid;
 
-pub fn localDcidLen(self: *const Connection) u8 {
-    return conn_cids.localDcidLen(self);
-}
+pub const localDcidLen = conn_cids.localDcidLen;
 
-pub fn longHeaderScid(self: *const Connection) ConnectionId {
-    return conn_cids.longHeaderScid(self);
-}
+pub const longHeaderScid = conn_cids.longHeaderScid;
 
-pub fn smallestLiveLocalCidSeq(self: *const Connection, path_id: u32) ?u64 {
-    return conn_cids.smallestLiveLocalCidSeq(self, path_id);
-}
+pub const smallestLiveLocalCidSeq = conn_cids.smallestLiveLocalCidSeq;
 
-pub fn nextLocalConnectionIdSequence(self: *const Connection, path_id: u32) u64 {
-    return conn_cids.nextLocalConnectionIdSequence(self, path_id);
-}
+pub const nextLocalConnectionIdSequence = conn_cids.nextLocalConnectionIdSequence;
 
-pub fn localScidCount(self: *const Connection) usize {
-    return conn_cids.localScidCount(self);
-}
+pub const localScidCount = conn_cids.localScidCount;
 
-pub fn localScids(self: *const Connection, dst: []ConnectionId) usize {
-    return conn_cids.localScids(self, dst);
-}
+pub const localScids = conn_cids.localScids;
 
-pub fn ownsLocalCid(self: *const Connection, dcid: []const u8) bool {
-    return conn_cids.ownsLocalCid(self, dcid);
-}
+pub const ownsLocalCid = conn_cids.ownsLocalCid;
 
-pub fn findLocalCidSequence(self: *const Connection, dcid: []const u8) ?u64 {
-    return conn_cids.findLocalCidSequence(self, dcid);
-}
+pub const findLocalCidSequence = conn_cids.findLocalCidSequence;
 
-pub fn setIncomingLocalCidSeq(self: *Connection, seq: ?u64) void {
-    return conn_cids.setIncomingLocalCidSeq(self, seq);
-}
+pub const setIncomingLocalCidSeq = conn_cids.setIncomingLocalCidSeq;
 
-pub fn peerActiveConnectionIdLimit(self: *const Connection) u64 {
-    return conn_cids.peerActiveConnectionIdLimit(self);
-}
+pub const peerActiveConnectionIdLimit = conn_cids.peerActiveConnectionIdLimit;
 
-pub fn localConnectionIdIssueBudget(self: *const Connection, path_id: u32) usize {
-    return conn_cids.localConnectionIdIssueBudget(self, path_id);
-}
+pub const localConnectionIdIssueBudget = conn_cids.localConnectionIdIssueBudget;
 
-pub fn acceptInitial(
-    self: *Connection,
-    bytes: []const u8,
-    params: TransportParams,
-) Error!void {
-    return conn_version.acceptInitial(self, bytes, params);
-}
+pub const acceptInitial = conn_version.acceptInitial;
 
-pub fn writeVersionNegotiation(
-    self: *Connection,
-    dst: []u8,
-    client_packet: []const u8,
-    supported_versions: []const u32,
-) Error!usize {
-    return conn_version.writeVersionNegotiation(self, dst, client_packet, supported_versions);
-}
+pub const writeVersionNegotiation = conn_version.writeVersionNegotiation;
 
-pub fn writeRetry(
-    self: *Connection,
-    dst: []u8,
-    client_initial: []const u8,
-    retry_scid: []const u8,
-    retry_token: []const u8,
-) Error!usize {
-    return conn_version.writeRetry(self, dst, client_initial, retry_scid, retry_token);
-}
+pub const writeRetry = conn_version.writeRetry;
 
-pub fn setInitialDcid(self: *Connection, dcid: []const u8) Error!void {
-    return conn_version.setInitialDcid(self, dcid);
-}
+pub const setInitialDcid = conn_version.setInitialDcid;
 
-fn discardInitialKeys(self: *Connection) void {
-    return conn_keys.discardInitialKeys(self);
-}
+const discardInitialKeys = conn_keys.discardInitialKeys;
 
-pub fn discardHandshakeKeys(self: *Connection) void {
-    return conn_keys.discardHandshakeKeys(self);
-}
+pub const discardHandshakeKeys = conn_keys.discardHandshakeKeys;
 
-pub fn setVersion(self: *Connection, version: u32) void {
-    return conn_version.setVersion(self, version);
-}
+pub const setVersion = conn_version.setVersion;
 
-pub fn setPendingVersionUpgrade(self: *Connection, version: ?u32) void {
-    return conn_version.setPendingVersionUpgrade(self, version);
-}
+pub const setPendingVersionUpgrade = conn_version.setPendingVersionUpgrade;
 
-pub fn applyPendingVersionUpgrade(self: *Connection) bool {
-    return conn_version.applyPendingVersionUpgrade(self);
-}
+pub const applyPendingVersionUpgrade = conn_version.applyPendingVersionUpgrade;
 
-pub fn clientAcceptCompatibleVersion(self: *Connection, version: u32) bool {
-    return conn_version.clientAcceptCompatibleVersion(self, version);
-}
+pub const clientAcceptCompatibleVersion = conn_version.clientAcceptCompatibleVersion;
 
 /// Open a new bidirectional stream with the given id. The id
 /// is caller-supplied. RFC 9000 §2.1 says the low two bits of
 /// a stream id encode (initiator, direction):
 ///   0 = client-initiated bidi, 1 = server-initiated bidi
 ///   2 = client-initiated uni,  3 = server-initiated uni
-pub fn openBidi(self: *Connection, id: u64) Error!*Stream {
-    return conn_streams.openBidi(self, id);
-}
+pub const openBidi = conn_streams.openBidi;
 
 /// Open a new unidirectional stream. The caller is responsible
 /// for choosing an id with the right low bits per §2.1.
-pub fn openUni(self: *Connection, id: u64) Error!*Stream {
-    return conn_streams.openUni(self, id);
-}
+pub const openUni = conn_streams.openUni;
 
 /// The `StreamType` this endpoint uses when it initiates a stream of the
 /// given directionality — client-{bidi,uni} for a client, server-{...}
 /// for a server.
-pub fn localStreamType(self: *const Connection, uni: bool) StreamType {
-    return conn_streams.localStreamType(self, uni);
-}
+pub const localStreamType = conn_streams.localStreamType;
 
 /// Open the next bidirectional stream initiated by this endpoint,
 /// choosing the id automatically (no manual RFC 9000 §2.1 bit math).
 /// Returns `StreamLimitExceeded` if the peer's bidi stream limit is
 /// reached; the id is not consumed in that case, so a later retry after
 /// the peer raises the limit reuses it.
-pub fn openNextBidi(self: *Connection) Error!*Stream {
-    return conn_streams.openNextBidi(self);
-}
+pub const openNextBidi = conn_streams.openNextBidi;
 
 /// Open the next unidirectional stream initiated by this endpoint —
 /// e.g. an HTTP/3 control or QPACK encoder/decoder stream — choosing the
 /// id automatically. Same limit/retry semantics as `openNextBidi`.
-pub fn openNextUni(self: *Connection) Error!*Stream {
-    return conn_streams.openNextUni(self);
-}
+pub const openNextUni = conn_streams.openNextUni;
 
-pub fn peekNextBidi(self: *const Connection) u64 {
-    return conn_streams.peekNextBidi(self);
-}
+pub const peekNextBidi = conn_streams.peekNextBidi;
 
-pub fn peekNextUni(self: *const Connection) u64 {
-    return conn_streams.peekNextUni(self);
-}
+pub const peekNextUni = conn_streams.peekNextUni;
 
-pub fn streamIndex(id: u64) u64 {
-    return conn_streams.streamIndex(id);
-}
+pub const streamIndex = conn_streams.streamIndex;
 
-pub fn initialRecvStreamLimit(self: *const Connection, id: u64) u64 {
-    return conn_streams.initialRecvStreamLimit(self, id);
-}
+pub const initialRecvStreamLimit = conn_streams.initialRecvStreamLimit;
 
-pub fn initialSendStreamLimit(self: *const Connection, id: u64) u64 {
-    return conn_streams.initialSendStreamLimit(self, id);
-}
+pub const initialSendStreamLimit = conn_streams.initialSendStreamLimit;
 
 /// Install the peer's transport parameters remembered from a prior
 /// connection, for a 0-RTT resumption. Bounds early-data (0-RTT)
@@ -2486,9 +2329,7 @@ pub fn setRememberedPeerTransportParams(self: *Connection, params: TransportPara
     }
 }
 
-pub fn recordPeerStreamOpenOrClose(self: *Connection, id: u64) bool {
-    return conn_streams.recordPeerStreamOpenOrClose(self, id);
-}
+pub const recordPeerStreamOpenOrClose = conn_streams.recordPeerStreamOpenOrClose;
 
 /// Connection-level send flow credit: new stream bytes the peer's
 /// MAX_DATA window accepts right now. See `streamSendWindow` for
@@ -2503,56 +2344,29 @@ pub fn sendWindow(self: *const Connection) u64 {
 /// Null for unknown streams and peer-initiated uni streams.
 /// Reflects peer flow-control windows only — congestion control
 /// and pacing intentionally excluded.
-pub fn streamSendWindow(self: *const Connection, id: u64) ?SendWindow {
-    return conn_streams.streamSendWindow(self, id);
-}
+pub const streamSendWindow = conn_streams.streamSendWindow;
 
-pub fn limitChunkToSendFlow(
-    self: *Connection,
-    s: *const Stream,
-    chunk: send_stream_mod.Chunk,
-) Error!?send_stream_mod.Chunk {
-    return conn_streams.limitChunkToSendFlow(self, s, chunk);
-}
+pub const limitChunkToSendFlow = conn_streams.limitChunkToSendFlow;
 
-fn limitChunkToSendFlowAfterPlanned(
-    self: *Connection,
-    s: *const Stream,
-    chunk: send_stream_mod.Chunk,
-    planned_conn_new_bytes: u64,
-) Error!?send_stream_mod.Chunk {
-    return conn_streams.limitChunkToSendFlowAfterPlanned(self, s, chunk, planned_conn_new_bytes);
-}
+const limitChunkToSendFlowAfterPlanned = conn_streams.limitChunkToSendFlowAfterPlanned;
 
-fn streamFlowNewBytes(s: *const Stream, chunk: send_stream_mod.Chunk) u64 {
-    return conn_streams.streamFlowNewBytes(s, chunk);
-}
+const streamFlowNewBytes = conn_streams.streamFlowNewBytes;
 
-pub fn recordStreamFlowSent(self: *Connection, s: *Stream, chunk: send_stream_mod.Chunk) void {
-    return conn_streams.recordStreamFlowSent(self, s, chunk);
-}
+pub const recordStreamFlowSent = conn_streams.recordStreamFlowSent;
 
 /// Iterate over every open stream. The yielded pointer is
 /// invalidated by `openBidi` / `openUni` (HashMap rehash) and
 /// by stream removal — finish iteration before mutating the
 /// stream set.
-pub fn streamIterator(self: *Connection) std.AutoHashMapUnmanaged(u64, *Stream).Iterator {
-    return conn_streams.streamIterator(self);
-}
+pub const streamIterator = conn_streams.streamIterator;
 
-pub fn streamCount(self: *const Connection) usize {
-    return conn_streams.streamCount(self);
-}
+pub const streamCount = conn_streams.streamCount;
 
-fn gcClosedStreams(self: *Connection) void {
-    return conn_streams.gcClosedStreams(self);
-}
+const gcClosedStreams = conn_streams.gcClosedStreams;
 
 /// Look up a stream by id. Returns null if no stream is open
 /// at that id.
-pub fn stream(self: *const Connection, id: u64) ?*Stream {
-    return conn_streams.stream(self, id);
-}
+pub const stream = conn_streams.stream;
 
 /// Snapshot of stream `id`'s send-half progress (bytes written, acked,
 /// buffered, and whether anything is ready to send), or `null` if the
@@ -2561,9 +2375,7 @@ pub fn stream(self: *const Connection, id: u64) ?*Stream {
 /// Lets an embedder track send backpressure without reaching into
 /// `SendStream`'s internals; snapshot a terminal stream's stats before
 /// the reaping GC removes it if you need them post-close.
-pub fn streamSendStats(self: *const Connection, id: u64) ?StreamSendStats {
-    return conn_streams.streamSendStats(self, id);
-}
+pub const streamSendStats = conn_streams.streamSendStats;
 
 /// Set the RFC 9218 send priority of stream `id` (see `StreamPriority`).
 /// The application-data send scheduler emits ready streams in urgency
@@ -2571,19 +2383,13 @@ pub fn streamSendStats(self: *const Connection, id: u64) ?StreamSendStats {
 /// embedder (e.g. an HTTP/3 layer honoring the `priority` header /
 /// PRIORITY_UPDATE) can update this at any time; it takes effect on the
 /// next packet built. Returns `StreamNotFound` for an unknown/reaped id.
-pub fn streamSetPriority(self: *Connection, id: u64, p: StreamPriority) Error!void {
-    return conn_streams.streamSetPriority(self, id, p);
-}
+pub const streamSetPriority = conn_streams.streamSetPriority;
 
 /// The current RFC 9218 send priority of stream `id`, or `null` if the
 /// stream is not in the live table (never opened, or already reaped).
-pub fn streamPriority(self: *const Connection, id: u64) ?StreamPriority {
-    return conn_streams.streamPriority(self, id);
-}
+pub const streamPriority = conn_streams.streamPriority;
 
-pub fn collectSendableStreamsByPriority(self: *Connection, buf: []*Stream) []*Stream {
-    return conn_streams.collectSendableStreamsByPriority(self, buf);
-}
+pub const collectSendableStreamsByPriority = conn_streams.collectSendableStreamsByPriority;
 
 /// Read-only recv-half status of stream `id`: whether the peer's FIN or
 /// RESET_STREAM has been seen, and whether the receive side has reached a
@@ -2591,75 +2397,42 @@ pub fn collectSendableStreamsByPriority(self: *Connection, buf: []*Stream) []*St
 /// the live table (never opened, or already reaped). Unlike
 /// `recvFullyTerminated`, it distinguishes a clean FIN from an abortive
 /// RESET, and holds no `*Stream` the caller must keep valid across a reap.
-pub fn streamRecvState(self: *const Connection, id: u64) ?StreamRecvState {
-    return conn_streams.streamRecvState(self, id);
-}
+pub const streamRecvState = conn_streams.streamRecvState;
 
 /// Convenience: write `data` to the send half of stream `id`.
-pub fn streamWrite(self: *Connection, id: u64, data: []const u8) Error!usize {
-    return conn_streams.streamWrite(self, id, data);
-}
+pub const streamWrite = conn_streams.streamWrite;
 
 /// Convenience: read from the receive half of stream `id`.
-pub fn streamRead(self: *Connection, id: u64, dst: []u8) Error!usize {
-    return conn_streams.streamRead(self, id, dst);
-}
+pub const streamRead = conn_streams.streamRead;
 
 /// Like `streamRead`, but also reports whether the peer's FIN has been
 /// seen — so a caller captures end-of-stream inline with the last read
 /// rather than inspecting the receive half separately, which the stream
 /// GC reaps the moment the recv side goes terminal. Prefer this over
 /// `streamRead` when you need to detect clean stream completion.
-pub fn streamReadFin(self: *Connection, id: u64, dst: []u8) Error!StreamReadResult {
-    return conn_streams.streamReadFin(self, id, dst);
-}
+pub const streamReadFin = conn_streams.streamReadFin;
 
-pub fn streamArrivedInEarlyData(self: *const Connection, id: u64) ?bool {
-    return conn_streams.streamArrivedInEarlyData(self, id);
-}
+pub const streamArrivedInEarlyData = conn_streams.streamArrivedInEarlyData;
 
-pub fn localDataBlockedAt(self: *const Connection) ?u64 {
-    return conn_flow.localDataBlockedAt(self);
-}
+pub const localDataBlockedAt = conn_flow.localDataBlockedAt;
 
-pub fn localStreamDataBlockedAt(self: *const Connection, stream_id: u64) ?u64 {
-    return conn_flow.localStreamDataBlockedAt(self, stream_id);
-}
+pub const localStreamDataBlockedAt = conn_flow.localStreamDataBlockedAt;
 
-pub fn localStreamsBlockedAt(self: *const Connection, bidi: bool) ?u64 {
-    return conn_flow.localStreamsBlockedAt(self, bidi);
-}
+pub const localStreamsBlockedAt = conn_flow.localStreamsBlockedAt;
 
-pub fn peerDataBlockedAt(self: *const Connection) ?u64 {
-    return conn_flow.peerDataBlockedAt(self);
-}
+pub const peerDataBlockedAt = conn_flow.peerDataBlockedAt;
 
-pub fn peerStreamDataBlockedAt(self: *const Connection, stream_id: u64) ?u64 {
-    return conn_flow.peerStreamDataBlockedAt(self, stream_id);
-}
+pub const peerStreamDataBlockedAt = conn_flow.peerStreamDataBlockedAt;
 
-pub fn peerStreamsBlockedAt(self: *const Connection, bidi: bool) ?u64 {
-    return conn_flow.peerStreamsBlockedAt(self, bidi);
-}
+pub const peerStreamsBlockedAt = conn_flow.peerStreamsBlockedAt;
 
-pub fn shouldQueueReceiveCredit(consumed: u64, advertised: u64, window: u64) bool {
-    return conn_flow.shouldQueueReceiveCredit(consumed, advertised, window);
-}
+pub const shouldQueueReceiveCredit = conn_flow.shouldQueueReceiveCredit;
 
-pub fn queueMaxStreams(self: *Connection, bidi: bool, maximum_streams: u64) void {
-    return conn_flow.queueMaxStreams(self, bidi, maximum_streams);
-}
+pub const queueMaxStreams = conn_flow.queueMaxStreams;
 
-pub fn connectionIdReplenishInfo(
-    self: *const Connection,
-    path_id: u32,
-) ?ConnectionIdReplenishInfo {
-    return conn_cids.connectionIdReplenishInfo(self, path_id);
-}
+pub const connectionIdReplenishInfo = conn_cids.connectionIdReplenishInfo;
 
-fn recordDatagramLost(self: *Connection, packet: *const sent_packets_mod.SentPacket) void {
-    return conn_datagram.recordDatagramLost(self, packet);
-}
+const recordDatagramLost = conn_datagram.recordDatagramLost;
 
 pub fn upsertStreamBlocked(
     list: *std.ArrayList(frame_types.StreamDataBlocked),
@@ -2669,84 +2442,43 @@ pub fn upsertStreamBlocked(
     return conn_flow.upsertStreamBlocked(list, allocator, item);
 }
 
-pub fn noteDataBlocked(self: *Connection, maximum_data: u64) void {
-    return conn_flow.noteDataBlocked(self, maximum_data);
-}
+pub const noteDataBlocked = conn_flow.noteDataBlocked;
 
-fn requeueDataBlocked(self: *Connection, maximum_data: u64) bool {
-    return conn_flow.requeueDataBlocked(self, maximum_data);
-}
+const requeueDataBlocked = conn_flow.requeueDataBlocked;
 
-pub fn clearLocalDataBlocked(self: *Connection, new_limit: u64) void {
-    return conn_flow.clearLocalDataBlocked(self, new_limit);
-}
+pub const clearLocalDataBlocked = conn_flow.clearLocalDataBlocked;
 
-pub fn noteStreamDataBlocked(
-    self: *Connection,
-    stream_id: u64,
-    maximum_stream_data: u64,
-) Error!void {
-    return conn_flow.noteStreamDataBlocked(self, stream_id, maximum_stream_data);
-}
+pub const noteStreamDataBlocked = conn_flow.noteStreamDataBlocked;
 
-fn requeueStreamDataBlocked(
-    self: *Connection,
-    item: frame_types.StreamDataBlocked,
-) Error!bool {
-    return conn_flow.requeueStreamDataBlocked(self, item);
-}
+const requeueStreamDataBlocked = conn_flow.requeueStreamDataBlocked;
 
-pub fn clearLocalStreamDataBlocked(
-    self: *Connection,
-    stream_id: u64,
-    new_limit: u64,
-) void {
-    return conn_flow.clearLocalStreamDataBlocked(self, stream_id, new_limit);
-}
+pub const clearLocalStreamDataBlocked = conn_flow.clearLocalStreamDataBlocked;
 
-pub fn noteStreamsBlocked(self: *Connection, bidi: bool, maximum_streams: u64) void {
-    return conn_flow.noteStreamsBlocked(self, bidi, maximum_streams);
-}
+pub const noteStreamsBlocked = conn_flow.noteStreamsBlocked;
 
-fn requeueStreamsBlocked(self: *Connection, item: frame_types.StreamsBlocked) bool {
-    return conn_flow.requeueStreamsBlocked(self, item);
-}
+const requeueStreamsBlocked = conn_flow.requeueStreamsBlocked;
 
-pub fn clearLocalStreamsBlocked(self: *Connection, bidi: bool, new_limit: u64) void {
-    return conn_flow.clearLocalStreamsBlocked(self, bidi, new_limit);
-}
+pub const clearLocalStreamsBlocked = conn_flow.clearLocalStreamsBlocked;
 
 /// Convenience: close the send half of stream `id` (queues FIN).
-pub fn streamFinish(self: *Connection, id: u64) Error!void {
-    return conn_streams.streamFinish(self, id);
-}
+pub const streamFinish = conn_streams.streamFinish;
 
 /// Convenience: abort the send half of stream `id` with
 /// RESET_STREAM (RFC 9000 §19.4). Any queued but unsent STREAM data
 /// is discarded; the final size is the number of bytes already
 /// accepted by `streamWrite`.
-pub fn streamReset(
-    self: *Connection,
-    id: u64,
-    application_error_code: u64,
-) Error!void {
-    return conn_streams.streamReset(self, id, application_error_code);
-}
+pub const streamReset = conn_streams.streamReset;
 
 /// Queue an RFC 9221 DATAGRAM payload for transmission. The next
 /// 1-RTT packet that fits the bytes ships them. Queueing is capped
 /// by the implementation's UDP packet budget and, once known, the
 /// peer's `max_datagram_frame_size` transport parameter.
-pub fn sendDatagram(self: *Connection, payload: []const u8) Error!void {
-    return conn_datagram.sendDatagram(self, payload);
-}
+pub const sendDatagram = conn_datagram.sendDatagram;
 
 /// Queue a DATAGRAM and return a connection-local id that will be
 /// echoed in `datagram_acked` / `datagram_lost` events. QUIC never
 /// retransmits DATAGRAM frames; this id is only for app retry policy.
-pub fn sendDatagramTracked(self: *Connection, payload: []const u8) Error!u64 {
-    return conn_datagram.sendDatagramTracked(self, payload);
-}
+pub const sendDatagramTracked = conn_datagram.sendDatagramTracked;
 
 /// The largest RFC 9221 DATAGRAM payload (in bytes) that `sendDatagram`
 /// / `sendDatagramTracked` will accept right now.
@@ -2762,26 +2494,11 @@ pub fn sendDatagramTracked(self: *Connection, payload: []const u8) Error!u64 {
 /// now," not a standing guarantee. RFC 9221 §5 forbids fragmenting a
 /// DATAGRAM; the send path only emits one that fits the current packet, so
 /// a payload sized to this value is carried whole.
-pub fn maxDatagramPayload(self: *const Connection) Error!usize {
-    return conn_datagram.maxDatagramPayload(self);
-}
+pub const maxDatagramPayload = conn_datagram.maxDatagramPayload;
 
-pub fn queueNewConnectionId(
-    self: *Connection,
-    sequence_number: u64,
-    retire_prior_to: u64,
-    cid: []const u8,
-    stateless_reset_token: [16]u8,
-) Error!void {
-    return conn_cids.queueNewConnectionId(self, sequence_number, retire_prior_to, cid, stateless_reset_token);
-}
+pub const queueNewConnectionId = conn_cids.queueNewConnectionId;
 
-pub fn queueRetireConnectionId(
-    self: *Connection,
-    sequence_number: u64,
-) Error!void {
-    return conn_cids.queueRetireConnectionId(self, sequence_number);
-}
+pub const queueRetireConnectionId = conn_cids.queueRetireConnectionId;
 
 /// True if the peer advertised the §4 `alternative_address`
 /// transport parameter on its handshake. Returns false when peer
@@ -2792,118 +2509,55 @@ pub fn queueRetireConnectionId(
 /// Optional flags for `advertiseAlternative*Address`; declared in conn_migration.zig.
 pub const AdvertiseAlternativeAddressOptions = conn_migration.AdvertiseAlternativeAddressOptions;
 
-pub fn peerSupportsAlternativeAddress(self: *const Connection) bool {
-    return conn_migration.peerSupportsAlternativeAddress(self);
-}
+pub const peerSupportsAlternativeAddress = conn_migration.peerSupportsAlternativeAddress;
 
-pub fn localAdvertisedAlternativeAddress(self: *const Connection) bool {
-    return conn_migration.localAdvertisedAlternativeAddress(self);
-}
+pub const localAdvertisedAlternativeAddress = conn_migration.localAdvertisedAlternativeAddress;
 
-pub fn advertiseAlternativeV4Address(
-    self: *Connection,
-    address: [4]u8,
-    port: u16,
-    opts: AdvertiseAlternativeAddressOptions,
-) Error!u64 {
-    return conn_migration.advertiseAlternativeV4Address(self, address, port, opts);
-}
+pub const advertiseAlternativeV4Address = conn_migration.advertiseAlternativeV4Address;
 
-pub fn advertiseAlternativeV6Address(
-    self: *Connection,
-    address: [16]u8,
-    port: u16,
-    opts: AdvertiseAlternativeAddressOptions,
-) Error!u64 {
-    return conn_migration.advertiseAlternativeV6Address(self, address, port, opts);
-}
+pub const advertiseAlternativeV6Address = conn_migration.advertiseAlternativeV6Address;
 
 /// Pop the oldest received DATAGRAM into `dst`. Returns the
 /// number of bytes written, or null if none pending. The
 /// payload is dropped from the queue regardless of whether it
 /// fit — caller must size `dst` to the peer's advertised
 /// `max_datagram_frame_size`.
-pub fn receiveDatagram(self: *Connection, dst: []u8) ?usize {
-    return conn_datagram.receiveDatagram(self, dst);
-}
+pub const receiveDatagram = conn_datagram.receiveDatagram;
 
 /// Pop the oldest received DATAGRAM and include whether it arrived
 /// in 0-RTT. The payload is dropped from the queue regardless of
 /// whether it fit.
-pub fn receiveDatagramInfo(self: *Connection, dst: []u8) ?IncomingDatagram {
-    return conn_datagram.receiveDatagramInfo(self, dst);
-}
+pub const receiveDatagramInfo = conn_datagram.receiveDatagramInfo;
 
-pub fn pendingDatagrams(self: *const Connection) usize {
-    return conn_datagram.pendingDatagrams(self);
-}
+pub const pendingDatagrams = conn_datagram.pendingDatagrams;
 
-pub fn enableMultipath(self: *Connection, enabled: bool) void {
-    return conn_paths.enableMultipath(self, enabled);
-}
+pub const enableMultipath = conn_paths.enableMultipath;
 
-pub fn multipathEnabled(self: *const Connection) bool {
-    return conn_paths.multipathEnabled(self);
-}
+pub const multipathEnabled = conn_paths.multipathEnabled;
 
-pub fn multipathNegotiated(self: *const Connection) bool {
-    return conn_paths.multipathNegotiated(self);
-}
+pub const multipathNegotiated = conn_paths.multipathNegotiated;
 
-pub fn peerSupportsGreaseQuicBit(self: *const Connection) bool {
-    return conn_paths.peerSupportsGreaseQuicBit(self);
-}
+pub const peerSupportsGreaseQuicBit = conn_paths.peerSupportsGreaseQuicBit;
 
-fn nextQuicBit(self: *const Connection) u1 {
-    return conn_paths.nextQuicBit(self);
-}
+const nextQuicBit = conn_paths.nextQuicBit;
 
-pub fn openPath(
-    self: *Connection,
-    peer_addr: Address,
-    local_addr: Address,
-    local_cid: ConnectionId,
-    peer_cid: ConnectionId,
-) Error!u32 {
-    return conn_paths.openPath(self, peer_addr, local_addr, local_cid, peer_cid);
-}
+pub const openPath = conn_paths.openPath;
 
-pub fn setActivePath(self: *Connection, path_id: u32) bool {
-    return conn_paths.setActivePath(self, path_id);
-}
+pub const setActivePath = conn_paths.setActivePath;
 
-pub fn abandonPath(self: *Connection, path_id: u32) bool {
-    return conn_paths.abandonPath(self, path_id);
-}
+pub const abandonPath = conn_paths.abandonPath;
 
-pub fn abandonPathAt(
-    self: *Connection,
-    path_id: u32,
-    error_code: u64,
-    now_us: u64,
-) bool {
-    return conn_paths.abandonPathAt(self, path_id, error_code, now_us);
-}
+pub const abandonPathAt = conn_paths.abandonPathAt;
 
-pub fn setPathBackup(self: *Connection, path_id: u32, backup: bool) bool {
-    return conn_paths.setPathBackup(self, path_id, backup);
-}
+pub const setPathBackup = conn_paths.setPathBackup;
 
-pub fn markPathValidated(self: *Connection, path_id: u32) bool {
-    return conn_paths.markPathValidated(self, path_id);
-}
+pub const markPathValidated = conn_paths.markPathValidated;
 
-pub fn setScheduler(self: *Connection, scheduler: Scheduler) void {
-    return conn_paths.setScheduler(self, scheduler);
-}
+pub const setScheduler = conn_paths.setScheduler;
 
-pub fn activePathId(self: *const Connection) u32 {
-    return conn_paths.activePathId(self);
-}
+pub const activePathId = conn_paths.activePathId;
 
-pub fn pathStats(self: *const Connection, path_id: u32) ?PathStats {
-    return conn_paths.pathStats(self, path_id);
-}
+pub const pathStats = conn_paths.pathStats;
 
 /// One-call observability snapshot (Unstable tier): whole-connection
 /// byte/packet counters, an active-path cwnd/RTT/PMTU snapshot, and
@@ -2911,9 +2565,7 @@ pub fn pathStats(self: *const Connection, path_id: u32) ?PathStats {
 /// of `Server.metricsSnapshot`. Everything is copied by value, so
 /// the result is safe to hold across ticks and reaps. Per-path
 /// detail stays on `pathStats(path_id)`.
-pub fn stats(self: *const Connection) ConnectionStats {
-    return conn_stats.stats(self);
-}
+pub const stats = conn_stats.stats;
 
 pub fn queuePathAbandon(self: *Connection, path_id: u32, error_code: u64) Error!void {
     return path_frame_queue.queuePathAbandon(self, path_id, error_code);
@@ -2958,20 +2610,9 @@ pub fn clearPendingPathCidsBlocked(self: *Connection, path_id: u32, next_sequenc
     return path_frame_queue.clearPendingPathCidsBlocked(self, path_id, next_sequence_number);
 }
 
-pub fn replenishConnectionIds(
-    self: *Connection,
-    provisions: []const ConnectionIdProvision,
-) Error!usize {
-    return conn_cids.replenishConnectionIds(self, provisions);
-}
+pub const replenishConnectionIds = conn_cids.replenishConnectionIds;
 
-pub fn replenishPathConnectionIds(
-    self: *Connection,
-    path_id: u32,
-    provisions: []const ConnectionIdProvision,
-) Error!usize {
-    return conn_cids.replenishPathConnectionIds(self, path_id, provisions);
-}
+pub const replenishPathConnectionIds = conn_cids.replenishPathConnectionIds;
 
 // INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
 pub fn cachePeerTransportParams(self: *Connection) Error!void {
@@ -3215,120 +2856,39 @@ pub fn idleTimeoutUs(self: *const Connection) ?u64 {
     return @min(local, params.max_idle_timeout_ms) * rtt_mod.ms;
 }
 
-pub fn primaryPath(self: *Connection) *PathState {
-    return conn_paths.primaryPath(self);
-}
+pub const primaryPath = conn_paths.primaryPath;
 
-pub fn primaryPathConst(self: *const Connection) *const PathState {
-    return conn_paths.primaryPathConst(self);
-}
+pub const primaryPathConst = conn_paths.primaryPathConst;
 
-pub fn activePath(self: *Connection) *PathState {
-    return conn_paths.activePath(self);
-}
+pub const activePath = conn_paths.activePath;
 
-fn applicationPathForPoll(self: *Connection) *PathState {
-    return conn_paths.applicationPathForPoll(self);
-}
+const applicationPathForPoll = conn_paths.applicationPathForPoll;
 
-pub fn incomingPathId(self: *Connection, from: ?Address) u32 {
-    return conn_paths.incomingPathId(self, from);
-}
+pub const incomingPathId = conn_paths.incomingPathId;
 
-pub fn peerAddressChangeCandidate(
-    self: *Connection,
-    path_id: u32,
-    from: ?Address,
-) ?Address {
-    return conn_paths.peerAddressChangeCandidate(self, path_id, from);
-}
+pub const peerAddressChangeCandidate = conn_paths.peerAddressChangeCandidate;
 
-pub fn queuePathResponseOnPath(
-    self: *Connection,
-    path_id: u32,
-    token: [8]u8,
-    addr: ?Address,
-) void {
-    return conn_paths.queuePathResponseOnPath(self, path_id, token, addr);
-}
+pub const queuePathResponseOnPath = conn_paths.queuePathResponseOnPath;
 
-fn queuePathChallengeOnPath(
-    self: *Connection,
-    path_id: u32,
-    token: [8]u8,
-) void {
-    return conn_paths.queuePathChallengeOnPath(self, path_id, token);
-}
+const queuePathChallengeOnPath = conn_paths.queuePathChallengeOnPath;
 
-fn handlePathValidationFailure(
-    self: *Connection,
-    path: *PathState,
-) void {
-    return conn_paths.handlePathValidationFailure(self, path);
-}
+const handlePathValidationFailure = conn_paths.handlePathValidationFailure;
 
-pub fn recordPathResponse(
-    self: *Connection,
-    path_id: u32,
-    token: [8]u8,
-) void {
-    return conn_paths.recordPathResponse(self, path_id, token);
-}
+pub const recordPathResponse = conn_paths.recordPathResponse;
 
-fn shouldRequeuePathChallenge(
-    self: *Connection,
-    path_id: u32,
-    token: [8]u8,
-) bool {
-    return conn_paths.shouldRequeuePathChallenge(self, path_id, token);
-}
+const shouldRequeuePathChallenge = conn_paths.shouldRequeuePathChallenge;
 
-pub fn handlePeerAddressChange(
-    self: *Connection,
-    path: *PathState,
-    addr: Address,
-    datagram_len: usize,
-    now_us: u64,
-) Error!void {
-    return conn_migration.handlePeerAddressChange(self, path, addr, datagram_len, now_us);
-}
+pub const handlePeerAddressChange = conn_migration.handlePeerAddressChange;
 
-fn consumeFreshPeerCidForMigration(
-    self: *Connection,
-    path: *PathState,
-) ?ConnectionId {
-    return conn_migration.consumeFreshPeerCidForMigration(self, path);
-}
+const consumeFreshPeerCidForMigration = conn_migration.consumeFreshPeerCidForMigration;
 
-pub fn beginClientActiveMigration(
-    self: *Connection,
-    new_local_addr: Address,
-    now_us: u64,
-) Error!void {
-    return conn_migration.beginClientActiveMigration(self, new_local_addr, now_us);
-}
+pub const beginClientActiveMigration = conn_migration.beginClientActiveMigration;
 
-pub fn noteServerLocalAddressChanged(
-    self: *Connection,
-    new_local_addr: Address,
-    now_us: u64,
-) Error!void {
-    return conn_migration.noteServerLocalAddressChanged(self, new_local_addr, now_us);
-}
+pub const noteServerLocalAddressChanged = conn_migration.noteServerLocalAddressChanged;
 
-pub fn recordAuthenticatedDatagramAddress(
-    self: *Connection,
-    path_id: u32,
-    addr: Address,
-    datagram_len: usize,
-    now_us: u64,
-) Error!void {
-    return conn_migration.recordAuthenticatedDatagramAddress(self, path_id, addr, datagram_len, now_us);
-}
+pub const recordAuthenticatedDatagramAddress = conn_migration.recordAuthenticatedDatagramAddress;
 
-pub fn incomingShortPath(self: *Connection, bytes: []const u8) ?*PathState {
-    return conn_migration.incomingShortPath(self, bytes);
-}
+pub const incomingShortPath = conn_migration.incomingShortPath;
 
 fn connPnIdx(lvl: EncryptionLevel) ?usize {
     return switch (lvl) {
@@ -3601,53 +3161,29 @@ pub fn u64ToUsizeClamped(value: u64) usize {
     return @intCast(value);
 }
 
-fn basePtoDurationForLevel(self: *const Connection, lvl: EncryptionLevel) u64 {
-    return conn_loss.basePtoDurationForLevel(self, lvl);
-}
+const basePtoDurationForLevel = conn_loss.basePtoDurationForLevel;
 
-pub fn ptoDurationForLevel(self: *const Connection, lvl: EncryptionLevel) u64 {
-    return conn_loss.ptoDurationForLevel(self, lvl);
-}
+pub const ptoDurationForLevel = conn_loss.ptoDurationForLevel;
 
-pub fn ptoDurationForApplicationPath(self: *const Connection, path: *const PathState) u64 {
-    return conn_loss.ptoDurationForApplicationPath(self, path);
-}
+pub const ptoDurationForApplicationPath = conn_loss.ptoDurationForApplicationPath;
 
-pub fn largestApplicationPtoDurationUs(self: *const Connection) u64 {
-    return conn_loss.largestApplicationPtoDurationUs(self);
-}
+pub const largestApplicationPtoDurationUs = conn_loss.largestApplicationPtoDurationUs;
 
-pub fn retiredPathRetentionUs(self: *const Connection) u64 {
-    return conn_loss.retiredPathRetentionUs(self);
-}
+pub const retiredPathRetentionUs = conn_loss.retiredPathRetentionUs;
 
-fn expireRetiringPaths(self: *Connection, now_us: u64) void {
-    return conn_paths.expireRetiringPaths(self, now_us);
-}
+const expireRetiringPaths = conn_paths.expireRetiringPaths;
 
-fn considerDeadline(best: *?TimerDeadline, candidate: TimerDeadline) void {
-    return conn_loss.considerDeadline(best, candidate);
-}
+const considerDeadline = conn_loss.considerDeadline;
 
-fn lossDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 {
-    return conn_loss.lossDeadlineForLevel(self, lvl);
-}
+const lossDeadlineForLevel = conn_loss.lossDeadlineForLevel;
 
-fn lossDeadlineForApplicationPath(self: *const Connection, path: *const PathState) ?u64 {
-    return conn_loss.lossDeadlineForApplicationPath(self, path);
-}
+const lossDeadlineForApplicationPath = conn_loss.lossDeadlineForApplicationPath;
 
-fn ptoDeadlineForLevel(self: *const Connection, lvl: EncryptionLevel) ?u64 {
-    return conn_loss.ptoDeadlineForLevel(self, lvl);
-}
+const ptoDeadlineForLevel = conn_loss.ptoDeadlineForLevel;
 
-fn ptoDeadlineForApplicationPath(self: *const Connection, path: *const PathState) ?u64 {
-    return conn_loss.ptoDeadlineForApplicationPath(self, path);
-}
+const ptoDeadlineForApplicationPath = conn_loss.ptoDeadlineForApplicationPath;
 
-fn idleDeadline(self: *const Connection) ?u64 {
-    return conn_loss.idleDeadline(self);
-}
+const idleDeadline = conn_loss.idleDeadline;
 
 fn bytesInFlight(self: *const Connection) u64 {
     var total: u64 = 0;
@@ -3869,75 +3405,30 @@ pub fn nextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline {
 }
 
 /// True if `poll` would produce an outgoing packet right now.
-pub fn canSend(self: *const Connection) bool {
-    return conn_send.canSend(self);
-}
+pub const canSend = conn_send.canSend;
 
 /// One outgoing-datagram step. Walks Initial → Handshake →
 /// Application encryption levels in order, packing whatever is
 /// pending at each (CRYPTO, ACK, STREAM) into a coalesced
 /// short/long-header datagram per RFC 9000 §12.2. Returns the
 /// total bytes written, or null if nothing was ready.
-pub fn poll(
-    self: *Connection,
-    dst: []u8,
-    now_us: u64,
-) Error!?usize {
-    return conn_send.poll(self, dst, now_us);
-}
+pub const poll = conn_send.poll;
 
 /// Path-aware outgoing-datagram step. Single-path callers can
 /// keep using `poll`; multipath-aware embedders can inspect the
 /// destination address and path id once `PathSet` lands.
-pub fn pollDatagram(
-    self: *Connection,
-    dst: []u8,
-    now_us: u64,
-) Error!?OutgoingDatagram {
-    return conn_send.pollDatagram(self, dst, now_us);
-}
+pub const pollDatagram = conn_send.pollDatagram;
 
 /// Emit one packet at the given level, if there's anything to
 /// send and we have keys. Internal helper of `poll` — exposed
 /// for tests that want fine-grained control.
-pub fn pollLevel(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    dst: []u8,
-    now_us: u64,
-) Error!?usize {
-    return conn_send.pollLevel(self, lvl, dst, now_us);
-}
+pub const pollLevel = conn_send.pollLevel;
 
-pub fn pollLevelOnPath(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    app_path_id: u32,
-    dst: []u8,
-    now_us: u64,
-) Error!?usize {
-    return conn_send.pollLevelOnPath(self, lvl, app_path_id, dst, now_us);
-}
+pub const pollLevelOnPath = conn_send.pollLevelOnPath;
 
-pub fn emitOnePendingMultipathFrame(
-    self: *Connection,
-    sent_packet: *sent_packets_mod.SentPacket,
-    pl_buf: *[max_recv_plaintext]u8,
-    pl_pos: *usize,
-    max_payload: usize,
-) Error!bool {
-    return conn_send.emitOnePendingMultipathFrame(self, sent_packet, pl_buf, pl_pos, max_payload);
-}
+pub const emitOnePendingMultipathFrame = conn_send.emitOnePendingMultipathFrame;
 
-pub fn emitPendingMultipathFrames(
-    self: *Connection,
-    sent_packet: *sent_packets_mod.SentPacket,
-    pl_buf: *[max_recv_plaintext]u8,
-    pl_pos: *usize,
-    max_payload: usize,
-) Error!bool {
-    return conn_send.emitPendingMultipathFrames(self, sent_packet, pl_buf, pl_pos, max_payload);
-}
+pub const emitPendingMultipathFrames = conn_send.emitPendingMultipathFrames;
 
 /// Process an incoming UDP datagram. Splits coalesced packets
 /// (RFC 9000 §12.2) and routes each through the matching
@@ -3952,14 +3443,7 @@ pub fn emitPendingMultipathFrames(
 ///     §10.2.1 ¶3) and so a peer's CC moves us to draining.
 ///     `dispatchFrames` is suppressed for non-CONNECTION_CLOSE
 ///     frames in this state via `closingAttributionOnly`.
-pub fn handle(
-    self: *Connection,
-    bytes: []u8,
-    from: ?Address,
-    now_us: u64,
-) Error!void {
-    return conn_recv_dispatch.handle(self, bytes, from, now_us);
-}
+pub const handle = conn_recv_dispatch.handle;
 
 /// Same as `handle` but also accepts the IP-layer ECN codepoint
 /// the embedder peeled off the datagram's TOS byte (RFC 3168 §5).
@@ -3967,36 +3451,15 @@ pub fn handle(
 /// `runUdpServer`'s recvmsg cmsg parser; per-packet handlers read
 /// `last_recv_ecn` to bump the receiving PN-space's counters
 /// (RFC 9000 §13.4.1).
-pub fn handleWithEcn(
-    self: *Connection,
-    bytes: []u8,
-    from: ?Address,
-    ecn: socket_opts_mod.EcnCodepoint,
-    now_us: u64,
-) Error!void {
-    return conn_recv_dispatch.handleWithEcn(self, bytes, from, ecn, now_us);
-}
+pub const handleWithEcn = conn_recv_dispatch.handleWithEcn;
 
-pub fn probePath(
-    self: *Connection,
-    token: [8]u8,
-    now_us: u64,
-    timeout_us: u64,
-) Error!void {
-    return conn_paths.probePath(self, token, now_us, timeout_us);
-}
+pub const probePath = conn_paths.probePath;
 
-pub fn requestPing(self: *Connection) void {
-    return conn_paths.requestPing(self);
-}
+pub const requestPing = conn_paths.requestPing;
 
-pub fn requestPathPing(self: *Connection, path_id: u32) Error!void {
-    return conn_paths.requestPathPing(self, path_id);
-}
+pub const requestPathPing = conn_paths.requestPathPing;
 
-pub fn isPathValidated(self: *const Connection) bool {
-    return conn_paths.isPathValidated(self);
-}
+pub const isPathValidated = conn_paths.isPathValidated;
 
 /// Current public shutdown state.
 pub fn closeState(self: *const Connection) CloseState {
@@ -4262,117 +3725,39 @@ pub fn releaseResidentBytes(self: *Connection, n: usize) void {
 /// Queue a STOP_SENDING for `stream_id` with the given app
 /// error code (RFC 9000 §19.5). Tells the peer to stop
 /// sending on the receiving half of the stream.
-pub fn streamStopSending(
-    self: *Connection,
-    stream_id: u64,
-    application_error_code: u64,
-) Error!void {
-    return conn_streams.streamStopSending(self, stream_id, application_error_code);
-}
+pub const streamStopSending = conn_streams.streamStopSending;
 
-fn queueStopSending(
-    self: *Connection,
-    item: StopSendingItem,
-) Error!void {
-    return conn_streams.queueStopSending(self, item);
-}
+const queueStopSending = conn_streams.queueStopSending;
 
-pub fn peerCidsCount(self: *const Connection) usize {
-    return conn_cids.peerCidsCount(self);
-}
+pub const peerCidsCount = conn_cids.peerCidsCount;
 
-pub fn peerDcid(self: *const Connection) ConnectionId {
-    return conn_cids.peerDcid(self);
-}
+pub const peerDcid = conn_cids.peerDcid;
 
-pub fn registerPeerCidForTesting(
-    self: *Connection,
-    sequence_number: u64,
-    retire_prior_to: u64,
-    cid: ConnectionId,
-    stateless_reset_token: [16]u8,
-) Error!void {
-    return conn_cids.registerPeerCidForTesting(self, sequence_number, retire_prior_to, cid, stateless_reset_token);
-}
+pub const registerPeerCidForTesting = conn_cids.registerPeerCidForTesting;
 
-pub fn handleOnePacket(
-    self: *Connection,
-    bytes: []u8,
-    now_us: u64,
-) Error!usize {
-    return conn_recv_dispatch.handleOnePacket(self, bytes, now_us);
-}
+pub const handleOnePacket = conn_recv_dispatch.handleOnePacket;
 
-pub fn packetPayloadAckEliciting(payload: []const u8) bool {
-    return conn_recv_dispatch.packetPayloadAckEliciting(payload);
-}
+pub const packetPayloadAckEliciting = conn_recv_dispatch.packetPayloadAckEliciting;
 
-pub fn packetPayloadNeedsImmediateAck(payload: []const u8) bool {
-    return conn_recv_dispatch.packetPayloadNeedsImmediateAck(payload);
-}
+pub const packetPayloadNeedsImmediateAck = conn_recv_dispatch.packetPayloadNeedsImmediateAck;
 
-pub fn handleShort(
-    self: *Connection,
-    bytes: []u8,
-    now_us: u64,
-) Error!usize {
-    return conn_recv_packet_handlers.handleShort(self, bytes, now_us);
-}
+pub const handleShort = conn_recv_packet_handlers.handleShort;
 
-pub fn handleInitial(
-    self: *Connection,
-    bytes: []u8,
-    now_us: u64,
-) Error!usize {
-    return conn_recv_packet_handlers.handleInitial(self, bytes, now_us);
-}
+pub const handleInitial = conn_recv_packet_handlers.handleInitial;
 
-pub fn handleRetry(
-    self: *Connection,
-    bytes: []u8,
-    now_us: u64,
-) Error!usize {
-    return conn_recv_packet_handlers.handleRetry(self, bytes, now_us);
-}
+pub const handleRetry = conn_recv_packet_handlers.handleRetry;
 
-pub fn dispatchFrames(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    payload: []const u8,
-    now_us: u64,
-) Error!void {
-    return conn_recv_dispatch.dispatchFrames(self, lvl, payload, now_us);
-}
+pub const dispatchFrames = conn_recv_dispatch.dispatchFrames;
 
-pub fn tokenEql(a: [16]u8, b: [16]u8) bool {
-    return conn_recv_dispatch.tokenEql(a, b);
-}
+pub const tokenEql = conn_recv_dispatch.tokenEql;
 
-pub fn isKnownStatelessReset(self: *const Connection, bytes: []const u8) bool {
-    return conn_recv_dispatch.isKnownStatelessReset(self, bytes);
-}
+pub const isKnownStatelessReset = conn_recv_dispatch.isKnownStatelessReset;
 
-pub fn peerCidActiveCountForPath(self: *const Connection, path_id: u32) usize {
-    return conn_cids.peerCidActiveCountForPath(self, path_id);
-}
+pub const peerCidActiveCountForPath = conn_cids.peerCidActiveCountForPath;
 
-pub fn registerPeerCid(
-    self: *Connection,
-    path_id: u32,
-    sequence_number: u64,
-    retire_prior_to: u64,
-    cid: ConnectionId,
-    stateless_reset_token: [16]u8,
-) Error!void {
-    return conn_cids.registerPeerCid(self, path_id, sequence_number, retire_prior_to, cid, stateless_reset_token);
-}
+pub const registerPeerCid = conn_cids.registerPeerCid;
 
-pub fn handleNewConnectionId(
-    self: *Connection,
-    nc: frame_types.NewConnectionId,
-) Error!void {
-    return conn_recv_cid_token_handlers.handleNewConnectionId(self, nc);
-}
+pub const handleNewConnectionId = conn_recv_cid_token_handlers.handleNewConnectionId;
 
 /// Returns true (and increments the per-cycle counter) when the
 /// cumulative ACK range count for this `handle` cycle would exceed
@@ -4387,12 +3772,7 @@ pub fn exceedsIncomingAckRangeCap(self: *Connection, range_count: u64) bool {
     return false;
 }
 
-pub fn handleRetireConnectionId(
-    self: *Connection,
-    rc: frame_types.RetireConnectionId,
-) void {
-    return conn_recv_cid_token_handlers.handleRetireConnectionId(self, rc);
-}
+pub const handleRetireConnectionId = conn_recv_cid_token_handlers.handleRetireConnectionId;
 
 /// RFC 9000 §19.7 — server-issued NEW_TOKEN. The frame is only
 /// legal at application encryption level (filtered upstream by
@@ -4400,203 +3780,71 @@ pub fn handleRetireConnectionId(
 /// NEW_TOKEN; if a peer-acting-as-server sends it to us we
 /// raise PROTOCOL_VIOLATION. Clients hand the borrowed slice
 /// straight to the embedder callback if one is installed.
-pub fn handleNewToken(self: *Connection, nt: frame_types.NewToken) void {
-    return conn_recv_cid_token_handlers.handleNewToken(self, nt);
-}
+pub const handleNewToken = conn_recv_cid_token_handlers.handleNewToken;
 
-pub fn handlePathAck(
-    self: *Connection,
-    pa: frame_types.PathAck,
-    now_us: u64,
-) Error!void {
-    return conn_recv_multipath_handlers.handlePathAck(self, pa, now_us);
-}
+pub const handlePathAck = conn_recv_multipath_handlers.handlePathAck;
 
-pub fn handlePathNewConnectionId(
-    self: *Connection,
-    nc: frame_types.PathNewConnectionId,
-) Error!void {
-    return conn_recv_multipath_handlers.handlePathNewConnectionId(self, nc);
-}
+pub const handlePathNewConnectionId = conn_recv_multipath_handlers.handlePathNewConnectionId;
 
-pub fn handlePathRetireConnectionId(
-    self: *Connection,
-    rc: frame_types.PathRetireConnectionId,
-) void {
-    return conn_recv_multipath_handlers.handlePathRetireConnectionId(self, rc);
-}
+pub const handlePathRetireConnectionId = conn_recv_multipath_handlers.handlePathRetireConnectionId;
 
-pub fn handleMaxPathId(self: *Connection, mp: frame_types.MaxPathId) void {
-    return conn_recv_multipath_handlers.handleMaxPathId(self, mp);
-}
+pub const handleMaxPathId = conn_recv_multipath_handlers.handleMaxPathId;
 
-pub fn handlePathsBlocked(self: *Connection, pb: frame_types.PathsBlocked) void {
-    return conn_recv_multipath_handlers.handlePathsBlocked(self, pb);
-}
+pub const handlePathsBlocked = conn_recv_multipath_handlers.handlePathsBlocked;
 
-pub fn handlePathCidsBlocked(self: *Connection, pcb: frame_types.PathCidsBlocked) void {
-    return conn_recv_multipath_handlers.handlePathCidsBlocked(self, pcb);
-}
+pub const handlePathCidsBlocked = conn_recv_multipath_handlers.handlePathCidsBlocked;
 
-pub fn handleAlternativeAddressV4(
-    self: *Connection,
-    a: frame_types.AlternativeV4Address,
-) void {
-    return conn_migration.handleAlternativeAddressV4(self, a);
-}
+pub const handleAlternativeAddressV4 = conn_migration.handleAlternativeAddressV4;
 
-pub fn handleAlternativeAddressV6(
-    self: *Connection,
-    a: frame_types.AlternativeV6Address,
-) void {
-    return conn_migration.handleAlternativeAddressV6(self, a);
-}
+pub const handleAlternativeAddressV6 = conn_migration.handleAlternativeAddressV6;
 
-pub fn highestAlternativeAddressSequenceSeen(self: *const Connection) ?u64 {
-    return conn_migration.highestAlternativeAddressSequenceSeen(self);
-}
+pub const highestAlternativeAddressSequenceSeen = conn_migration.highestAlternativeAddressSequenceSeen;
 
-pub fn handleMaxData(self: *Connection, md: frame_types.MaxData) void {
-    return conn_recv_flow_handlers.handleMaxData(self, md);
-}
+pub const handleMaxData = conn_recv_flow_handlers.handleMaxData;
 
-pub fn handleMaxStreamData(self: *Connection, msd: frame_types.MaxStreamData) void {
-    return conn_recv_flow_handlers.handleMaxStreamData(self, msd);
-}
+pub const handleMaxStreamData = conn_recv_flow_handlers.handleMaxStreamData;
 
-pub fn handleMaxStreams(self: *Connection, ms: frame_types.MaxStreams) void {
-    return conn_recv_flow_handlers.handleMaxStreams(self, ms);
-}
+pub const handleMaxStreams = conn_recv_flow_handlers.handleMaxStreams;
 
-pub fn handleDataBlocked(self: *Connection, db: frame_types.DataBlocked) void {
-    return conn_recv_flow_handlers.handleDataBlocked(self, db);
-}
+pub const handleDataBlocked = conn_recv_flow_handlers.handleDataBlocked;
 
-pub fn handleStreamDataBlocked(self: *Connection, sdb: frame_types.StreamDataBlocked) Error!void {
-    return conn_recv_flow_handlers.handleStreamDataBlocked(self, sdb);
-}
+pub const handleStreamDataBlocked = conn_recv_flow_handlers.handleStreamDataBlocked;
 
-pub fn handleStreamsBlocked(self: *Connection, sb: frame_types.StreamsBlocked) void {
-    return conn_recv_flow_handlers.handleStreamsBlocked(self, sb);
-}
+pub const handleStreamsBlocked = conn_recv_flow_handlers.handleStreamsBlocked;
 
-pub fn handleDatagram(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    dg: frame_types.Datagram,
-) Error!void {
-    return conn_recv_data_handlers.handleDatagram(self, lvl, dg);
-}
+pub const handleDatagram = conn_recv_data_handlers.handleDatagram;
 
-pub fn handleCrypto(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    cr: frame_types.Crypto,
-) Error!void {
-    return conn_recv_data_handlers.handleCrypto(self, lvl, cr);
-}
+pub const handleCrypto = conn_recv_data_handlers.handleCrypto;
 
-fn cryptoInboxQueued(self: *const Connection) bool {
-    return conn_recv_data_handlers.cryptoInboxQueued(self);
-}
+const cryptoInboxQueued = conn_recv_data_handlers.cryptoInboxQueued;
 
-fn drainInboxIntoTls(self: *Connection) Error!void {
-    return conn_recv_data_handlers.drainInboxIntoTls(self);
-}
+const drainInboxIntoTls = conn_recv_data_handlers.drainInboxIntoTls;
 
-pub fn handleStream(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    s: frame_types.Stream,
-) Error!void {
-    return conn_recv_data_handlers.handleStream(self, lvl, s);
-}
+pub const handleStream = conn_recv_data_handlers.handleStream;
 
-pub fn handleResetStream(self: *Connection, rs: frame_types.ResetStream) Error!void {
-    return conn_recv_stream_control_handlers.handleResetStream(self, rs);
-}
+pub const handleResetStream = conn_recv_stream_control_handlers.handleResetStream;
 
-pub fn handleAckAtLevel(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    a: frame_types.Ack,
-    now_us: u64,
-) Error!void {
-    return conn_recv_ack_handlers.handleAckAtLevel(self, lvl, a, now_us);
-}
+pub const handleAckAtLevel = conn_recv_ack_handlers.handleAckAtLevel;
 
-fn dispatchLostPacketToStreams(
-    self: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
-) Error!bool {
-    return conn_loss.dispatchLostPacketToStreams(self, packet);
-}
+const dispatchLostPacketToStreams = conn_loss.dispatchLostPacketToStreams;
 
-pub fn dispatchLostControlFrames(
-    self: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
-) Error!bool {
-    return conn_recv_ack_handlers.dispatchLostControlFrames(self, packet);
-}
+pub const dispatchLostControlFrames = conn_recv_ack_handlers.dispatchLostControlFrames;
 
-pub fn dispatchLostControlFramesOnPath(
-    self: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
-    path_id: u32,
-) Error!bool {
-    return conn_loss.dispatchLostControlFramesOnPath(self, packet, path_id);
-}
+pub const dispatchLostControlFramesOnPath = conn_loss.dispatchLostControlFramesOnPath;
 
-pub fn requeueLostPacket(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    packet: *const sent_packets_mod.SentPacket,
-) Error!bool {
-    return conn_loss.requeueLostPacket(self, lvl, packet);
-}
+pub const requeueLostPacket = conn_loss.requeueLostPacket;
 
-pub fn isPersistentCongestionFromBasePto(base_pto_us: u64, loss_stats: LossStats) bool {
-    return conn_loss.isPersistentCongestionFromBasePto(base_pto_us, loss_stats);
-}
+pub const isPersistentCongestionFromBasePto = conn_loss.isPersistentCongestionFromBasePto;
 
-pub fn detectLossesByPacketThresholdOnApplicationPath(
-    self: *Connection,
-    path: *PathState,
-) Error!void {
-    return conn_loss.detectLossesByPacketThresholdOnApplicationPath(self, path);
-}
+pub const detectLossesByPacketThresholdOnApplicationPath = conn_loss.detectLossesByPacketThresholdOnApplicationPath;
 
-fn detectLossesByTimeThresholdAtLevel(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    now_us: u64,
-) Error!void {
-    return conn_loss.detectLossesByTimeThresholdAtLevel(self, lvl, now_us);
-}
+const detectLossesByTimeThresholdAtLevel = conn_loss.detectLossesByTimeThresholdAtLevel;
 
-fn detectLossesByTimeThresholdOnApplicationPath(
-    self: *Connection,
-    path: *PathState,
-    now_us: u64,
-) Error!void {
-    return conn_loss.detectLossesByTimeThresholdOnApplicationPath(self, path, now_us);
-}
+const detectLossesByTimeThresholdOnApplicationPath = conn_loss.detectLossesByTimeThresholdOnApplicationPath;
 
-fn fireDuePtoAtLevel(
-    self: *Connection,
-    lvl: EncryptionLevel,
-    now_us: u64,
-) Error!void {
-    return conn_loss.fireDuePtoAtLevel(self, lvl, now_us);
-}
+const fireDuePtoAtLevel = conn_loss.fireDuePtoAtLevel;
 
-fn fireDuePtoOnApplicationPath(
-    self: *Connection,
-    path: *PathState,
-    now_us: u64,
-) Error!void {
-    return conn_loss.fireDuePtoOnApplicationPath(self, path, now_us);
-}
+const fireDuePtoOnApplicationPath = conn_loss.fireDuePtoOnApplicationPath;
 
 /// Periodic tick — drives time-based loss detection, PTO,
 /// idle timeout, and draining deadlines. The caller passes the
