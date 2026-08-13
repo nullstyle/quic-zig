@@ -967,7 +967,7 @@ test "ChReassembler: tolerates leading PADDING/PING/ACK in the payload" {
 // BEFORE any TLS state exists: multi-Initial CRYPTO reassembly of a
 // fragmented ClientHello, then a TLS-extension walk to the
 // `quic_transport_parameters` blob, then the `version_information`
-// transport parameter, then version selection. `src/server/vneg.zig`
+// transport parameter, then version selection. `src/Server/vneg.zig`
 // chains exactly these on the accept path. None may panic on hostile
 // input; every returned slice must point inside the caller buffer.
 

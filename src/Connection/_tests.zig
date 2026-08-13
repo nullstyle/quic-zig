@@ -1,5 +1,5 @@
 // Aggregator for the per-area Connection test files (split from the
-// former 8.4k-line monolith). state.zig's test hook imports this file;
+// former 8.4k-line monolith). Connection.zig's test hook imports this file;
 // each area file below is reached through this comptime block.
 
 test {

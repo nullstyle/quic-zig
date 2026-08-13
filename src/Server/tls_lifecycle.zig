@@ -1,8 +1,8 @@
-// Server TLS context lifecycle: refcounted generation draining and
-// hot context replacement (Server.replaceTlsContext), plus the
-// anti-replay early-data trampoline shared with Server.init. Split
-// from server.zig; the pub method on Server is a thin thunk that
-// delegates here.
+//! Server TLS context lifecycle: refcounted generation draining and
+//! hot context replacement (Server.replaceTlsContext), plus the
+//! anti-replay early-data trampoline shared with Server.init. Split
+//! from Server.zig; the pub method on Server is a thin thunk that
+//! delegates here.
 
 const std = @import("std");
 const boringssl = @import("boringssl");
@@ -103,7 +103,7 @@ pub fn antiReplayEarlyDataTrampoline(
     };
 }
 
-// Doc comment lives on the `Server.replaceTlsContext` thunk in server.zig.
+// Doc comment lives on the `Server.replaceTlsContext` thunk in Server.zig.
 pub fn replaceTlsContext(self: *Server, reload: TlsReload) Error!void {
     var new_ctx: boringssl.tls.Context = switch (reload) {
         .pem => |pem| blk: {

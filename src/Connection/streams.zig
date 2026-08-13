@@ -1,10 +1,10 @@
-// The stream layer of Connection: open/accept + stream-id algebra,
-// per-direction limits and accounting, GC of fully-closed streams, the
-// embedder-facing read/write/priority API, and stream termination
-// (FIN / RESET_STREAM / STOP_SENDING). RFC 9000 §2-3, §19; RFC 9218
-// priorities. Free-function siblings of `Connection`'s method-style
-// stream API; the methods on `Connection` are thin thunks that
-// delegate here.
+//! The stream layer of Connection: open/accept + stream-id algebra,
+//! per-direction limits and accounting, GC of fully-closed streams, the
+//! embedder-facing read/write/priority API, and stream termination
+//! (FIN / RESET_STREAM / STOP_SENDING). RFC 9000 §2-3, §19; RFC 9218
+//! priorities. Free-function siblings of `Connection`'s method-style
+//! stream API; the methods on `Connection` are thin thunks that
+//! delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
@@ -33,7 +33,7 @@ const transport_error_stream_state = state_mod.transport_error_stream_state;
 const transport_error_flow_control = state_mod.transport_error_flow_control;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
 
-// Doc comment lives on the `Connection.openBidi` thunk in state.zig.
+// Doc comment lives on the `Connection.openBidi` thunk in Connection.zig.
 pub fn openBidi(self: *Connection, id: u64) Error!*Stream {
     if (!streamIsBidi(id) or !streamInitiatedByLocal(self, id)) return Error.InvalidStreamId;
     if (self.streams.contains(id)) return Error.StreamAlreadyOpen;
@@ -41,7 +41,7 @@ pub fn openBidi(self: *Connection, id: u64) Error!*Stream {
     return try openStream(self, id);
 }
 
-// Doc comment lives on the `Connection.openUni` thunk in state.zig.
+// Doc comment lives on the `Connection.openUni` thunk in Connection.zig.
 pub fn openUni(self: *Connection, id: u64) Error!*Stream {
     if (!streamIsUni(id) or !streamInitiatedByLocal(self, id)) return Error.InvalidStreamId;
     if (self.streams.contains(id)) return Error.StreamAlreadyOpen;
@@ -49,7 +49,7 @@ pub fn openUni(self: *Connection, id: u64) Error!*Stream {
     return try openStream(self, id);
 }
 
-// Doc comment lives on the `Connection.localStreamType` thunk in state.zig.
+// Doc comment lives on the `Connection.localStreamType` thunk in Connection.zig.
 pub fn localStreamType(self: *const Connection, uni: bool) StreamType {
     return switch (self.role) {
         .client => if (uni) .client_uni else .client_bidi,
@@ -57,12 +57,12 @@ pub fn localStreamType(self: *const Connection, uni: bool) StreamType {
     };
 }
 
-// Doc comment lives on the `Connection.openNextBidi` thunk in state.zig.
+// Doc comment lives on the `Connection.openNextBidi` thunk in Connection.zig.
 pub fn openNextBidi(self: *Connection) Error!*Stream {
     return openBidi(self, localStreamType(self, false).streamId(self.local_opened_streams_bidi));
 }
 
-// Doc comment lives on the `Connection.openNextUni` thunk in state.zig.
+// Doc comment lives on the `Connection.openNextUni` thunk in Connection.zig.
 pub fn openNextUni(self: *Connection) Error!*Stream {
     return openUni(self, localStreamType(self, true).streamId(self.local_opened_streams_uni));
 }
@@ -372,7 +372,7 @@ pub fn recordStreamFlowSent(self: *Connection, s: *Stream, chunk: send_stream_mo
     self.we_sent_stream_data += delta;
 }
 
-// Doc comment lives on the `Connection.streamIterator` thunk in state.zig.
+// Doc comment lives on the `Connection.streamIterator` thunk in Connection.zig.
 pub fn streamIterator(self: *Connection) std.AutoHashMapUnmanaged(u64, *Stream).Iterator {
     return self.streams.iterator();
 }
@@ -481,12 +481,12 @@ pub fn nextServerBidiId(self: *const Connection, start: u64) u64 {
     return id;
 }
 
-// Doc comment lives on the `Connection.stream` thunk in state.zig.
+// Doc comment lives on the `Connection.stream` thunk in Connection.zig.
 pub fn stream(self: *const Connection, id: u64) ?*Stream {
     return self.streams.get(id);
 }
 
-// Doc comment lives on the `Connection.streamSendStats` thunk in state.zig.
+// Doc comment lives on the `Connection.streamSendStats` thunk in Connection.zig.
 pub fn streamSendStats(self: *const Connection, id: u64) ?StreamSendStats {
     const s = self.streams.get(id) orelse return null;
     const written = s.send.writtenBytes();
@@ -499,13 +499,13 @@ pub fn streamSendStats(self: *const Connection, id: u64) ?StreamSendStats {
     };
 }
 
-// Doc comment lives on the `Connection.streamSetPriority` thunk in state.zig.
+// Doc comment lives on the `Connection.streamSetPriority` thunk in Connection.zig.
 pub fn streamSetPriority(self: *Connection, id: u64, p: StreamPriority) Error!void {
     const s = self.streams.get(id) orelse return Error.StreamNotFound;
     s.priority = p;
 }
 
-// Doc comment lives on the `Connection.streamPriority` thunk in state.zig.
+// Doc comment lives on the `Connection.streamPriority` thunk in Connection.zig.
 pub fn streamPriority(self: *const Connection, id: u64) ?StreamPriority {
     const s = self.streams.get(id) orelse return null;
     return s.priority;
@@ -517,7 +517,7 @@ pub fn streamPriority(self: *const Connection, id: u64) ?StreamPriority {
 /// fit one packet, the highest-priority `buf.len` are returned and the rest
 /// are served on a later packet. Returns the filled prefix.
 ///
-/// INTERNAL: pub for `_state_tests.zig` access; not part of the embedder
+/// INTERNAL: pub for `_tests.zig` access; not part of the embedder
 /// API (the scheduling it drives is observed through `pollDatagram`).
 pub fn collectSendableStreamsByPriority(self: *Connection, buf: []*Stream) []*Stream {
     var n: usize = 0;
@@ -540,7 +540,7 @@ pub fn collectSendableStreamsByPriority(self: *Connection, buf: []*Stream) []*St
     return result;
 }
 
-// Doc comment lives on the `Connection.streamRecvState` thunk in state.zig.
+// Doc comment lives on the `Connection.streamRecvState` thunk in Connection.zig.
 pub fn streamRecvState(self: *const Connection, id: u64) ?StreamRecvState {
     const s = self.streams.get(id) orelse return null;
     return .{
@@ -550,7 +550,7 @@ pub fn streamRecvState(self: *const Connection, id: u64) ?StreamRecvState {
     };
 }
 
-// Doc comment lives on the `Connection.streamWrite` thunk in state.zig.
+// Doc comment lives on the `Connection.streamWrite` thunk in Connection.zig.
 pub fn streamWrite(self: *Connection, id: u64, data: []const u8) Error!usize {
     const s = self.streams.get(id) orelse return Error.StreamNotFound;
     // Hardening guide §3.5 / §8: pre-flight the resident-bytes
@@ -578,7 +578,7 @@ pub fn streamWrite(self: *Connection, id: u64, data: []const u8) Error!usize {
     return accepted;
 }
 
-// Doc comment lives on the `Connection.streamRead` thunk in state.zig.
+// Doc comment lives on the `Connection.streamRead` thunk in Connection.zig.
 pub fn streamRead(self: *Connection, id: u64, dst: []u8) Error!usize {
     const s = self.streams.get(id) orelse return Error.StreamNotFound;
     const before = s.recv.bytes.items.len;
@@ -612,7 +612,7 @@ pub fn streamRead(self: *Connection, id: u64, dst: []u8) Error!usize {
     return n;
 }
 
-// Doc comment lives on the `Connection.streamReadFin` thunk in state.zig.
+// Doc comment lives on the `Connection.streamReadFin` thunk in Connection.zig.
 pub fn streamReadFin(self: *Connection, id: u64, dst: []u8) Error!StreamReadResult {
     const n = try streamRead(self, id, dst);
     // `streamRead` already returned `StreamNotFound` if the stream was
@@ -629,13 +629,13 @@ pub fn streamArrivedInEarlyData(self: *const Connection, id: u64) ?bool {
     return s.arrived_in_early_data;
 }
 
-// Doc comment lives on the `Connection.streamFinish` thunk in state.zig.
+// Doc comment lives on the `Connection.streamFinish` thunk in Connection.zig.
 pub fn streamFinish(self: *Connection, id: u64) Error!void {
     const s = self.streams.get(id) orelse return Error.StreamNotFound;
     try s.send.finish();
 }
 
-// Doc comment lives on the `Connection.streamReset` thunk in state.zig.
+// Doc comment lives on the `Connection.streamReset` thunk in Connection.zig.
 pub fn streamReset(
     self: *Connection,
     id: u64,
@@ -645,7 +645,7 @@ pub fn streamReset(
     try s.send.resetStream(application_error_code);
 }
 
-// Doc comment lives on the `Connection.streamStopSending` thunk in state.zig.
+// Doc comment lives on the `Connection.streamStopSending` thunk in Connection.zig.
 pub fn streamStopSending(
     self: *Connection,
     stream_id: u64,

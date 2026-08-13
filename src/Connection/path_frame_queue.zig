@@ -1,7 +1,7 @@
-// Multipath path-scoped frame queueing — draft-ietf-quic-multipath-21
-// §6. Free-function siblings of `Connection`'s `queuePath*` /
-// `pendingPathCidsBlocked` / `clearPendingPathCidsBlocked` API; the
-// methods on `Connection` are thin wrappers that delegate here.
+//! Multipath path-scoped frame queueing — draft-ietf-quic-multipath-21
+//! §6. Free-function siblings of `Connection`'s `queuePath*` /
+//! `pendingPathCidsBlocked` / `clearPendingPathCidsBlocked` API; the
+//! methods on `Connection` are thin wrappers that delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

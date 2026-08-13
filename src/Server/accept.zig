@@ -1,8 +1,8 @@
-// Connection acceptance: openSlotFromInitial (slot allocation, TLS
-// context wiring, transport-parameter setup, preferred-address
-// advertisement, first-flight feed), the slot error-close mapping, and
-// dispatchToSlot. Split from server.zig; the private methods on Server
-// delegate here via private thunks where hub callers remain.
+//! Connection acceptance: openSlotFromInitial (slot allocation, TLS
+//! context wiring, transport-parameter setup, preferred-address
+//! advertisement, first-flight feed), the slot error-close mapping, and
+//! dispatchToSlot. Split from Server.zig; the private methods on Server
+//! delegate here via private thunks where hub callers remain.
 
 const std = @import("std");
 const boringssl = @import("boringssl");

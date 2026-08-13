@@ -3,7 +3,7 @@
 //! across v1/v2 type-bit rotations, DCID peeking for routing, and
 //! the packed `cid_table` key format.
 //!
-//! This is a LEAF on purpose: it never imports `server.zig`, so the
+//! This is a LEAF on purpose: it never imports `Server.zig`, so the
 //! sibling method files (routing, accept, dos, vneg) and the hub
 //! itself can all share these helpers without round-tripping the
 //! hub's namespace. Everything here is byte-in/value-out — no

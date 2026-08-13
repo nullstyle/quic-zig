@@ -1,4 +1,4 @@
-// Split from _state_tests.zig — see that file for the area index.
+// Split from _tests.zig — see that file for the area index.
 // Test bodies are verbatim; only this alias header is per-file.
 
 const std = @import("std");
@@ -1102,8 +1102,8 @@ test "noteServerLocalAddressChanged: PATH_CHALLENGE-first emit on the freshly-mi
 // -- Connection-level fuzz harnesses (state-machine invariant fuzzing) ----
 //
 // These sit one layer above the per-buffer fuzz harnesses landed in
-// `recv_stream.zig` / `send_stream.zig` / `flow_control.zig` /
-// `path_validator.zig` / `ack_tracker.zig`. The per-buffer harnesses
+// `RecvStream.zig` / `SendStream.zig` / `flow_control.zig` /
+// `PathValidator.zig` / `AckTracker.zig`. The per-buffer harnesses
 // proved each state machine in isolation; here we drive a fully
 // constructed `Connection` so the fuzzer also exercises the
 // integration paths that include `bytes_resident` accounting against

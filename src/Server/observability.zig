@@ -1,9 +1,9 @@
-// Server observability: the LogEvent / LogCallback surface, metrics
-// and rate-limit snapshots, the log-event rate limiter, and the emit
-// plumbing. Split from server.zig; server.zig re-imports the types
-// under their original private aliases and keeps thin method thunks,
-// so the embedder surface (Server.LogEvent, Server.metricsSnapshot,
-// ...) is unchanged.
+//! Server observability: the LogEvent / LogCallback surface, metrics
+//! and rate-limit snapshots, the log-event rate limiter, and the emit
+//! plumbing. Split from Server.zig; Server.zig re-imports the types
+//! under their original private aliases and keeps thin method thunks,
+//! so the embedder surface (Server.LogEvent, Server.metricsSnapshot,
+//! ...) is unchanged.
 
 const std = @import("std");
 const Server = @import("../Server.zig");

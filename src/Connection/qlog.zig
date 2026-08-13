@@ -1,9 +1,9 @@
-// Qlog observability for Connection — the draft-ietf-quic-qlog event
-// and enum surface plus the emit* helpers. Free-function siblings of
-// `Connection`'s method-style emitters; the methods on `Connection`
-// are thin thunks that delegate here, and state.zig re-exports every
-// type declared in this file so the `quic.conn.state.*` public
-// path keeps resolving.
+//! Qlog observability for Connection — the draft-ietf-quic-qlog event
+//! and enum surface plus the emit* helpers. Free-function siblings of
+//! `Connection`'s method-style emitters; the methods on `Connection`
+//! are thin thunks that delegate here, and Connection.zig re-exports every
+//! type declared in this file so the `quic.conn.state.*` public
+//! path keeps resolving.
 
 const state_mod = @import("../Connection.zig");
 const Connection = state_mod.Connection;
@@ -233,7 +233,7 @@ pub const QlogEvent = struct {
 /// Connection.
 pub const QlogCallback = *const fn (user_data: ?*anyopaque, event: QlogEvent) void;
 
-// Doc comment lives on the `Connection.setQlogCallback` thunk in state.zig.
+// Doc comment lives on the `Connection.setQlogCallback` thunk in Connection.zig.
 pub fn setQlogCallback(
     self: *Connection,
     callback: ?QlogCallback,
@@ -249,7 +249,7 @@ pub fn setQlogCallback(
     if (callback != null) emitConnectionStartedOnce(self);
 }
 
-// Doc comment lives on the `Connection.setQlogPacketEvents` thunk in state.zig.
+// Doc comment lives on the `Connection.setQlogPacketEvents` thunk in Connection.zig.
 pub fn setQlogPacketEvents(self: *Connection, enabled: bool) void {
     self.qlog_packet_events = enabled;
 }

@@ -1,12 +1,12 @@
-// The outbound send path of Connection: canSend gating, the poll /
-// pollDatagram / pollLevel entry points, and pollLevelOnPath — the
-// packet assembler that drains pending control frames, CRYPTO, streams
-// by priority, DATAGRAMs and PMTUD probes into a sealed packet under
-// congestion, flow, anti-amplification and key-phase constraints —
-// plus per-frame encode helpers and the pending-multipath-frame
-// emitters. Free-function siblings of `Connection`'s method-style send
-// API; the methods on `Connection` are thin thunks that delegate
-// here.
+//! The outbound send path of Connection: canSend gating, the poll /
+//! pollDatagram / pollLevel entry points, and pollLevelOnPath — the
+//! packet assembler that drains pending control frames, CRYPTO, streams
+//! by priority, DATAGRAMs and PMTUD probes into a sealed packet under
+//! congestion, flow, anti-amplification and key-phase constraints —
+//! plus per-frame encode helpers and the pending-multipath-frame
+//! emitters. Free-function siblings of `Connection`'s method-style send
+//! API; the methods on `Connection` are thin thunks that delegate
+//! here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
@@ -39,7 +39,7 @@ const Address = state_mod.Address;
 const PacketKeys = state_mod.PacketKeys;
 const ConnectionId = state_mod.ConnectionId;
 
-// Doc comment lives on the `Connection.canSend` thunk in state.zig.
+// Doc comment lives on the `Connection.canSend` thunk in Connection.zig.
 pub fn canSend(self: *const Connection) bool {
     if (self.lifecycle.pending_close != null) return true;
     if (self.lifecycle.closed) return false;
@@ -81,7 +81,7 @@ pub fn canSend(self: *const Connection) bool {
     return false;
 }
 
-// Doc comment lives on the `Connection.poll` thunk in state.zig.
+// Doc comment lives on the `Connection.poll` thunk in Connection.zig.
 pub fn poll(
     self: *Connection,
     dst: []u8,
@@ -91,7 +91,7 @@ pub fn poll(
     return datagram.len;
 }
 
-// Doc comment lives on the `Connection.pollDatagram` thunk in state.zig.
+// Doc comment lives on the `Connection.pollDatagram` thunk in Connection.zig.
 pub fn pollDatagram(
     self: *Connection,
     dst: []u8,
@@ -158,7 +158,7 @@ pub fn pollDatagram(
     };
 }
 
-// Doc comment lives on the `Connection.pollLevel` thunk in state.zig.
+// Doc comment lives on the `Connection.pollLevel` thunk in Connection.zig.
 pub fn pollLevel(
     self: *Connection,
     lvl: EncryptionLevel,

@@ -212,13 +212,13 @@ RELEASE_READINESS.md, not an open item.)
 
 ## File layout: hubs, siblings, and leaves
 
-The two big aggregates (`Connection` in `src/conn/state.zig`, `Server`
-in `src/server.zig`) are composed across files using the same
+The two big aggregates (`Connection` in `src/Connection.zig`, `Server`
+in `src/Server.zig`) are composed across files using the same
 hub-and-spokes idiom as Zig's standard library (`std/fs.zig` and
 friends back-import `std.zig` while it forward-imports them; Zig's
 lazy per-decl resolution makes the mutual import well-formed, and
 `usingnamespace` no longer exists as an alternative). The canonical
-per-file ownership map lives at the top of `src/conn/state.zig`.
+per-file ownership map lives at the top of `src/Connection.zig`.
 
 Rules that keep the seam clean:
 
@@ -237,7 +237,7 @@ Rules that keep the seam clean:
    Mark such decls `// INTERNAL: pub for direct sibling import
    (<file>)`.
 4. **Hub-independent helpers live in leaf files** with no back-import
-   (example: `src/server/wire_peek.zig` — pure byte-in/value-out wire
+   (example: `src/Server/wire_peek.zig` — pure byte-in/value-out wire
    peeking). A leaf that imports the hub is not a leaf; if a helper
    needs the hub, it belongs in a sibling method file.
 5. **Thunk retention** (established in 95a4472): a hub method thunk

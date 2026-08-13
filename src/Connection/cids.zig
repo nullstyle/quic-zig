@@ -1,10 +1,10 @@
-// Connection-ID registries for both directions: local SCID issue /
-// retire / budget (RFC 9000 §5.1.1), the peer-CID registry (§5.1.2),
-// NEW_CONNECTION_ID / RETIRE_CONNECTION_ID queueing, replenish-event
-// bookkeeping, and the multipath per-path CID budgets. Free-function
-// siblings of `Connection`'s method-style CID plumbing; the methods on
-// `Connection` are thin thunks that delegate here. Cross-subsystem CID
-// helpers shared with _internal.zig stay there.
+//! Connection-ID registries for both directions: local SCID issue /
+//! retire / budget (RFC 9000 §5.1.1), the peer-CID registry (§5.1.2),
+//! NEW_CONNECTION_ID / RETIRE_CONNECTION_ID queueing, replenish-event
+//! bookkeeping, and the multipath per-path CID budgets. Free-function
+//! siblings of `Connection`'s method-style CID plumbing; the methods on
+//! `Connection` are thin thunks that delegate here. Cross-subsystem CID
+//! helpers shared with _internal.zig stay there.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

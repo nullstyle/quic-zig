@@ -13,7 +13,7 @@ on:
 
 # Coverage-guided fuzzing of the wire / frame / server header-peek
 # parsers. The harness lives next to the unit tests in src/wire/,
-# src/frame/, and src/server.zig (every `std.testing.fuzz` site).
+# src/frame/, and src/Server.zig (every `std.testing.fuzz` site).
 # Crashes save to .zig-cache/v/; the artifact upload preserves them
 # so we can replay locally.
 #

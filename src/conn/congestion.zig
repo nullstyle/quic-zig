@@ -25,10 +25,10 @@ const pacing_mod = @import("Pacer.zig");
 pub const HyStart = hystart_mod.State;
 pub const HyStartConfig = hystart_mod.Config;
 
-/// RFC 9438 CUBIC controller (re-export; lives in congestion_cubic.zig).
+/// RFC 9438 CUBIC controller (re-export; lives in congestion/Cubic.zig).
 pub const Cubic = cubic_mod;
 
-/// BBRv3 controller (re-export; lives in congestion_bbr.zig).
+/// BBRv3 controller (re-export; lives in congestion/Bbr.zig).
 pub const Bbr = bbr_mod;
 /// BBR model observability record (`CongestionController.bbrSnapshot`).
 pub const BbrSnapshot = bbr_mod.Snapshot;

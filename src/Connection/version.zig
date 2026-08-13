@@ -1,8 +1,8 @@
-// Server-side Initial acceptance, Version Negotiation / Retry packet
-// writing, and compatible version upgrade (RFC 9000 §6, §17.2.5; RFC
-// 9368/9369). Free-function siblings of `Connection`'s method-style
-// version plumbing; the methods on `Connection` are thin thunks that
-// delegate here.
+//! Server-side Initial acceptance, Version Negotiation / Retry packet
+//! writing, and compatible version upgrade (RFC 9000 §6, §17.2.5; RFC
+//! 9368/9369). Free-function siblings of `Connection`'s method-style
+//! version plumbing; the methods on `Connection` are thin thunks that
+//! delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

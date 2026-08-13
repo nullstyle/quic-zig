@@ -1,11 +1,11 @@
-// Path management for Connection: the multipath lifecycle
-// (draft-ietf-quic-multipath — open/abandon/status/backup, scheduler),
-// path accessors, PATH_CHALLENGE / PATH_RESPONSE validation, path
-// retirement, and the probe/ping API. Free-function siblings of
-// `Connection`'s method-style path plumbing; the methods on
-// `Connection` are thin thunks that delegate here. The outbound
-// multipath frame queues live in path_frame_queue.zig and the inbound
-// handlers in conn_recv_multipath_handlers.zig.
+//! Path management for Connection: the multipath lifecycle
+//! (draft-ietf-quic-multipath — open/abandon/status/backup, scheduler),
+//! path accessors, PATH_CHALLENGE / PATH_RESPONSE validation, path
+//! retirement, and the probe/ping API. Free-function siblings of
+//! `Connection`'s method-style path plumbing; the methods on
+//! `Connection` are thin thunks that delegate here. The outbound
+//! multipath frame queues live in path_frame_queue.zig and the inbound
+//! handlers in Connection/recv_multipath_handlers.zig.
 
 const std = @import("std");
 const boringssl = @import("boringssl");
@@ -76,7 +76,7 @@ pub fn nextQuicBit(self: *const Connection) u1 {
 /// Application PN, sent, RTT, congestion, validation, and PTO
 /// state; the multipath control frames are emitted from
 /// `emitPendingMultipathFrames` and the receive switch dispatches
-/// the inbound side (see `conn_recv_multipath_handlers.zig`).
+/// the inbound side (see `Connection/recv_multipath_handlers.zig`).
 pub fn openPath(
     self: *Connection,
     peer_addr: Address,

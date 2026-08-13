@@ -1,15 +1,15 @@
-// Inbound packet handlers for the six per-encryption-level packet
-// dispatch paths a `Connection` exposes: Version Negotiation, Initial,
-// Retry, 0-RTT (early data), Handshake, and 1-RTT (short header).
-// Each handler is responsible for header parse / AEAD open / reserved-
-// bits gate / per-level state updates and then defers frame-level
-// processing to `Connection.dispatchFrames`. Free-function siblings of
-// `Connection`'s public method-style handlers; the methods on
-// `Connection` are thin thunks that delegate here.
-//
-// `Connection.handleOnePacket` (the long-header type dispatcher) stays
-// in state.zig — it's the orchestrator that picks which of these six
-// handlers to invoke based on the first byte / version field.
+//! Inbound packet handlers for the six per-encryption-level packet
+//! dispatch paths a `Connection` exposes: Version Negotiation, Initial,
+//! Retry, 0-RTT (early data), Handshake, and 1-RTT (short header).
+//! Each handler is responsible for header parse / AEAD open / reserved-
+//! bits gate / per-level state updates and then defers frame-level
+//! processing to `Connection.dispatchFrames`. Free-function siblings of
+//! `Connection`'s public method-style handlers; the methods on
+//! `Connection` are thin thunks that delegate here.
+//!
+//! `Connection.handleOnePacket` (the long-header type dispatcher) stays
+//! in Connection.zig — it's the orchestrator that picks which of these six
+//! handlers to invoke based on the first byte / version field.
 
 const std = @import("std");
 const boringssl = @import("boringssl");

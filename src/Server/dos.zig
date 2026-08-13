@@ -1,8 +1,8 @@
-// Server DoS gates: per-source Initial rate limiting, version
-// negotiation rate limiting, per-source bandwidth accounting, and the
-// Retry / NEW_TOKEN address-validation gate (mint, echo-validate,
-// bounded state table). Split from server.zig; the private methods on
-// Server delegate here via private thunks where hub callers remain.
+//! Server DoS gates: per-source Initial rate limiting, version
+//! negotiation rate limiting, per-source bandwidth accounting, and the
+//! Retry / NEW_TOKEN address-validation gate (mint, echo-validate,
+//! bounded state table). Split from Server.zig; the private methods on
+//! Server delegate here via private thunks where hub callers remain.
 
 const std = @import("std");
 const Server = @import("../Server.zig");

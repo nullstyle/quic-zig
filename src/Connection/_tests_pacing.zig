@@ -1,4 +1,4 @@
-// Split from _state_tests.zig — see that file for the area index.
+// Split from _tests.zig — see that file for the area index.
 // Connection-level pacing behavior (RFC 9002 §7.7): the gate, the
 // deadline surfacing, the kill-switch, and probe debt.
 

@@ -7,7 +7,7 @@
 //
 // Entries belong here when:
 //   * a helper is needed by multiple subsystem files (e.g.
-//     `path_frame_queue.zig` and a future `conn_streams.zig`), AND
+//     `path_frame_queue.zig` and a future `Connection/streams.zig`), AND
 //   * making the helper a `pub fn` on `Connection` would pollute the
 //     embedder-visible method namespace.
 //

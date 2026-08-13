@@ -609,7 +609,7 @@ pub fn deinit(self: *Client) void {
 
 // -- tests --------------------------------------------------------------
 //
-// Like `src/server.zig`, the wider end-to-end smoke lives in
+// Like `src/Server.zig`, the wider end-to-end smoke lives in
 // `tests/e2e/client_smoke.zig` so it can `@embedFile` test data.
 // The tests below only exercise config validation — they don't need
 // a running TLS context.

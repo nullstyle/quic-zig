@@ -1,12 +1,12 @@
-// Inbound frame handlers for QUIC multipath (draft-ietf-quic-multipath-21):
-// PATH_ACK, PATH_ABANDON, PATH_STATUS, PATH_NEW_CONNECTION_ID,
-// PATH_RETIRE_CONNECTION_ID, MAX_PATH_ID, PATHS_BLOCKED,
-// PATH_CIDS_BLOCKED. Free-function siblings of `Connection`'s
-// public method-style handlers; the methods on `Connection` are
-// thin thunks that delegate here.
-//
-// These are the inbound counterparts of the `queuePath*` methods in
-// `path_frame_queue.zig`.
+//! Inbound frame handlers for QUIC multipath (draft-ietf-quic-multipath-21):
+//! PATH_ACK, PATH_ABANDON, PATH_STATUS, PATH_NEW_CONNECTION_ID,
+//! PATH_RETIRE_CONNECTION_ID, MAX_PATH_ID, PATHS_BLOCKED,
+//! PATH_CIDS_BLOCKED. Free-function siblings of `Connection`'s
+//! public method-style handlers; the methods on `Connection` are
+//! thin thunks that delegate here.
+//!
+//! These are the inbound counterparts of the `queuePath*` methods in
+//! `path_frame_queue.zig`.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

@@ -1,8 +1,8 @@
-// Connection routing: the CID -> slot table (lookup, resync, drop),
-// QUIC-LB CID minting and live-slot rotation, and per-slot CID
-// replenishment. Split from server.zig; the pub methods on Server are
-// thin thunks that delegate here. The pure header-peek / CID-key
-// helpers live in the wire_peek.zig leaf.
+//! Connection routing: the CID -> slot table (lookup, resync, drop),
+//! QUIC-LB CID minting and live-slot rotation, and per-slot CID
+//! replenishment. Split from Server.zig; the pub methods on Server are
+//! thin thunks that delegate here. The pure header-peek / CID-key
+//! helpers live in the wire_peek.zig leaf.
 
 const std = @import("std");
 const Server = @import("../Server.zig");
@@ -20,7 +20,7 @@ const Address = conn_mod.path.Address;
 const max_tracked_cids_per_slot = Server.max_tracked_cids_per_slot;
 const boringssl = @import("boringssl");
 
-// Doc comment lives on the `Connection.installLbConfig` thunk in state.zig.
+// Doc comment lives on the `Connection.installLbConfig` thunk in Connection.zig.
 pub fn installLbConfig(self: *Server, new_cfg: lb_mod.LbConfig) Error!void {
     new_cfg.validate() catch return Error.InvalidConfig;
     if (self.lb_factory == null) return Error.InvalidConfig;
@@ -46,7 +46,7 @@ pub fn installLbConfig(self: *Server, new_cfg: lb_mod.LbConfig) Error!void {
     }
 }
 
-// Doc comment lives on the `Connection.rotateLiveSlotCids` thunk in state.zig.
+// Doc comment lives on the `Connection.rotateLiveSlotCids` thunk in Connection.zig.
 pub fn rotateLiveSlotCids(self: *Server) usize {
     const factory_ptr = if (self.lb_factory) |*f| f else return 0;
     const key = self.stateless_reset_key orelse return 0;
@@ -87,7 +87,7 @@ pub fn findSlotForDatagram(self: *Server, bytes: []const u8) ?*Slot {
     return self.cid_table.get(key);
 }
 
-// Doc comment lives on the `Connection.mintLocalScid` thunk in state.zig.
+// Doc comment lives on the `Connection.mintLocalScid` thunk in Connection.zig.
 pub fn mintLocalScid(self: *Server, dst: []u8) Error!void {
     if (self.lb_factory) |*factory| {
         const n = factory.mint(dst) catch |err| switch (err) {

@@ -1,8 +1,8 @@
-// The DATAGRAM extension (RFC 9221): the embedder send/receive API,
-// payload sizing against the negotiated limits and current PMTU, and
-// the tracked-send acked/lost event bookkeeping. Free-function
-// siblings of `Connection`'s method-style datagram API; the methods on
-// `Connection` are thin thunks that delegate here.
+//! The DATAGRAM extension (RFC 9221): the embedder send/receive API,
+//! payload sizing against the negotiated limits and current PMTU, and
+//! the tracked-send acked/lost event bookkeeping. Free-function
+//! siblings of `Connection`'s method-style datagram API; the methods on
+//! `Connection` are thin thunks that delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
@@ -33,12 +33,12 @@ pub fn recordDatagramLost(self: *Connection, packet: *const sent_packets_mod.Sen
     recordDatagramSendEvent(self, .{ .lost = event });
 }
 
-// Doc comment lives on the `Connection.sendDatagram` thunk in state.zig.
+// Doc comment lives on the `Connection.sendDatagram` thunk in Connection.zig.
 pub fn sendDatagram(self: *Connection, payload: []const u8) Error!void {
     _ = try sendDatagramTracked(self, payload);
 }
 
-// Doc comment lives on the `Connection.sendDatagramTracked` thunk in state.zig.
+// Doc comment lives on the `Connection.sendDatagramTracked` thunk in Connection.zig.
 pub fn sendDatagramTracked(self: *Connection, payload: []const u8) Error!u64 {
     const max_payload = try maxDatagramPayload(
         self,
@@ -66,7 +66,7 @@ pub fn sendDatagramTracked(self: *Connection, payload: []const u8) Error!u64 {
     return id;
 }
 
-// Doc comment lives on the `Connection.maxDatagramPayload` thunk in state.zig.
+// Doc comment lives on the `Connection.maxDatagramPayload` thunk in Connection.zig.
 pub fn maxDatagramPayload(self: *const Connection) Error!usize {
     // Room a 1-RTT packet + DATAGRAM frame need around the payload. The
     // reserve matches the historical `default_mtu`-derived ceiling at the
@@ -83,13 +83,13 @@ pub fn maxDatagramPayload(self: *const Connection) Error!usize {
     return limit;
 }
 
-// Doc comment lives on the `Connection.receiveDatagram` thunk in state.zig.
+// Doc comment lives on the `Connection.receiveDatagram` thunk in Connection.zig.
 pub fn receiveDatagram(self: *Connection, dst: []u8) ?usize {
     const item = receiveDatagramInfo(self, dst) orelse return null;
     return item.len;
 }
 
-// Doc comment lives on the `Connection.receiveDatagramInfo` thunk in state.zig.
+// Doc comment lives on the `Connection.receiveDatagramInfo` thunk in Connection.zig.
 pub fn receiveDatagramInfo(self: *Connection, dst: []u8) ?IncomingDatagram {
     const item = self.pending_frames.popRecvDatagram() orelse return null;
     defer self.allocator.free(item.data);

@@ -10,7 +10,7 @@
 //!    negotiated config, close/draining lifecycle, timers, the TLS
 //!    handshake driver, and thin delegating methods. The method
 //!    bodies live in the `conn_*` sibling files (see the directory
-//!    map at the top of state.zig); methods annotated `INTERNAL` are
+//!    map at the top of Connection.zig); methods annotated `INTERNAL` are
 //!    cross-file scaffolding, not embedder API.
 //!  - `ack_tracker` / `pn_space` / `sent_packets` — packet-number
 //!    bookkeeping that drives ACK emission and loss detection.

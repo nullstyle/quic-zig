@@ -2,7 +2,7 @@
 //! per RFC 9002 §6 and Appendix A.
 //!
 //! Pure functions operating on caller-managed `SentPacketTracker`,
-//! `PnSpace`, and `RttEstimator`. Connection (state.zig) owns the
+//! `PnSpace`, and `RttEstimator`. Connection (Connection.zig) owns the
 //! state and ties these together via `onPacketSent` and
 //! `onAckReceived` orchestration.
 

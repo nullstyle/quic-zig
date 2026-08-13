@@ -1,8 +1,8 @@
-// Server configuration surface: Config and its nested policy types
-// (RateLimit, EarlyData, TlsReload) plus PreferredAddressConfig.
-// Split from server.zig; server.zig re-imports these under the same
-// `Server.Config` / `Server.RateLimit` / ... aliases, so the embedder
-// surface is unchanged.
+//! Server configuration surface: Config and its nested policy types
+//! (RateLimit, EarlyData, TlsReload) plus PreferredAddressConfig.
+//! Split from Server.zig; Server.zig re-imports these under the same
+//! `Server.Config` / `Server.RateLimit` / ... aliases, so the embedder
+//! surface is unchanged.
 
 const Config = @This();
 
@@ -14,7 +14,7 @@ const tls_mod = @import("../tls/root.zig");
 const lb_mod = @import("../lb/root.zig");
 const state = conn_mod.state;
 // Direct sibling imports: these types are declared in
-// observability.zig; reaching them through server.zig's re-exports
+// observability.zig; reaching them through Server.zig's re-exports
 // would put this file in the hub cycle for no reason. With only
 // sibling imports, config.zig is a leaf.
 const LogCallbackImpl = server_observability.LogCallback;

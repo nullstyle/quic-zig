@@ -1,13 +1,13 @@
-// The inbound receive path of Connection: the handle/handleWithEcn
-// datagram entry points, per-datagram loop control and stateless-reset
-// detection, handleOnePacket orchestration, 1-RTT packet open against
-// the key epochs, frame counting/dispatch (dispatchFrames) with the
-// per-level frame gates, and incoming multipath frame validation.
-// Free-function siblings of `Connection`'s method-style receive
-// plumbing; the methods on `Connection` are thin thunks that delegate
-// here. Per-level packet handlers live in
-// conn_recv_packet_handlers.zig and the frame handlers in the other
-// conn_recv_*_handlers.zig siblings.
+//! The inbound receive path of Connection: the handle/handleWithEcn
+//! datagram entry points, per-datagram loop control and stateless-reset
+//! detection, handleOnePacket orchestration, 1-RTT packet open against
+//! the key epochs, frame counting/dispatch (dispatchFrames) with the
+//! per-level frame gates, and incoming multipath frame validation.
+//! Free-function siblings of `Connection`'s method-style receive
+//! plumbing; the methods on `Connection` are thin thunks that delegate
+//! here. Per-level packet handlers live in
+//! Connection/recv_packet_handlers.zig and the frame handlers in the other
+//! conn_recv_*_handlers.zig siblings.
 
 const std = @import("std");
 const boringssl = @import("boringssl");
@@ -44,7 +44,7 @@ const max_supported_udp_payload_size = state_mod.max_supported_udp_payload_size;
 const transport_error_frame_encoding = state_mod.transport_error_frame_encoding;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
 
-// Doc comment lives on the `Connection.handle` thunk in state.zig.
+// Doc comment lives on the `Connection.handle` thunk in Connection.zig.
 pub fn handle(
     self: *Connection,
     bytes: []u8,
@@ -54,7 +54,7 @@ pub fn handle(
     return handleWithEcn(self, bytes, from, .not_ect, now_us);
 }
 
-// Doc comment lives on the `Connection.handleWithEcn` thunk in state.zig.
+// Doc comment lives on the `Connection.handleWithEcn` thunk in Connection.zig.
 pub fn handleWithEcn(
     self: *Connection,
     bytes: []u8,

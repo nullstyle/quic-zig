@@ -1,10 +1,10 @@
-// Connection- and stream-level flow control bookkeeping (RFC 9000 §4,
-// §19.9-19.14): MAX_DATA / MAX_STREAM_DATA / MAX_STREAMS credit
-// queueing, the local and peer *_BLOCKED state in both directions, and
-// the blocked-event surface. Free-function siblings of `Connection`'s
-// method-style flow plumbing; the methods on `Connection` are thin
-// thunks that delegate here. The inbound frame handlers live in
-// conn_recv_flow_handlers.zig.
+//! Connection- and stream-level flow control bookkeeping (RFC 9000 §4,
+//! §19.9-19.14): MAX_DATA / MAX_STREAM_DATA / MAX_STREAMS credit
+//! queueing, the local and peer *_BLOCKED state in both directions, and
+//! the blocked-event surface. Free-function siblings of `Connection`'s
+//! method-style flow plumbing; the methods on `Connection` are thin
+//! thunks that delegate here. The inbound frame handlers live in
+//! Connection/recv_flow_handlers.zig.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
@@ -60,7 +60,7 @@ pub fn peerStreamsBlockedAt(self: *const Connection, bidi: bool) ?u64 {
     return if (bidi) self.peer_streams_blocked_bidi else self.peer_streams_blocked_uni;
 }
 
-// INTERNAL: pub for conn_streams.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/streams.zig access; not part of the embedder API.
 pub fn queueMaxStreamData(
     self: *Connection,
     stream_id: u64,
@@ -84,7 +84,7 @@ pub fn queueMaxStreamData(
     });
 }
 
-// INTERNAL: pub for conn_streams.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/streams.zig access; not part of the embedder API.
 pub fn queueMaxData(self: *Connection, maximum_data: u64) void {
     if (maximum_data > self.local_max_data) self.local_max_data = maximum_data;
     if (self.peer_data_blocked_at) |limit| {

@@ -9,39 +9,47 @@
 //! stream layer, the multipath `PathSet`, key updates, and the
 //! close/draining lifecycle.
 //!
-//! This file is the hub: the struct definition (fields), construction,
-//! negotiated transport-parameter config, the close/draining
-//! lifecycle, per-level dispatch shims, `tick`/`nextTimerDeadline`,
-//! the TLS handshake driver + `tls.quic.Method` trampolines, and thin
-//! delegating methods. The method bodies live in free-function
-//! sibling files, each taking `*Connection` as its first argument:
+//! This file IS the struct (ziglang file-as-struct: `Compilation.zig`
+//! anatomy — @This alias, imports, fields, then types and methods).
+//! It owns construction, negotiated transport-parameter config, the
+//! close/draining lifecycle, per-level dispatch shims,
+//! `tick`/`nextTimerDeadline`, the TLS handshake driver +
+//! `tls.quic.Method` trampolines, and the decl-alias re-exports that
+//! give the spoke functions method syntax. Method bodies live in
+//! free-function spoke files under `Connection/`, each taking
+//! `*Connection` as its first argument (the `src/Sema.zig` +
+//! `src/Sema/*.zig` shape in the zig compiler):
 //!
-//!  - conn_send.zig          — canSend/poll*; the packet assembler
-//!  - conn_recv_dispatch.zig — handle/handleWithEcn, packet open,
-//!                             frame dispatch + gates, stateless reset
-//!  - conn_recv_data_handlers.zig    — CRYPTO / STREAM / DATAGRAM
-//!  - conn_recv_packet_handlers.zig  — per-level packet handlers
-//!  - conn_recv_ack_handlers.zig     — inbound ACK processing
-//!  - conn_recv_flow_handlers.zig    — MAX_* / *_BLOCKED frames
-//!  - conn_recv_cid_token_handlers.zig / conn_recv_multipath_handlers.zig
-//!  - conn_recv_stream_control_handlers.zig — STOP_SENDING/RESET_STREAM
-//!  - conn_streams.zig       — stream open/id algebra/limits/GC + API
-//!  - conn_flow.zig          — flow-control credit + blocked state
-//!  - conn_datagram.zig      — RFC 9221 datagram API + events
-//!  - conn_cids.zig          — local + peer CID registries/budgets
-//!  - conn_keys.zig          — key schedule, 1-RTT key update, discard
-//!  - conn_version.zig       — Initial accept, VN/Retry, version upgrade
-//!  - conn_paths.zig         — multipath lifecycle, PATH_CHALLENGE, probes
-//!  - conn_migration.zig     — RFC 9000 §9 migration + alt-address
-//!  - conn_loss.zig          — RFC 9002 loss detection, PTO, deadlines
-//!  - conn_qlog.zig          — qlog event types + emitters
-//!  - path_frame_queue.zig / _internal.zig — multipath queueing + shared
-//!                             CID helpers (pre-existing)
+//!  - Connection/send.zig          — canSend/poll*; the packet assembler
+//!  - Connection/recv_dispatch.zig — handle/handleWithEcn, packet open,
+//!                                   frame dispatch + gates, stateless reset
+//!  - Connection/recv_data_handlers.zig    — CRYPTO / STREAM / DATAGRAM
+//!  - Connection/recv_packet_handlers.zig  — per-level packet handlers
+//!  - Connection/recv_ack_handlers.zig     — inbound ACK processing
+//!  - Connection/recv_flow_handlers.zig    — MAX_* / *_BLOCKED frames
+//!  - Connection/recv_cid_token_handlers.zig /
+//!    Connection/recv_multipath_handlers.zig
+//!  - Connection/recv_stream_control_handlers.zig — STOP_SENDING/RESET_STREAM
+//!  - Connection/streams.zig   — stream open/id algebra/limits/GC + API
+//!  - Connection/flow.zig      — flow-control credit + blocked state
+//!  - Connection/datagram.zig  — RFC 9221 datagram API + events
+//!  - Connection/cids.zig      — local + peer CID registries/budgets
+//!  - Connection/keys.zig      — key schedule, 1-RTT key update, discard
+//!  - Connection/version.zig   — Initial accept, VN/Retry, version upgrade
+//!  - Connection/paths.zig     — multipath lifecycle, PATH_CHALLENGE, probes
+//!  - Connection/migration.zig — RFC 9000 §9 migration + alt-address
+//!  - Connection/loss.zig      — RFC 9002 loss detection, PTO, deadlines
+//!  - Connection/qlog.zig      — qlog event types + emitters
+//!  - Connection/path_frame_queue.zig / Connection/_internal.zig —
+//!    multipath queueing + shared CID helpers
 //!
-//! Tests live in _state_tests_<area>.zig (aggregated by
-//! _state_tests.zig); shared fixtures in _test_util.zig. Methods and
-//! decls annotated `// INTERNAL:` are pub only for these sibling
-//! files — they are not embedder API.
+//! Support types live in `conn/` (AckTracker, PnSpace,
+//! SentPacketTracker, RttEstimator, Pacer, and the namespace
+//! modules). Tests live in Connection/_tests_<area>.zig (aggregated
+//! by Connection/_tests.zig); shared fixtures in
+//! Connection/_test_util.zig. Methods and decls annotated
+//! `// INTERNAL:` are pub only for the spoke files — they are not
+//! embedder API.
 
 // Consumers spell `<module>.Connection`; the pub self-alias keeps
 // that path resolving now that the file IS the type.
@@ -1464,7 +1472,7 @@ pub const TimerDeadline = struct {
     path_id: u32 = 0,
 };
 
-// INTERNAL: pub for _state_tests.zig access; not part of embedder API.
+// INTERNAL: pub for _tests.zig access; not part of embedder API.
 pub const LossStats = struct {
     count: u32 = 0,
     bytes_lost: u64 = 0,
@@ -1540,38 +1548,38 @@ pub const ApplicationKeyUpdateStatus = struct {
 };
 
 /// Tag identifying a qlog event (modeled on draft-ietf-quic-qlog-quic-events);
-/// declared in conn_qlog.zig.
+/// declared in Connection/qlog.zig.
 pub const QlogEventName = conn_qlog.QlogEventName;
-/// QUIC packet type as it appears in qlog packet events; declared in conn_qlog.zig.
+/// QUIC packet type as it appears in qlog packet events; declared in Connection/qlog.zig.
 pub const QlogPacketKind = conn_qlog.QlogPacketKind;
-/// Why a packet was dropped before frame dispatch; declared in conn_qlog.zig.
+/// Why a packet was dropped before frame dispatch; declared in Connection/qlog.zig.
 pub const QlogPacketDropReason = conn_qlog.QlogPacketDropReason;
-/// Packet number space tag carried in qlog packet/loss events; declared in conn_qlog.zig.
+/// Packet number space tag carried in qlog packet/loss events; declared in Connection/qlog.zig.
 pub const QlogPnSpace = conn_qlog.QlogPnSpace;
-/// Stream lifecycle state reported via qlog `stream_state_updated`; declared in conn_qlog.zig.
+/// Stream lifecycle state reported via qlog `stream_state_updated`; declared in Connection/qlog.zig.
 pub const QlogStreamState = conn_qlog.QlogStreamState;
 /// Congestion-controller phase reported via qlog `congestion_state_updated`;
-/// declared in conn_qlog.zig.
+/// declared in Connection/qlog.zig.
 pub const QlogCongestionState = conn_qlog.QlogCongestionState;
-/// Why a packet was declared lost (RFC 9002 §6); declared in conn_qlog.zig.
+/// Why a packet was declared lost (RFC 9002 §6); declared in Connection/qlog.zig.
 pub const QlogLossReason = conn_qlog.QlogLossReason;
-/// Why a candidate path failed to validate; declared in conn_qlog.zig.
+/// Why a candidate path failed to validate; declared in Connection/qlog.zig.
 pub const QlogMigrationFailReason = conn_qlog.QlogMigrationFailReason;
-/// Qlog event payload delivered to the embedder's `QlogCallback`; declared in conn_qlog.zig.
+/// Qlog event payload delivered to the embedder's `QlogCallback`; declared in Connection/qlog.zig.
 pub const QlogEvent = conn_qlog.QlogEvent;
-/// Embedder-supplied qlog sink callback; declared in conn_qlog.zig.
+/// Embedder-supplied qlog sink callback; declared in Connection/qlog.zig.
 pub const QlogCallback = conn_qlog.QlogCallback;
 
-/// Allow / deny verdict returned by a `MigrationCallback`; declared in conn_migration.zig.
+/// Allow / deny verdict returned by a `MigrationCallback`; declared in Connection/migration.zig.
 pub const MigrationDecision = conn_migration.MigrationDecision;
 /// Embedder policy hook consulted on peer migration candidates (RFC 9000 §9);
-/// declared in conn_migration.zig.
+/// declared in Connection/migration.zig.
 pub const MigrationCallback = conn_migration.MigrationCallback;
 /// Callback fired when a client receives a NEW_TOKEN frame (RFC 9000 §8.1.3);
-/// declared in conn_migration.zig.
+/// declared in Connection/migration.zig.
 pub const NewTokenCallback = conn_migration.NewTokenCallback;
 
-// INTERNAL: pub for conn_keys.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/keys.zig access; not part of the embedder API.
 pub const ApplicationKeyEpoch = struct {
     material: SecretMaterial,
     keys: PacketKeys,
@@ -1583,14 +1591,14 @@ pub const ApplicationKeyEpoch = struct {
     acked: bool = false,
 };
 
-// INTERNAL: pub for conn_recv_dispatch.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/recv_dispatch.zig access; not part of the embedder API.
 pub const ApplicationReadKeySlot = enum {
     current,
     previous,
     next,
 };
 
-// INTERNAL: pub for conn_recv_dispatch.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/recv_dispatch.zig access; not part of the embedder API.
 pub const ApplicationOpenResult = struct {
     opened: short_packet_mod.Open1RttResult,
     slot: ApplicationReadKeySlot,
@@ -2139,7 +2147,7 @@ pub fn handshakeDone(self: *Connection) bool {
     return self.inner.handshakeDone();
 }
 
-// INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/recv_data_handlers.zig access; not part of the embedder API.
 pub fn queueHandshakeDoneIfReady(self: *Connection) void {
     if (self.role != .server) return;
     if (!self.inner.handshakeDone()) return;
@@ -2506,7 +2514,7 @@ pub const queueRetireConnectionId = conn_cids.queueRetireConnectionId;
 /// is a server (servers MUST NOT send the parameter), or when the
 /// peer simply omitted it. Drives the negotiation gate on
 /// `advertiseAlternative*Address`.
-/// Optional flags for `advertiseAlternative*Address`; declared in conn_migration.zig.
+/// Optional flags for `advertiseAlternative*Address`; declared in Connection/migration.zig.
 pub const AdvertiseAlternativeAddressOptions = conn_migration.AdvertiseAlternativeAddressOptions;
 
 pub const peerSupportsAlternativeAddress = conn_migration.peerSupportsAlternativeAddress;
@@ -2614,7 +2622,7 @@ pub const replenishConnectionIds = conn_cids.replenishConnectionIds;
 
 pub const replenishPathConnectionIds = conn_cids.replenishPathConnectionIds;
 
-// INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/recv_data_handlers.zig access; not part of the embedder API.
 pub fn cachePeerTransportParams(self: *Connection) Error!void {
     if (self.cached_peer_transport_params != null) return;
     const blob = self.inner.peerQuicTransportParams() orelse return;
@@ -2814,7 +2822,7 @@ fn localMaxAckDelayUs(self: *const Connection) u64 {
     return self.local_transport_params.max_ack_delay_ms * rtt_mod.ms;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn ackDelayScaled(
     self: *const Connection,
     tracker: *const ack_tracker_mod.AckTracker,
@@ -2841,7 +2849,7 @@ fn promoteDueAckDelay(self: *Connection, tracker: *ack_tracker_mod.AckTracker, n
     );
 }
 
-// INTERNAL: pub for conn_loss.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
 pub fn idleTimeoutUs(self: *const Connection) ?u64 {
     // RFC 9000 §10.1 ¶2: "An idle timeout value of 0 is equivalent
     // to no timeout." The effective value is the minimum of local
@@ -2903,13 +2911,13 @@ pub fn pnSpaceForLevel(self: *Connection, lvl: EncryptionLevel) *PnSpace {
     return &self.primaryPath().app_pn_space;
 }
 
-// INTERNAL: pub for conn_loss.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
 pub fn pnSpaceForLevelConst(self: *const Connection, lvl: EncryptionLevel) *const PnSpace {
     if (connPnIdx(lvl)) |idx| return &self.pn_spaces[idx];
     return &self.primaryPathConst().app_pn_space;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn pnSpaceForLevelOnPath(
     self: *Connection,
     lvl: EncryptionLevel,
@@ -2924,13 +2932,13 @@ pub fn sentForLevel(self: *Connection, lvl: EncryptionLevel) *SentPacketTracker 
     return &self.primaryPath().sent;
 }
 
-// INTERNAL: pub for conn_loss.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
 pub fn sentForLevelConst(self: *const Connection, lvl: EncryptionLevel) *const SentPacketTracker {
     if (connPnIdx(lvl)) |idx| return &self.sent[idx];
     return &self.primaryPathConst().sent;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn sentForLevelOnPath(
     self: *Connection,
     lvl: EncryptionLevel,
@@ -2945,7 +2953,7 @@ pub fn rttForLevel(self: *Connection, lvl: EncryptionLevel) *RttEstimator {
     return &self.primaryPath().path.rtt;
 }
 
-// INTERNAL: pub for conn_loss.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
 pub fn rttForLevelConst(self: *const Connection, lvl: EncryptionLevel) *const RttEstimator {
     _ = lvl;
     return &self.primaryPathConst().path.rtt;
@@ -2973,7 +2981,7 @@ pub fn ptoCountForLevel(self: *Connection, lvl: EncryptionLevel) *u32 {
     return &self.primaryPath().pto_count;
 }
 
-// INTERNAL: pub for conn_loss.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
 pub fn ptoCountForLevelConst(self: *const Connection, lvl: EncryptionLevel) *const u32 {
     if (connPnIdx(lvl)) |idx| return &self.pto_count[idx];
     return &self.primaryPathConst().pto_count;
@@ -2989,7 +2997,7 @@ fn pendingPingForLevelConst(self: *const Connection, lvl: EncryptionLevel) *cons
     return &self.primaryPathConst().pending_ping;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn pendingPingForLevelOnPath(
     self: *Connection,
     lvl: EncryptionLevel,
@@ -2999,7 +3007,7 @@ pub fn pendingPingForLevelOnPath(
     return &app_path.pending_ping;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn anyPendingPing(self: *const Connection) bool {
     for (self.pending_ping) |ping| {
         if (ping) return true;
@@ -3019,7 +3027,7 @@ fn clearPendingPings(self: *Connection) void {
     }
 }
 
-// INTERNAL: pub for conn_keys.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/keys.zig access; not part of the embedder API.
 pub fn clearSentTracker(self: *Connection, tracker: *SentPacketTracker) void {
     tracker.clear(self.allocator);
 }
@@ -3053,7 +3061,7 @@ pub fn resetInitialRecoveryForRetry(self: *Connection) Error!void {
     self.pending_ping[0] = false;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn canSendEarlyData(self: *Connection) bool {
     if (self.role != .client) return false;
     if (!self.early_data_send_enabled) return false;
@@ -3062,7 +3070,7 @@ pub fn canSendEarlyData(self: *Connection) bool {
     return self.haveSecret(.early_data, .write);
 }
 
-// INTERNAL: pub for conn_cids.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/cids.zig access; not part of the embedder API.
 pub fn installPeerTransportStatelessResetToken(self: *Connection) Error!void {
     if (self.peer_transport_reset_token_installed) return;
     const params = self.cached_peer_transport_params orelse return;
@@ -3096,7 +3104,7 @@ pub fn validatePeerTransportConnectionIds(self: *Connection) void {
     }
 }
 
-// INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/recv_data_handlers.zig access; not part of the embedder API.
 pub fn refreshEarlyDataStatus(self: *Connection) Error!void {
     if (self.early_data_rejection_processed) return;
     if (self.inner.earlyDataStatus() != .rejected) return;
@@ -3137,24 +3145,24 @@ pub fn requeueRejectedEarlyData(self: *Connection) Error!void {
     }
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn nextStreamPacketKey(self: *Connection) u64 {
     const key = self.next_stream_packet_key;
     self.next_stream_packet_key +|= 1;
     return key;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn drainingDurationUs(self: *const Connection) u64 {
     return 3 * self.primaryPathConst().path.rtt.pto(self.peerMaxAckDelayUs());
 }
 
-// INTERNAL: pub for conn_migration.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/migration.zig access; not part of the embedder API.
 pub fn saturatingMul(a: u64, b: u64) u64 {
     return std.math.mul(u64, a, b) catch std.math.maxInt(u64);
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn u64ToUsizeClamped(value: u64) usize {
     const max_usize_as_u64: u64 = @intCast(std.math.maxInt(usize));
     if (value > max_usize_as_u64) return std.math.maxInt(usize);
@@ -3229,7 +3237,7 @@ pub fn congestionBlocked(self: *const Connection, lvl: EncryptionLevel) bool {
     return path.path.cc.sendAllowance(path.sent.bytes_in_flight) == 0;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn congestionBlockedOnPath(
     self: *const Connection,
     lvl: EncryptionLevel,
@@ -3242,7 +3250,7 @@ pub fn congestionBlockedOnPath(
     return app_path.path.cc.sendAllowance(app_path.sent.bytes_in_flight) == 0;
 }
 
-// INTERNAL: pub for conn_send.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 // Pacing twin of `congestionBlockedOnPath`, sharing its exemption
 // structure exactly: non-application levels, PTO probes, and
 // pending PINGs are never paced (RFC 9002 §7.7 applies to normal
@@ -3510,7 +3518,7 @@ pub fn isClosed(self: *const Connection) bool {
 
 const closeErrorSpace = lifecycle_mod.closeErrorSpace;
 
-// INTERNAL: pub for conn_recv_dispatch.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/recv_dispatch.zig access; not part of the embedder API.
 pub fn enterDraining(
     self: *Connection,
     source: CloseSource,
@@ -3989,7 +3997,7 @@ fn shuttleOutboxToPeer(self: *Connection, peer: *Connection) Error!void {
     }
 }
 
-// INTERNAL: pub for conn_recv_data_handlers.zig access; not part of the embedder API.
+// INTERNAL: pub for Connection/recv_data_handlers.zig access; not part of the embedder API.
 pub fn advanceHandshake(self: *Connection) Error!void {
     self.inner.handshake() catch |e| switch (e) {
         error.WantRead, error.WantWrite => {},
@@ -4143,7 +4151,7 @@ const method: boringssl.tls.quic.Method = .{
 
 // -- tests ---------------------------------------------------------------
 //
-// All inline tests for state.zig live in src/conn/_state_tests.zig.
+// All inline tests for Connection.zig live in src/conn/_tests.zig.
 // The leading underscore signals "internal to conn/". Including the
 // import here ensures the compiler walks the file for `test` blocks
 // when this module is compiled in test mode. A `test` block (not

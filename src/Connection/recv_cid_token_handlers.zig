@@ -1,7 +1,7 @@
-// Inbound frame handlers for connection-id and token frames:
-// NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, NEW_TOKEN. Free-function
-// siblings of `Connection`'s public method-style handlers; the methods
-// on `Connection` are thin thunks that delegate here.
+//! Inbound frame handlers for connection-id and token frames:
+//! NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, NEW_TOKEN. Free-function
+//! siblings of `Connection`'s public method-style handlers; the methods
+//! on `Connection` are thin thunks that delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

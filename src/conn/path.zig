@@ -687,7 +687,7 @@ pub const PathState = struct {
     //
     // These are the small, unit-testable mutations the connection
     // calls from its send / ack / loss hot paths. Splitting them into
-    // named methods keeps `state.zig` readable and lets the inline
+    // named methods keeps `Connection.zig` readable and lets the inline
     // tests below pin the state machine without standing up a full
     // Connection.
 

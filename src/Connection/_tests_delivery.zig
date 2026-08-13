@@ -1,4 +1,4 @@
-// Split from _state_tests.zig — see that file for the area index.
+// Split from _tests.zig — see that file for the area index.
 // Connection-level delivery-rate sampling (draft-cheng-02 / ccwg-bbr-06
 // §4.1.2): transmit stamping through pollDatagram, app-limited marking
 // on empty polls, sampler advancement through handleAckAtLevel, and

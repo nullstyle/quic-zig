@@ -1,7 +1,7 @@
-// 1-RTT key schedule and key updates (RFC 9001 §6), AEAD usage limits,
-// and Initial/Handshake key discard. Free-function siblings of
-// `Connection`'s method-style key plumbing; the methods on `Connection`
-// are thin thunks that delegate here.
+//! 1-RTT key schedule and key updates (RFC 9001 §6), AEAD usage limits,
+//! and Initial/Handshake key discard. Free-function siblings of
+//! `Connection`'s method-style key plumbing; the methods on `Connection`
+//! are thin thunks that delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
@@ -477,7 +477,7 @@ pub fn discardInitialKeys(self: *Connection) void {
 ///
 /// Idempotent: the `handshake_keys_discarded` latch makes a
 /// second call a no-op.
-/// INTERNAL: pub for `_state_tests.zig` to drive the discard
+/// INTERNAL: pub for `_tests.zig` to drive the discard
 /// directly without the surrounding `handleWithEcn` /
 /// `drainInboxIntoTls` machinery. Embedders never need this —
 /// the gate is purely an internal RFC 9001 §4.9.2 invariant.

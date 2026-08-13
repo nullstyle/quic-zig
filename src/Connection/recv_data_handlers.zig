@@ -1,10 +1,10 @@
-// Inbound payload-bearing frame handlers: DATAGRAM (RFC 9221), CRYPTO
-// (RFC 9001 §4.1.3 — including the bounded reassembly inbox and the
-// drain into the TLS stack), and STREAM (RFC 9000 §19.8), plus the
-// recv-side resident-bytes reconciliation. Free-function siblings of
-// `Connection`'s method-style handlers; the methods on `Connection` are
-// thin thunks that delegate here. Control-frame handlers live in the
-// other conn_recv_*_handlers.zig siblings.
+//! Inbound payload-bearing frame handlers: DATAGRAM (RFC 9221), CRYPTO
+//! (RFC 9001 §4.1.3 — including the bounded reassembly inbox and the
+//! drain into the TLS stack), and STREAM (RFC 9000 §19.8), plus the
+//! recv-side resident-bytes reconciliation. Free-function siblings of
+//! `Connection`'s method-style handlers; the methods on `Connection` are
+//! thin thunks that delegate here. Control-frame handlers live in the
+//! other conn_recv_*_handlers.zig siblings.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

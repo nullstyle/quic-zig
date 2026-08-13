@@ -1,8 +1,8 @@
-// Inbound ACK frame processing: per-encryption-level ACKs, the
-// multipath PATH_ACK twin, and the loss-recovery callback that
-// re-queues control frames RFC 9002 has declared lost. Free-function
-// siblings of `Connection`'s public method-style handlers; the
-// methods on `Connection` are thin thunks that delegate here.
+//! Inbound ACK frame processing: per-encryption-level ACKs, the
+//! multipath PATH_ACK twin, and the loss-recovery callback that
+//! re-queues control frames RFC 9002 has declared lost. Free-function
+//! siblings of `Connection`'s public method-style handlers; the
+//! methods on `Connection` are thin thunks that delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

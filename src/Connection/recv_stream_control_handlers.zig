@@ -1,8 +1,8 @@
-// Inbound frame handlers for stream-control termination from the
-// peer: STOP_SENDING (RFC 9000 §19.5) and RESET_STREAM (§19.4).
-// Free-function siblings of `Connection`'s public method-style
-// handlers; the methods on `Connection` are thin thunks that
-// delegate here.
+//! Inbound frame handlers for stream-control termination from the
+//! peer: STOP_SENDING (RFC 9000 §19.5) and RESET_STREAM (§19.4).
+//! Free-function siblings of `Connection`'s public method-style
+//! handlers; the methods on `Connection` are thin thunks that
+//! delegate here.
 
 const state_mod = @import("../Connection.zig");
 const conn_streams = @import("streams.zig");

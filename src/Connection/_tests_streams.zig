@@ -1,4 +1,4 @@
-// Split from _state_tests.zig — see that file for the area index.
+// Split from _tests.zig — see that file for the area index.
 // Test bodies are verbatim; only this alias header is per-file.
 
 const std = @import("std");

@@ -1,10 +1,10 @@
-// Connection migration and address change (RFC 9000 §9) plus the
-// draft-munizaga-quic-alternative-server-address extension: peer
-// address-change detection and policy (MigrationCallback), active
-// client migration, server local-address changes, and the alternative
-// server address advertise / receive surface. Free-function siblings
-// of `Connection`'s method-style migration plumbing; the methods on
-// `Connection` are thin thunks that delegate here.
+//! Connection migration and address change (RFC 9000 §9) plus the
+//! draft-munizaga-quic-alternative-server-address extension: peer
+//! address-change detection and policy (MigrationCallback), active
+//! client migration, server local-address changes, and the alternative
+//! server address advertise / receive surface. Free-function siblings
+//! of `Connection`'s method-style migration plumbing; the methods on
+//! `Connection` are thin thunks that delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
@@ -19,7 +19,7 @@ const frame_types = state_mod.frame_types;
 const path_mod = state_mod.path_mod;
 const min_path_challenge_interval_us = state_mod.min_path_challenge_interval_us;
 
-// Doc comment lives on the `Connection.setMigrationCallback` thunk in state.zig.
+// Doc comment lives on the `Connection.setMigrationCallback` thunk in Connection.zig.
 pub fn setMigrationCallback(
     self: *Connection,
     callback: ?MigrationCallback,

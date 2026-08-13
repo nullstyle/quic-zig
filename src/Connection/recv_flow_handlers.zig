@@ -1,8 +1,8 @@
-// Inbound frame handlers for connection-level + stream-level flow
-// control: MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED,
-// STREAM_DATA_BLOCKED, STREAMS_BLOCKED. Free-function siblings of
-// `Connection`'s public method-style handlers; the methods on
-// `Connection` are thin thunks that delegate here.
+//! Inbound frame handlers for connection-level + stream-level flow
+//! control: MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED,
+//! STREAM_DATA_BLOCKED, STREAMS_BLOCKED. Free-function siblings of
+//! `Connection`'s public method-style handlers; the methods on
+//! `Connection` are thin thunks that delegate here.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

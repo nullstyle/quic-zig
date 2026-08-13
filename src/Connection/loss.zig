@@ -1,13 +1,13 @@
-// RFC 9002 loss detection and PTO for Connection: PTO/backoff duration
-// math, the loss / PTO / idle timer deadlines, acked- and lost-packet
-// dispatch to streams and control-frame queues, packet- and
-// time-threshold loss detection, and PTO probe firing — in both
-// per-level and multipath per-path variants. Free-function siblings of
-// `Connection`'s method-style loss plumbing; the methods on
-// `Connection` are thin thunks that delegate here. The pure
-// estimator/tracker types live in loss_recovery.zig / sent_packets.zig
-// / rtt.zig; inbound ACK processing lives in
-// conn_recv_ack_handlers.zig.
+//! RFC 9002 loss detection and PTO for Connection: PTO/backoff duration
+//! math, the loss / PTO / idle timer deadlines, acked- and lost-packet
+//! dispatch to streams and control-frame queues, packet- and
+//! time-threshold loss detection, and PTO probe firing — in both
+//! per-level and multipath per-path variants. Free-function siblings of
+//! `Connection`'s method-style loss plumbing; the methods on
+//! `Connection` are thin thunks that delegate here. The pure
+//! estimator/tracker types live in loss_recovery.zig / SentPacketTracker.zig
+//! / RttEstimator.zig; inbound ACK processing lives in
+//! Connection/recv_ack_handlers.zig.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");

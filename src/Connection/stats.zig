@@ -1,10 +1,10 @@
-// Connection-level statistics snapshot: the embedder-facing mirror of
-// `Server.metricsSnapshot`, assembled entirely from counters and
-// snapshots the connection already maintains. Free functions over
-// `*Connection` in the house layout; `Connection.stats()` is the thunk.
-//
-// Everything here is a by-value copy — safe to hold across ticks,
-// reaps, and connection teardown.
+//! Connection-level statistics snapshot: the embedder-facing mirror of
+//! `Server.metricsSnapshot`, assembled entirely from counters and
+//! snapshots the connection already maintains. Free functions over
+//! `*Connection` in the house layout; `Connection.stats()` is the thunk.
+//!
+//! Everything here is a by-value copy — safe to hold across ticks,
+//! reaps, and connection teardown.
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
@@ -49,7 +49,7 @@ pub const ConnectionStats = struct {
 };
 
 // One-line pointer per the extraction convention: full doc on the
-// `Connection.stats` thunk in state.zig.
+// `Connection.stats` thunk in Connection.zig.
 pub fn stats(self: *const Connection) ConnectionStats {
     const active_id = conn_paths.activePathId(self);
     const ps = conn_paths.pathStats(self, active_id);

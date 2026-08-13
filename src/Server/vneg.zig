@@ -1,8 +1,8 @@
-// Server version negotiation and compatible version upgrade
-// (RFC 9368/9369): accepted-version checks, ClientHello preparse for
-// the upgrade target, the pending-upgrade state machine, and VN packet
-// queueing. Split from server.zig; the private methods on Server
-// delegate here via private thunks where hub callers remain.
+//! Server version negotiation and compatible version upgrade
+//! (RFC 9368/9369): accepted-version checks, ClientHello preparse for
+//! the upgrade target, the pending-upgrade state machine, and VN packet
+//! queueing. Split from Server.zig; the private methods on Server
+//! delegate here via private thunks where hub callers remain.
 
 const std = @import("std");
 const Server = @import("../Server.zig");

@@ -14,7 +14,7 @@
 //! the conformance suite tests/conformance/bbr_draft06.zig pins that
 //! revision). Everything is integer arithmetic over bytes and
 //! microseconds with u128 intermediates and rational gain constants —
-//! the congestion_cubic.zig unit discipline; no floats, no allocation,
+//! the congestion/Cubic.zig unit discipline; no floats, no allocation,
 //! and the struct is relocatable by value (Path lives in an ArrayList).
 //!
 //! Deliberate deviations, each conservative and marked DEVIATION at
