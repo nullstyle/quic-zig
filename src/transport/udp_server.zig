@@ -35,7 +35,7 @@
 
 const std = @import("std");
 
-const Server = @import("../server.zig").Server;
+const Server = @import("../server.zig");
 const path_mod = @import("../conn/path.zig");
 const socket_opts = @import("socket_opts.zig");
 const udp_batch = @import("udp_batch.zig");

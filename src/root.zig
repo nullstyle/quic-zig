@@ -89,7 +89,7 @@ pub const alt_addr = @import("alt_addr/root.zig");
 /// High-level convenience wrapper for embedding quic as a QUIC
 /// server. Owns the TLS context and a connection table; the
 /// embedder still owns the UDP socket and the clock.
-pub const Server = @import("server.zig").Server;
+pub const Server = @import("server.zig");
 
 /// Server-side `preferred_address` (RFC 9000 §18.2 / §5.1.1)
 /// configuration. Set on `Server.Config.preferred_address` to

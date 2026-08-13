@@ -5,10 +5,9 @@
 // helpers live in the wire_peek.zig leaf.
 
 const std = @import("std");
-const server_mod = @import("../server.zig");
-const Server = server_mod.Server;
-const Slot = server_mod.Server.Slot;
-const Error = server_mod.Server.Error;
+const Server = @import("../server.zig");
+const Slot = Server.Slot;
+const Error = Server.Error;
 const wire_peek = @import("wire_peek.zig");
 const cidKeyFromSlice = wire_peek.cidKeyFromSlice;
 const cidKeyFromConnectionId = wire_peek.cidKeyFromConnectionId;
@@ -18,7 +17,7 @@ const conn_mod = @import("../conn/root.zig");
 const lb_mod = @import("../lb/root.zig");
 const ConnectionId = conn_mod.path.ConnectionId;
 const Address = conn_mod.path.Address;
-const max_tracked_cids_per_slot = server_mod.max_tracked_cids_per_slot;
+const max_tracked_cids_per_slot = Server.max_tracked_cids_per_slot;
 const boringssl = @import("boringssl");
 
 // Doc comment lives on the `Connection.installLbConfig` thunk in state.zig.

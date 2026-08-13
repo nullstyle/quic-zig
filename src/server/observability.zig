@@ -6,11 +6,10 @@
 // ...) is unchanged.
 
 const std = @import("std");
-const server_mod = @import("../server.zig");
+const Server = @import("../server.zig");
 const server_dos = @import("dos.zig");
-const Server = server_mod.Server;
-const SlotImpl = server_mod.Server.Slot;
-const StatelessResponseKind = server_mod.StatelessResponseKind;
+const SlotImpl = Server.Slot;
+const StatelessResponseKind = Server.StatelessResponseKind;
 const conn_mod = @import("../conn/root.zig");
 const Address = conn_mod.path.Address;
 const ConnectionId = conn_mod.path.ConnectionId;

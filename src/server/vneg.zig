@@ -5,17 +5,16 @@
 // delegate here via private thunks where hub callers remain.
 
 const std = @import("std");
-const server_mod = @import("../server.zig");
-const Server = server_mod.Server;
-const Slot = server_mod.Server.Slot;
-const Error = server_mod.Server.Error;
+const Server = @import("../server.zig");
+const Slot = Server.Slot;
+const Error = Server.Error;
 const conn_mod = @import("../conn/root.zig");
 const wire = @import("../wire/root.zig");
 const Address = conn_mod.path.Address;
 const ConnectionId = conn_mod.path.ConnectionId;
 const wire_peek = @import("wire_peek.zig");
 const isInitialLongHeader = wire_peek.isInitialLongHeader;
-const StatelessResponse = server_mod.Server.StatelessResponse;
+const StatelessResponse = Server.StatelessResponse;
 const peekLongHeaderIds = wire_peek.peekLongHeaderIds;
 
 /// True if `version` is one of the wire-format versions this

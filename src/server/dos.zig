@@ -5,8 +5,7 @@
 // Server delegate here via private thunks where hub callers remain.
 
 const std = @import("std");
-const server_mod = @import("../server.zig");
-const Server = server_mod.Server;
+const Server = @import("../server.zig");
 const conn_mod = @import("../conn/root.zig");
 const Address = conn_mod.path.Address;
 const ConnectionId = conn_mod.path.ConnectionId;
@@ -27,11 +26,11 @@ const wire = @import("../wire/root.zig");
 /// guide §4.1 token-bucket. Declared here (not on the hub): this
 /// file owns the source-rate table and is the constant's only user.
 pub const bandwidth_idle_threshold_us: u64 = 5_000_000;
-const StatelessResponse = server_mod.Server.StatelessResponse;
+const StatelessResponse = Server.StatelessResponse;
 const RetryTokenKey = conn_mod.RetryTokenKey;
-const Error = server_mod.Server.Error;
+const Error = Server.Error;
 const LongHeaderIds = wire_peek.LongHeaderIds;
-const Slot = server_mod.Server.Slot;
+const Slot = Server.Slot;
 
 /// Token-bucket gate for per-source Initial acceptance. Returns
 /// true if `addr` is under its cap and the caller may proceed
