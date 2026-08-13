@@ -21,4 +21,5 @@ test {
     _ = @import("e2e/connection_events.zig");
     _ = @import("e2e/server_lifecycle_hooks.zig");
     _ = @import("e2e/public_api_smoke.zig");
+    _ = @import("e2e/internal_surface_smoke.zig");
 }
