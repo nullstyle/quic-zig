@@ -1,7 +1,7 @@
 //! draft-ietf-ccwg-bbr-06 — BBR Congestion Control (BBRv3).
 //!
-//! Pins the controller quic_zig exposes as
-//! `quic_zig.conn.congestion.Bbr` (selected via
+//! Pins the controller quic exposes as
+//! `quic.conn.congestion.Bbr` (selected via
 //! `Config.congestion_control = .bbr`). BBR is unilateral sender
 //! behavior with no wire format, so conformance here means
 //! state-machine and control-law fidelity: tests construct `Bbr`
@@ -62,9 +62,9 @@
 //!   that instrument as the gate for any default flip.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
-const congestion = quic_zig.conn.congestion;
-const delivery_rate = quic_zig.conn.delivery_rate;
+const quic = @import("quic");
+const congestion = quic.conn.congestion;
+const delivery_rate = quic.conn.delivery_rate;
 
 const Bbr = congestion.Bbr;
 const RateSample = delivery_rate.RateSample;

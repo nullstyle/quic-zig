@@ -3,7 +3,7 @@
 //! BoringSSL serializes only the TLS `SSL_SESSION`. QUIC 0-RTT also
 //! needs the peer's remembered transport parameters so the client can
 //! bound early-data sends before the resumed handshake publishes fresh
-//! parameters. This module freezes the quic_zig-owned envelope that
+//! parameters. This module freezes the quic-owned envelope that
 //! embedders persist between connections:
 //!
 //!   QZRS || version(1) || flags(1) || ticket_len(u32) ||

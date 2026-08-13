@@ -6,9 +6,9 @@
 //! blobs itself.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const transport_params = quic_zig.tls.transport_params;
+const transport_params = quic.tls.transport_params;
 
 const Params = transport_params.Params;
 const PreferredAddress = transport_params.PreferredAddress;

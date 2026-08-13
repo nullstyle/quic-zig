@@ -4,11 +4,11 @@
 //! public state-machine surfaces used by Connection.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const flow_control = quic_zig.conn.flow_control;
-const path_mod = quic_zig.conn.path;
-const path_validator_mod = quic_zig.conn.path_validator;
+const flow_control = quic.conn.flow_control;
+const path_mod = quic.conn.path;
+const path_validator_mod = quic.conn.path_validator;
 
 const ConnectionData = flow_control.ConnectionData;
 const StreamCount = flow_control.StreamCount;

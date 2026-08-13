@@ -227,7 +227,7 @@ pub fn drainInboxIntoTls(self: *Connection) Error!void {
     // RFC 9001 §5.7 ¶3 / ¶4: discard Initial keys once handshake
     // confirms. The strict spec timing is "first Handshake packet
     // sent" (client) / "first Handshake packet processed" (server),
-    // but in quic_zig's flow the client's first Handshake send is
+    // but in quic's flow the client's first Handshake send is
     // accompanied by an Initial-level ACK that's still needed by
     // the server, so we wait until handshake confirms — at which
     // point no further Initial activity is legitimate. Latched +

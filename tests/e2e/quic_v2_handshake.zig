@@ -2,7 +2,7 @@
 //!
 //! Mirrors `server_client_handshake.zig`, but both sides are
 //! configured for QUIC v2. Drives the handshake through the full
-//! `quic_zig.Server` / `quic_zig.Client` wrappers (slot table, CID
+//! `quic.Server` / `quic.Client` wrappers (slot table, CID
 //! routing, the works) so a regression in the v2 long-header type
 //! rotation, the v2 Initial salt + HKDF labels, or the v2 Retry
 //! integrity tag would show up here as a hung handshake or an AEAD
@@ -18,17 +18,17 @@
 //!      know v2 exists; the server accepts v1 directly.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("common.zig");
 
-const QUIC_V1: u32 = quic_zig.QUIC_VERSION_1;
-const QUIC_V2: u32 = quic_zig.QUIC_VERSION_2;
+const QUIC_V1: u32 = quic.QUIC_VERSION_1;
+const QUIC_V2: u32 = quic.QUIC_VERSION_2;
 
 fn pumpClientToServer(
-    cli: *quic_zig.Client,
-    srv: *quic_zig.Server,
+    cli: *quic.Client,
+    srv: *quic.Server,
     rx: []u8,
-    addr: quic_zig.conn.path.Address,
+    addr: quic.conn.path.Address,
     now_us: u64,
 ) !usize {
     var n: usize = 0;
@@ -40,8 +40,8 @@ fn pumpClientToServer(
 }
 
 fn pumpServerToClient(
-    srv: *quic_zig.Server,
-    cli: *quic_zig.Client,
+    srv: *quic.Server,
+    cli: *quic.Client,
     rx: []u8,
     now_us: u64,
 ) !usize {
@@ -55,7 +55,7 @@ fn pumpServerToClient(
     return n;
 }
 
-fn pumpStateless(srv: *quic_zig.Server) void {
+fn pumpStateless(srv: *quic.Server) void {
     while (srv.drainStatelessResponse()) |_| {}
 }
 
@@ -65,9 +65,9 @@ const HandshakeOutcome = struct {
 };
 
 fn driveHandshake(
-    cli: *quic_zig.Client,
-    srv: *quic_zig.Server,
-    peer_addr: quic_zig.conn.path.Address,
+    cli: *quic.Client,
+    srv: *quic.Server,
+    peer_addr: quic.conn.path.Address,
     max_rounds: u32,
 ) !HandshakeOutcome {
     var rx: [4096]u8 = undefined;
@@ -95,7 +95,7 @@ test "v2 handshake completes on both sides [RFC9368 §3]" {
     const protos = [_][]const u8{"hq-test"};
     const versions = [_]u32{QUIC_V2};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -105,7 +105,7 @@ test "v2 handshake completes on both sides [RFC9368 §3]" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -115,7 +115,7 @@ test "v2 handshake completes on both sides [RFC9368 §3]" {
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x21), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x21), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
@@ -135,7 +135,7 @@ test "v1 handshake regression: still completes after v2 plumbing landed" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -147,7 +147,7 @@ test "v1 handshake regression: still completes after v2 plumbing landed" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -157,7 +157,7 @@ test "v1 handshake regression: still completes after v2 plumbing landed" {
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(QUIC_V1, cli.conn.version);
@@ -169,7 +169,7 @@ test "v1+v2 server with a v1 client: server accepts v1 directly [RFC9368 §6]" {
     const protos = [_][]const u8{"hq-test"};
     const versions = [_]u32{ QUIC_V1, QUIC_V2 };
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -179,7 +179,7 @@ test "v1+v2 server with a v1 client: server accepts v1 directly [RFC9368 §6]" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -189,7 +189,7 @@ test "v1+v2 server with a v1 client: server accepts v1 directly [RFC9368 §6]" {
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x55), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x55), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(QUIC_V1, srv.iterator()[0].conn.version);
@@ -200,7 +200,7 @@ test "v2-only server with a v1-only client emits a VN listing v2 [RFC9368 §6]" 
     const protos = [_][]const u8{"hq-test"};
     const versions = [_]u32{QUIC_V2};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -210,7 +210,7 @@ test "v2-only server with a v1-only client emits a VN listing v2 [RFC9368 §6]" 
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -222,7 +222,7 @@ test "v2-only server with a v1-only client emits a VN listing v2 [RFC9368 §6]" 
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x77), .port = 0 } };
     try cli.conn.advance();
 
     // Pump exactly one client→server datagram and inspect what the
@@ -238,7 +238,7 @@ test "v2-only server with a v1-only client emits a VN listing v2 [RFC9368 §6]" 
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
     try std.testing.expect(srv.statelessResponseCount() >= 1);
     const vn = srv.drainStatelessResponse() orelse return error.UnexpectedNullVn;
-    const parsed = try quic_zig.wire.header.parse(vn.slice(), 0);
+    const parsed = try quic.wire.header.parse(vn.slice(), 0);
     try std.testing.expect(parsed.header == .version_negotiation);
     const vn_hdr = parsed.header.version_negotiation;
     try std.testing.expectEqual(@as(usize, 1), vn_hdr.versionCount());
@@ -258,7 +258,7 @@ test "v1+v2 client advertises version_information transport parameter [RFC9368 �
     const versions = [_]u32{ QUIC_V1, QUIC_V2 };
     const cli_compat = [_]u32{QUIC_V2}; // chosen=v1, compatible=[v2]
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -268,7 +268,7 @@ test "v1+v2 client advertises version_information transport parameter [RFC9368 �
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -279,7 +279,7 @@ test "v1+v2 client advertises version_information transport parameter [RFC9368 �
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x88), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x88), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
 
@@ -316,7 +316,7 @@ test "[v2,v1] server upgrades a v1-wire ClientHello that lists v2 [RFC9368 §6]"
     const srv_versions = [_]u32{ QUIC_V2, QUIC_V1 };
     const cli_compat = [_]u32{QUIC_V2}; // wire=v1, available=[v1, v2]
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -326,7 +326,7 @@ test "[v2,v1] server upgrades a v1-wire ClientHello that lists v2 [RFC9368 §6]"
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -337,7 +337,7 @@ test "[v2,v1] server upgrades a v1-wire ClientHello that lists v2 [RFC9368 §6]"
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
 
@@ -373,7 +373,7 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
     const protos = [_][]const u8{"hq-test"};
     const srv_versions = [_]u32{ QUIC_V2, QUIC_V1 };
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -394,7 +394,7 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
     // First build the QUIC transport parameters blob with a
     // version_information that lists [v1, v2].
     var tp_buf: [256]u8 = undefined;
-    var tp_params: quic_zig.tls.TransportParams = .{};
+    var tp_params: quic.tls.TransportParams = .{};
     try tp_params.setCompatibleVersions(&[_]u32{ QUIC_V1, QUIC_V2 });
     const tp_len = try tp_params.encode(&tp_buf);
 
@@ -481,22 +481,22 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
     const split = 600;
     const dcid: [8]u8 = .{ 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
     const scid: [4]u8 = .{ 0xc0, 0xc1, 0xc2, 0xc3 };
-    const init_keys = try quic_zig.wire.initial.deriveInitialKeys(&dcid, false);
-    const r_keys = try quic_zig.wire.short_packet.derivePacketKeys(
+    const init_keys = try quic.wire.initial.deriveInitialKeys(&dcid, false);
+    const r_keys = try quic.wire.short_packet.derivePacketKeys(
         .aes128_gcm_sha256,
         &init_keys.secret,
     );
 
     // Frame stream for Initial #1: CRYPTO offset=0 covering ch[0..split].
     var f1_buf: [2048]u8 = undefined;
-    const f1_len = try quic_zig.frame.encode(&f1_buf, .{ .crypto = .{
+    const f1_len = try quic.frame.encode(&f1_buf, .{ .crypto = .{
         .offset = 0,
         .data = ch[0..split],
     } });
 
     // Frame stream for Initial #2: CRYPTO offset=split covering ch[split..].
     var f2_buf: [2048]u8 = undefined;
-    const f2_len = try quic_zig.frame.encode(&f2_buf, .{ .crypto = .{
+    const f2_len = try quic.frame.encode(&f2_buf, .{ .crypto = .{
         .offset = split,
         .data = ch[split..],
     } });
@@ -504,7 +504,7 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
     // Seal each Initial. RFC 9000 §14 requires the client's first-
     // flight Initial to pad to ≥ 1200 bytes; we pad both for safety.
     var pkt1: [2048]u8 = undefined;
-    const len1 = try quic_zig.wire.long_packet.sealInitial(&pkt1, .{
+    const len1 = try quic.wire.long_packet.sealInitial(&pkt1, .{
         .version = QUIC_V1,
         .dcid = &dcid,
         .scid = &scid,
@@ -514,7 +514,7 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
         .pad_to = 1200,
     });
     var pkt2: [2048]u8 = undefined;
-    const len2 = try quic_zig.wire.long_packet.sealInitial(&pkt2, .{
+    const len2 = try quic.wire.long_packet.sealInitial(&pkt2, .{
         .version = QUIC_V1,
         .dcid = &dcid,
         .scid = &scid,
@@ -524,13 +524,13 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
         .pad_to = 1200,
     });
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
 
     // Feed Initial #1: the slot opens, but since the CH is fragmented
     // the single-shot pre-parse fails and a `pending_upgrade` is
     // attached. The connection still commits to v1 at this point.
     const out1 = try srv.feed(pkt1[0..len1], peer_addr, 0);
-    try std.testing.expectEqual(@as(quic_zig.Server.FeedOutcome, .accepted), out1);
+    try std.testing.expectEqual(@as(quic.Server.FeedOutcome, .accepted), out1);
     try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
     const slot = srv.iterator()[0];
     try std.testing.expectEqual(QUIC_V1, slot.conn.version);
@@ -542,7 +542,7 @@ test "[v2,v1] server upgrades a multi-Initial fragmented ClientHello [RFC9368 §
     // After `dispatchToSlot.applyPendingVersionUpgrade` runs, the
     // connection's active version is v2.
     const out2 = try srv.feed(pkt2[0..len2], peer_addr, 0);
-    try std.testing.expectEqual(@as(quic_zig.Server.FeedOutcome, .routed), out2);
+    try std.testing.expectEqual(@as(quic.Server.FeedOutcome, .routed), out2);
     try std.testing.expectEqual(QUIC_V2, slot.conn.version);
     try std.testing.expect(slot.pending_upgrade == null);
 }
@@ -557,7 +557,7 @@ test "[v2,v1] server with v1-only client commits to v1, no upgrade [RFC9368 §6]
     const protos = [_][]const u8{"hq-test"};
     const srv_versions = [_]u32{ QUIC_V2, QUIC_V1 };
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -567,7 +567,7 @@ test "[v2,v1] server with v1-only client commits to v1, no upgrade [RFC9368 §6]
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -579,7 +579,7 @@ test "[v2,v1] server with v1-only client commits to v1, no upgrade [RFC9368 §6]
     });
     defer cli.deinit();
 
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
     const outcome = try driveHandshake(&cli, &srv, peer_addr, 32);
     try std.testing.expect(outcome.completed);
     try std.testing.expectEqual(QUIC_V1, cli.conn.version);

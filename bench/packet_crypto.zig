@@ -5,13 +5,13 @@
 //! contexts own all reusable crypto/key state needed by hot loops.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 
-const protection = quic_zig.wire.protection;
-const initial = quic_zig.wire.initial;
-const short_packet = quic_zig.wire.short_packet;
-const long_packet = quic_zig.wire.long_packet;
+const protection = quic.wire.protection;
+const initial = quic.wire.initial;
+const short_packet = quic.wire.short_packet;
+const long_packet = quic.wire.long_packet;
 
 const Aes128 = boringssl.crypto.aes.Aes128;
 const AesGcm128 = boringssl.crypto.aead.AesGcm128;

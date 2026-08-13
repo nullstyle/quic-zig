@@ -1,7 +1,7 @@
 //! RFC 9438 — CUBIC for Fast and Long-Distance Networks.
 //!
-//! Pins the CUBIC controller quic_zig exposes as
-//! `quic_zig.conn.congestion.Cubic` (selected via
+//! Pins the CUBIC controller quic exposes as
+//! `quic.conn.congestion.Cubic` (selected via
 //! `Config.congestion_control = .cubic`). Deep mechanics (curve
 //! shape, epoch handling, app-limited freezing) are unit-tested next
 //! to the implementation in `src/conn/congestion_cubic.zig`; this
@@ -32,8 +32,8 @@
 //!   its conformance suite is rfc9406_hystart.zig.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
-const congestion = quic_zig.conn.congestion;
+const quic = @import("quic");
+const congestion = quic.conn.congestion;
 
 const Cubic = congestion.Cubic;
 const NewReno = congestion.NewReno;

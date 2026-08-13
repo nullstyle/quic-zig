@@ -1,6 +1,6 @@
 {
  "schema_version": 3,
- "suite": "quic_zig.microbench",
+ "suite": "quic.microbench",
  "generated_unix_ns": 1786572786736715000,
  "target_ns_per_benchmark": 100000000,
  "min_iters": 1000,
@@ -11,7 +11,6 @@
  "optimize": "safe",
  "bench_unsafe_release_fast": false,
  "report_path": "baselines/bench/m5max.json",
- "quic_zig_version": "0.11.0",
  "zig_version": "0.17.0-dev.1683+5ceec001b",
  "target": {
   "arch": "aarch64",
@@ -796,5 +795,6 @@
    "mad_ns_per_op": 0.184508,
    "min_ns_per_op": 2.482379
   }
- ]
+ ],
+ "quic_version": "0.11.0"
 }

@@ -117,7 +117,7 @@ pub const Token = [max_token_len]u8;
 /// Domain separator. Bumped from "...v1" because the format changed.
 /// Mixed into AEAD AAD; replaying a v1 HMAC-tagged blob through v2
 /// `validate` returns `.malformed`.
-const domain_separator = "quic_zig retry token v2";
+const domain_separator = "quic retry token v2";
 
 /// Errors raised by `mint` and (via `validate`) surfaced as `.malformed`.
 pub const Error = error{

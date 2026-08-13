@@ -7,12 +7,12 @@
 //! own their AES-GCM nonce generation.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const retry_token = quic_zig.conn.retry_token;
-const new_token = quic_zig.conn.new_token;
-const stateless_reset = quic_zig.conn.stateless_reset;
-const lb = quic_zig.lb;
+const retry_token = quic.conn.retry_token;
+const new_token = quic.conn.new_token;
+const stateless_reset = quic.conn.stateless_reset;
+const lb = quic.lb;
 
 pub const retry_token_mint_validate_name = "retry_token_mint_validate";
 pub const new_token_mint_validate_name = "new_token_mint_validate";
@@ -70,7 +70,7 @@ pub const RetryTokenMintValidateCtx = struct {
     client_address: []const u8 = client_address,
     original_dcid: [retry_original_dcid.len]u8 = retry_original_dcid,
     retry_scid: [retry_scid.len]u8 = retry_scid,
-    quic_version: u32 = quic_zig.QUIC_VERSION_1,
+    quic_version: u32 = quic.QUIC_VERSION_1,
 
     pub fn init() RetryTokenMintValidateCtx {
         return .{};
@@ -135,7 +135,7 @@ pub const NewTokenMintValidateCtx = struct {
     validate_now_us: u64 = 12_000_000,
     lifetime_us: u64 = 24 * 3600 * 1_000_000,
     client_address: []const u8 = client_address,
-    quic_version: u32 = quic_zig.QUIC_VERSION_1,
+    quic_version: u32 = quic.QUIC_VERSION_1,
 
     pub fn init() NewTokenMintValidateCtx {
         return .{};

@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const quic_dep = b.dependency("quic_zig", .{
+    const quic_dep = b.dependency("quic", .{
         .target = target,
         .optimize = optimize,
     });
@@ -14,10 +14,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe_mod.addImport("quic_zig", quic_dep.module("quic_zig"));
+    exe_mod.addImport("quic", quic_dep.module("quic"));
     // The exported shared boringssl instance is the point of this smoke
     // test: a consumer must be able to name `boringssl.tls.Context`
-    // values that type-unify with quic_zig's API (e.g.
+    // values that type-unify with quic's API (e.g.
     // `Client.Config.tls_context_override` for private-CA pinning)
     // without declaring its own boringssl-zig dependency.
     exe_mod.addImport("boringssl", quic_dep.module("boringssl"));

@@ -68,16 +68,16 @@
 //!     → rfc9000_frames.zig
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const initial_fixture = @import("_initial_fixture.zig");
 
-const retry_token = quic_zig.conn.retry_token;
-const new_token = quic_zig.conn.new_token;
-const path_validator = quic_zig.conn.path_validator;
-const path_mod = quic_zig.conn.path;
-const wire = quic_zig.wire;
+const retry_token = quic.conn.retry_token;
+const new_token = quic.conn.new_token;
+const path_validator = quic.conn.path_validator;
+const path_mod = quic.conn.path;
+const wire = quic.wire;
 
-const QUIC_V1: u32 = quic_zig.QUIC_VERSION_1;
+const QUIC_V1: u32 = quic.QUIC_VERSION_1;
 
 /// Stable test key for Retry-token mint/validate fixtures. AES-GCM-256
 /// requires 32 bytes; the bytes themselves are arbitrary-but-fixed so
@@ -129,7 +129,7 @@ test "MUST emit a Version Negotiation packet whose Version field is the 0x000000
 
 test "MUST advertise QUIC v1 in the supported_versions list of an emitted VN [RFC9000 §6.1 ¶1]" {
     // The whole point of VN is to tell the peer which versions to
-    // retry with. quic_zig is a v1-only endpoint, so the only legitimate
+    // retry with. quic is a v1-only endpoint, so the only legitimate
     // entry it can advertise is `QUIC_VERSION_1`.
     var versions_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, versions_bytes[0..4], QUIC_V1, .big);
@@ -176,7 +176,7 @@ test "MUST swap the client's DCID and SCID in the emitted VN response [RFC9000 �
     const decoded = parsed.header.version_negotiation;
     // Decoded DCID equals the *original client's* SCID — i.e. the
     // VN's DCID *is* the swapped value. That's the property we want
-    // to pin: quic_zig's encoder honors the swap.
+    // to pin: quic's encoder honors the swap.
     try std.testing.expectEqualSlices(
         u8,
         &client_scid,
@@ -207,7 +207,7 @@ test "MUST NOT initiate a new connection in response to a Version Negotiation pa
     const fixture = @import("_handshake_fixture.zig");
 
     const protos = [_][]const u8{"hq-test"};
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "localhost",
@@ -278,7 +278,7 @@ test "MUST NOT initiate a new connection in response to a Version Negotiation pa
     const close_event = client.conn.closeEvent() orelse
         return error.TestExpectedCloseEvent;
     try std.testing.expectEqual(
-        quic_zig.CloseSource.version_negotiation,
+        quic.CloseSource.version_negotiation,
         close_event.source,
     );
 }
@@ -290,7 +290,7 @@ test "MUST NOT initiate a new connection in response to a Version Negotiation pa
 test "MUST validate a Retry token whose bound material matches the issuing inputs [RFC9000 §8.1.2 ¶1]" {
     // RFC 9000 §8.1.2: "A server MUST validate that the source
     // address of an Initial packet matches the source of the Retry
-    // packet's address." quic_zig's Retry token AEAD-binds the
+    // packet's address." quic's Retry token AEAD-binds the
     // client_address, ODCID, retry_scid, version, and an issue/expiry
     // window. A token minted under inputs X validates only when the
     // Initial that echoes it presents the same X.
@@ -404,7 +404,7 @@ test "MUST NOT accept a Retry token whose AEAD tag has been tampered with [RFC90
 }
 
 test "MUST NOT accept a Retry token whose lifetime has expired [RFC9000 §8.1.2 ¶?]" {
-    // §8.1.2 calls for "a limited lifetime" on Retry tokens; quic_zig
+    // §8.1.2 calls for "a limited lifetime" on Retry tokens; quic
     // surfaces this as an explicit `.expired` result. Old tokens are
     // unforgeable forever (AEAD), but stale ones MUST NOT validate.
     const token = try retry_token.minted(.{
@@ -472,7 +472,7 @@ test "MUST NOT accept a Retry token whose QUIC version field disagrees with the 
 }
 
 test "NORMATIVE Retry tokens are opaque to the client (random nonce yields distinct ciphertexts) [RFC9000 §8.1.2 ¶6]" {
-    // §8.1.2 ¶6 calls Retry tokens "opaque" to the peer. quic_zig's
+    // §8.1.2 ¶6 calls Retry tokens "opaque" to the peer. quic's
     // implementation lifts that to a stronger property: two tokens
     // minted with byte-identical inputs differ on the wire because of
     // the per-token random AEAD nonce. The peer cannot cluster
@@ -599,7 +599,7 @@ test "MUST NOT accept a NEW_TOKEN before its issued-at time [RFC9000 §8.1.3 ¶?
 test "NORMATIVE Retry-token-shaped bytes do not pass NEW_TOKEN validate (domain separation) [RFC9000 §8.1.3 ¶?]" {
     // §8.1.3 leaves token format to implementations, but a
     // confused-deputy crossover (Retry token presented in the
-    // NEW_TOKEN field, or vice versa) MUST NOT validate. quic_zig
+    // NEW_TOKEN field, or vice versa) MUST NOT validate. quic
     // enforces this with distinct AEAD AAD strings; the property
     // here is the asymmetry: a 96-byte blob shaped like a Retry
     // token cannot pass through new_token.validate.
@@ -678,7 +678,7 @@ test "MUST NOT mint validator state from a stray PATH_RESPONSE [RFC9000 §8.2 ¶
 
 test "MUST fail path validation when the challenge is unanswered for the timeout window [RFC9000 §8.2.4 ¶1]" {
     // §8.2.4 ¶1: "Endpoints SHOULD abandon path validation based on
-    // a timer." quic_zig surfaces this as an explicit `.failed`
+    // a timer." quic surfaces this as an explicit `.failed`
     // transition driven by `tick(now_us)` once now exceeds
     // `pending_at_us + timeout_us`. The caller computes timeout as
     // `3 * PTO`.
@@ -732,7 +732,7 @@ test "MUST NOT permit a fourth datagram-equivalent send on a 1200-byte unvalidat
 
 test "MUST lift the anti-amp cap once the path is validated [RFC9000 §8.1 ¶?]" {
     // §8.1: once address validation completes the cap no longer
-    // applies. quic_zig surfaces "no cap" as `maxInt(u64)` so the
+    // applies. quic surfaces "no cap" as `maxInt(u64)` so the
     // upstream send loop never short-circuits on anti-amp post-
     // validation.
     var p = path_mod.Path.init(
@@ -914,7 +914,7 @@ test "MUST reset per-path RTT and congestion controller after migration [RFC9000
 
 test "MAY roll back a failed migration to the prior 4-tuple [RFC9000 §9.4 ¶?]" {
     // RFC 9000 §9.4 leaves the failure-handling policy to
-    // implementations. quic_zig snapshots the pre-migration state and
+    // implementations. quic snapshots the pre-migration state and
     // exposes `rollbackFailedMigration` so a validator timeout on
     // the new path can return the connection to its prior 4-tuple
     // rather than tearing down. Pin the optional behavior by
@@ -949,17 +949,17 @@ test "MAY roll back a failed migration to the prior 4-tuple [RFC9000 §9.4 ¶?]"
 /// signal without poking at internal state. 64 slots is generous —
 /// a vanilla v1 handshake datagram emits well under that.
 const QlogPreHandshakeRecorder = struct {
-    events: [64]quic_zig.QlogEvent = undefined,
+    events: [64]quic.QlogEvent = undefined,
     count: usize = 0,
 
-    fn callback(user_data: ?*anyopaque, event: quic_zig.QlogEvent) void {
+    fn callback(user_data: ?*anyopaque, event: quic.QlogEvent) void {
         const self: *QlogPreHandshakeRecorder = @ptrCast(@alignCast(user_data.?));
         if (self.count >= self.events.len) return;
         self.events[self.count] = event;
         self.count += 1;
     }
 
-    fn first(self: *const QlogPreHandshakeRecorder, name: quic_zig.QlogEventName) ?quic_zig.QlogEvent {
+    fn first(self: *const QlogPreHandshakeRecorder, name: quic.QlogEventName) ?quic.QlogEvent {
         for (self.events[0..self.count]) |ev| if (ev.name == name) return ev;
         return null;
     }
@@ -973,7 +973,7 @@ test "MUST reject a peer migration attempt before the handshake confirms [RFC900
     // off-path observer that has glimpsed the Initial keys redirect
     // the server's response stream to a chosen 4-tuple.
     //
-    // quic_zig's policy: drop the datagram entirely (no anti-amp credit,
+    // quic's policy: drop the datagram entirely (no anti-amp credit,
     // no PATH_CHALLENGE minted, peer_addr unchanged on the existing
     // path) and surface a `migration_path_failed` qlog event with
     // reason `pre_handshake`. The connection stays open — the peer
@@ -1026,8 +1026,8 @@ test "MUST reject a peer migration attempt before the handshake confirms [RFC900
     // Round 3 (the test): client polls a Handshake-level packet
     // (Finished). Feed it FROM A DIFFERENT `from` address.
     const now2: u64 = 3_000;
-    const migration_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
-    try std.testing.expect(!quic_zig.conn.path.Address.eql(migration_addr, pair.peer_addr));
+    const migration_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
+    try std.testing.expect(!quic.conn.path.Address.eql(migration_addr, pair.peer_addr));
 
     var fed_any = false;
     while (try pair.client.conn.poll(&rx, now2)) |len| {
@@ -1039,7 +1039,7 @@ test "MUST reject a peer migration attempt before the handshake confirms [RFC900
     // Drop semantics — connection must NOT have closed. A migration-
     // gate firing is graceful: the peer can still recover by sending
     // again from the original address.
-    try std.testing.expectEqual(@as(?quic_zig.CloseEvent, null), srv_conn.closeEvent());
+    try std.testing.expectEqual(@as(?quic.CloseEvent, null), srv_conn.closeEvent());
 
     // The load-bearing assertion: a `migration_path_failed` qlog
     // event with reason `pre_handshake` was emitted. This is the
@@ -1051,7 +1051,7 @@ test "MUST reject a peer migration attempt before the handshake confirms [RFC900
     const evt = recorder.first(.migration_path_failed) orelse
         return error.ExpectedMigrationPathFailedEvent;
     try std.testing.expectEqual(
-        @as(?quic_zig.QlogMigrationFailReason, .pre_handshake),
+        @as(?quic.QlogMigrationFailReason, .pre_handshake),
         evt.migration_fail_reason,
     );
 }

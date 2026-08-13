@@ -1,4 +1,4 @@
-//! Echo client — the canonical first-hour quic_zig client example,
+//! Echo client — the canonical first-hour quic client example,
 //! paired with `echo_server.zig`.
 //!
 //! ```sh
@@ -9,11 +9,11 @@
 //!
 //! The shape to copy for your own client:
 //!
-//!  1. `quic_zig.Client.connect` builds the TLS context + a
+//!  1. `quic.Client.connect` builds the TLS context + a
 //!     ready-to-tick `Connection` (here with `insecure_skip_verify`
 //!     because the demo server uses a self-signed test cert — drop
 //!     that for anything real).
-//!  2. `quic_zig.transport.runUdpClient` owns the socket and the
+//!  2. `quic.transport.runUdpClient` owns the socket and the
 //!     advance/receive/tick loop; it returns when the connection
 //!     closes.
 //!  3. ALL application logic lives in the `on_iteration` hook — a
@@ -32,7 +32,7 @@
 //! an error condition.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("echo_common.zig");
 
 /// Payload for the stream leg of the round-trip.
@@ -73,7 +73,7 @@ pub const EchoFlow = struct {
     /// loop iteration on the loop thread, after inbound datagrams are
     /// handled and the clock ticked; anything queued here ships on
     /// the very next outbox drain.
-    pub fn onIteration(ctx: ?*anyopaque, client: *quic_zig.Client, now_us: u64) anyerror!void {
+    pub fn onIteration(ctx: ?*anyopaque, client: *quic.Client, now_us: u64) anyerror!void {
         const flow: *EchoFlow = @ptrCast(@alignCast(ctx.?));
         if (flow.stage == .done) return;
         if (now_us > flow.deadline_us) return error.EchoTimedOut;
@@ -212,7 +212,7 @@ pub fn runPayload(
     const reply = try allocator.alloc(u8, payload.len);
     defer allocator.free(reply);
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -235,7 +235,7 @@ pub fn runPayload(
         .payload = payload,
         .reply = reply,
     };
-    try quic_zig.transport.runUdpClient(&client, .{
+    try quic.transport.runUdpClient(&client, .{
         .target = target,
         .io = io,
         // Demo posture, same as the server: run unprivileged.

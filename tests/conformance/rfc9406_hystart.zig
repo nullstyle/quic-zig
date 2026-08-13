@@ -1,7 +1,7 @@
 //! RFC 9406 — HyStart++: Modified Slow Start for TCP (applied to QUIC).
 //!
-//! Pins the slow-start-exit behavior quic_zig implements in
-//! `quic_zig.conn.hystart`, shared by both congestion controllers.
+//! Pins the slow-start-exit behavior quic implements in
+//! `quic.conn.hystart`, shared by both congestion controllers.
 //! The state machine's own edge cases are unit-tested next to the
 //! implementation; this suite carries the RFC-traceable claims and
 //! checks that both `NewReno` and `Cubic` honour them through the
@@ -29,14 +29,14 @@
 //!
 //! Out of scope here:
 //!   RFC9406 §4.1 (the TCP-specific "limited slow start" interaction) —
-//!   QUIC's sender is byte-based and quic_zig applies HyStart++ on top
+//!   QUIC's sender is byte-based and quic applies HyStart++ on top
 //!   of the RFC 9002 §7.3 slow-start branch directly.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const congestion = quic_zig.conn.congestion;
-const hystart = quic_zig.conn.hystart;
+const congestion = quic.conn.congestion;
+const hystart = quic.conn.hystart;
 const CongestionController = congestion.CongestionController;
 
 /// Drive one full round of `samples` RTT observations at `rtt_us`,

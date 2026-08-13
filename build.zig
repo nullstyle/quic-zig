@@ -161,16 +161,16 @@ pub fn build(b: *std.Build) void {
     const boringssl_dep = boringsslDependency(b, target, optimize, bssl_fwd);
     const boringssl_mod = boringssl_dep.module("boringssl");
 
-    const quic_zig_mod = b.addModule("quic_zig", .{
+    const quic_mod = b.addModule("quic", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    quic_zig_mod.addImport("boringssl", boringssl_mod);
+    quic_mod.addImport("boringssl", boringssl_mod);
 
-    // Export the exact boringssl module instance quic_zig is compiled
-    // against so consumers can name types that unify with quic_zig's
+    // Export the exact boringssl module instance quic is compiled
+    // against so consumers can name types that unify with quic's
     // API surface — e.g. constructing a `boringssl.tls.Context` for
     // `Client.Config.tls_context_override` (private-CA pinning, custom
     // session-ticket capture). A consumer that declared its own
@@ -185,7 +185,7 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", manifest.version);
     const build_options_mod = build_options.createModule();
-    quic_zig_mod.addImport("build_options", build_options_mod);
+    quic_mod.addImport("build_options", build_options_mod);
 
     // Everything below is development-only surface: test suites, the
     // QNS endpoint, examples, docs, interop tooling, benchmarks. When
@@ -219,10 +219,10 @@ pub fn build(b: *std.Build) void {
         "Build the unit-test binary with the LLVM backend. Required for a meaningful `--fuzz` run, because only LLVM emits the sancov coverage sections the fuzzer reads.",
     );
 
-    const test_step = b.step("test", "Run quic_zig tests");
+    const test_step = b.step("test", "Run quic tests");
 
     const unit_tests = b.addTest(.{
-        .root_module = quic_zig_mod,
+        .root_module = quic_mod,
         .use_llvm = use_llvm_for_tests,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
@@ -230,14 +230,14 @@ pub fn build(b: *std.Build) void {
 
     // Cross-cutting integration tests live in tests/. They have
     // their own module so they can `@embedFile` test data without
-    // shipping it inside the published `quic_zig` package.
+    // shipping it inside the published `quic` package.
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    tests_mod.addImport("quic_zig", quic_zig_mod);
+    tests_mod.addImport("quic", quic_mod);
     tests_mod.addImport("boringssl", boringssl_mod);
     const integration_tests = b.addTest(.{ .root_module = tests_mod });
     const run_integration_tests = b.addRunArtifact(integration_tests);
@@ -276,7 +276,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    conformance_mod.addImport("quic_zig", quic_zig_mod);
+    conformance_mod.addImport("quic", quic_mod);
     conformance_mod.addImport("boringssl", boringssl_mod);
     const conformance_tests = b.addTest(.{
         .root_module = conformance_mod,
@@ -285,7 +285,7 @@ pub fn build(b: *std.Build) void {
     const run_conformance_tests = b.addRunArtifact(conformance_tests);
     test_step.dependOn(&run_conformance_tests.step);
 
-    const conformance_step = b.step("conformance", "Run quic_zig RFC-traceable conformance suites");
+    const conformance_step = b.step("conformance", "Run quic RFC-traceable conformance suites");
     conformance_step.dependOn(&run_conformance_tests.step);
 
     const qns_mod = b.createModule(.{
@@ -294,7 +294,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    qns_mod.addImport("quic_zig", quic_zig_mod);
+    qns_mod.addImport("quic", quic_mod);
     qns_mod.addImport("boringssl", boringssl_mod);
 
     const qns_exe = b.addExecutable(.{
@@ -321,7 +321,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    alt_addr_example_mod.addImport("quic_zig", quic_zig_mod);
+    alt_addr_example_mod.addImport("quic", quic_mod);
     alt_addr_example_mod.addImport("boringssl", boringssl_mod);
 
     const alt_addr_example_exe = b.addExecutable(.{
@@ -349,7 +349,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    echo_server_mod.addImport("quic_zig", quic_zig_mod);
+    echo_server_mod.addImport("quic", quic_mod);
     const echo_server_exe = b.addExecutable(.{
         .name = "echo-server-example",
         .root_module = echo_server_mod,
@@ -363,7 +363,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    echo_client_mod.addImport("quic_zig", quic_zig_mod);
+    echo_client_mod.addImport("quic", quic_mod);
     const echo_client_exe = b.addExecutable(.{
         .name = "echo-client-example",
         .root_module = echo_client_mod,
@@ -381,7 +381,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    echo_smoke_mod.addImport("quic_zig", quic_zig_mod);
+    echo_smoke_mod.addImport("quic", quic_mod);
     const echo_smoke_exe = b.addExecutable(.{
         .name = "echo-smoke",
         .root_module = echo_smoke_mod,
@@ -402,7 +402,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    goodput_smoke_mod.addImport("quic_zig", quic_zig_mod);
+    goodput_smoke_mod.addImport("quic", quic_mod);
     const goodput_smoke_exe = b.addExecutable(.{
         .name = "goodput-smoke",
         .root_module = goodput_smoke_mod,
@@ -431,7 +431,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    foreign_loop_example_mod.addImport("quic_zig", quic_zig_mod);
+    foreign_loop_example_mod.addImport("quic", quic_mod);
 
     const foreign_loop_example_exe = b.addExecutable(.{
         .name = "foreign-loop-embedder-example",
@@ -444,18 +444,18 @@ pub fn build(b: *std.Build) void {
     const run_foreign_loop_example_tests = b.addRunArtifact(foreign_loop_example_tests);
     test_step.dependOn(&run_foreign_loop_example_tests.step);
 
-    // Zig autodocs for the public quic_zig module. `zig build docs`
+    // Zig autodocs for the public quic module. `zig build docs`
     // emits the static site into zig-out/docs (open index.html).
     const docs_obj = b.addObject(.{
-        .name = "quic_zig",
-        .root_module = quic_zig_mod,
+        .name = "quic",
+        .root_module = quic_mod,
     });
     const install_docs = b.addInstallDirectory(.{
         .source_dir = docs_obj.getEmittedDocs(),
         .install_dir = .prefix,
         .install_subdir = "docs",
     });
-    const docs_step = b.step("docs", "Generate quic_zig API documentation (Zig autodocs)");
+    const docs_step = b.step("docs", "Generate quic API documentation (Zig autodocs)");
     docs_step.dependOn(&install_docs.step);
 
     const interop_tool_mod = b.createModule(.{
@@ -481,7 +481,7 @@ pub fn build(b: *std.Build) void {
 
     // Benchmark report comparison: reads two bench/report.zig JSON
     // reports and fails on regressions (median beyond tolerance AND
-    // beyond the 3xMAD noise floor). Pure std tool, no quic_zig import.
+    // beyond the 3xMAD noise floor). Pure std tool, no quic import.
     const bench_compare_mod = b.createModule(.{
         .root_source_file = b.path("tools/bench_compare.zig"),
         .target = target,
@@ -522,14 +522,14 @@ pub fn build(b: *std.Build) void {
     const bench_boringssl_dep = boringsslDependency(b, target, bench_optimize, bssl_fwd);
     const bench_boringssl_mod = bench_boringssl_dep.module("boringssl");
 
-    const bench_quic_zig_mod = b.createModule(.{
+    const bench_quic_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = bench_optimize,
         .sanitize_c = sanitize_c,
     });
-    bench_quic_zig_mod.addImport("boringssl", bench_boringssl_mod);
-    bench_quic_zig_mod.addImport("build_options", build_options_mod);
+    bench_quic_mod.addImport("boringssl", bench_boringssl_mod);
+    bench_quic_mod.addImport("build_options", build_options_mod);
 
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("bench/main.zig"),
@@ -537,7 +537,7 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .sanitize_c = sanitize_c,
     });
-    bench_mod.addImport("quic_zig", bench_quic_zig_mod);
+    bench_mod.addImport("quic", bench_quic_mod);
     bench_mod.addImport("boringssl", bench_boringssl_mod);
 
     const bench_exe = b.addExecutable(.{
@@ -546,7 +546,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_bench = b.addRunArtifact(bench_exe);
     run_bench.addPassthruArgs();
-    const bench_step = b.step("bench", "Run quic_zig microbenchmarks");
+    const bench_step = b.step("bench", "Run quic microbenchmarks");
     bench_step.dependOn(&run_bench.step);
 
     // End-to-end benchmarks: whole-Connection goodput, handshakes/sec,
@@ -559,7 +559,7 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .sanitize_c = sanitize_c,
     });
-    bench_e2e_mod.addImport("quic_zig", bench_quic_zig_mod);
+    bench_e2e_mod.addImport("quic", bench_quic_mod);
     bench_e2e_mod.addImport("boringssl", bench_boringssl_mod);
 
     const bench_e2e_exe = b.addExecutable(.{
@@ -568,7 +568,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_bench_e2e = b.addRunArtifact(bench_e2e_exe);
     run_bench_e2e.addPassthruArgs();
-    const bench_e2e_step = b.step("bench-e2e", "Run quic_zig end-to-end benchmarks (goodput, handshakes, impairment)");
+    const bench_e2e_step = b.step("bench-e2e", "Run quic end-to-end benchmarks (goodput, handshakes, impairment)");
     bench_e2e_step.dependOn(&run_bench_e2e.step);
 
     const bench_tests_mod = b.createModule(.{
@@ -577,7 +577,7 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .sanitize_c = sanitize_c,
     });
-    bench_tests_mod.addImport("quic_zig", bench_quic_zig_mod);
+    bench_tests_mod.addImport("quic", bench_quic_mod);
     bench_tests_mod.addImport("boringssl", bench_boringssl_mod);
     const bench_tests = b.addTest(.{ .root_module = bench_tests_mod });
     const run_bench_tests = b.addRunArtifact(bench_tests);

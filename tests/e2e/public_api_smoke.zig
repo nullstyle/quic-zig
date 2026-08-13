@@ -6,7 +6,7 @@
 //! depend on.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 fn requireDecl(comptime T: type, comptime name: []const u8) void {
     if (!@hasDecl(T, name)) @compileError("missing public API declaration: " ++ name);
@@ -14,7 +14,7 @@ fn requireDecl(comptime T: type, comptime name: []const u8) void {
 
 test "stable root and namespace exports resolve" {
     comptime {
-        const Root = quic_zig;
+        const Root = quic;
         for (.{
             "Server",
             "Client",
@@ -42,7 +42,7 @@ test "stable root and namespace exports resolve" {
             "EarlyDataStatus",
         }) |name| requireDecl(Root, name);
 
-        const Transport = quic_zig.transport;
+        const Transport = quic.transport;
         for (.{
             "runUdpServer",
             "RunUdpOptions",
@@ -58,41 +58,41 @@ test "stable root and namespace exports resolve" {
 
 test "stable wrapper config types resolve" {
     comptime {
-        _ = quic_zig.Server.Config;
-        _ = quic_zig.Client.Config;
-        _ = quic_zig.PreferredAddressConfig;
-        _ = quic_zig.transport.RunUdpOptions;
-        _ = quic_zig.transport.RunUdpClientOptions;
+        _ = quic.Server.Config;
+        _ = quic.Client.Config;
+        _ = quic.PreferredAddressConfig;
+        _ = quic.transport.RunUdpOptions;
+        _ = quic.transport.RunUdpClientOptions;
     }
 }
 
 test "stable Connection cycle, lifecycle, stream, and datagram methods keep their callable shape" {
-    const Conn = quic_zig.Connection;
+    const Conn = quic.Connection;
 
-    const handle: *const fn (*Conn, []u8, ?quic_zig.Address, u64) anyerror!void = Conn.handle;
-    const handle_with_ecn: *const fn (*Conn, []u8, ?quic_zig.Address, quic_zig.transport.EcnCodepoint, u64) anyerror!void = Conn.handleWithEcn;
-    const poll_datagram: *const fn (*Conn, []u8, u64) anyerror!?quic_zig.OutgoingDatagram = Conn.pollDatagram;
+    const handle: *const fn (*Conn, []u8, ?quic.Address, u64) anyerror!void = Conn.handle;
+    const handle_with_ecn: *const fn (*Conn, []u8, ?quic.Address, quic.transport.EcnCodepoint, u64) anyerror!void = Conn.handleWithEcn;
+    const poll_datagram: *const fn (*Conn, []u8, u64) anyerror!?quic.OutgoingDatagram = Conn.pollDatagram;
     const tick: *const fn (*Conn, u64) anyerror!void = Conn.tick;
-    const poll_event: *const fn (*Conn) ?quic_zig.ConnectionEvent = Conn.pollEvent;
-    const next_timer_deadline: *const fn (*const Conn, u64) ?quic_zig.TimerDeadline = Conn.nextTimerDeadline;
+    const poll_event: *const fn (*Conn) ?quic.ConnectionEvent = Conn.pollEvent;
+    const next_timer_deadline: *const fn (*const Conn, u64) ?quic.TimerDeadline = Conn.nextTimerDeadline;
     const is_closed: *const fn (*const Conn) bool = Conn.isClosed;
-    const close_state: *const fn (*const Conn) quic_zig.CloseState = Conn.closeState;
-    const phase: *const fn (*const Conn) quic_zig.ConnectionPhase = Conn.phase;
+    const close_state: *const fn (*const Conn) quic.CloseState = Conn.closeState;
+    const phase: *const fn (*const Conn) quic.ConnectionPhase = Conn.phase;
 
-    const open_bidi: *const fn (*Conn, u64) anyerror!*quic_zig.conn.state.Stream = Conn.openBidi;
-    const open_uni: *const fn (*Conn, u64) anyerror!*quic_zig.conn.state.Stream = Conn.openUni;
-    const open_next_bidi: *const fn (*Conn) anyerror!*quic_zig.conn.state.Stream = Conn.openNextBidi;
-    const open_next_uni: *const fn (*Conn) anyerror!*quic_zig.conn.state.Stream = Conn.openNextUni;
-    const local_stream_type: *const fn (*const Conn, bool) quic_zig.StreamType = Conn.localStreamType;
+    const open_bidi: *const fn (*Conn, u64) anyerror!*quic.conn.state.Stream = Conn.openBidi;
+    const open_uni: *const fn (*Conn, u64) anyerror!*quic.conn.state.Stream = Conn.openUni;
+    const open_next_bidi: *const fn (*Conn) anyerror!*quic.conn.state.Stream = Conn.openNextBidi;
+    const open_next_uni: *const fn (*Conn) anyerror!*quic.conn.state.Stream = Conn.openNextUni;
+    const local_stream_type: *const fn (*const Conn, bool) quic.StreamType = Conn.localStreamType;
     const stream_read: *const fn (*Conn, u64, []u8) anyerror!usize = Conn.streamRead;
-    const stream_read_fin: *const fn (*Conn, u64, []u8) anyerror!quic_zig.StreamReadResult = Conn.streamReadFin;
+    const stream_read_fin: *const fn (*Conn, u64, []u8) anyerror!quic.StreamReadResult = Conn.streamReadFin;
     const stream_write: *const fn (*Conn, u64, []const u8) anyerror!usize = Conn.streamWrite;
     const stream_finish: *const fn (*Conn, u64) anyerror!void = Conn.streamFinish;
     const stream_stop_sending: *const fn (*Conn, u64, u64) anyerror!void = Conn.streamStopSending;
-    const stream_send_stats: *const fn (*const Conn, u64) ?quic_zig.StreamSendStats = Conn.streamSendStats;
-    const stream_recv_state: *const fn (*const Conn, u64) ?quic_zig.StreamRecvState = Conn.streamRecvState;
-    const stream_priority: *const fn (*const Conn, u64) ?quic_zig.StreamPriority = Conn.streamPriority;
-    const stream_set_priority: *const fn (*Conn, u64, quic_zig.StreamPriority) anyerror!void = Conn.streamSetPriority;
+    const stream_send_stats: *const fn (*const Conn, u64) ?quic.StreamSendStats = Conn.streamSendStats;
+    const stream_recv_state: *const fn (*const Conn, u64) ?quic.StreamRecvState = Conn.streamRecvState;
+    const stream_priority: *const fn (*const Conn, u64) ?quic.StreamPriority = Conn.streamPriority;
+    const stream_set_priority: *const fn (*Conn, u64, quic.StreamPriority) anyerror!void = Conn.streamSetPriority;
 
     const begin_graceful_shutdown: *const fn (*Conn) void = Conn.beginGracefulShutdown;
     const graceful_shutdown_active: *const fn (*const Conn) bool = Conn.gracefulShutdownActive;
@@ -101,7 +101,7 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
     const send_datagram: *const fn (*Conn, []const u8) anyerror!void = Conn.sendDatagram;
     const send_datagram_tracked: *const fn (*Conn, []const u8) anyerror!u64 = Conn.sendDatagramTracked;
     const receive_datagram: *const fn (*Conn, []u8) ?usize = Conn.receiveDatagram;
-    const receive_datagram_info: *const fn (*Conn, []u8) ?quic_zig.IncomingDatagram = Conn.receiveDatagramInfo;
+    const receive_datagram_info: *const fn (*Conn, []u8) ?quic.IncomingDatagram = Conn.receiveDatagramInfo;
     const max_datagram_payload: *const fn (*const Conn) anyerror!usize = Conn.maxDatagramPayload;
 
     _ = .{
@@ -143,24 +143,24 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
 
 test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
     comptime {
-        const Event = quic_zig.ConnectionEvent;
-        _ = quic_zig.DatagramSendEvent;
-        _ = quic_zig.FlowBlockedInfo;
-        _ = quic_zig.FlowBlockedKind;
-        _ = quic_zig.FlowBlockedSource;
-        _ = quic_zig.ConnectionIdReplenishInfo;
-        _ = quic_zig.StreamOpenedInfo;
+        const Event = quic.ConnectionEvent;
+        _ = quic.DatagramSendEvent;
+        _ = quic.FlowBlockedInfo;
+        _ = quic.FlowBlockedKind;
+        _ = quic.FlowBlockedSource;
+        _ = quic.ConnectionIdReplenishInfo;
+        _ = quic.StreamOpenedInfo;
 
-        if (std.meta.fieldInfo(Event, .datagram_acked).type != quic_zig.DatagramSendEvent) {
+        if (std.meta.fieldInfo(Event, .datagram_acked).type != quic.DatagramSendEvent) {
             @compileError("ConnectionEvent.datagram_acked payload alias drifted");
         }
-        if (std.meta.fieldInfo(Event, .flow_blocked).type != quic_zig.FlowBlockedInfo) {
+        if (std.meta.fieldInfo(Event, .flow_blocked).type != quic.FlowBlockedInfo) {
             @compileError("ConnectionEvent.flow_blocked payload alias drifted");
         }
-        if (std.meta.fieldInfo(Event, .connection_ids_needed).type != quic_zig.ConnectionIdReplenishInfo) {
+        if (std.meta.fieldInfo(Event, .connection_ids_needed).type != quic.ConnectionIdReplenishInfo) {
             @compileError("ConnectionEvent.connection_ids_needed payload alias drifted");
         }
-        if (std.meta.fieldInfo(Event, .stream_opened).type != quic_zig.StreamOpenedInfo) {
+        if (std.meta.fieldInfo(Event, .stream_opened).type != quic.StreamOpenedInfo) {
             @compileError("ConnectionEvent.stream_opened payload alias drifted");
         }
         // `handshake_established` is a void one-shot; pin its presence.
@@ -169,7 +169,7 @@ test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
 }
 
 test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" {
-    const Conn = quic_zig.Connection;
+    const Conn = quic.Connection;
     comptime {
         requireDecl(Conn, "negotiatedAlpn");
         requireDecl(Conn, "earlyDataStatus");
@@ -177,18 +177,18 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         requireDecl(Conn, "setEarlyDataEnabled");
         // Wrapper config: ticket capture (client) and 0-RTT replay
         // context + proactive CID replenish (server).
-        _ = std.meta.fieldInfo(quic_zig.Client.Config, .new_session_callback);
-        _ = std.meta.fieldInfo(quic_zig.Client.Config, .resumption_state);
-        _ = std.meta.fieldInfo(quic_zig.Server.Config, .early_data);
-        _ = quic_zig.Server.EarlyData.disabled;
-        _ = std.meta.fieldInfo(quic_zig.Server.Config, .early_data_application_context);
-        _ = std.meta.fieldInfo(quic_zig.Server.Config, .auto_replenish_connection_ids);
-        _ = std.meta.fieldInfo(quic_zig.Server.Config, .max_auto_replenish_cids);
+        _ = std.meta.fieldInfo(quic.Client.Config, .new_session_callback);
+        _ = std.meta.fieldInfo(quic.Client.Config, .resumption_state);
+        _ = std.meta.fieldInfo(quic.Server.Config, .early_data);
+        _ = quic.Server.EarlyData.disabled;
+        _ = std.meta.fieldInfo(quic.Server.Config, .early_data_application_context);
+        _ = std.meta.fieldInfo(quic.Server.Config, .auto_replenish_connection_ids);
+        _ = std.meta.fieldInfo(quic.Server.Config, .max_auto_replenish_cids);
         // Typed migration refusals stay in the public error set.
         // Named via the root alias on purpose: that is the path
         // embedders composing their own error sets should use, so
         // pinning it here keeps it from being dropped.
-        const E = quic_zig.ConnectionError;
+        const E = quic.ConnectionError;
         if (@as(E, error.MigrationPreHandshake) != error.MigrationPreHandshake or
             @as(E, error.MigrationValidationPending) != error.MigrationValidationPending or
             @as(E, error.MigrationNoFreshPeerCid) != error.MigrationNoFreshPeerCid)
@@ -201,7 +201,7 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
 }
 
 test "server hostability surface keeps its callable shape" {
-    const Server = quic_zig.Server;
+    const Server = quic.Server;
     comptime {
         // Embedder-owned per-connection pointer on the slot.
         if (std.meta.fieldInfo(Server.Slot, .user_data).type != ?*anyopaque) {
@@ -211,17 +211,17 @@ test "server hostability surface keeps its callable shape" {
         _ = Server.ConnectionWillCloseCallback;
         requireDecl(Server, "nextTimerDeadline");
     }
-    const next_deadline: *const fn (*const Server, u64) ?quic_zig.TimerDeadline = Server.nextTimerDeadline;
+    const next_deadline: *const fn (*const Server, u64) ?quic.TimerDeadline = Server.nextTimerDeadline;
     _ = next_deadline;
 
     // Per-iteration application hooks on both packaged loops.
-    const server_hook_field = comptime std.meta.fieldInfo(quic_zig.transport.RunUdpOptions, .on_iteration);
-    const client_hook_field = comptime std.meta.fieldInfo(quic_zig.transport.RunUdpClientOptions, .on_iteration);
+    const server_hook_field = comptime std.meta.fieldInfo(quic.transport.RunUdpOptions, .on_iteration);
+    const client_hook_field = comptime std.meta.fieldInfo(quic.transport.RunUdpClientOptions, .on_iteration);
     comptime {
-        if (server_hook_field.type != ?*const fn (?*anyopaque, *quic_zig.Server, u64) anyerror!void) {
+        if (server_hook_field.type != ?*const fn (?*anyopaque, *quic.Server, u64) anyerror!void) {
             @compileError("RunUdpOptions.on_iteration hook signature drifted");
         }
-        if (client_hook_field.type != ?*const fn (?*anyopaque, *quic_zig.Client, u64) anyerror!void) {
+        if (client_hook_field.type != ?*const fn (?*anyopaque, *quic.Client, u64) anyerror!void) {
             @compileError("RunUdpClientOptions.on_iteration hook signature drifted");
         }
     }

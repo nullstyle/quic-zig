@@ -28,7 +28,7 @@ pub const MaxStreamDataItem = struct {
 
 /// One queued NEW_TOKEN frame (RFC 9000 §19.7). The token payload is
 /// stored inline as a fixed 96-byte buffer (matches
-/// `conn.new_token.max_token_len`) plus a `len`. quic_zig mints a single
+/// `conn.new_token.max_token_len`) plus a `len`. quic mints a single
 /// fixed-shape format so a heap allocation isn't needed.
 pub const NewTokenItem = struct {
     /// Maximum supported NEW_TOKEN length on the wire. Matches
@@ -102,7 +102,7 @@ pub const PendingFrameQueues = struct {
 
     // -- NEW_TOKEN (RFC 9000 §19.7) --
     /// NEW_TOKEN payload the server has queued for emission. Single
-    /// slot — quic_zig emits at most one NEW_TOKEN per session by
+    /// slot — quic emits at most one NEW_TOKEN per session by
     /// default, so the queue is a fixed buffer holding the 96-byte
     /// AEAD-sealed token plus its length. `Connection.queueNewToken`
     /// stages bytes here; the application-level drain in

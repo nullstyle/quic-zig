@@ -1,6 +1,6 @@
-//! quic_zig.transport - UDP socket plumbing.
+//! quic.transport - UDP socket plumbing.
 //!
-//! quic_zig is transport-agnostic at the protocol layer: connections
+//! quic is transport-agnostic at the protocol layer: connections
 //! consume and produce datagrams, and *something* shuttles those
 //! datagrams to a UDP socket. This module collects helpers for that
 //! layer: socket-option tuning, ECN cmsg helpers, and opinionated
@@ -37,7 +37,7 @@ pub const default_server_recv_buffer_bytes = socket_opts.default_server_recv_buf
 /// Re-export of `socket_opts.default_server_send_buffer_bytes` (4 MiB).
 pub const default_server_send_buffer_bytes = socket_opts.default_server_send_buffer_bytes;
 /// Re-export of `socket_opts.EcnCodepoint` — RFC 3168 §5 codepoints
-/// quic_zig translates between `IP_TOS` / `IPV6_TCLASS` and the QUIC
+/// quic translates between `IP_TOS` / `IPV6_TCLASS` and the QUIC
 /// state machine's per-PN-space ECN counters.
 pub const EcnCodepoint = socket_opts.EcnCodepoint;
 /// Re-export of `socket_opts.setEcnSendMarking`.

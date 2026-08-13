@@ -4,8 +4,8 @@
 //! the adopted BBR document; bbr-06 is cited below where a rule exists
 //! only there).
 //!
-//! Pins the sampler quic_zig exposes as
-//! `quic_zig.conn.delivery_rate.Estimator`, driven unit-level with
+//! Pins the sampler quic exposes as
+//! `quic.conn.delivery_rate.Estimator`, driven unit-level with
 //! hand-stamped packets and microsecond timestamps — the same style as
 //! rfc9438_cubic.zig. The Connection-level call-site gates (only
 //! in-flight application/0-RTT packets are stamped; pure ACKs never
@@ -43,9 +43,9 @@
 //!   estimator never sees non-in-flight packets).
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
-const delivery_rate = quic_zig.conn.delivery_rate;
-const sent_packets = quic_zig.conn.sent_packets;
+const quic = @import("quic");
+const delivery_rate = quic.conn.delivery_rate;
+const sent_packets = quic.conn.sent_packets;
 
 const Estimator = delivery_rate.Estimator;
 
@@ -166,7 +166,7 @@ test "NORMATIVE an interval shorter than min_rtt yields no reliable rate [draft-
 }
 
 test "MAY account delivery in octets [draft-cheng-iccrg-delivery-rate-estimation-02 §2.2]" {
-    // The draft permits packet- or octet-granularity; quic_zig uses
+    // The draft permits packet- or octet-granularity; quic uses
     // octets, matching the byte-based congestion controller surface.
     var est: Estimator = .{};
     var p = packet(1, 1_000, 977); // deliberately not a round packet count

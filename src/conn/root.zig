@@ -1,6 +1,6 @@
-//! quic_zig.conn — per-connection state machine.
+//! quic.conn — per-connection state machine.
 //!
-//! The bulk of quic_zig lives here: the `Connection` type itself
+//! The bulk of quic lives here: the `Connection` type itself
 //! (handshake driving, packet protection, streams, datagrams,
 //! migration, multipath, key updates) and its supporting subsystems
 //! split across submodules.

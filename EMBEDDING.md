@@ -2,15 +2,15 @@
 
 This guide covers the stable embedding surfaces:
 
-- `quic_zig.Server` for accepting QUIC connections.
-- `quic_zig.Client` for dialing QUIC peers.
-- `quic_zig.transport.runUdpServer` and `runUdpClient` for simple
+- `quic.Server` for accepting QUIC connections.
+- `quic.Client` for dialing QUIC peers.
+- `quic.transport.runUdpServer` and `runUdpClient` for simple
   `std.Io` UDP loops.
-- `quic_zig.Connection` for custom event loops, batched I/O, qlog
+- `quic.Connection` for custom event loops, batched I/O, qlog
   routing, and application-specific scheduling.
 
 quic-zig is pre-1.0, so APIs may change between 0.x releases. The
-module name in Zig code is `quic_zig`.
+module name in Zig code is `quic`.
 
 ## Package Setup
 
@@ -18,17 +18,17 @@ In a consuming `build.zig`, import the module from the package
 dependency:
 
 ```zig
-const quic_zig_dep = b.dependency("quic_zig", .{
+const quic_dep = b.dependency("quic", .{
     .target = target,
     .optimize = optimize,
 });
-exe.root_module.addImport("quic_zig", quic_zig_dep.module("quic_zig"));
+exe.root_module.addImport("quic", quic_dep.module("quic"));
 ```
 
 Application code then uses:
 
 ```zig
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 ```
 
 ## Server Wrapper
@@ -39,7 +39,7 @@ chooses the socket model and application protocol behavior.
 
 ```zig
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -55,10 +55,10 @@ pub fn run(
     // (see the key-persistence note under "Required Configuration"
     // below). A real deployment loads this key from durable storage
     // and only generates+stores it on first run.
-    var retry_key: quic_zig.RetryTokenKey = undefined;
+    var retry_key: quic.RetryTokenKey = undefined;
     io.random(&retry_key);
 
-    var server = try quic_zig.Server.init(.{
+    var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = cert_pem,
         .tls_key_pem = key_pem,
@@ -79,7 +79,7 @@ pub fn run(
     });
     defer server.deinit();
 
-    try quic_zig.transport.runUdpServer(&server, .{
+    try quic.transport.runUdpServer(&server, .{
         .listen = "0.0.0.0:4433",
         .io = io,
         .shutdown_flag = shutdown,
@@ -105,11 +105,11 @@ directly instead: see "Foreign Event Loops" below.
 
 `Client.connect` owns the client-side TLS setup and initial connection
 ID generation. The returned `client.conn` is the full
-`*quic_zig.Connection`.
+`*quic.Connection`.
 
 ```zig
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 pub fn dial(
     allocator: std.mem.Allocator,
@@ -120,7 +120,7 @@ pub fn dial(
 ) !void {
     const protos = [_][]const u8{"h3"};
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = server_name,
         .alpn_protocols = &protos,
@@ -137,7 +137,7 @@ pub fn dial(
     });
     defer client.deinit();
 
-    try quic_zig.transport.runUdpClient(&client, .{
+    try quic.transport.runUdpClient(&client, .{
         .target = target,
         .io = io,
         .shutdown_flag = shutdown,
@@ -316,7 +316,7 @@ if you have a wake channel, otherwise cap the sleep.
 
 `Server` and `Connection` have no internal locking. In a foreign loop
 *you* are the serializer: no thread but the loop thread may call into
-quic_zig. The pattern is a queue plus a wake fd — producers push work
+quic. The pattern is a queue plus a wake fd — producers push work
 under a mutex and nudge the loop; the loop thread drains the queue and
 is the only caller. A wake means "check the queue", not "one item", so
 N pushes may coalesce into one wake; drain until empty.
@@ -328,7 +328,7 @@ WebTransport, custom protocols), a few helpers remove common boilerplate.
 
 Stream ids encode `(initiator, direction)` in their low two bits (RFC 9000
 §2.1). Rather than compute them by hand, classify with
-`quic_zig.StreamType.fromId(id)` and open the next local-initiated stream
+`quic.StreamType.fromId(id)` and open the next local-initiated stream
 with the role-aware helpers:
 
 ```zig
@@ -338,7 +338,7 @@ const qpack_enc = try conn.openNextUni();
 const qpack_dec = try conn.openNextUni();
 
 // classify a peer-initiated stream seen via streamIterator:
-switch (quic_zig.StreamType.fromId(id)) {
+switch (quic.StreamType.fromId(id)) {
     .client_bidi, .server_bidi => {},
     .client_uni, .server_uni => {},
 }
@@ -381,7 +381,7 @@ currently accept — PMTU-aware and bounded by the peer's
 `max_datagram_frame_size` — so a caller can size buffers up front instead
 of probing for `Error.DatagramTooLarge`.
 
-`Connection.phase()` reports a coarse `quic_zig.ConnectionPhase` —
+`Connection.phase()` reports a coarse `quic.ConnectionPhase` —
 `initial` → `handshake` → `established`, or `closing` / `draining` /
 `closed` — so an embedder can gate its own state machine without inferring
 the epoch from `handshakeDone` and `closeState`.
@@ -455,7 +455,7 @@ tokens stop matching previously issued CIDs.
 
 0-RTT is off by default. To enable it safely:
 
-- Allocate a `quic_zig.tls.AntiReplayTracker` (it must outlive the
+- Allocate a `quic.tls.AntiReplayTracker` (it must outlive the
   `Server`) and set `Server.Config.early_data` to
   `.{ .with_anti_replay = &tracker }`. The union carries the tracker,
   so there is no separate field to remember — which is the point: the
@@ -467,10 +467,10 @@ tokens stop matching previously issued CIDs.
 - Treat bytes where `Connection.streamArrivedInEarlyData(id)` is true as
   replayable. Only idempotent application actions should be accepted.
 
-Client session tickets are re-exported as `quic_zig.Session`:
+Client session tickets are re-exported as `quic.Session`:
 
 ```zig
-var resumed = try quic_zig.Session.fromBytes(client_ctx, ticket_bytes);
+var resumed = try quic.Session.fromBytes(client_ctx, ticket_bytes);
 defer resumed.deinit();
 try conn.setSession(resumed);
 conn.setEarlyDataEnabled(true);
@@ -481,7 +481,7 @@ observed on the ticket-issuing connection, so early-data sends are bounded
 by the resumed session's flow-control limits. BoringSSL does not carry
 peer transport parameters across resumption, so quic-zig persists both in
 one versioned envelope: encode the ticket together with the observed
-parameters via `quic_zig.tls.resumption_state.encode` / `encodeAlloc`,
+parameters via `quic.tls.resumption_state.encode` / `encodeAlloc`,
 and feed the bytes back through `Client.Config.resumption_state` — the
 wrapper decodes the envelope (`tls.resumption_state.decode`), installs
 the session, enables early data, and remembers the peer parameters. On a
@@ -493,7 +493,7 @@ real parameters arrive.
 ## Diagnostics
 
 TLS key logging is available through `boringssl-zig` and re-exported as
-`quic_zig.KeylogCallback`:
+`quic.KeylogCallback`:
 
 ```zig
 try tls_ctx.setKeylogCallback(onKeylogLine);
@@ -506,7 +506,7 @@ events are surfaced through the qlog-style callback:
 conn.setQlogCallback(onQlogEvent, app_state);
 conn.setQlogPacketEvents(true);
 
-fn onQlogEvent(user_data: ?*anyopaque, event: quic_zig.QlogEvent) void {
+fn onQlogEvent(user_data: ?*anyopaque, event: quic.QlogEvent) void {
     _ = user_data;
     recordEvent(event);
 }
@@ -525,12 +525,12 @@ off in low-overhead deployments.
   path-specific CID provisioning, and `Connection.pollDatagram`.
 - Preferred Address is configured with `Server.Config.preferred_address`;
   `runUdpServer` binds the alternate listener sockets for that config.
-- QUIC-LB draft 21 is exposed as `quic_zig.lb` and
+- QUIC-LB draft 21 is exposed as `quic.lb` and
   `Server.Config.quic_lb`. Plaintext, single-pass AES, and four-pass
   Feistel modes are implemented. Enabling it intentionally embeds routing
   information in server-issued CIDs.
 - Alternative Server Address draft 00 exposes codec support, server emit,
-  typed receive events, and helper functions through `quic_zig.alt_addr`
+  typed receive events, and helper functions through `quic.alt_addr`
   and `examples/alt_addr_embedder.zig`.
 
 ## Out Of Scope

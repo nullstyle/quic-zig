@@ -1,10 +1,10 @@
 //! Deterministic stream microbenchmark helpers.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const send_stream = quic_zig.conn.send_stream;
-const recv_stream = quic_zig.conn.recv_stream;
+const send_stream = quic.conn.send_stream;
+const recv_stream = quic.conn.recv_stream;
 
 const SendStream = send_stream.SendStream;
 const RecvStream = recv_stream.RecvStream;

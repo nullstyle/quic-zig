@@ -1,6 +1,6 @@
 //! Phase 5b acceptance: the QUIC handshake completes by exchanging
 //! real Initial/Handshake/1-RTT datagrams between two
-//! `quic_zig.Connection`s — no `peer.inbox` shortcut. CRYPTO frames
+//! `quic.Connection`s — no `peer.inbox` shortcut. CRYPTO frames
 //! flow through `poll` (CRYPTO frame inside Initial/Handshake long-
 //! header packets) and `handle` (decrypt → dispatch CRYPTO → feed
 //! TLS via `provideQuicData`).
@@ -9,7 +9,7 @@
 //! with us over UDP — the in-process pipe is no longer load-bearing.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
@@ -42,9 +42,9 @@ test "client + server handshake via real datagram exchange" {
     });
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     // Crucially: NO `client.peer = server` here. Bytes only move
     // through poll/handle.
@@ -62,7 +62,7 @@ test "client + server handshake via real datagram exchange" {
     // peer_dcid + initial_dcid from the first incoming Initial.
     try server.setLocalScid(&ServerScid);
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .max_idle_timeout_ms = 30_000,
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 18,

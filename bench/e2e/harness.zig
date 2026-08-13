@@ -10,7 +10,7 @@
 //! measure protocol behavior deterministically.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const sim_net = @import("sim_net.zig");
 const counting_allocator = @import("counting_allocator.zig");
@@ -40,7 +40,7 @@ pub const PairOptions = struct {
     initial_max_streams_bidi: u64 = 16,
     /// Congestion controller for both endpoints — the A/B lever the
     /// CUBIC-default flip gate drives. Follows the library default.
-    congestion_control: quic_zig.CongestionAlgorithm = .cubic,
+    congestion_control: quic.CongestionAlgorithm = .cubic,
     /// RFC 9406 HyStart++ on both endpoints (A/B lever).
     hystart: bool = true,
 };
@@ -49,8 +49,8 @@ pub const PairOptions = struct {
 pub const Pair = struct {
     server_tls: boringssl.tls.Context,
     client_tls: boringssl.tls.Context,
-    client: quic_zig.Connection,
-    server: quic_zig.Connection,
+    client: quic.Connection,
+    server: quic.Connection,
 
     pub fn create(allocator: std.mem.Allocator, opts: PairOptions) !*Pair {
         const pair = try allocator.create(Pair);
@@ -76,15 +76,15 @@ pub const Pair = struct {
         // Pair is heap-allocated, so the embedded Connections sit at
         // their final addresses — the in-place constructors wire TLS
         // immediately (there is no bind-later step anymore).
-        try quic_zig.Connection.initClientAt(&pair.client, allocator, pair.client_tls, "localhost");
+        try quic.Connection.initClientAt(&pair.client, allocator, pair.client_tls, "localhost");
         errdefer pair.client.deinit();
-        try quic_zig.Connection.initServerAt(&pair.server, allocator, pair.server_tls);
+        try quic.Connection.initServerAt(&pair.server, allocator, pair.server_tls);
         errdefer pair.server.deinit();
 
         pair.client.peer = &pair.server;
         pair.server.peer = &pair.client;
 
-        const tp: quic_zig.tls.TransportParams = .{
+        const tp: quic.tls.TransportParams = .{
             .initial_max_data = opts.initial_max_data,
             .initial_max_stream_data_bidi_local = opts.initial_max_stream_data,
             .initial_max_stream_data_bidi_remote = opts.initial_max_stream_data,
@@ -130,7 +130,7 @@ pub const Pair = struct {
 pub const GoodputOptions = struct {
     total_bytes: usize = 64 << 20,
     chunk_bytes: usize = 256 << 10,
-    congestion_control: quic_zig.CongestionAlgorithm = .cubic,
+    congestion_control: quic.CongestionAlgorithm = .cubic,
     /// Virtual-clock step per shuttle iteration.
     tick_us: u64 = 100,
     /// Cap on collected per-poll latency samples (8 bytes each).
@@ -322,7 +322,7 @@ pub const ImpairmentOptions = struct {
     total_bytes: usize = 8 << 20,
     chunk_bytes: usize = 256 << 10,
     tick_us: u64 = 100,
-    congestion_control: quic_zig.CongestionAlgorithm = .cubic,
+    congestion_control: quic.CongestionAlgorithm = .cubic,
     /// RFC 9406 HyStart++ on both endpoints (A/B lever).
     hystart: bool = true,
     seed: u64 = 0xbe9c4,

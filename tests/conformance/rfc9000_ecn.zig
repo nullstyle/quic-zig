@@ -1,7 +1,7 @@
 //! RFC 9000 — Explicit Congestion Notification (§13.4).
 //!
 //! Pins the wire-shape, validation, and policy promises of QUIC's
-//! Explicit Congestion Notification (ECN) feedback loop. quic_zig
+//! Explicit Congestion Notification (ECN) feedback loop. quic
 //! reads the IP-layer ECN codepoint off incoming UDP datagrams via
 //! cmsg, accumulates per-PN-space counters of ECT(0) / ECT(1) / CE
 //! markings, and emits those counters in outgoing 0x03 ACK frames.
@@ -12,7 +12,7 @@
 //! ## Coverage
 //!
 //! Covered:
-//!   RFC9000 §13.4   NORMATIVE quic_zig defaults to ECN-on per Connection
+//!   RFC9000 §13.4   NORMATIVE quic defaults to ECN-on per Connection
 //!   RFC9000 §13.4.1 MUST     a §13.4-bearing ACK at type 0x03 carries ECT0/ECT1/CE counts
 //!   RFC9000 §13.4.1 NORMATIVE per-PN-space ECN counters bump from `EcnCodepoint`
 //!   RFC9000 §13.4.2 MUST     ECN counts in an ACK are monotonically non-decreasing
@@ -24,15 +24,15 @@
 //! Visible debt: none — this file is the new ECN baseline.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const handshake_fixture = @import("_handshake_fixture.zig");
 
-const conn_mod = quic_zig.conn;
+const conn_mod = quic.conn;
 const ack_tracker_mod = conn_mod.ack_tracker;
 const pn_space_mod = conn_mod.pn_space;
 const congestion_mod = conn_mod.congestion;
-const frame = quic_zig.frame;
-const transport = quic_zig.transport;
+const frame = quic.frame;
+const transport = quic.transport;
 
 const PnSpace = conn_mod.PnSpace;
 const NewReno = conn_mod.NewReno;
@@ -59,7 +59,7 @@ test "MUST encode ACK as type 0x02 when no ECN counts are present [RFC9000 §19.
 }
 
 test "MUST encode ACK as type 0x03 when ECN counts are present [RFC9000 §19.3.2]" {
-    // §19.3.2: "The ACK_ECN frame type is 0x03." quic_zig switches the
+    // §19.3.2: "The ACK_ECN frame type is 0x03." quic switches the
     // type byte purely on whether `Ack.ecn_counts` is set.
     var buf: [32]u8 = undefined;
     const ack: frame.types.Ack = .{
@@ -105,7 +105,7 @@ test "MUST round-trip ECN counts through the encoder/decoder [RFC9000 §13.4.1]"
 
 test "NORMATIVE per-PN-space ECN counters bump on received markings [RFC9000 §13.4.1]" {
     // §13.4.1 describes the receiver maintaining counts of ECT(0) /
-    // ECT(1) / CE markings observed on packets. quic_zig implements
+    // ECT(1) / CE markings observed on packets. quic implements
     // this as `PnSpace.recv_ect{0,1}` / `recv_ce`, bumped by
     // `onPacketReceivedWithEcn`.
     var space: PnSpace = .{};
@@ -151,7 +151,7 @@ test "NORMATIVE Connection.ecn_enabled defaults to true [RFC9000 §13.4]" {
     // the default by reading the declared field default off the
     // `Connection` type via Zig's reflection — no TLS context
     // required.
-    const info = @typeInfo(quic_zig.Connection).@"struct";
+    const info = @typeInfo(quic.Connection).@"struct";
     comptime var found = false;
     comptime var default: bool = false;
     inline for (info.field_names, info.field_types, info.field_attrs) |name, FieldType, attrs| {
@@ -176,7 +176,7 @@ test "NORMATIVE PnSpace.validation defaults to testing [RFC9000 §13.4.2]" {
 test "MUST flip ECN validation to failed when peer reports a non-monotonic ECT0 count [RFC9000 §13.4.2]" {
     // §13.4.2: "If an endpoint receives an ACK frame with an ECN
     // count that decreases ... the endpoint stops processing ECN
-    // sections". quic_zig captures that semantic by transitioning the
+    // sections". quic captures that semantic by transitioning the
     // PN space's `validation` to `failed`. We can't drive
     // `handleAckAtLevel` directly from here without setting up a full
     // Connection, but the `validateAndApplyAckEcn` semantics are
@@ -272,7 +272,7 @@ test "NORMATIVE parseEcnFromControl returns not_ect on an empty control buffer [
 /// wire on the client side and return the highest PN minted. Mints a
 /// fresh stream (id 0), writes 16 bytes, and pumps `poll` until at
 /// least one packet emerges. Caller asserts the resulting PN ≥ 0.
-fn driveOneAppPn(client: *quic_zig.Connection, pair: *handshake_fixture.HandshakePair) !u64 {
+fn driveOneAppPn(client: *quic.Connection, pair: *handshake_fixture.HandshakePair) !u64 {
     _ = try client.openBidi(0);
     var send_buf: [16]u8 = @splat(1);
     _ = try client.streamWrite(0, &send_buf);
@@ -461,6 +461,6 @@ test "NORMATIVE Connection.ecn_enabled=false suppresses CE reaction [RFC9000 §1
 
     // The peer-ACK ECN counters must NOT have been mutated when ECN
     // is off — that's the kill-switch promise. The CE bump in the
-    // ACK is observable in the wire bytes but quic_zig didn't react.
+    // ACK is observable in the wire bytes but quic didn't react.
     try std.testing.expectEqual(@as(u64, 0), app_path.app_pn_space.peer_ack_ce);
 }

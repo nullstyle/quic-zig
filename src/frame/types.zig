@@ -159,7 +159,7 @@ pub const Ack = struct {
     largest_acked: u64,
     /// Encoded ack delay in microseconds, scaled by the peer's
     /// `ack_delay_exponent` transport parameter (RFC 9000 §13.2.5).
-    /// quic_zig's wire layer doesn't apply the exponent; transport
+    /// quic's wire layer doesn't apply the exponent; transport
     /// parameter scaling is the state machine's job.
     ack_delay: u64,
     /// Length of the contiguous run [largest_acked - first_range,
@@ -304,7 +304,7 @@ pub const Datagram = struct {
     has_length: bool = true,
 };
 
-/// Tagged union of every QUIC frame quic_zig parses or emits. The active
+/// Tagged union of every QUIC frame quic parses or emits. The active
 /// tag tells you the frame type; the payload carries its fields. Use
 /// `encode` / `decode` from this module to translate to and from wire
 /// bytes.

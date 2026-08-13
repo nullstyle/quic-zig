@@ -1,4 +1,4 @@
-//! quic_zig - a Zig-first IETF QUIC transport implementation.
+//! quic - a Zig-first IETF QUIC transport implementation.
 //!
 //! This module is the public API surface. It re-exports the namespace
 //! modules (`wire`, `frame`, `tls`, `conn`, `transport`) plus the
@@ -36,7 +36,7 @@ pub const quic_lb_draft_version: u32 = 21;
 /// Public Alternative Server Address target.
 /// `frame.types.AlternativeV4Address` / `AlternativeV6Address` and the
 /// 0xff0969d85c transport parameter follow
-/// draft-munizaga-quic-alternative-server-address-00. quic_zig exposes
+/// draft-munizaga-quic-alternative-server-address-00. quic exposes
 /// codec support, transport-parameter negotiation, server emit helpers,
 /// typed receive events, and embedder helpers under `alt_addr`.
 /// Bumping this is a deliberate scoped change.
@@ -54,12 +54,12 @@ pub const frame = @import("frame/root.zig");
 pub const tls = @import("tls/root.zig");
 
 /// Per-connection state machine: streams, paths, congestion control,
-/// loss recovery, key updates, multipath. The bulk of quic_zig lives
+/// loss recovery, key updates, multipath. The bulk of quic lives
 /// here.
 pub const conn = @import("conn/root.zig");
 
 /// Stateless Retry token HMAC helpers. Re-exported under
-/// `quic_zig.retry_token` for embedders that want address-bound Retry
+/// `quic.retry_token` for embedders that want address-bound Retry
 /// validation without writing the token format themselves.
 pub const retry_token = conn.retry_token;
 
@@ -86,7 +86,7 @@ pub const lb = @import("lb/root.zig");
 /// on `Connection`, and delay / address-book helpers live here.
 pub const alt_addr = @import("alt_addr/root.zig");
 
-/// High-level convenience wrapper for embedding quic_zig as a QUIC
+/// High-level convenience wrapper for embedding quic as a QUIC
 /// server. Owns the TLS context and a connection table; the
 /// embedder still owns the UDP socket and the clock.
 pub const Server = @import("server.zig").Server;
@@ -99,7 +99,7 @@ pub const Server = @import("server.zig").Server;
 /// datagrams into the connection table.
 pub const PreferredAddressConfig = @import("server.zig").PreferredAddressConfig;
 
-/// High-level convenience wrapper for embedding quic_zig as a QUIC
+/// High-level convenience wrapper for embedding quic as a QUIC
 /// client. Like `Server`, it owns the TLS context and per-Initial
 /// random DCID/SCID generation; the embedder still owns the UDP
 /// socket, the clock, and the returned `Connection` lifecycle.
@@ -118,7 +118,7 @@ pub const Connection = conn.Connection;
 /// The error set `Connection`'s methods return. Embedders building a
 /// composite error set for their own layer (`MyError = ConnectionError
 /// || ...`) should name this rather than reaching through
-/// `quic_zig.conn.state.Error`, which is a submodule path, not part of
+/// `quic.conn.state.Error`, which is a submodule path, not part of
 /// the advertised surface.
 pub const ConnectionError = conn.Error;
 
@@ -235,7 +235,7 @@ pub const QlogCallback = conn.QlogCallback;
 /// One qlog-style observable event delivered through `QlogCallback`.
 pub const QlogEvent = conn.QlogEvent;
 
-/// The set of qlog event names quic_zig currently emits.
+/// The set of qlog event names quic currently emits.
 pub const QlogEventName = conn.QlogEventName;
 
 /// Packet number space for qlog events.
@@ -347,7 +347,7 @@ test {
 
 test "phase 0: builds and links against boringssl-zig" {
     // Touch boringssl so the link path is exercised.
-    const digest = try boringssl.crypto.hash.Sha256.hash("quic_zig");
+    const digest = try boringssl.crypto.hash.Sha256.hash("quic");
     try std.testing.expectEqual(@as(usize, 32), digest.len);
 
     // Single-sourced from build.zig.zon; assert it is populated and

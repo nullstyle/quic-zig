@@ -1,7 +1,7 @@
 .{
-    .name = .quic_zig,
+    .name = .quic,
     .version = "0.12.0-dev",
-    .fingerprint = 0xe70034831dc6c68c,
+    .fingerprint = 0xc0795252bd98740e,
     .minimum_zig_version = "0.17.0-dev.1683+5ceec001b",
     .dependencies = .{
         .boringssl_zig = .{

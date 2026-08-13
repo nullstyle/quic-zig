@@ -1,4 +1,4 @@
-//! `quic_zig.lb` - QUIC-LB connection-ID generation.
+//! `quic.lb` - QUIC-LB connection-ID generation.
 //!
 //! Implements the server-side surface of
 //! [draft-ietf-quic-load-balancers-21][draft]: encoding routing
@@ -10,14 +10,14 @@
 //!
 //! ## Pinned to draft revision 21
 //!
-//! Like `multipath_draft_version`, the QUIC-LB draft revision quic_zig
-//! tracks is pinned in `quic_zig.quic_lb_draft_version`. Bumping it is
+//! Like `multipath_draft_version`, the QUIC-LB draft revision quic
+//! tracks is pinned in `quic.quic_lb_draft_version`. Bumping it is
 //! a deliberate scoped change — the wire format is unstable until the
 //! draft is published as an RFC.
 //!
 //! ## Hardening note
 //!
-//! quic_zig's default posture is "server SCIDs are CSPRNG draws — no
+//! quic's default posture is "server SCIDs are CSPRNG draws — no
 //! deployment metadata leaks on the wire" (see README §"On by default").
 //! Configuring `Server.Config.quic_lb` deliberately inverts that: every
 //! minted CID encodes the configured `server_id`, and in plaintext mode

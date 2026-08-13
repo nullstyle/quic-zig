@@ -1,6 +1,6 @@
 {
  "schema_version": 3,
- "suite": "quic_zig.bench_e2e",
+ "suite": "quic.bench_e2e",
  "generated_unix_ns": 1786552657061860000,
  "samples_per_benchmark": 9,
  "cc_algorithm": "cubic",
@@ -8,7 +8,6 @@
  "optimize": "ReleaseSafe",
  "bench_unsafe_release_fast": false,
  "report_path": "baselines/bench/m5max-e2e.json",
- "quic_zig_version": "0.11.0",
  "zig_version": "0.17.0-dev.1252+e4b325c19",
  "target": {
   "arch": "aarch64",
@@ -201,5 +200,6 @@
    "peak_queue_delay_us": 24232,
    "seed": 780740
   }
- ]
+ ],
+ "quic_version": "0.11.0"
 }

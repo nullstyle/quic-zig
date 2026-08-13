@@ -2,9 +2,9 @@
 //! connection-ID generation conformance.
 //!
 //! This suite locks down the on-wire and config-validation rules a
-//! quic_zig server-side stack honours when an embedder opts into
+//! quic server-side stack honours when an embedder opts into
 //! `Server.Config.quic_lb`. Pinned to draft revision 21 — bumping
-//! `quic_zig.quic_lb_draft_version` is a deliberate scoped change.
+//! `quic.quic_lb_draft_version` is a deliberate scoped change.
 //!
 //! ## Coverage (LB-1 through LB-6)
 //!
@@ -42,17 +42,17 @@
 //!
 //! ## Out of scope here
 //!
-//!   * Load-balancer-side decoding — quic_zig ships server-side only.
+//!   * Load-balancer-side decoding — quic ships server-side only.
 //!     A future stretch goal may add a decode helper for ops tooling.
 //!   * Retry Service — per draft-21 change log, the Retry Service was
 //!     split into a separate document. Not part of this draft.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const handshake_fixture = @import("_handshake_fixture.zig");
 const initial_fixture = @import("_initial_fixture.zig");
 
-const lb = quic_zig.lb;
+const lb = quic.lb;
 
 // ---------------------------------------------------------------- §3 first-octet layout
 
@@ -80,7 +80,7 @@ test "MUST encode config_id in the high 3 bits of the first octet [draft-ietf-qu
 
 test "MUST encode (cid_len - 1) in the low 5 bits when encode_length is true [draft-ietf-quic-load-balancers-21 §3]" {
     // Draft §3 covers two options for the low 5 bits — self-describe
-    // length, or fill with random. quic_zig defaults `encode_length` to
+    // length, or fill with random. quic defaults `encode_length` to
     // true; the wire result is exactly the CID length minus one (so
     // values fit in 5 bits up to the 20-octet QUIC v1 cap).
     const cfg: lb.LbConfig = .{
@@ -193,7 +193,7 @@ test "SHOULD auto-set disable_active_migration when QUIC-LB is plaintext [draft-
     // algorithm … SHOULD send the disable_active_migration transport
     // parameter." The Server in plaintext mode SHOULD NOT issue extra
     // CIDs via NEW_CONNECTION_ID, and disabling active migration
-    // signals that intent to peers. quic_zig auto-flips this when the
+    // signals that intent to peers. quic auto-flips this when the
     // embedder hasn't already.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
@@ -201,7 +201,7 @@ test "SHOULD auto-set disable_active_migration when QUIC-LB is plaintext [draft-
     var transport_params = handshake_fixture.defaultParams();
     transport_params.disable_active_migration = false;
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -224,7 +224,7 @@ test "NORMATIVE Server.init resolves local_cid_len from the QUIC-LB config [draf
     // shape and the routing-key length agree on the lb-derived value.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -249,7 +249,7 @@ test "NORMATIVE Server.init leaves local_cid_len untouched without QUIC-LB confi
     // any deviation would surface here as a wrong length).
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -486,14 +486,14 @@ test "MUST round-trip four-pass encrypt/decrypt for every supported length [draf
 test "MUST fall back to unroutable CIDs once the active nonce counter exhausts [draft-ietf-quic-load-balancers-21 §3 ¶3]" {
     // §3 ¶3: "When the nonce counter exhausts, the server MUST
     // either switch to a new configuration or use the [unroutable]
-    // 0b111 config_id." quic_zig's Server-level `mintLocalScid`
+    // 0b111 config_id." quic's Server-level `mintLocalScid`
     // implements the latter automatically: forced exhaustion plus a
     // mint produces a `0b111` first octet so the LB can route via
     // its fallback path while the operator pushes a fresh
     // configuration via `installLbConfig`.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -539,7 +539,7 @@ test "MUST surface RandFailed on auto-fallback when local_cid_len < 8 [draft-iet
     // configuration.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -562,7 +562,7 @@ test "MUST surface RandFailed on auto-fallback when local_cid_len < 8 [draft-iet
     try srv.mintLocalScid(&burn); // wrap
 
     var dst: [6]u8 = undefined;
-    try std.testing.expectError(quic_zig.Server.Error.RandFailed, srv.mintLocalScid(&dst));
+    try std.testing.expectError(quic.Server.Error.RandFailed, srv.mintLocalScid(&dst));
 }
 
 // ---------------------------------------------------------------- §3.1 unroutable fallback
@@ -672,7 +672,7 @@ test "NORMATIVE installLbConfig swaps the active factory and subsequent mints us
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -711,7 +711,7 @@ test "MUST reject installLbConfig with mismatched cidLength [server rotation]" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -726,7 +726,7 @@ test "MUST reject installLbConfig with mismatched cidLength [server rotation]" {
     defer srv.deinit();
 
     // New config has cidLength = 12 (1 + 4 + 7); mismatch.
-    try std.testing.expectError(quic_zig.Server.Error.InvalidConfig, srv.installLbConfig(.{
+    try std.testing.expectError(quic.Server.Error.InvalidConfig, srv.installLbConfig(.{
         .config_id = 0,
         .server_id = try lb.ServerId.fromSlice(&.{ 1, 2, 3, 4 }),
         .nonce_len = 7,
@@ -742,9 +742,9 @@ test "MUST push NEW_CONNECTION_ID to live slots on installLbConfig with stateles
     // pre-rotation CID on its next datagram.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
-    const stateless_key: quic_zig.conn.stateless_reset.Key = @splat(0x42);
+    const stateless_key: quic.conn.stateless_reset.Key = @splat(0x42);
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -799,7 +799,7 @@ test "NORMATIVE installLbConfig is lazy without stateless_reset_key [server rota
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -837,7 +837,7 @@ test "MUST reject installLbConfig when Server was built without QUIC-LB [server 
     // InvalidConfig — embedders should re-init the server instead.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = handshake_fixture.test_cert_pem,
         .tls_key_pem = handshake_fixture.test_key_pem,
@@ -846,7 +846,7 @@ test "MUST reject installLbConfig when Server was built without QUIC-LB [server 
     });
     defer srv.deinit();
 
-    try std.testing.expectError(quic_zig.Server.Error.InvalidConfig, srv.installLbConfig(.{
+    try std.testing.expectError(quic.Server.Error.InvalidConfig, srv.installLbConfig(.{
         .config_id = 0,
         .server_id = try lb.ServerId.fromSlice(&.{ 1, 2, 3 }),
         .nonce_len = 5,

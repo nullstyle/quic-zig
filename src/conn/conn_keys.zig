@@ -48,7 +48,7 @@ pub fn initialKeysActive(self: *const Connection, dir: Direction) bool {
 
 /// Cipher suite negotiated for the given encryption level, if
 /// the secret has been installed and the protocol-id is one we
-/// support. RFC 9001 only permits TLS 1.3 cipher suites; quic_zig
+/// support. RFC 9001 only permits TLS 1.3 cipher suites; quic
 /// understands the three QUIC v1 suites.
 pub fn cipherSuite(
     self: *const Connection,
@@ -427,7 +427,7 @@ pub fn discardExpiredApplicationReadKeys(self: *Connection, now_us: u64) void {
 }
 
 /// RFC 9001 §5.7 ¶3: "Endpoints MUST discard their Initial keys
-/// when they first send a Handshake packet." quic_zig makes the call
+/// when they first send a Handshake packet." quic makes the call
 /// stricter: once Handshake-level secrets are installed (which
 /// means the TLS handshake has progressed past Initial) we drop
 /// Initial keys outright. Any further inbound Initial packet is

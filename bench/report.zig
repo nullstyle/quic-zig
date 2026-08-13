@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 pub const schema_version: u64 = 3;
 
@@ -206,7 +206,7 @@ test "buildReportPath sanitizes tokens and falls back to local/manual" {
 // -- report envelope -------------------------------------------------------
 
 pub const Meta = struct {
-    /// e.g. "quic_zig.microbench" or "quic_zig.bench_e2e".
+    /// e.g. "quic.microbench" or "quic.bench_e2e".
     suite: []const u8,
     generated_unix_ns: u64,
     machine_id: []const u8,
@@ -267,8 +267,8 @@ pub fn renderReport(
     try out.appendSlice(allocator, "  \"report_path\": ");
     try appendJsonString(out, allocator, meta.report_path);
     try out.appendSlice(allocator, ",\n");
-    try out.appendSlice(allocator, "  \"quic_zig_version\": ");
-    try appendJsonString(out, allocator, quic_zig.version());
+    try out.appendSlice(allocator, "  \"quic_version\": ");
+    try appendJsonString(out, allocator, quic.version());
     try out.appendSlice(allocator, ",\n");
     try out.appendSlice(allocator, "  \"zig_version\": ");
     try appendJsonString(out, allocator, builtin.zig_version_string);
@@ -358,7 +358,7 @@ test "renderReport produces parseable JSON with the shared envelope" {
     };
 
     try renderReport(&out, allocator, .{
-        .suite = "quic_zig.report_test",
+        .suite = "quic.report_test",
         .generated_unix_ns = 7,
         .machine_id = "test-machine",
         .hostname = null,
@@ -373,7 +373,7 @@ test "renderReport produces parseable JSON with the shared envelope" {
     defer parsed.deinit();
     const root = parsed.value.object;
     try std.testing.expectEqual(@as(i64, @intCast(schema_version)), root.get("schema_version").?.integer);
-    try std.testing.expectEqualStrings("quic_zig.report_test", root.get("suite").?.string);
+    try std.testing.expectEqualStrings("quic.report_test", root.get("suite").?.string);
     try std.testing.expectEqual(@as(i64, 5), root.get("samples_per_benchmark").?.integer);
     const benchmarks = root.get("benchmarks").?.array;
     try std.testing.expectEqual(@as(usize, 1), benchmarks.items.len);
@@ -400,7 +400,7 @@ test "appendCcPosture renders header keys both suites splice verbatim" {
         }
     };
     try renderReport(&out, allocator, .{
-        .suite = "quic_zig.report_test",
+        .suite = "quic.report_test",
         .generated_unix_ns = 7,
         .machine_id = "test-machine",
         .hostname = null,

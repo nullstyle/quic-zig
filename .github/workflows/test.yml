@@ -97,7 +97,7 @@ jobs:
         run: zig build run-goodput-smoke
 
       # Out-of-tree consumer smoke: builds a separate package that
-      # depends on quic-zig by path and pins the exported quic_zig +
+      # depends on quic-zig by path and pins the exported quic +
       # boringssl module surface (type identity for
       # Client.Config.tls_context_override consumers).
       - name: consumer-smoke (out-of-tree package)

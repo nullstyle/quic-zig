@@ -9,6 +9,20 @@ changes.
 
 ### Changed (BREAKING)
 
+- **The package is named `quic` now, not `quic_zig`.** The `_zig`
+  suffix was redundant in a Zig package name. This changes every
+  consumer-facing identifier at once: `build.zig.zon` dependency key
+  (`.quic = .{ ... }`), `b.dependency("quic", ...)`,
+  `dep.module("quic")`, and `@import("quic")`. The manifest
+  `.name`/`.fingerprint` pair changed with it, which is a new package
+  identity as far as the Zig package manager is concerned — re-fetch
+  rather than expecting hash continuity. The project (repo, docs,
+  issue tracker) is still called quic-zig; only the package/module
+  identifier shrank. Bench report metadata follows: suites are
+  `quic.microbench` / `quic.bench_e2e` and the version key is
+  `quic_version` (committed baselines updated in-commit, header-only).
+  Historical CHANGELOG entries below keep the names that were true
+  when they shipped.
 - **A `Connection` now has one address for its whole life** — the
   init-then-move-then-`bind()` dance is gone, and with it the window
   where moving a bound Connection silently dangled the `*Connection`

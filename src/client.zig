@@ -1,4 +1,4 @@
-//! quic_zig.Client — convenience wrapper for embedding quic_zig as a
+//! quic.Client — convenience wrapper for embedding quic as a
 //! QUIC client.
 //!
 //! `Connection.createClient` is intentionally low-level: the embedder
@@ -19,7 +19,7 @@
 //! first. See `README.md` for a typical send-loop example.
 //!
 //! For embedders who don't want to hand-roll the bind/poll/recv/tick
-//! loop, `quic_zig.transport.runUdpClient` is the opinionated
+//! loop, `quic.transport.runUdpClient` is the opinionated
 //! `std.Io` client loop alongside `runUdpServer`. It owns the UDP
 //! socket, drives the
 //! state machine on a monotonic clock, and exits cleanly when the
@@ -130,7 +130,7 @@ const ConfigImpl = struct {
 
     /// Optional versioned 0-RTT resumption envelope from a prior
     /// connection to this server. Bytes must be produced by
-    /// `quic_zig.tls.resumption_state.encode` /
+    /// `quic.tls.resumption_state.encode` /
     /// `encodeAlloc`, which wrap the raw BoringSSL `Session.toBytes`
     /// payload together with the server transport parameters observed
     /// on the connection that issued that session ticket. Raw
@@ -156,7 +156,7 @@ const ConfigImpl = struct {
 
     /// Number of ack-eliciting application packets the client requires
     /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
-    /// matches `quic_zig.conn.state.application_ack_eliciting_threshold`.
+    /// matches `quic.conn.state.application_ack_eliciting_threshold`.
     /// Lower this to 1 for low-RTT links where every packet should be
     /// ACKed; raise it to amortize ACK overhead at the cost of more
     /// peer PTOs.
@@ -206,8 +206,8 @@ const ConfigImpl = struct {
 
     /// QUIC wire-format version the client puts on its first
     /// Initial. RFC 9000 §15: defaults to v1
-    /// (`quic_zig.QUIC_VERSION_1`). Embedders that want v2
-    /// standalone set this to `quic_zig.QUIC_VERSION_2`; the
+    /// (`quic.QUIC_VERSION_1`). Embedders that want v2
+    /// standalone set this to `quic.QUIC_VERSION_2`; the
     /// client's Initial-key salt + HKDF labels (RFC 9368 §3.3.1 /
     /// §3.3.2), long-header type bits (§3.2), and Retry-tag
     /// constants (§3.3.3) follow.
@@ -506,7 +506,7 @@ pub const Client = struct {
 
         // NEW_TOKEN replay on the first Initial — RFC 9000 §8.1.3
         // lets a returning client present a previously-issued
-        // token in the Initial's long-header Token field. quic_zig
+        // token in the Initial's long-header Token field. quic
         // reuses the `retry_token` storage on Connection because
         // the wire mechanism is identical (Token field on
         // long-header Initial). The Server's gate distinguishes

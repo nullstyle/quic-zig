@@ -14,7 +14,7 @@
 //! socket setup for exactly this reason.
 //!
 //! This module provides small, platform-aware wrappers around
-//! `setsockopt` so any consumer of the quic_zig library — the QNS
+//! `setsockopt` so any consumer of the quic library — the QNS
 //! endpoint, an embedded server, a load tester — can tune a freshly
 //! bound socket the same way.
 //!
@@ -103,9 +103,9 @@ pub const Handle = posix.socket_t;
 /// TOS byte / IPv6 TCLASS byte. QUIC uses these for path-level
 /// congestion signaling (RFC 9000 §13.4):
 /// * `not_ect` (0b00) — endpoint is opting out of ECN.
-/// * `ect0` (0b10) — ECN-Capable, codepoint 0; quic_zig's default for
+/// * `ect0` (0b10) — ECN-Capable, codepoint 0; quic's default for
 ///   1-RTT and 0-RTT packets.
-/// * `ect1` (0b01) — ECN-Capable, codepoint 1; quic_zig only ever
+/// * `ect1` (0b01) — ECN-Capable, codepoint 1; quic only ever
 ///   parses, never emits, this on the send side (per QUIC consensus).
 /// * `ce` (0b11) — Congestion Experienced; only ever set by routers
 ///   on the path. A QUIC endpoint that emits CE itself is broken.
@@ -149,7 +149,7 @@ pub const SetEcnError = error{
 /// — the QUIC stack tolerates one of the two failing as long as
 /// the address family it actually uses got the marking.
 ///
-/// Only the low two bits of the TOS byte are touched; quic_zig
+/// Only the low two bits of the TOS byte are touched; quic
 /// leaves the DSCP bits at zero (the kernel default).
 pub fn setEcnSendMarking(handle: Handle, codepoint: EcnCodepoint) SetEcnError!void {
     if (!has_ip_ecn_sockopts) return error.Unsupported;
@@ -426,7 +426,7 @@ fn setBufferImpl(handle: Handle, bytes: usize, dir: BufferDirection) SetBufferEr
     };
 }
 
-/// Apply quic_zig's recommended server-side tuning to a freshly bound
+/// Apply quic's recommended server-side tuning to a freshly bound
 /// UDP socket. This is the one-shot helper an embedder calls right
 /// after `Net.IpAddress.bind`. Failures from the underlying
 /// `setsockopt` calls are returned so the caller can decide

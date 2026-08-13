@@ -1,6 +1,6 @@
 //! Hermetic in-process Server↔Client end-to-end QUIC handshake.
 //!
-//! `quic_zig.Server` and `quic_zig.Client` are both production-grade
+//! `quic.Server` and `quic.Client` are both production-grade
 //! convenience wrappers, but until now no test drove a real `Client`
 //! through a real `Server` without sockets. The full handshake was
 //! only exercised by the QNS Docker interop matrix, which means a
@@ -11,7 +11,7 @@
 //! This file closes that gap. The pattern mirrors
 //! `mock_transport_real_handshake.zig`'s "drive a real handshake
 //! without a socket" loop, but the server side here is the full
-//! `quic_zig.Server` wrapper — slot table, `feed` dispatch, stateless
+//! `quic.Server` wrapper — slot table, `feed` dispatch, stateless
 //! response queue, CID-table resync, the works. Three scenarios:
 //!
 //!   1. Vanilla TLS-1.3 handshake completes via `Server.feed` and
@@ -26,7 +26,7 @@
 //!      handshake completes through the post-Retry slot.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("common.zig");
 
 /// Drive an outbound packet from `src` straight into `dst.feed`.
@@ -34,10 +34,10 @@ const common = @import("common.zig");
 /// datagrams flowed). Wrapped in a helper so the three tests don't
 /// repeat the same pump-loop boilerplate.
 fn pumpClientToServer(
-    cli: *quic_zig.Client,
-    srv: *quic_zig.Server,
+    cli: *quic.Client,
+    srv: *quic.Server,
     rx: []u8,
-    addr: quic_zig.conn.path.Address,
+    addr: quic.conn.path.Address,
     now_us: u64,
 ) !usize {
     var n: usize = 0;
@@ -53,8 +53,8 @@ fn pumpClientToServer(
 /// moving on so a slot that wants to emit Initial+Handshake on the
 /// same wakeup gets fully drained.
 fn pumpServerToClient(
-    srv: *quic_zig.Server,
-    cli: *quic_zig.Client,
+    srv: *quic.Server,
+    cli: *quic.Client,
     rx: []u8,
     now_us: u64,
 ) !usize {
@@ -72,7 +72,7 @@ test "Server <-> Client: full handshake completes through Server.feed" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -81,7 +81,7 @@ test "Server <-> Client: full handshake completes through Server.feed" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -91,7 +91,7 @@ test "Server <-> Client: full handshake completes through Server.feed" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
 
     // Kick the client so the very first Initial is in its outbox.
     // `Client.connect` deliberately leaves this to the embedder so
@@ -143,7 +143,7 @@ test "Server <-> Client: NEW_CONNECTION_ID rotates routing key in cid_table" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -152,7 +152,7 @@ test "Server <-> Client: NEW_CONNECTION_ID rotates routing key in cid_table" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -162,7 +162,7 @@ test "Server <-> Client: NEW_CONNECTION_ID rotates routing key in cid_table" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
     try cli.conn.advance();
 
     // Phase 1: get the handshake done. Same loop as the first test.
@@ -241,7 +241,7 @@ test "Server <-> Client: NEW_CONNECTION_ID rotates routing key in cid_table" {
             try std.testing.expect((rx[0] & 0x80) == 0); // short header
             try std.testing.expectEqualSlices(u8, &new_cid_bytes, rx[1 .. 1 + new_cid_bytes.len]);
             const outcome = try srv.feed(rx[0..len], peer_addr, now_us);
-            try std.testing.expectEqual(quic_zig.Server.FeedOutcome.routed, outcome);
+            try std.testing.expectEqual(quic.Server.FeedOutcome.routed, outcome);
             routed_packets += 1;
         }
         try srv.tick(now_us);
@@ -269,14 +269,14 @@ test "Server <-> Client: handshake completes via Retry round-trip" {
     // Stable HMAC key — any 32 bytes work, the value just has to be
     // consistent across mint/validate. Mirrors the value used in
     // `server_smoke.zig`'s Retry test.
-    const retry_key: quic_zig.RetryTokenKey = .{
+    const retry_key: quic.RetryTokenKey = .{
         0x86, 0x71, 0x15, 0x0d, 0x9a, 0x2c, 0x5e, 0x04,
         0x31, 0xa8, 0x6a, 0xf9, 0x18, 0x44, 0xbd, 0x2b,
         0x4d, 0xee, 0x90, 0x3f, 0xa7, 0x61, 0x0c, 0x55,
         0xf2, 0x83, 0x1d, 0xb6, 0x95, 0x77, 0x40, 0x29,
     };
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -286,7 +286,7 @@ test "Server <-> Client: handshake completes via Retry round-trip" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -296,7 +296,7 @@ test "Server <-> Client: handshake completes via Retry round-trip" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xef), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xef), .port = 0 } };
     try cli.conn.advance();
 
     // Phase 1: client emits Initial #1. Server queues a Retry.
@@ -305,7 +305,7 @@ test "Server <-> Client: handshake completes via Retry round-trip" {
         const now_us: u64 = 1_000;
         const len = (try cli.conn.poll(&rx, now_us)).?;
         const outcome = try srv.feed(rx[0..len], peer_addr, now_us);
-        try std.testing.expectEqual(quic_zig.Server.FeedOutcome.retry_sent, outcome);
+        try std.testing.expectEqual(quic.Server.FeedOutcome.retry_sent, outcome);
         try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
         try std.testing.expectEqual(@as(usize, 1), srv.statelessResponseCount());
 
@@ -391,7 +391,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -400,7 +400,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -415,7 +415,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // is a `path.Address` family tag (4 = IPv4); the actual layout
     // doesn't matter for `peerAddressChangeCandidate`'s `Address.eql`
     // check, only that old/new compare unequal byte-for-byte.
-    const old_peer_addr: quic_zig.conn.path.Address = .{
+    const old_peer_addr: quic.conn.path.Address = .{
         .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0x1000 },
     };
     try cli.conn.advance();
@@ -456,7 +456,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
 
     // Capture pre-rebind path state for post-conditions.
     const path_before = slot.conn.primaryPathConst();
-    try std.testing.expect(quic_zig.conn.path.Address.eql(path_before.path.peer_addr, old_peer_addr));
+    try std.testing.expect(quic.conn.path.Address.eql(path_before.path.peer_addr, old_peer_addr));
     try std.testing.expect(path_before.path.isValidated());
     try std.testing.expect(slot.conn.pending_frames.path_challenge == null);
 
@@ -464,10 +464,10 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // rewrite. Pump the client's next 1-RTT packet through `feed`
     // with a brand-new peer address. The packet bytes are unchanged
     // — only the `from` tuple rotates.
-    const new_peer_addr: quic_zig.conn.path.Address = .{
+    const new_peer_addr: quic.conn.path.Address = .{
         .ipv4 = .{ .addr = .{ 192, 0, 2, 99 }, .port = 0xabcd },
     };
-    try std.testing.expect(!quic_zig.conn.path.Address.eql(old_peer_addr, new_peer_addr));
+    try std.testing.expect(!quic.conn.path.Address.eql(old_peer_addr, new_peer_addr));
 
     // Coax the client into emitting an ack-eliciting 1-RTT packet so
     // the server has something authenticated to record against the
@@ -485,7 +485,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
         // `new_peer_addr`.
         while (try cli.conn.poll(&rx, now_us)) |len| {
             const outcome = try srv.feed(rx[0..len], new_peer_addr, now_us);
-            try std.testing.expectEqual(quic_zig.Server.FeedOutcome.routed, outcome);
+            try std.testing.expectEqual(quic.Server.FeedOutcome.routed, outcome);
             rebound_inbound += 1;
             // First authenticated rebound datagram should arm the
             // migration: PATH_CHALLENGE queued on the active path
@@ -505,7 +505,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // primary path is in the migration-pending window (anti-amp
     // counters reset, validator pending, rollback snapshotted).
     const path_after = slot.conn.primaryPathConst();
-    try std.testing.expect(quic_zig.conn.path.Address.eql(path_after.path.peer_addr, new_peer_addr));
+    try std.testing.expect(quic.conn.path.Address.eql(path_after.path.peer_addr, new_peer_addr));
     try std.testing.expect(path_after.pending_migration_reset);
     try std.testing.expectEqual(@as(u32, 0), slot.conn.pending_frames.path_challenge_path_id);
 
@@ -515,7 +515,7 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // depend on this for correctness, but a divergence here would
     // mean outbound packets land on the wrong socket post-rebind.
     try std.testing.expect(slot.peer_addr != null);
-    try std.testing.expect(quic_zig.conn.path.Address.eql(slot.peer_addr.?, new_peer_addr));
+    try std.testing.expect(quic.conn.path.Address.eql(slot.peer_addr.?, new_peer_addr));
 
     // No second slot was opened — `findSlotForDatagram` matched the
     // existing one via the unchanged DCID. A fresh slot here would
@@ -564,7 +564,7 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -573,7 +573,7 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -583,13 +583,13 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const old_peer_addr: quic_zig.conn.path.Address = .{
+    const old_peer_addr: quic.conn.path.Address = .{
         .ipv4 = .{ .addr = .{ 10, 0, 0, 1 }, .port = 0x1000 },
     };
-    const new_peer_addr: quic_zig.conn.path.Address = .{
+    const new_peer_addr: quic.conn.path.Address = .{
         .ipv4 = .{ .addr = .{ 192, 0, 2, 99 }, .port = 0xabcd },
     };
-    try std.testing.expect(!quic_zig.conn.path.Address.eql(old_peer_addr, new_peer_addr));
+    try std.testing.expect(!quic.conn.path.Address.eql(old_peer_addr, new_peer_addr));
 
     // Phase 1: ship the FIRST Initial through the original tuple so
     // the server opens a slot. We deliberately do NOT pump
@@ -614,9 +614,9 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     // Capture pre-rebind slot routing state.
     const slot_peer_before = slot.peer_addr;
     try std.testing.expect(slot_peer_before != null);
-    try std.testing.expect(quic_zig.conn.path.Address.eql(slot_peer_before.?, old_peer_addr));
+    try std.testing.expect(quic.conn.path.Address.eql(slot_peer_before.?, old_peer_addr));
     const path_peer_before = slot.conn.primaryPathConst().path.peer_addr;
-    try std.testing.expect(quic_zig.conn.path.Address.eql(path_peer_before, old_peer_addr));
+    try std.testing.expect(quic.conn.path.Address.eql(path_peer_before, old_peer_addr));
 
     // Phase 2: deliver another inbound from the SAME client through
     // the NEW peer address, while the server's handshake is still
@@ -637,7 +637,7 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     var rebound_inbound: u32 = 0;
     while (try cli.conn.poll(&rx, rebind_now_us)) |len| {
         const outcome = try srv.feed(rx[0..len], new_peer_addr, rebind_now_us);
-        try std.testing.expectEqual(quic_zig.Server.FeedOutcome.routed, outcome);
+        try std.testing.expectEqual(quic.Server.FeedOutcome.routed, outcome);
         rebound_inbound += 1;
     }
     try std.testing.expect(rebound_inbound > 0);
@@ -655,7 +655,7 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     // re-asserted here as the precondition for the slot-routing
     // assertion below).
     const path_peer_after = slot.conn.primaryPathConst().path.peer_addr;
-    try std.testing.expect(quic_zig.conn.path.Address.eql(path_peer_after, old_peer_addr));
+    try std.testing.expect(quic.conn.path.Address.eql(path_peer_after, old_peer_addr));
 
     // Slot-routing invariant — THE assertion this test exists for:
     // `Server.feed`'s postlogue reads `activePath().peer_addr` AFTER
@@ -667,7 +667,7 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
     // un-validated tuple — what the runner observes as "first server
     // packet on new path lacks PATH_CHALLENGE".
     try std.testing.expect(slot.peer_addr != null);
-    try std.testing.expect(quic_zig.conn.path.Address.eql(
+    try std.testing.expect(quic.conn.path.Address.eql(
         slot.peer_addr.?,
         old_peer_addr,
     ));

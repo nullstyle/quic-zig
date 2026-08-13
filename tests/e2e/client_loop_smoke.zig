@@ -1,4 +1,4 @@
-//! Smoke tests for `quic_zig.transport.runUdpClient`.
+//! Smoke tests for `quic.transport.runUdpClient`.
 //!
 //! Mirror to `server_loop_smoke.zig`. The full loop is awkward to
 //! drive headless (it needs a real UDP peer), so the in-tree tests
@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 const common = @import("common.zig");
 
@@ -30,16 +30,16 @@ test "runUdpClient is importable from the transport namespace" {
     // propagate out verbatim; hook-less loops still fail only with
     // `transport.RunUdpClientError` values.
     const helper: *const fn (
-        *quic_zig.Client,
-        quic_zig.transport.RunUdpClientOptions,
-    ) anyerror!void = quic_zig.transport.runUdpClient;
+        *quic.Client,
+        quic.transport.RunUdpClientOptions,
+    ) anyerror!void = quic.transport.runUdpClient;
     _ = helper;
     // The documented loop-error set stays public.
-    _ = quic_zig.transport.RunUdpClientError;
+    _ = quic.transport.RunUdpClientError;
 }
 
 test "RunUdpClientOptions defaults match the documented contract" {
-    const opts: quic_zig.transport.RunUdpClientOptions = .{
+    const opts: quic.transport.RunUdpClientOptions = .{
         .target = "127.0.0.1:4433",
         .io = undefined,
     };
@@ -60,7 +60,7 @@ test "RunUdpClientOptions defaults match the documented contract" {
 test "runUdpClient rejects a malformed target literal" {
     const protos = [_][]const u8{"hq-test"};
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
@@ -73,7 +73,7 @@ test "runUdpClient rejects a malformed target literal" {
     // attempted. Confirms the helper validates the target literal up
     // front so a typo doesn't surface as a confusing socket error
     // from deep in std.Io.
-    const result = quic_zig.transport.runUdpClient(&client, .{
+    const result = quic.transport.runUdpClient(&client, .{
         .target = "not-an-address",
         .io = std.testing.io,
     });
@@ -83,7 +83,7 @@ test "runUdpClient rejects a malformed target literal" {
 test "runUdpClient rejects a malformed bind literal" {
     const protos = [_][]const u8{"hq-test"};
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
@@ -92,7 +92,7 @@ test "runUdpClient rejects a malformed bind literal" {
     });
     defer client.deinit();
 
-    const result = quic_zig.transport.runUdpClient(&client, .{
+    const result = quic.transport.runUdpClient(&client, .{
         .target = "127.0.0.1:4433",
         .bind = "not-an-address",
         .io = std.testing.io,
@@ -103,7 +103,7 @@ test "runUdpClient rejects a malformed bind literal" {
 test "runUdpClient rejects zero-byte buffers" {
     const protos = [_][]const u8{"hq-test"};
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
@@ -114,7 +114,7 @@ test "runUdpClient rejects zero-byte buffers" {
 
     try std.testing.expectError(
         error.InvalidBufferSize,
-        quic_zig.transport.runUdpClient(&client, .{
+        quic.transport.runUdpClient(&client, .{
             .target = "127.0.0.1:4433",
             .io = std.testing.io,
             .rx_buffer_bytes = 0,
@@ -122,7 +122,7 @@ test "runUdpClient rejects zero-byte buffers" {
     );
     try std.testing.expectError(
         error.InvalidBufferSize,
-        quic_zig.transport.runUdpClient(&client, .{
+        quic.transport.runUdpClient(&client, .{
             .target = "127.0.0.1:4433",
             .io = std.testing.io,
             .tx_buffer_bytes = 0,
@@ -139,7 +139,7 @@ test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
     // bounds the total wait.
     const protos = [_][]const u8{"hq-test"};
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "test.example",
@@ -150,7 +150,7 @@ test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
 
     var stop = std.atomic.Value(bool).init(true);
 
-    quic_zig.transport.runUdpClient(&client, .{
+    quic.transport.runUdpClient(&client, .{
         // Bind to the same family as the target so the implicit
         // `0.0.0.0:0` fallback is exercised; target itself is a
         // garbage but well-formed loopback port nothing is

@@ -9,7 +9,7 @@
 //! reordering actually reorders.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 pub const Options = struct {
     seed: u64,
@@ -125,8 +125,8 @@ pub const SimNet = struct {
     /// scans are fine at BDP-bounded queue sizes.
     pub fn deliverDue(
         self: *SimNet,
-        client: *quic_zig.Connection,
-        server: *quic_zig.Connection,
+        client: *quic.Connection,
+        server: *quic.Connection,
         now_us: u64,
     ) !void {
         while (true) {

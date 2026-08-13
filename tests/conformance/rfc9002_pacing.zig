@@ -1,6 +1,6 @@
 //! RFC 9002 §7.7 — packet pacing.
 //!
-//! Pins the pacing behavior quic_zig implements in `conn.pacing` (a
+//! Pins the pacing behavior quic implements in `conn.pacing` (a
 //! per-path token bucket gated into the send path). Connection-level
 //! liveness, deadline surfacing, and the kill switch are covered in
 //! `src/conn/_state_tests_pacing.zig`; this suite carries the
@@ -21,7 +21,7 @@
 //!                              are not congestion controlled)
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const handshake_fixture = @import("_handshake_fixture.zig");
 
 const HandshakePair = handshake_fixture.HandshakePair;
@@ -43,7 +43,7 @@ fn drainClientPacer(pair: *HandshakePair) void {
 test "SHOULD limit the initial send burst to the initial congestion window [RFC9002 §7.7 ¶2]" {
     // The bucket property itself: a fresh pacer's low-rate capacity is
     // exactly the 10-packet initial-window burst.
-    const pacing = quic_zig.conn.pacing;
+    const pacing = quic.conn.pacing;
     var pacer: pacing.Pacer = .{};
     pacer.refill(0, pacing.rateBytesPerSecond(12_000, 333_000, true), 1_200);
     try std.testing.expect(pacer.canSend(pacing.burst_packets * 1_200));

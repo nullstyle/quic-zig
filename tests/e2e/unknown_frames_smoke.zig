@@ -34,7 +34,7 @@
 //! "frame", halving payload density without gaining coverage.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
@@ -46,13 +46,13 @@ const ClientScid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
 const ServerScid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7 };
 
 /// Drive a real Initial/Handshake/1-RTT exchange between two
-/// `quic_zig.Connection`s until both sides have application keys. Mirror
+/// `quic.Connection`s until both sides have application keys. Mirror
 /// of the loop in `path_challenge_flood_smoke.zig` — kept inline so
 /// this file does not collide with parallel agents editing the
 /// existing e2e files.
 fn driveHandshake(
-    client: *quic_zig.Connection,
-    server: *quic_zig.Connection,
+    client: *quic.Connection,
+    server: *quic.Connection,
     start_now_us: u64,
 ) !u64 {
     var buf_c2s: [2048]u8 = undefined;
@@ -81,8 +81,8 @@ fn buildPair(
     server_tls: *boringssl.tls.Context,
     client_tls: *boringssl.tls.Context,
 ) !struct {
-    client: *quic_zig.Connection,
-    server: *quic_zig.Connection,
+    client: *quic.Connection,
+    server: *quic.Connection,
 } {
     const protos = [_][]const u8{"hq-test"};
     server_tls.* = try boringssl.tls.Context.initServer(.{
@@ -100,14 +100,14 @@ fn buildPair(
         .alpn = &protos,
     });
 
-    const client = try allocator.create(quic_zig.Connection);
+    const client = try allocator.create(quic.Connection);
     errdefer allocator.destroy(client);
-    try quic_zig.Connection.initClientAt(client, allocator, client_tls.*, "localhost");
+    try quic.Connection.initClientAt(client, allocator, client_tls.*, "localhost");
     errdefer client.deinit();
 
-    const server = try allocator.create(quic_zig.Connection);
+    const server = try allocator.create(quic.Connection);
     errdefer allocator.destroy(server);
-    try quic_zig.Connection.initServerAt(server, allocator, server_tls.*);
+    try quic.Connection.initServerAt(server, allocator, server_tls.*);
     errdefer server.deinit();
     try client.setLocalScid(&ClientScid);
     try client.setInitialDcid(&InitialDcid);
@@ -149,7 +149,7 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
     // server didn't slip into a zombie state after rejecting the
     // unknown-frames payload.
     const baseline_close = server.closeState();
-    try std.testing.expectEqual(quic_zig.CloseState.open, baseline_close);
+    try std.testing.expectEqual(quic.CloseState.open, baseline_close);
 
     // Drain any handshake tail so the server's PN tracker is on a
     // settled application baseline before we inject the malicious
@@ -186,7 +186,7 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
 
     // Seal the malicious payload as a real protected 1-RTT packet.
     var packet_buf: [1500]u8 = undefined;
-    const packet_len = try quic_zig.wire.short_packet.seal1Rtt(&packet_buf, .{
+    const packet_len = try quic.wire.short_packet.seal1Rtt(&packet_buf, .{
         .dcid = dcid,
         .pn = pn,
         .largest_acked = null,
@@ -236,7 +236,7 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
     // FRAME_ENCODING_ERROR (0x07) — not the post-handshake baseline,
     // and not a zombie/open state.
     try std.testing.expect(baseline_close == .open);
-    try std.testing.expectEqual(quic_zig.CloseState.closing, server.closeState());
+    try std.testing.expectEqual(quic.CloseState.closing, server.closeState());
     const ce = server.closeEvent() orelse return error.NoCloseEvent;
     try std.testing.expectEqual(@as(u64, 0x07), ce.error_code);
 
@@ -244,7 +244,7 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
     // with no infinite loop or panic; the connection stays closing.
     var poll_buf: [2048]u8 = undefined;
     _ = try server.poll(&poll_buf, now_us + 1_000);
-    try std.testing.expectEqual(quic_zig.CloseState.closing, server.closeState());
+    try std.testing.expectEqual(quic.CloseState.closing, server.closeState());
 }
 
 test "replayed 1-RTT DATAGRAM packet is delivered only once (L1)" {
@@ -288,7 +288,7 @@ test "replayed 1-RTT DATAGRAM packet is delivered only once (L1)" {
     const dcid = server.local_scid.slice();
 
     var packet_buf: [1500]u8 = undefined;
-    const packet_len = try quic_zig.wire.short_packet.seal1Rtt(&packet_buf, .{
+    const packet_len = try quic.wire.short_packet.seal1Rtt(&packet_buf, .{
         .dcid = dcid,
         .pn = pn,
         .largest_acked = null,

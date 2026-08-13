@@ -1,4 +1,4 @@
-//! Smoke tests for `quic_zig.transport.runUdpServer`.
+//! Smoke tests for `quic.transport.runUdpServer`.
 //!
 //! The full loop is awkward to drive headless: it needs a real UDP
 //! peer to handshake against, a thread to run the loop, and a way to
@@ -17,7 +17,7 @@
 //!
 //! What we can't easily verify here:
 //!   - End-to-end handshake against a real peer. Driving that
-//!     requires a second quic_zig client (or quic-go) on a known port,
+//!     requires a second quic client (or quic-go) on a known port,
 //!     which is what `interop/qns_endpoint.zig` and the commands in
 //!     `interop/README.md` are for.
 //!   - Behavior under socket errors, signal-driven shutdown, or
@@ -26,7 +26,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 const common = @import("common.zig");
 
@@ -42,16 +42,16 @@ test "runUdpServer is importable from the transport namespace" {
     // propagate out verbatim; hook-less loops still fail only with
     // `transport.RunError` values.
     const helper: *const fn (
-        *quic_zig.Server,
-        quic_zig.transport.RunUdpOptions,
-    ) anyerror!void = quic_zig.transport.runUdpServer;
+        *quic.Server,
+        quic.transport.RunUdpOptions,
+    ) anyerror!void = quic.transport.runUdpServer;
     _ = helper;
     // The documented loop-error set stays public.
-    _ = quic_zig.transport.RunError;
+    _ = quic.transport.RunError;
 }
 
 test "RunUdpOptions defaults match the documented contract" {
-    const opts: quic_zig.transport.RunUdpOptions = .{
+    const opts: quic.transport.RunUdpOptions = .{
         .listen = "127.0.0.1:0",
         .io = undefined, // not invoked
     };
@@ -71,7 +71,7 @@ test "RunUdpOptions defaults match the documented contract" {
 test "runUdpServer rejects a malformed listen literal" {
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = test_cert_pem,
         .tls_key_pem = test_key_pem,
@@ -84,7 +84,7 @@ test "runUdpServer rejects a malformed listen literal" {
     // attempted. Important: this confirms the helper validates input
     // up front so a typo'd listen string doesn't surface as a
     // confusing socket error from deep in std.Io.
-    const result = quic_zig.transport.runUdpServer(&srv, .{
+    const result = quic.transport.runUdpServer(&srv, .{
         .listen = "not-an-address",
         .io = std.testing.io,
     });
@@ -94,7 +94,7 @@ test "runUdpServer rejects a malformed listen literal" {
 test "runUdpServer rejects zero-byte buffers" {
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = test_cert_pem,
         .tls_key_pem = test_key_pem,
@@ -104,14 +104,14 @@ test "runUdpServer rejects zero-byte buffers" {
     defer srv.deinit();
 
     // Bad rx buffer.
-    try std.testing.expectError(error.InvalidBufferSize, quic_zig.transport.runUdpServer(&srv, .{
+    try std.testing.expectError(error.InvalidBufferSize, quic.transport.runUdpServer(&srv, .{
         .listen = "127.0.0.1:0",
         .io = std.testing.io,
         .rx_buffer_bytes = 0,
     }));
 
     // Bad tx buffer.
-    try std.testing.expectError(error.InvalidBufferSize, quic_zig.transport.runUdpServer(&srv, .{
+    try std.testing.expectError(error.InvalidBufferSize, quic.transport.runUdpServer(&srv, .{
         .listen = "127.0.0.1:0",
         .io = std.testing.io,
         .tx_buffer_bytes = 0,
@@ -125,7 +125,7 @@ test "runUdpServer with shutdown_flag already set returns immediately" {
     // blocking. The receive timeout caps the worst case at ~5 ms.
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = test_cert_pem,
         .tls_key_pem = test_key_pem,
@@ -138,7 +138,7 @@ test "runUdpServer with shutdown_flag already set returns immediately" {
 
     // Skip if the test environment can't bind UDP at all (sandboxed
     // CI runners sometimes block this).
-    quic_zig.transport.runUdpServer(&srv, .{
+    quic.transport.runUdpServer(&srv, .{
         .listen = "127.0.0.1:0",
         .io = std.testing.io,
         .shutdown_flag = &stop,
@@ -192,7 +192,7 @@ test "runUdpServer binds preferred-address alt listener and returns cleanly" {
     // the test cannot collide with anything else on the host.
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = test_cert_pem,
         .tls_key_pem = test_key_pem,
@@ -208,7 +208,7 @@ test "runUdpServer binds preferred-address alt listener and returns cleanly" {
 
     var stop = std.atomic.Value(bool).init(true);
 
-    quic_zig.transport.runUdpServer(&srv, .{
+    quic.transport.runUdpServer(&srv, .{
         .listen = "127.0.0.1:0",
         .io = std.testing.io,
         .shutdown_flag = &stop,

@@ -19,7 +19,7 @@
 //! shared runner is far too noisy to gate on.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("echo_common.zig");
 
 /// Bulk payload pushed client -> server.
@@ -46,7 +46,7 @@ const SinkState = struct {
 const SinkApp = struct {
     allocator: std.mem.Allocator,
 
-    pub fn onIteration(ctx: ?*anyopaque, server: *quic_zig.Server, now_us: u64) anyerror!void {
+    pub fn onIteration(ctx: ?*anyopaque, server: *quic.Server, now_us: u64) anyerror!void {
         _ = now_us;
         const app: *SinkApp = @ptrCast(@alignCast(ctx.?));
         for (server.iterator()) |slot| {
@@ -83,7 +83,7 @@ const SinkApp = struct {
         }
     }
 
-    pub fn onConnectionWillClose(ctx: ?*anyopaque, slot: *quic_zig.Server.Slot) void {
+    pub fn onConnectionWillClose(ctx: ?*anyopaque, slot: *quic.Server.Slot) void {
         const app: *SinkApp = @ptrCast(@alignCast(ctx.?));
         const state = sinkState(slot) orelse return;
         std.debug.print(
@@ -94,7 +94,7 @@ const SinkApp = struct {
         slot.user_data = null;
     }
 
-    fn ensureState(app: *SinkApp, slot: *quic_zig.Server.Slot) !*SinkState {
+    fn ensureState(app: *SinkApp, slot: *quic.Server.Slot) !*SinkState {
         if (sinkState(slot)) |state| return state;
         const state = try app.allocator.create(SinkState);
         state.* = .{};
@@ -103,7 +103,7 @@ const SinkApp = struct {
     }
 };
 
-fn sinkState(slot: *quic_zig.Server.Slot) ?*SinkState {
+fn sinkState(slot: *quic.Server.Slot) ?*SinkState {
     const ptr = slot.user_data orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
@@ -117,7 +117,7 @@ fn serveSink(
     var app: SinkApp = .{ .allocator = allocator };
     const protos = [_][]const u8{common.alpn};
 
-    var server = try quic_zig.Server.init(.{
+    var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.cert_pem,
         .tls_key_pem = common.key_pem,
@@ -128,7 +128,7 @@ fn serveSink(
     });
     defer server.deinit();
 
-    try quic_zig.transport.runUdpServer(&server, .{
+    try quic.transport.runUdpServer(&server, .{
         .listen = listen,
         .io = io,
         .shutdown_flag = shutdown_flag,
@@ -166,7 +166,7 @@ const UploadFlow = struct {
 
     const Stage = enum { awaiting_handshake, uploading, awaiting_acks, done };
 
-    pub fn onIteration(ctx: ?*anyopaque, client: *quic_zig.Client, now_us: u64) anyerror!void {
+    pub fn onIteration(ctx: ?*anyopaque, client: *quic.Client, now_us: u64) anyerror!void {
         const flow: *UploadFlow = @ptrCast(@alignCast(ctx.?));
         if (flow.stage == .done) return;
         if (now_us > deadline_us) return error.GoodputTimedOut;
@@ -252,7 +252,7 @@ pub fn main(init: std.process.Init) !void {
     prng.random().bytes(payload);
 
     const protos = [_][]const u8{common.alpn};
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -264,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     var flow: UploadFlow = .{ .payload = payload };
-    try quic_zig.transport.runUdpClient(&client, .{
+    try quic.transport.runUdpClient(&client, .{
         .target = addr,
         .io = io,
         .tune_socket = false,

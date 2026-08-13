@@ -1,20 +1,20 @@
 //! Regression coverage for connection-close source attribution
-//! across a real `quic_zig.Server` ↔ `quic_zig.Client` handshake.
+//! across a real `quic.Server` ↔ `quic.Client` handshake.
 //!
 //! http3_zig's integration suite caught a regression where the receiving
 //! end of a CONNECTION_CLOSE was reporting `CloseSource.local` instead
-//! of `.peer`. Bug should be reproducible inside quic_zig using the same
+//! of `.peer`. Bug should be reproducible inside quic using the same
 //! Server/Client pair driving used in `server_client_handshake.zig`.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("common.zig");
 
 fn pumpClientToServer(
-    cli: *quic_zig.Client,
-    srv: *quic_zig.Server,
+    cli: *quic.Client,
+    srv: *quic.Server,
     rx: []u8,
-    addr: quic_zig.conn.path.Address,
+    addr: quic.conn.path.Address,
     now_us: u64,
 ) !usize {
     var n: usize = 0;
@@ -26,8 +26,8 @@ fn pumpClientToServer(
 }
 
 fn pumpServerToClient(
-    srv: *quic_zig.Server,
-    cli: *quic_zig.Client,
+    srv: *quic.Server,
+    cli: *quic.Client,
     rx: []u8,
     now_us: u64,
 ) !usize {
@@ -45,7 +45,7 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -57,7 +57,7 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -67,7 +67,7 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
 
     try cli.conn.advance();
 
@@ -92,8 +92,8 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
     // Server's local view: source = local.
     {
         const ev = slot.conn.closeEvent().?;
-        try std.testing.expectEqual(quic_zig.conn.lifecycle.CloseSource.local, ev.source);
-        try std.testing.expectEqual(quic_zig.conn.lifecycle.CloseErrorSpace.application, ev.error_space);
+        try std.testing.expectEqual(quic.conn.lifecycle.CloseSource.local, ev.source);
+        try std.testing.expectEqual(quic.conn.lifecycle.CloseErrorSpace.application, ev.error_space);
         try std.testing.expectEqual(@as(u64, 0x100), ev.error_code);
     }
 
@@ -107,8 +107,8 @@ test "peer-initiated CONNECTION_CLOSE attributes source=peer on receiver" {
     }
 
     const cli_ev = cli.conn.closeEvent() orelse return error.ClientNeverObservedClose;
-    try std.testing.expectEqual(quic_zig.conn.lifecycle.CloseSource.peer, cli_ev.source);
-    try std.testing.expectEqual(quic_zig.conn.lifecycle.CloseErrorSpace.application, cli_ev.error_space);
+    try std.testing.expectEqual(quic.conn.lifecycle.CloseSource.peer, cli_ev.source);
+    try std.testing.expectEqual(quic.conn.lifecycle.CloseErrorSpace.application, cli_ev.error_space);
     try std.testing.expectEqual(@as(u64, 0x100), cli_ev.error_code);
     try std.testing.expectEqualStrings("server shutdown", cli_ev.reason);
 }

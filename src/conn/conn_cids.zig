@@ -183,7 +183,7 @@ pub fn nextLocalConnectionIdSequence(self: *const Connection, path_id: u32) u64 
 /// (initial SCID plus every still-unretired SCID issued via
 /// NEW_CONNECTION_ID). Used by embedders that maintain a
 /// CID-to-connection routing table outside the connection
-/// (the canonical caller is `quic_zig.Server`).
+/// (the canonical caller is `quic.Server`).
 pub fn localScidCount(self: *const Connection) usize {
     return self.local_cids.items.len;
 }

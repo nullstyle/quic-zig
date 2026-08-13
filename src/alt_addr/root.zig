@@ -1,4 +1,4 @@
-//! quic_zig.alt_addr — embedder helpers for the
+//! quic.alt_addr — embedder helpers for the
 //! draft-munizaga-quic-alternative-server-address-00 extension.
 //!
 //! The extension's frame codec, transport-parameter negotiation,
@@ -56,7 +56,7 @@
 //! ## §4 ¶3 0-RTT contract
 //!
 //! "Endpoints MUST NOT remember the value of this extension for
-//! 0-RTT." quic_zig satisfies this by construction: server emit
+//! 0-RTT." quic satisfies this by construction: server emit
 //! gates on the live handshake's transport parameters and the
 //! `local_transport_params` is whatever the embedder configured for
 //! *this* connection. Embedders that persist transport-parameter

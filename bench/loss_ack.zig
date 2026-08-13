@@ -3,17 +3,17 @@
 //! The fixtures are fixed-size and allocate nothing per iteration.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 
-const ack_range = quic_zig.frame.ack_range;
-const frame_types = quic_zig.frame.types;
-const congestion = quic_zig.conn.congestion;
-const Connection = quic_zig.Connection;
-const loss_recovery = quic_zig.conn.loss_recovery;
-const pn_space_mod = quic_zig.conn.pn_space;
-const rtt_mod = quic_zig.conn.rtt;
-const sent_packets = quic_zig.conn.sent_packets;
+const ack_range = quic.frame.ack_range;
+const frame_types = quic.frame.types;
+const congestion = quic.conn.congestion;
+const Connection = quic.Connection;
+const loss_recovery = quic.conn.loss_recovery;
+const pn_space_mod = quic.conn.pn_space;
+const rtt_mod = quic.conn.rtt;
+const sent_packets = quic.conn.sent_packets;
 
 const PnSpace = pn_space_mod.PnSpace;
 const RttEstimator = rtt_mod.RttEstimator;

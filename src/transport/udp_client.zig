@@ -1,4 +1,4 @@
-//! Opinionated `std.Io`-based UDP client loop for `quic_zig.Client`.
+//! Opinionated `std.Io`-based UDP client loop for `quic.Client`.
 //!
 //! Takes a freshly-constructed
 //! `*Client` and an embedder-supplied target address, binds an

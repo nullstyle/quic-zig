@@ -1,4 +1,4 @@
-//! Phase 5 acceptance: two `quic_zig.Connection`s open a stream
+//! Phase 5 acceptance: two `quic.Connection`s open a stream
 //! after the TLS handshake, the client streams bytes through
 //! `Connection.poll`, the server consumes them via
 //! `Connection.handle` + `streamRead`, and ACKs flow back to the
@@ -11,7 +11,7 @@
 //! the same Connection.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
@@ -22,9 +22,9 @@ const ClientCid = [_]u8{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
 const ServerCid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x99 };
 const ClientPath1Cid = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
 const ServerPath1Cid = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xb0, 0xb1 };
-const Address = quic_zig.conn.path.Address;
+const Address = quic.conn.path.Address;
 
-fn handshake(allocator: std.mem.Allocator, client: *quic_zig.Connection, server: *quic_zig.Connection) !void {
+fn handshake(allocator: std.mem.Allocator, client: *quic.Connection, server: *quic.Connection) !void {
     var step: u32 = 0;
     while (step < 50) : (step += 1) {
         if (client.handshakeDone() and server.handshakeDone()) break;
@@ -116,7 +116,7 @@ const MultipathNet = struct {
     fn enqueue(
         self: *MultipathNet,
         from_client: bool,
-        datagram: quic_zig.OutgoingDatagram,
+        datagram: quic.OutgoingDatagram,
         bytes: []const u8,
         now_us: u64,
     ) !void {
@@ -144,7 +144,7 @@ const MultipathNet = struct {
     fn pollEndpoint(
         self: *MultipathNet,
         from_client: bool,
-        conn: *quic_zig.Connection,
+        conn: *quic.Connection,
         now_us: u64,
     ) !void {
         var pkt: [2048]u8 = undefined;
@@ -155,8 +155,8 @@ const MultipathNet = struct {
 
     fn deliverDue(
         self: *MultipathNet,
-        client: *quic_zig.Connection,
-        server: *quic_zig.Connection,
+        client: *quic.Connection,
+        server: *quic.Connection,
         now_us: u64,
     ) !void {
         var delivered = true;
@@ -227,7 +227,7 @@ const RebindingNet = struct {
     fn enqueue(
         self: *RebindingNet,
         from_client: bool,
-        datagram: quic_zig.OutgoingDatagram,
+        datagram: quic.OutgoingDatagram,
         bytes: []const u8,
         now_us: u64,
     ) !void {
@@ -263,7 +263,7 @@ const RebindingNet = struct {
     fn pollEndpoint(
         self: *RebindingNet,
         from_client: bool,
-        conn: *quic_zig.Connection,
+        conn: *quic.Connection,
         now_us: u64,
     ) !void {
         var pkt: [2048]u8 = undefined;
@@ -274,8 +274,8 @@ const RebindingNet = struct {
 
     fn deliverDue(
         self: *RebindingNet,
-        client: *quic_zig.Connection,
-        server: *quic_zig.Connection,
+        client: *quic.Connection,
+        server: *quic.Connection,
         now_us: u64,
     ) !void {
         var delivered = true;
@@ -304,15 +304,15 @@ const RebindingNet = struct {
     }
 };
 
-fn configurePrimaryCids(client: *quic_zig.Connection, server: *quic_zig.Connection) !void {
+fn configurePrimaryCids(client: *quic.Connection, server: *quic.Connection) !void {
     try client.setPeerDcid(&ServerCid);
     try client.setLocalScid(&ClientCid);
     try server.setPeerDcid(&ClientCid);
     try server.setLocalScid(&ServerCid);
 }
 
-fn openSecondPath(client: *quic_zig.Connection, server: *quic_zig.Connection) !u32 {
-    const Cid = quic_zig.conn.path.ConnectionId;
+fn openSecondPath(client: *quic.Connection, server: *quic.Connection) !u32 {
+    const Cid = quic.conn.path.ConnectionId;
     const client_path_id = try client.openPath(
         .unspecified,
         .unspecified,
@@ -337,7 +337,7 @@ fn noteDatagram(payload: []const u8, seen_p0: *bool, seen_p1: *bool) void {
 }
 
 fn drainExpectedStream(
-    conn: *quic_zig.Connection,
+    conn: *quic.Connection,
     stream_id: u64,
     expected: []const u8,
     consumed: *usize,
@@ -365,14 +365,14 @@ test "client streams 16 KiB to server through poll/handle" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -461,14 +461,14 @@ test "DATAGRAM round-trips through the 1-RTT path" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -515,14 +515,14 @@ test "CONNECTION_CLOSE wire-redacts the reason by default (hardening §9 / §12)
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -566,7 +566,7 @@ test "CONNECTION_CLOSE wire-redacts the reason by default (hardening §9 / §12)
     const peer_close = server.closeEvent().?;
     try std.testing.expectEqual(@as(usize, 0), peer_close.reason.len);
     try std.testing.expectEqual(@as(u64, 0x0a), peer_close.error_code);
-    try std.testing.expectEqual(quic_zig.conn.lifecycle.CloseErrorSpace.transport, peer_close.error_space);
+    try std.testing.expectEqual(quic.conn.lifecycle.CloseErrorSpace.transport, peer_close.error_space);
 }
 
 test "CONNECTION_CLOSE wire-includes reason when reveal_close_reason_on_wire is set" {
@@ -578,9 +578,9 @@ test "CONNECTION_CLOSE wire-includes reason when reveal_close_reason_on_wire is 
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
 
     // Embedder opt-in: dev/debug builds want the reason on the wire
@@ -589,7 +589,7 @@ test "CONNECTION_CLOSE wire-includes reason when reveal_close_reason_on_wire is 
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -629,14 +629,14 @@ test "CONNECTION_CLOSE propagates from sender to receiver" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -678,14 +678,14 @@ test "STOP_SENDING propagates and resets the sender's stream" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -716,7 +716,7 @@ test "STOP_SENDING propagates and resets the sender's stream" {
     // Client's send half should have sent RESET_STREAM and observed
     // the peer ACK it.
     const cs = client.stream(0).?;
-    try std.testing.expectEqual(quic_zig.conn.send_stream.State.reset_recvd, cs.send.state);
+    try std.testing.expectEqual(quic.conn.send_stream.State.reset_recvd, cs.send.state);
     try std.testing.expect(cs.send.reset != null);
     try std.testing.expectEqual(@as(u64, 0xff), cs.send.reset.?.error_code);
 }
@@ -730,16 +730,16 @@ test "client streams 512 KiB to server (regression for upload stall)" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
     // Use the same TPs nullq-peer advertises so we exercise the same
     // flow-control limits the dev's go-quic-peer interop uses.
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .max_idle_timeout_ms = 30_000,
         .initial_max_data = 16 * 1024 * 1024,
         .initial_max_stream_data_bidi_local = 8 * 1024 * 1024,
@@ -803,14 +803,14 @@ test "PATH_CHALLENGE → PATH_RESPONSE validates the path round-trip" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -853,14 +853,14 @@ test "client streams 16 KiB to server with 10% simulated loss" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -945,14 +945,14 @@ test "loss recovery: a dropped 1-RTT packet is retransmitted and cwnd shrinks (L
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -1054,14 +1054,14 @@ test "single-path NAT rebinding survives loss and reordering" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .max_idle_timeout_ms = 30_000,
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_local = 1 << 20,
@@ -1156,14 +1156,14 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
     defer server_tls.deinit();
     defer client_tls.deinit();
 
-    const client = try quic_zig.Connection.createClient(allocator, client_tls, "localhost");
+    const client = try quic.Connection.createClient(allocator, client_tls, "localhost");
     defer client.destroy();
-    const server = try quic_zig.Connection.createServer(allocator, server_tls);
+    const server = try quic.Connection.createServer(allocator, server_tls);
     defer server.destroy();
     client.peer = server;
     server.peer = client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -1297,8 +1297,8 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
 
     try std.testing.expectEqual(total, server_consumed);
     try std.testing.expectEqual(total, client_consumed);
-    try std.testing.expectEqual(quic_zig.conn.path.State.retiring, client.pathStats(path1).?.state);
-    try std.testing.expectEqual(quic_zig.conn.path.State.retiring, server.pathStats(path1).?.state);
+    try std.testing.expectEqual(quic.conn.path.State.retiring, client.pathStats(path1).?.state);
+    try std.testing.expectEqual(quic.conn.path.State.retiring, server.pathStats(path1).?.state);
 
     const retire_at = @max(
         client.pathStats(path1).?.retire_deadline_us.?,
@@ -1307,6 +1307,6 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
     now_us = @max(now_us, retire_at);
     try client.tick(now_us);
     try server.tick(now_us);
-    try std.testing.expectEqual(quic_zig.conn.path.State.failed, client.pathStats(path1).?.state);
-    try std.testing.expectEqual(quic_zig.conn.path.State.failed, server.pathStats(path1).?.state);
+    try std.testing.expectEqual(quic.conn.path.State.failed, client.pathStats(path1).?.state);
+    try std.testing.expectEqual(quic.conn.path.State.failed, server.pathStats(path1).?.state);
 }

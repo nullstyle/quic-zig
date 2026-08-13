@@ -4,10 +4,10 @@
 //! ACK/loss notification path that `Connection` uses for RFC 9221
 //! DATAGRAM send outcomes.
 
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const event_queue = quic_zig.conn.event_queue;
-const sent_packets = quic_zig.conn.sent_packets;
+const event_queue = quic.conn.event_queue;
+const sent_packets = quic.conn.sent_packets;
 
 const event_count = event_queue.max_datagram_send_events;
 

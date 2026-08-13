@@ -37,11 +37,11 @@
 //!   RFC9000 §19  varint use inside frame types                 → rfc9000_frames.zig
 //!
 //! Not implemented by design:
-//!   none — RFC 9000 §16 is the encoding rule; quic_zig implements the full surface.
+//!   none — RFC 9000 §16 is the encoding rule; quic implements the full surface.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
-const varint = quic_zig.wire.varint;
+const quic = @import("quic");
+const varint = quic.wire.varint;
 
 // ---------------------------------------------------------------- §16 decode forms
 

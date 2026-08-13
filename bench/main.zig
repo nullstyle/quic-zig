@@ -1,4 +1,4 @@
-//! quic_zig microbenchmarks.
+//! quic microbenchmarks.
 //!
 //! Measures hot paths that every sent or received packet exercises:
 //!  - varint encode/decode (every length field)
@@ -33,7 +33,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const report_mod = @import("report.zig");
 const connection_datagram_bench = @import("connection_datagram.zig");
@@ -44,9 +44,9 @@ const stream_bench = @import("stream_reassembly.zig");
 const tokens_lb_bench = @import("tokens_lb.zig");
 const transport_params_bench = @import("transport_params.zig");
 
-const varint = quic_zig.wire.varint;
-const header = quic_zig.wire.header;
-const frame = quic_zig.frame;
+const varint = quic.wire.varint;
+const header = quic.wire.header;
+const frame = quic.frame;
 const frame_types = frame.types;
 const ack_range = frame.ack_range;
 
@@ -496,7 +496,7 @@ pub fn main(init: std.process.Init) !void {
     else
         null;
 
-    std.debug.print("quic_zig microbenchmarks (target ~{d}ms/sample, {d} samples, {s})\n", .{
+    std.debug.print("quic microbenchmarks (target ~{d}ms/sample, {d} samples, {s})\n", .{
         target_ns / std.time.ns_per_ms,
         configured_samples,
         @tagName(builtin.mode),
@@ -812,7 +812,7 @@ pub fn main(init: std.process.Init) !void {
         // library ships as the default posture. Record that, so a
         // report predating or following a default flip says which
         // side of the flip it measured.
-        const cc_defaults: quic_zig.conn.congestion.Config = .{};
+        const cc_defaults: quic.conn.congestion.Config = .{};
         try report_mod.appendCcPosture(
             &extra_header,
             allocator,
@@ -823,7 +823,7 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             .{
-                .suite = "quic_zig.microbench",
+                .suite = "quic.microbench",
                 .generated_unix_ns = generated_unix_ns,
                 .machine_id = machine_id,
                 .hostname = hostname,

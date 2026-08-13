@@ -9,7 +9,7 @@
 //! deployment supplies its own PEM pair and clients drop
 //! `insecure_skip_verify`.
 
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 /// Self-signed localhost certificate (PEM). Test fixture — do not
 /// deploy.
@@ -31,7 +31,7 @@ pub const default_addr = "127.0.0.1:4433";
 /// `max_datagram_frame_size` so the RFC 9221 DATAGRAM echo leg works
 /// — leave that field at its 0 default and `sendDatagram` fails with
 /// `DatagramUnavailable`.
-pub fn transportParams() quic_zig.tls.TransportParams {
+pub fn transportParams() quic.tls.TransportParams {
     return .{
         .max_idle_timeout_ms = 30_000,
         .initial_max_data = 1 << 20,

@@ -15,7 +15,7 @@
 //! this file does not depend on helpers private to them.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
@@ -27,8 +27,8 @@ const ClientScid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
 const ServerScid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7 };
 
 fn driveHandshake(
-    client: *quic_zig.Connection,
-    server: *quic_zig.Connection,
+    client: *quic.Connection,
+    server: *quic.Connection,
     start_now_us: u64,
 ) !u64 {
     var buf_c2s: [2048]u8 = undefined;
@@ -55,8 +55,8 @@ fn buildPair(
     server_tls: *boringssl.tls.Context,
     client_tls: *boringssl.tls.Context,
 ) !struct {
-    client: *quic_zig.Connection,
-    server: *quic_zig.Connection,
+    client: *quic.Connection,
+    server: *quic.Connection,
 } {
     const protos = [_][]const u8{"hq-test"};
     server_tls.* = try boringssl.tls.Context.initServer(.{
@@ -74,14 +74,14 @@ fn buildPair(
         .alpn = &protos,
     });
 
-    const client = try allocator.create(quic_zig.Connection);
+    const client = try allocator.create(quic.Connection);
     errdefer allocator.destroy(client);
-    try quic_zig.Connection.initClientAt(client, allocator, client_tls.*, "localhost");
+    try quic.Connection.initClientAt(client, allocator, client_tls.*, "localhost");
     errdefer client.deinit();
 
-    const server = try allocator.create(quic_zig.Connection);
+    const server = try allocator.create(quic.Connection);
     errdefer allocator.destroy(server);
-    try quic_zig.Connection.initServerAt(server, allocator, server_tls.*);
+    try quic.Connection.initServerAt(server, allocator, server_tls.*);
     errdefer server.deinit();
     try client.setLocalScid(&ClientScid);
     try client.setInitialDcid(&InitialDcid);
@@ -115,26 +115,26 @@ test "phase(): initial -> established -> closing/draining across a real lifecycl
     const server = pair.server;
 
     // Pre-handshake: only Initial keys are installed on either side.
-    try std.testing.expectEqual(quic_zig.ConnectionPhase.initial, client.phase());
-    try std.testing.expectEqual(quic_zig.ConnectionPhase.initial, server.phase());
+    try std.testing.expectEqual(quic.ConnectionPhase.initial, client.phase());
+    try std.testing.expectEqual(quic.ConnectionPhase.initial, server.phase());
 
     var now_us = try driveHandshake(client, server, 1_000_000);
 
     // Both ends now hold 1-RTT (application) write keys.
-    try std.testing.expectEqual(quic_zig.ConnectionPhase.established, client.phase());
-    try std.testing.expectEqual(quic_zig.ConnectionPhase.established, server.phase());
+    try std.testing.expectEqual(quic.ConnectionPhase.established, client.phase());
+    try std.testing.expectEqual(quic.ConnectionPhase.established, server.phase());
 
     // A local close moves the initiator into the closing state (§10.2.1),
     // which wins over the (still-established) handshake epoch.
     client.close(false, 0x100, "app done");
-    try std.testing.expectEqual(quic_zig.ConnectionPhase.closing, client.phase());
+    try std.testing.expectEqual(quic.ConnectionPhase.closing, client.phase());
 
     // Deliver the CONNECTION_CLOSE; the peer enters draining (§10.2.2).
     var buf: [2048]u8 = undefined;
     now_us += 10_000;
     const n = (try client.poll(&buf, now_us)) orelse return error.NoCloseEmitted;
     try server.handle(buf[0..n], null, now_us);
-    try std.testing.expectEqual(quic_zig.ConnectionPhase.draining, server.phase());
+    try std.testing.expectEqual(quic.ConnectionPhase.draining, server.phase());
 }
 
 test "beginGracefulShutdown: local opens refused while an in-flight stream drains" {
@@ -167,8 +167,8 @@ test "beginGracefulShutdown: local opens refused while an in-flight stream drain
     try std.testing.expect(client.gracefulShutdownActive());
     try std.testing.expectError(error.ShuttingDown, client.openNextBidi());
     try std.testing.expectError(error.ShuttingDown, client.openNextUni());
-    try std.testing.expectEqual(quic_zig.CloseState.open, client.closeState());
-    try std.testing.expectEqual(quic_zig.ConnectionPhase.established, client.phase());
+    try std.testing.expectEqual(quic.CloseState.open, client.closeState());
+    try std.testing.expectEqual(quic.ConnectionPhase.established, client.phase());
 
     // The in-flight stream still drains to the server in full, FIN included.
     // The whole payload fits one 1-RTT packet, so client -> server delivery

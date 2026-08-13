@@ -2,7 +2,7 @@
 // and enum surface plus the emit* helpers. Free-function siblings of
 // `Connection`'s method-style emitters; the methods on `Connection`
 // are thin thunks that delegate here, and state.zig re-exports every
-// type declared in this file so the `quic_zig.conn.state.*` public
+// type declared in this file so the `quic.conn.state.*` public
 // path keeps resolving.
 
 const state_mod = @import("state.zig");
@@ -27,9 +27,10 @@ pub const QlogEventName = enum {
     aead_confidentiality_limit_reached,
     aead_integrity_limit_reached,
     // -- new richer events (modeled after qlog draft-ietf-quic-qlog-quic-events) --
-    /// One-shot event when the connection begins exchanging packets — emitted from
-    /// the first call to `bind` for clients (or first authenticated packet for the
-    /// server). Carries our role plus the SCID/DCID known at the time.
+    /// One-shot event when the connection begins observation — emitted from
+    /// `setQlogCallback` (the first moment a sink exists) and, server-side,
+    /// from the first authenticated Initial if a callback was already
+    /// installed. Carries our role plus the SCID/DCID known at the time.
     connection_started,
     /// Emitted whenever `closeState()` transitions (open → closing → draining → closed).
     connection_state_updated,

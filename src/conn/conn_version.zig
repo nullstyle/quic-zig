@@ -137,7 +137,7 @@ pub fn writeVersionNegotiation(
 
 /// Server-side helper: write a Retry packet in response to
 /// `client_initial`. Token contents and validation remain
-/// embedder-owned; quic_zig handles the Retry header and the
+/// embedder-owned; quic handles the Retry header and the
 /// version-keyed RFC 9001 §5.8 / RFC 9368 §3.3.3 integrity tag.
 /// The Retry's version field mirrors the client's Initial so the
 /// peer can validate under the matching constants.

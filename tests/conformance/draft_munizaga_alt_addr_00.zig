@@ -1,9 +1,9 @@
 //! draft-munizaga-quic-alternative-server-address-00 conformance.
 //!
-//! Locks down the wire format and transport-parameter rules quic_zig
+//! Locks down the wire format and transport-parameter rules quic
 //! observes for the QUIC Alternative Server Address frames extension.
 //! Pinned to draft revision 00 — bumping
-//! `quic_zig.alt_server_address_draft_version` is a deliberate scoped
+//! `quic.alt_server_address_draft_version` is a deliberate scoped
 //! change.
 //!
 //! ## Coverage (codec scope)
@@ -32,7 +32,7 @@
 //!                        types (codec preserves whatever the sender
 //!                        supplies; this test demonstrates correct
 //!                        framing of an increasing run)
-//!   §7        NORMATIVE  frames are ack-eliciting under quic_zig's
+//!   §7        NORMATIVE  frames are ack-eliciting under quic's
 //!                        classifier (drives loss-recovery / ACK
 //!                        scheduling correctly)
 //!   §7        NORMATIVE  receiving the frame without the extension
@@ -84,13 +84,13 @@
 //!     adopt the new path.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const handshake_fixture = @import("_handshake_fixture.zig");
 
-const frame = quic_zig.frame;
-const tls = quic_zig.tls;
+const frame = quic.frame;
+const tls = quic.tls;
 const transport_params = tls.transport_params;
-const varint = quic_zig.wire.varint;
+const varint = quic.wire.varint;
 const Frame = frame.types.Frame;
 
 // ---------------------------------------------------------------- §4 transport parameter
@@ -450,7 +450,7 @@ test "NORMATIVE receiver surfaces a typed ALTERNATIVE_V4_ADDRESS event when clie
 
     // Drain non-alt-addr events first (handshake completion, etc.),
     // then assert exactly one §6 event with the expected payload.
-    var saw_alt: ?quic_zig.AlternativeServerAddressEvent = null;
+    var saw_alt: ?quic.AlternativeServerAddressEvent = null;
     while (pair.clientConn().pollEvent()) |event| {
         if (event == .alternative_server_address) {
             saw_alt = event.alternative_server_address;
@@ -682,7 +682,7 @@ test "NORMATIVE ALTERNATIVE_*_ADDRESS frames are ack-eliciting in a 1-RTT payloa
         .address = .{ 192, 0, 2, 1 },
         .port = 4433,
     } });
-    try std.testing.expect(quic_zig.Connection.packetPayloadAckEliciting(buf[0..n]));
+    try std.testing.expect(quic.Connection.packetPayloadAckEliciting(buf[0..n]));
 
     var buf6: [64]u8 = undefined;
     const n6 = try frame.encode(&buf6, .{ .alternative_v6_address = .{
@@ -692,7 +692,7 @@ test "NORMATIVE ALTERNATIVE_*_ADDRESS frames are ack-eliciting in a 1-RTT payloa
         .address = @splat(0),
         .port = 4433,
     } });
-    try std.testing.expect(quic_zig.Connection.packetPayloadAckEliciting(buf6[0..n6]));
+    try std.testing.expect(quic.Connection.packetPayloadAckEliciting(buf6[0..n6]));
 }
 
 // ---------------------------------------------------------------- §8 multipath interaction (ALT-5)
@@ -736,7 +736,7 @@ test "NORMATIVE ALTERNATIVE_*_ADDRESS receipt under a multipath-negotiated hands
     const close_event = try pair.injectFrameAtClient(frame_buf[0..n]);
     try std.testing.expect(close_event == null);
 
-    var saw: ?quic_zig.AlternativeServerAddressEvent = null;
+    var saw: ?quic.AlternativeServerAddressEvent = null;
     while (pair.clientConn().pollEvent()) |event| {
         if (event == .alternative_server_address) saw = event.alternative_server_address;
     }
@@ -751,7 +751,7 @@ test "NORMATIVE ALTERNATIVE_*_ADDRESS receipt under a multipath-negotiated hands
 test "SHOULD recommendedMigrationDelayMs returns a value within the requested range [draft-munizaga-quic-alternative-server-address-00 §9]" {
     var i: usize = 0;
     while (i < 32) : (i += 1) {
-        const v = try quic_zig.alt_addr.recommendedMigrationDelayMs(50, 500);
+        const v = try quic.alt_addr.recommendedMigrationDelayMs(50, 500);
         try std.testing.expect(v >= 50);
         try std.testing.expect(v <= 500);
     }
@@ -792,6 +792,6 @@ test "SHOULD recommendedMigrationDelayMs returns the lower bound when the range 
     // rather than panicking so config files can express it.
     try std.testing.expectEqual(
         @as(u64, 25),
-        try quic_zig.alt_addr.recommendedMigrationDelayMs(25, 25),
+        try quic.alt_addr.recommendedMigrationDelayMs(25, 25),
     );
 }

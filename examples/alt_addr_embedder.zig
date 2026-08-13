@@ -2,7 +2,7 @@
 //! draft-munizaga-quic-alternative-server-address-00 receive surface.
 //!
 //! The connection's `pollEvent` returns each `ALTERNATIVE_V4/V6_ADDRESS`
-//! frame as a typed `AlternativeServerAddressEvent`. quic_zig
+//! frame as a typed `AlternativeServerAddressEvent`. quic
 //! pre-filters out duplicates and stale-reorders (RFC 9000 §13.3
 //! retransmits and out-of-order app-PN delivery), so the embedder
 //! only sees forward-progress updates. What remains is the
@@ -28,16 +28,16 @@
 //!    a caller-supplied callback so this example composes with an
 //!    embedder that already has a `pollEvent` loop.
 //!
-//! The whole thing uses only the public `quic_zig` API surface; the
+//! The whole thing uses only the public `quic` API surface; the
 //! tests at the bottom drive it against a stubbed event stream so
 //! the example doubles as a regression for the receive-side
 //! contract.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const AlternativeServerAddressEvent = quic_zig.AlternativeServerAddressEvent;
-const ConnectionEvent = quic_zig.ConnectionEvent;
+const AlternativeServerAddressEvent = quic.AlternativeServerAddressEvent;
+const ConnectionEvent = quic.ConnectionEvent;
 
 /// Maximum number of distinct `(kind, addr, port)` entries the
 /// embedder will track at once. Bounded so a chatty server can't
@@ -230,7 +230,7 @@ pub const MigrationScheduler = struct {
         target: Entry,
         now_ms: u64,
     ) !void {
-        const delay_ms = try quic_zig.alt_addr.recommendedMigrationDelayMs(
+        const delay_ms = try quic.alt_addr.recommendedMigrationDelayMs(
             self.config.min_delay_ms,
             self.config.max_delay_ms,
         );
@@ -267,7 +267,7 @@ pub const Embedder = struct {
     /// embedder's existing pollEvent loop continues to fire.
     pub fn pump(
         self: *Embedder,
-        conn: *quic_zig.Connection,
+        conn: *quic.Connection,
         now_ms: u64,
         non_alt_callback: ?*const fn (event: ConnectionEvent) void,
     ) !usize {

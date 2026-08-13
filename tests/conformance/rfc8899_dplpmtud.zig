@@ -4,7 +4,7 @@
 //! RFC 8899 specifies a generic active PMTU-discovery protocol. The
 //! QUIC-specific application is documented under §6 (also leaning on
 //! RFC 9000 §14.3 for the QUIC v1 minimum-MTU floor of 1200 bytes and
-//! §14.4 for the PADDING+PING probe shape). quic_zig implements this
+//! §14.4 for the PADDING+PING probe shape). quic implements this
 //! per-`PathState` so each application-data path probes / discovers
 //! its own MTU independently — see `src/conn/path.zig` for the
 //! state-machine primitives and `src/conn/state.zig` for the send /
@@ -49,12 +49,12 @@
 //!                   future scope.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
-const conn_mod = quic_zig.conn;
+const quic = @import("quic");
+const conn_mod = quic.conn;
 const path_mod = conn_mod.path;
-const wire = quic_zig.wire;
+const wire = quic.wire;
 const short_packet = wire.short_packet;
-const frame_mod = quic_zig.frame;
+const frame_mod = quic.frame;
 
 const testing = std.testing;
 const handshake_fixture = @import("_handshake_fixture.zig");
@@ -298,7 +298,7 @@ test "MUST NOT trigger CC reaction when a probe is declared lost [RFC8899 §4.4 
     // RFC 8899 §4.4 / §5.1.5: probe-packet loss is a discovery
     // signal, NOT a congestion signal. The implementation MUST NOT
     // shrink cwnd, bump ssthresh, or enter the recovery period
-    // because of a probe loss. quic_zig's loss-detection path
+    // because of a probe loss. quic's loss-detection path
     // routes a probe-PN-matched loss through `pmtudOnProbeLost`
     // and skips the LossStats add — which is what every CC update
     // function consumes. We assert the cwnd snapshot is unchanged

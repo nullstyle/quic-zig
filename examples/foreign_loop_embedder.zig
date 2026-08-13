@@ -1,6 +1,6 @@
 //! Foreign event loop embedder — the I/O-agnostic ("caller-drives")
 //! path wired into a hand-rolled `std.posix.poll` reactor instead of
-//! `quic_zig.transport.runUdpServer` / `runUdpClient`.
+//! `quic.transport.runUdpServer` / `runUdpClient`.
 //!
 //! ```sh
 //! zig build examples
@@ -10,7 +10,7 @@
 //! The shape to copy when your runtime already owns the wait:
 //!
 //!  1. **Scheduling math is pure.** `pollTimeoutMs` turns a
-//!     `quic_zig.TimerDeadline` into a `poll(2)` timeout. Past-due
+//!     `quic.TimerDeadline` into a `poll(2)` timeout. Past-due
 //!     deadlines must clamp to `0` (a negative timeout means "block
 //!     forever" and your PTO never fires) and sub-millisecond ones
 //!     must round *up* to `1` (or the loop spins hot). This is where
@@ -46,7 +46,7 @@
 //!     thread but the loop thread may touch them. Producers push onto
 //!     `WorkQueue` under its mutex and call `Waker.wake`; the loop
 //!     thread drains the queue and is the only thing that ever calls
-//!     into quic_zig.
+//!     into quic.
 //!  6. **Everything the packaged loops do, you now owe.** Bind and
 //!     (optionally) tune the socket, drain `drainStatelessResponse`
 //!     separately from the per-slot outbox, pick destinations as
@@ -86,11 +86,11 @@
 //! socket/poll group (Group D) touches real fds, and it skips on
 //! Windows, where std routes sockets through `std.Io` and
 //! `std.posix.poll` is a hard `@compileError`. The whole thing uses
-//! only the public `quic_zig` API surface.
+//! only the public `quic` API surface.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("echo_common.zig");
 
 /// ALPN this example negotiates, so it is self-identifying on the
@@ -129,7 +129,7 @@ pub const default_idle_cap_ms: i32 = 1_000;
 /// entirely for exactly that reason.
 pub fn pollTimeoutMs(
     now_us: u64,
-    deadline: ?quic_zig.TimerDeadline,
+    deadline: ?quic.TimerDeadline,
     idle_cap_ms: i32,
     has_wake_fd: bool,
 ) i32 {
@@ -150,9 +150,9 @@ pub fn pollTimeoutMs(
 /// and folds in its own wall-clock budget) parks on the minimum, so
 /// this reduction is part of the scheduling surface.
 pub fn earlier(
-    a: ?quic_zig.TimerDeadline,
-    b: ?quic_zig.TimerDeadline,
-) ?quic_zig.TimerDeadline {
+    a: ?quic.TimerDeadline,
+    b: ?quic.TimerDeadline,
+) ?quic.TimerDeadline {
     const lhs = a orelse return b;
     const rhs = b orelse return lhs;
     return if (rhs.at_us < lhs.at_us) rhs else lhs;
@@ -161,7 +161,7 @@ pub fn earlier(
 // -- L1b: clock + address projections (local copies, on purpose) ------------
 
 /// Non-negative microsecond offset from a captured monotonic origin.
-/// A six-line copy of `quic_zig.transport.udp_server.monotonicNowUs`
+/// A six-line copy of `quic.transport.udp_server.monotonicNowUs`
 /// (`src/transport/udp_server.zig`): the library ships this, but a
 /// foreign loop owes `transport/` nothing, and spelling it out here
 /// makes that concrete. `Server.feed` / `tick` only require a
@@ -174,10 +174,10 @@ pub fn monotonicNowUs(io: std.Io, start: std.Io.Timestamp) u64 {
     return @intCast(delta);
 }
 
-/// Project a `std.Io.net.IpAddress` into quic_zig's tagged-union
+/// Project a `std.Io.net.IpAddress` into quic's tagged-union
 /// `Address`. Library equivalent:
-/// `quic_zig.transport.udp_server.ipAddressToPathAddress`.
-pub fn ipAddressToPathAddress(addr: std.Io.net.IpAddress) quic_zig.Address {
+/// `quic.transport.udp_server.ipAddressToPathAddress`.
+pub fn ipAddressToPathAddress(addr: std.Io.net.IpAddress) quic.Address {
     return switch (addr) {
         .ip4 => |ip4| .{ .ipv4 = .{ .addr = ip4.bytes, .port = ip4.port } },
         .ip6 => |ip6| .{ .ipv6 = .{ .addr = ip6.bytes, .port = ip6.port, .flow = ip6.flow } },
@@ -186,8 +186,8 @@ pub fn ipAddressToPathAddress(addr: std.Io.net.IpAddress) quic_zig.Address {
 
 /// Inverse projection. `null` for `.unspecified` — the loop treats
 /// that as "no usable destination" and skips the send. Library
-/// equivalent: `quic_zig.transport.udp_server.pathAddressToIpAddress`.
-pub fn pathAddressToIpAddress(addr: quic_zig.Address) ?std.Io.net.IpAddress {
+/// equivalent: `quic.transport.udp_server.pathAddressToIpAddress`.
+pub fn pathAddressToIpAddress(addr: quic.Address) ?std.Io.net.IpAddress {
     return switch (addr) {
         .unspecified => null,
         .ipv4 => |v| .{ .ip4 = .{ .bytes = v.addr, .port = v.port } },
@@ -195,7 +195,7 @@ pub fn pathAddressToIpAddress(addr: quic_zig.Address) ?std.Io.net.IpAddress {
     };
 }
 
-// -- L2: pumps (pure quic_zig, transport injected) --------------------------
+// -- L2: pumps (pure quic, transport injected) --------------------------
 
 /// Where a pump hands finished datagrams. House-style opaque-ctx +
 /// fn-pointer, matching `transport.RunUdpOptions.on_iteration` and
@@ -204,7 +204,7 @@ pub fn pathAddressToIpAddress(addr: quic_zig.Address) ?std.Io.net.IpAddress {
 /// another pump's `ingest` (see the in-memory test at the bottom).
 pub const DatagramSink = struct {
     ctx: ?*anyopaque = null,
-    send: *const fn (ctx: ?*anyopaque, dst: quic_zig.Address, bytes: []const u8) anyerror!void,
+    send: *const fn (ctx: ?*anyopaque, dst: quic.Address, bytes: []const u8) anyerror!void,
 };
 
 /// Max concurrently-tracked connections in `ServerApp`'s state pool.
@@ -267,12 +267,12 @@ pub const StreamWriter = struct {
 
 /// `StreamWriter` bound to a live connection. `ctx` is the
 /// `*Connection` itself, which is already pointer-stable.
-fn connectionStreamWriter(conn: *quic_zig.Connection) StreamWriter {
+fn connectionStreamWriter(conn: *quic.Connection) StreamWriter {
     return .{ .ctx = conn, .write = connectionStreamWrite };
 }
 
 fn connectionStreamWrite(ctx: ?*anyopaque, id: u64, data: []const u8) anyerror!usize {
-    const conn: *quic_zig.Connection = @ptrCast(@alignCast(ctx.?));
+    const conn: *quic.Connection = @ptrCast(@alignCast(ctx.?));
     return conn.streamWrite(id, data);
 }
 
@@ -325,7 +325,7 @@ pub const EchoOutcome = enum {
 /// Per-connection application state, handed out of `ServerApp`'s pool
 /// on the first event from a connection, hung off `Slot.user_data`,
 /// and returned to the pool in `ServerApp.onConnectionWillClose`.
-/// quic_zig never reads or frees `user_data`; the will-close hook —
+/// quic never reads or frees `user_data`; the will-close hook —
 /// which `Server.reap` invokes while the slot is still fully valid —
 /// is the last safe place to release whatever it points at.
 pub const ConnState = struct {
@@ -366,7 +366,7 @@ pub const ServerApp = struct {
     /// for each `.closed` slot while `slot.conn` / `slot.user_data`
     /// are still valid. Release per-connection state here and nowhere
     /// else.
-    pub fn onConnectionWillClose(ctx: ?*anyopaque, slot: *quic_zig.Server.Slot) void {
+    pub fn onConnectionWillClose(ctx: ?*anyopaque, slot: *quic.Server.Slot) void {
         const self: *ServerApp = @ptrCast(@alignCast(ctx.?));
         const state = stateOf(slot) orelse return;
         self.streams_echoed += state.streams_echoed;
@@ -386,7 +386,7 @@ pub const ServerApp = struct {
         return n;
     }
 
-    fn ensureState(self: *ServerApp, slot: *quic_zig.Server.Slot) ?*ConnState {
+    fn ensureState(self: *ServerApp, slot: *quic.Server.Slot) ?*ConnState {
         if (stateOf(slot)) |state| return state;
         for (&self.pool) |*entry| {
             if (entry.in_use) continue;
@@ -398,7 +398,7 @@ pub const ServerApp = struct {
         return null;
     }
 
-    fn stateOf(slot: *quic_zig.Server.Slot) ?*ConnState {
+    fn stateOf(slot: *quic.Server.Slot) ?*ConnState {
         const ptr = slot.user_data orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
@@ -408,7 +408,7 @@ pub const ServerApp = struct {
 /// with the transport injected. Mirrors `runUdpServer`'s body
 /// (`src/transport/udp_server.zig`) step for step, minus the socket.
 pub const ServerPump = struct {
-    server: *quic_zig.Server,
+    server: *quic.Server,
     app: *ServerApp,
     sink: DatagramSink,
     /// Outbound scratch. `pollDatagram` writes one datagram per call
@@ -427,7 +427,7 @@ pub const ServerPump = struct {
 
     /// Ingest one datagram and flush any Version Negotiation / Retry
     /// it queued. `bytes` MUST be mutable — header unprotection
-    /// rewrites it in place, which is why every quic_zig ingest path
+    /// rewrites it in place, which is why every quic ingest path
     /// takes `[]u8` and not `[]const u8`.
     ///
     /// The stateless drain is a separate step because VN and Retry
@@ -436,9 +436,9 @@ pub const ServerPump = struct {
     pub fn ingest(
         self: *ServerPump,
         bytes: []u8,
-        from: quic_zig.Address,
+        from: quic.Address,
         now_us: u64,
-    ) !quic_zig.Server.FeedOutcome {
+    ) !quic.Server.FeedOutcome {
         const outcome = try self.server.feed(bytes, from, now_us);
         while (self.server.drainStatelessResponse()) |response| {
             // Best-effort, exactly as `runUdpServer` treats them: the
@@ -511,7 +511,7 @@ pub const ServerPump = struct {
                         slot.conn.close(true, 0x04, "stream tracker exhausted");
                     }
                 },
-                // The mandatory catch-all arm: quic_zig may add event
+                // The mandatory catch-all arm: quic may add event
                 // variants in a minor release. See
                 // `docs/API_STABILITY.md`.
                 else => {},
@@ -545,11 +545,11 @@ pub const ServerPump = struct {
     /// Earliest pending timer across every live slot, or null when no
     /// slot has one armed. This is what a foreign loop parks on
     /// instead of a fixed tick.
-    pub fn nextDeadline(self: *const ServerPump, now_us: u64) ?quic_zig.TimerDeadline {
+    pub fn nextDeadline(self: *const ServerPump, now_us: u64) ?quic.TimerDeadline {
         return self.server.nextTimerDeadline(now_us);
     }
 
-    fn drainSlot(self: *ServerPump, slot: *quic_zig.Server.Slot, now_us: u64) !void {
+    fn drainSlot(self: *ServerPump, slot: *quic.Server.Slot, now_us: u64) !void {
         while (try slot.conn.pollDatagram(self.tx, now_us)) |out| {
             // `out.to` wins (migration / multipath / VN peers); the
             // slot's last-seen peer address is the fallback. Neither
@@ -561,7 +561,7 @@ pub const ServerPump = struct {
 };
 
 /// Pump every tracked bidi stream one pass.
-fn echoStreams(slot: *quic_zig.Server.Slot, state: *ConnState) !void {
+fn echoStreams(slot: *quic.Server.Slot, state: *ConnState) !void {
     for (&state.streams) |*e| {
         if (!e.active) continue;
         switch (try echoStream(slot.conn, e)) {
@@ -590,7 +590,7 @@ fn echoStreams(slot: *quic_zig.Server.Slot, state: *ConnState) !void {
 ///     returns zero bytes.
 ///  2. Asserting `streamWrite` accepted everything. It short-writes by
 ///     design under send-buffer pressure; see `StreamEcho.flush`.
-fn echoStream(conn: *quic_zig.Connection, e: *StreamEcho) !EchoOutcome {
+fn echoStream(conn: *quic.Connection, e: *StreamEcho) !EchoOutcome {
     const writer = connectionStreamWriter(conn);
 
     // Whatever the connection refused last pass goes first, so bytes
@@ -624,7 +624,7 @@ fn echoStream(conn: *quic_zig.Connection, e: *StreamEcho) !EchoOutcome {
 }
 
 /// Echo every queued inbound DATAGRAM verbatim.
-fn echoDatagrams(slot: *quic_zig.Server.Slot, state: *ConnState) !void {
+fn echoDatagrams(slot: *quic.Server.Slot, state: *ConnState) !void {
     // Sized to the advertised `max_datagram_frame_size`, not to the
     // stream chunk: `receiveDatagram` pops the payload whether or not
     // it fit, so a short buffer loses the tail with no error.
@@ -683,11 +683,11 @@ pub const ClientFlow = struct {
 /// ClientHello never reaches the wire) and a single-path destination
 /// fallback (`out.to orelse target`).
 pub const ClientPump = struct {
-    client: *quic_zig.Client,
+    client: *quic.Client,
     sink: DatagramSink,
     tx: []u8,
     /// Where datagrams go when the connection doesn't name a path.
-    target: quic_zig.Address,
+    target: quic.Address,
     /// Bytes to write on the bidi stream.
     payload: []const u8 = stream_message,
     /// Accumulator for the echo, exactly `payload.len` bytes.
@@ -845,7 +845,7 @@ pub const ClientPump = struct {
         self.flow.stage = .done;
     }
 
-    pub fn nextDeadline(self: *const ClientPump, now_us: u64) ?quic_zig.TimerDeadline {
+    pub fn nextDeadline(self: *const ClientPump, now_us: u64) ?quic.TimerDeadline {
         return self.client.conn.nextTimerDeadline(now_us);
     }
 
@@ -877,7 +877,7 @@ pub const max_queued_work: usize = 16;
 /// thread is the only thread allowed to make that call.
 pub const Work = struct {
     kind: Kind,
-    /// Producer-assigned sequence number. quic_zig never sees it; it
+    /// Producer-assigned sequence number. quic never sees it; it
     /// exists so the tests (and a human reading the log) can observe
     /// that FIFO order survived the hand-off.
     seq: u64 = 0,
@@ -1062,7 +1062,7 @@ const SocketSink = struct {
     io: std.Io,
     sock: *const std.Io.net.Socket,
 
-    fn sendFn(ctx: ?*anyopaque, dst: quic_zig.Address, bytes: []const u8) anyerror!void {
+    fn sendFn(ctx: ?*anyopaque, dst: quic.Address, bytes: []const u8) anyerror!void {
         const self: *SocketSink = @ptrCast(@alignCast(ctx.?));
         const ip = pathAddressToIpAddress(dst) orelse return;
         try self.sock.send(self.io, &ip, bytes);
@@ -1112,9 +1112,9 @@ pub const PosixPollReactor = struct {
 
     pub const Options = struct {
         io: std.Io,
-        server: *quic_zig.Server,
+        server: *quic.Server,
         app: *ServerApp,
-        client: *quic_zig.Client,
+        client: *quic.Client,
         server_sock: *const std.Io.net.Socket,
         client_sock: *const std.Io.net.Socket,
         waker: Waker,
@@ -1214,7 +1214,7 @@ pub const PosixPollReactor = struct {
             // 2. Sleep. The reactor's own budget is just another
             // deadline, so `earlier` folds it in and the QUIC-armed
             // cases keep their exact semantics.
-            const budget: quic_zig.TimerDeadline = .{ .kind = .idle, .at_us = self.budget_us };
+            const budget: quic.TimerDeadline = .{ .kind = .idle, .at_us = self.budget_us };
             const deadline = earlier(
                 budget,
                 earlier(self.server.nextDeadline(now_us), self.client.nextDeadline(now_us)),
@@ -1412,7 +1412,7 @@ fn runDemo(init: std.process.Init) !void {
     const protos = [_][]const u8{alpn};
     var app: ServerApp = .{};
 
-    var server = try quic_zig.Server.init(.{
+    var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.cert_pem,
         .tls_key_pem = common.key_pem,
@@ -1431,7 +1431,7 @@ fn runDemo(init: std.process.Init) !void {
     });
     defer server.deinit();
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -1523,10 +1523,10 @@ test "pollTimeoutMs: a past-due deadline returns 0, never a negative timeout" {
     // so the connection's PTO would never fire and the loop would
     // stall until the next inbound datagram.
     const now_us: u64 = 1_000_000;
-    const past: quic_zig.TimerDeadline = .{ .kind = .pto, .at_us = now_us - 5_000 };
+    const past: quic.TimerDeadline = .{ .kind = .pto, .at_us = now_us - 5_000 };
     try testing.expectEqual(@as(i32, 0), pollTimeoutMs(now_us, past, default_idle_cap_ms, true));
 
-    const exactly_due: quic_zig.TimerDeadline = .{ .kind = .pto, .at_us = now_us };
+    const exactly_due: quic.TimerDeadline = .{ .kind = .pto, .at_us = now_us };
     try testing.expectEqual(
         @as(i32, 0),
         pollTimeoutMs(now_us, exactly_due, default_idle_cap_ms, true),
@@ -1535,14 +1535,14 @@ test "pollTimeoutMs: a past-due deadline returns 0, never a negative timeout" {
 
 test "pollTimeoutMs: a sub-millisecond deadline rounds up to 1 ms" {
     const now_us: u64 = 1_000_000;
-    const soon: quic_zig.TimerDeadline = .{ .kind = .ack_delay, .at_us = now_us + 300 };
+    const soon: quic.TimerDeadline = .{ .kind = .ack_delay, .at_us = now_us + 300 };
     // 0 here would spin the loop hot on a 300 µs ACK-delay timer.
     try testing.expectEqual(@as(i32, 1), pollTimeoutMs(now_us, soon, default_idle_cap_ms, true));
 }
 
 test "pollTimeoutMs: an exact millisecond deadline is not inflated" {
     const now_us: u64 = 1_000_000;
-    const in_2ms: quic_zig.TimerDeadline = .{ .kind = .loss_detection, .at_us = now_us + 2_000 };
+    const in_2ms: quic.TimerDeadline = .{ .kind = .loss_detection, .at_us = now_us + 2_000 };
     try testing.expectEqual(@as(i32, 2), pollTimeoutMs(now_us, in_2ms, default_idle_cap_ms, true));
 }
 
@@ -1550,7 +1550,7 @@ test "pollTimeoutMs: a far-future deadline is clamped to the idle cap" {
     const now_us: u64 = 1_000_000;
     // An hour out: the microsecond delta doesn't fit an i32
     // millisecond timeout, so the clamp is load-bearing.
-    const far: quic_zig.TimerDeadline = .{ .kind = .idle, .at_us = now_us + 3_600_000_000 };
+    const far: quic.TimerDeadline = .{ .kind = .idle, .at_us = now_us + 3_600_000_000 };
     try testing.expectEqual(
         default_idle_cap_ms,
         pollTimeoutMs(now_us, far, default_idle_cap_ms, true),
@@ -1558,8 +1558,8 @@ test "pollTimeoutMs: a far-future deadline is clamped to the idle cap" {
 }
 
 test "earlier: picks the sooner of two armed deadlines and tolerates nulls" {
-    const a: quic_zig.TimerDeadline = .{ .kind = .pto, .at_us = 5_000 };
-    const b: quic_zig.TimerDeadline = .{ .kind = .idle, .at_us = 9_000 };
+    const a: quic.TimerDeadline = .{ .kind = .pto, .at_us = 5_000 };
+    const b: quic.TimerDeadline = .{ .kind = .idle, .at_us = 9_000 };
 
     try testing.expect(earlier(null, null) == null);
     try testing.expectEqual(@as(u64, 5_000), earlier(a, null).?.at_us);
@@ -1568,7 +1568,7 @@ test "earlier: picks the sooner of two armed deadlines and tolerates nulls" {
     try testing.expectEqual(@as(u64, 5_000), earlier(b, a).?.at_us);
     // The kind rides along untouched — the embedder treats it as
     // opaque and only feeds `at_us` back into the loop.
-    try testing.expectEqual(quic_zig.TimerKind.pto, earlier(b, a).?.kind);
+    try testing.expectEqual(quic.TimerKind.pto, earlier(b, a).?.kind);
 }
 
 // Group B — wake/queue semantics. Portable: `std.Thread.Mutex` works
@@ -1711,7 +1711,7 @@ test "StreamEcho.flush: a refused write keeps the remainder staged for the next 
 // application data. Portable, including Windows.
 
 /// Wires one pump's `DatagramSink` straight into the other's
-/// `ingest`. The copy into `scratch` is not incidental: quic_zig's
+/// `ingest`. The copy into `scratch` is not incidental: quic's
 /// ingest paths take `[]u8` because header unprotection rewrites the
 /// buffer in place, and `DatagramSink.send` hands out `[]const u8`.
 const MemoryWire = struct {
@@ -1722,7 +1722,7 @@ const MemoryWire = struct {
     to_client: u32 = 0,
     scratch: [max_quic_datagram_bytes]u8 = undefined,
 
-    fn toServer(ctx: ?*anyopaque, dst: quic_zig.Address, bytes: []const u8) anyerror!void {
+    fn toServer(ctx: ?*anyopaque, dst: quic.Address, bytes: []const u8) anyerror!void {
         _ = dst;
         const self: *MemoryWire = @ptrCast(@alignCast(ctx.?));
         @memcpy(self.scratch[0..bytes.len], bytes);
@@ -1730,7 +1730,7 @@ const MemoryWire = struct {
         _ = try self.server.?.ingest(self.scratch[0..bytes.len], synthetic_peer, self.now_us);
     }
 
-    fn toClient(ctx: ?*anyopaque, dst: quic_zig.Address, bytes: []const u8) anyerror!void {
+    fn toClient(ctx: ?*anyopaque, dst: quic.Address, bytes: []const u8) anyerror!void {
         _ = dst;
         const self: *MemoryWire = @ptrCast(@alignCast(ctx.?));
         @memcpy(self.scratch[0..bytes.len], bytes);
@@ -1741,7 +1741,7 @@ const MemoryWire = struct {
 
 /// Synthetic client tuple the in-memory server sees every datagram
 /// arrive from.
-const synthetic_peer: quic_zig.Address = .{
+const synthetic_peer: quic.Address = .{
     .ipv4 = .{ .addr = .{ 127, 0, 0, 1 }, .port = 4433 },
 };
 
@@ -1772,7 +1772,7 @@ fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32) !MemoryRun 
     const protos = [_][]const u8{alpn};
 
     var app: ServerApp = .{};
-    var server = try quic_zig.Server.init(.{
+    var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.cert_pem,
         .tls_key_pem = common.key_pem,
@@ -1783,7 +1783,7 @@ fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32) !MemoryRun 
     });
     defer server.deinit();
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -1938,7 +1938,7 @@ test "ClientPump: bootstrap queues the ClientHello with nothing armed to wake th
     const allocator = testing.allocator;
     const protos = [_][]const u8{alpn};
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -1998,7 +1998,7 @@ const CountingSink = struct {
         return .{ .ctx = self, .send = CountingSink.send };
     }
 
-    fn send(ctx: ?*anyopaque, dst: quic_zig.Address, bytes: []const u8) anyerror!void {
+    fn send(ctx: ?*anyopaque, dst: quic.Address, bytes: []const u8) anyerror!void {
         _ = dst;
         const self: *CountingSink = @ptrCast(@alignCast(ctx.?));
         self.datagrams += 1;
@@ -2051,7 +2051,7 @@ fn reactorSmoke() !void {
     const protos = [_][]const u8{alpn};
     var app: ServerApp = .{};
 
-    var server = try quic_zig.Server.init(.{
+    var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.cert_pem,
         .tls_key_pem = common.key_pem,
@@ -2062,7 +2062,7 @@ fn reactorSmoke() !void {
     });
     defer server.deinit();
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,

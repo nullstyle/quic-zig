@@ -6,17 +6,17 @@
 //! event-loop sleep sizing).
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("common.zig");
 
 const HookCtx = struct {
     fired: u32 = 0,
     slot_id: ?u64 = null,
     user_data_seen: ?*anyopaque = null,
-    conn_close_state_inside: ?quic_zig.CloseState = null,
+    conn_close_state_inside: ?quic.CloseState = null,
 };
 
-fn onWillClose(user_data: ?*anyopaque, slot: *quic_zig.Server.Slot) void {
+fn onWillClose(user_data: ?*anyopaque, slot: *quic.Server.Slot) void {
     const ctx: *HookCtx = @ptrCast(@alignCast(user_data.?));
     ctx.fired += 1;
     ctx.slot_id = slot.slot_id;
@@ -26,10 +26,10 @@ fn onWillClose(user_data: ?*anyopaque, slot: *quic_zig.Server.Slot) void {
 }
 
 fn pumpClientToServer(
-    cli: *quic_zig.Client,
-    srv: *quic_zig.Server,
+    cli: *quic.Client,
+    srv: *quic.Server,
     rx: []u8,
-    addr: quic_zig.conn.path.Address,
+    addr: quic.conn.path.Address,
     now_us: u64,
 ) !void {
     while (try cli.conn.poll(rx, now_us)) |len| {
@@ -38,8 +38,8 @@ fn pumpClientToServer(
 }
 
 fn pumpServerToClient(
-    srv: *quic_zig.Server,
-    cli: *quic_zig.Client,
+    srv: *quic.Server,
+    cli: *quic.Client,
     rx: []u8,
     now_us: u64,
 ) !void {
@@ -57,7 +57,7 @@ test "on_connection_will_close fires inside reap with the slot still valid" {
     var hook_ctx: HookCtx = .{};
     var app_state: u32 = 0xbeef;
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -68,7 +68,7 @@ test "on_connection_will_close fires inside reap with the slot still valid" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -78,7 +78,7 @@ test "on_connection_will_close fires inside reap with the slot still valid" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcd), .port = 0 } };
 
     try cli.conn.advance();
 
@@ -113,7 +113,7 @@ test "on_connection_will_close fires inside reap with the slot still valid" {
         try cli.conn.tick(now_us);
         now_us += 500_000; // stride past 3xPTO quickly
     }
-    try std.testing.expectEqual(quic_zig.CloseState.closed, srv.iterator()[0].conn.closeState());
+    try std.testing.expectEqual(quic.CloseState.closed, srv.iterator()[0].conn.closeState());
 
     // Reap runs the hook exactly once, before teardown, with user_data
     // and the connection still intact.
@@ -123,7 +123,7 @@ test "on_connection_will_close fires inside reap with the slot still valid" {
     try std.testing.expectEqual(@as(u32, 1), hook_ctx.fired);
     try std.testing.expectEqual(expected_slot_id, hook_ctx.slot_id.?);
     try std.testing.expectEqual(@as(?*anyopaque, &app_state), hook_ctx.user_data_seen);
-    try std.testing.expectEqual(quic_zig.CloseState.closed, hook_ctx.conn_close_state_inside.?);
+    try std.testing.expectEqual(quic.CloseState.closed, hook_ctx.conn_close_state_inside.?);
 
     // Nothing left to reap; the hook does not re-fire.
     try std.testing.expectEqual(@as(usize, 0), srv.reap());
@@ -134,7 +134,7 @@ test "Server.nextTimerDeadline aggregates the earliest slot deadline" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -145,11 +145,11 @@ test "Server.nextTimerDeadline aggregates the earliest slot deadline" {
 
     // No slots: nothing to sleep on.
     try std.testing.expectEqual(
-        @as(?quic_zig.TimerDeadline, null),
+        @as(?quic.TimerDeadline, null),
         srv.nextTimerDeadline(0),
     );
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -159,7 +159,7 @@ test "Server.nextTimerDeadline aggregates the earliest slot deadline" {
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xef), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xef), .port = 0 } };
 
     try cli.conn.advance();
 
@@ -194,7 +194,7 @@ test "auto-replenished CIDs make client active migration work against a default 
     // the proactive top-up existed, this exact scenario failed with
     // PathLimitExceeded: the server never issued spare CIDs and the
     // client had nothing to migrate to.
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -204,7 +204,7 @@ test "auto-replenished CIDs make client active migration work against a default 
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -214,7 +214,7 @@ test "auto-replenished CIDs make client active migration work against a default 
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x77), .port = 7777 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x77), .port = 7777 } };
 
     try cli.conn.advance();
 
@@ -235,6 +235,6 @@ test "auto-replenished CIDs make client active migration work against a default 
 
     // The load-bearing assertion: active migration succeeds without
     // any app-side CID provisioning.
-    const new_local: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x78), .port = 7878 } };
+    const new_local: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x78), .port = 7878 } };
     try cli.conn.beginClientActiveMigration(new_local, now_us);
 }

@@ -1,7 +1,7 @@
 //! Hardening guide §5.2 / §11.2 regression: 0-RTT replay rejection.
 //!
 //! Embedders that opt in to 0-RTT (`Server.Config.early_data`)
-//! are required to wire `quic_zig.tls.AntiReplayTracker` into their
+//! are required to wire `quic.tls.AntiReplayTracker` into their
 //! server loop and reject any 0-RTT request whose ticket-derived
 //! identity has already been seen — RFC 9001 §5.6 / RFC 8446 §8.
 //! Without that check, an attacker who captures a 0-RTT request can
@@ -27,7 +27,7 @@
 //!      same identity, `tracker.consume(id, now_us)`, expect `.replay`.
 //!
 //! The test demonstrates the full embedder workflow even though the
-//! high-level `quic_zig.Server` wrapper does not yet auto-call
+//! high-level `quic.Server` wrapper does not yet auto-call
 //! `setEarlyDataContext` on freshly-accepted slots — the replay-cache
 //! data structure and the identity-construction recipe are what this
 //! pins. When BoringSSL's 0-RTT acceptance is wired through the
@@ -36,18 +36,18 @@
 //! BoringSSL-state-based.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
 /// SHA-256 of the resumed session's ticket bytes. This is option (1)
 /// in the "Identity choice" section of
-/// `quic_zig.tls.anti_replay`'s module docstring: bound to
+/// `quic.tls.anti_replay`'s module docstring: bound to
 /// the ticket exactly, stable across replays of the same 0-RTT
 /// message, differs across distinct legitimate 0-RTT attempts (a
 /// peer-issued single-use ticket cannot be re-issued).
-fn ticketIdentity(ticket_bytes: []const u8) quic_zig.tls.anti_replay.Id {
-    var id: quic_zig.tls.anti_replay.Id = @splat(0);
+fn ticketIdentity(ticket_bytes: []const u8) quic.tls.anti_replay.Id {
+    var id: quic.tls.anti_replay.Id = @splat(0);
     std.crypto.hash.sha2.Sha256.hash(ticket_bytes, &id, .{});
     return id;
 }
@@ -82,10 +82,10 @@ const TicketSink = struct {
 /// agents editing the existing e2e files don't collide on a shared
 /// helper.
 fn pumpClientToServer(
-    cli: *quic_zig.Client,
-    srv: *quic_zig.Server,
+    cli: *quic.Client,
+    srv: *quic.Server,
     rx: []u8,
-    addr: quic_zig.conn.path.Address,
+    addr: quic.conn.path.Address,
     now_us: u64,
 ) !usize {
     var n: usize = 0;
@@ -99,8 +99,8 @@ fn pumpClientToServer(
 /// Drain every server slot's outbound packets into `cli`. Same shape
 /// as the helper in `server_client_handshake.zig`.
 fn pumpServerToClient(
-    srv: *quic_zig.Server,
-    cli: *quic_zig.Client,
+    srv: *quic.Server,
+    cli: *quic.Client,
     rx: []u8,
     now_us: u64,
 ) !usize {
@@ -120,7 +120,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
 
     // -- Step 1: build a Server with 0-RTT enabled, and a client TLS
     //   context that will capture the NewSessionTicket. --
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -144,7 +144,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     // pass it via `tls_context_override`; do not deinit here.
     try client_ctx.setNewSessionCallback(TicketSink.cb, &sink);
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -158,7 +158,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     //   pumping until the post-handshake NST flight lands and the
     //   client has captured a ticket. --
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     try cli.conn.advance();
 
     var step: u32 = 0;
@@ -189,13 +189,13 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     try std.testing.expect(ticket_bytes.len > 0);
     const remembered_params = (try cli.conn.peerTransportParams()) orelse
         return error.NoPeerTransportParams;
-    const resumption_bytes = try quic_zig.tls.resumption_state.encodeAlloc(
+    const resumption_bytes = try quic.tls.resumption_state.encodeAlloc(
         allocator,
         ticket_bytes,
         remembered_params,
     );
     defer allocator.free(resumption_bytes);
-    const persisted = try quic_zig.tls.resumption_state.decode(resumption_bytes);
+    const persisted = try quic.tls.resumption_state.decode(resumption_bytes);
     try std.testing.expectEqualSlices(u8, ticket_bytes, persisted.session_ticket);
     try std.testing.expectEqual(
         remembered_params.initial_max_data,
@@ -207,7 +207,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     //   ticket bytes (option 1 in the anti_replay module docstring).
     //   First connection: `.fresh`. Second connection presenting the
     //   same ticket bytes: `.replay`. --
-    var tracker = try quic_zig.tls.AntiReplayTracker.init(allocator, .{
+    var tracker = try quic.tls.AntiReplayTracker.init(allocator, .{
         .max_entries = 64,
         .max_age_us = 10 * std.time.us_per_min,
     });
@@ -222,7 +222,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     // monotonic epoch; the tracker uses it for both insertion
     // bookkeeping and stale-entry pruning.
     try std.testing.expectEqual(
-        quic_zig.tls.anti_replay.Verdict.fresh,
+        quic.tls.anti_replay.Verdict.fresh,
         try tracker.consume(id, 1_000_000),
     );
     try std.testing.expectEqual(@as(usize, 1), tracker.size());
@@ -233,7 +233,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     // (treat them as unauthenticated; serve any response only at
     // 1-RTT after handshake completion).
     try std.testing.expectEqual(
-        quic_zig.tls.anti_replay.Verdict.replay,
+        quic.tls.anti_replay.Verdict.replay,
         try tracker.consume(id, 1_500_000),
     );
     try std.testing.expectEqual(@as(usize, 1), tracker.size());
@@ -249,7 +249,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     const id2 = ticketIdentity(tampered);
     try std.testing.expect(!std.mem.eql(u8, &id, &id2));
     try std.testing.expectEqual(
-        quic_zig.tls.anti_replay.Verdict.fresh,
+        quic.tls.anti_replay.Verdict.fresh,
         try tracker.consume(id2, 2_000_000),
     );
     try std.testing.expectEqual(@as(usize, 2), tracker.size());
@@ -258,7 +258,7 @@ test "0-RTT replay rejection: AntiReplayTracker marks first ticket fresh, second
     // semantics: the tracker is single-shot per identity within the
     // active window.
     try std.testing.expectEqual(
-        quic_zig.tls.anti_replay.Verdict.replay,
+        quic.tls.anti_replay.Verdict.replay,
         try tracker.consume(id, 2_500_000),
     );
 }
@@ -279,7 +279,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -301,7 +301,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
     });
     try client_ctx.setNewSessionCallback(TicketSink.cb, &sink);
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -312,7 +312,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
     defer cli.deinit();
 
     var rx: [4096]u8 = undefined;
-    const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
     try cli.conn.advance();
 
     var step: u32 = 0;

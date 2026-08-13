@@ -42,13 +42,13 @@
 //!                                response to a v2 Initial
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
-const wire = quic_zig.wire;
+const wire = quic.wire;
 const header = wire.header;
 const initial = wire.initial;
 const long_packet = wire.long_packet;
-const tls = quic_zig.tls;
+const tls = quic.tls;
 const TransportParams = tls.TransportParams;
 const transport_params_mod = tls.transport_params;
 
@@ -67,7 +67,7 @@ fn fromHex(comptime hex: []const u8) [hex.len / 2]u8 {
 // ---------------------------------------------------------------- §3.1 version code
 
 test "QUIC v2 wire-format version code is 0x6b3343cf [RFC9368 §3.1 ¶1]" {
-    try std.testing.expectEqual(@as(u32, 0x6b3343cf), quic_zig.QUIC_VERSION_2);
+    try std.testing.expectEqual(@as(u32, 0x6b3343cf), quic.QUIC_VERSION_2);
     try std.testing.expectEqual(@as(u32, 0x6b3343cf), QUIC_V2);
 }
 
@@ -302,9 +302,9 @@ const default_server_params = TransportParams{
     .active_connection_id_limit = 4,
 };
 
-fn buildServerWithVersions(versions: []const u32) !quic_zig.Server {
+fn buildServerWithVersions(versions: []const u32) !quic.Server {
     const protos = [_][]const u8{"hq-test"};
-    return try quic_zig.Server.init(.{
+    return try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = test_cert_pem,
         .tls_key_pem = test_key_pem,
@@ -345,9 +345,9 @@ test "server with v1+v2 accepts a v2 Initial without VN [RFC9368 §6]" {
     const scid: [4]u8 = .{ 0xa, 0xb, 0xc, 0xd };
     var pkt = try buildV2InitialDatagram(&dcid, &scid);
 
-    const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
+    const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xee), .port = 0 } };
     const out = try srv.feed(&pkt, addr, 1_000_000);
-    try std.testing.expectEqual(quic_zig.Server.FeedOutcome.accepted, out);
+    try std.testing.expectEqual(quic.Server.FeedOutcome.accepted, out);
     try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
     try std.testing.expectEqual(@as(usize, 0), srv.statelessResponseCount());
 
@@ -375,9 +375,9 @@ test "server with only v1 emits VN listing v1 for a v2 Initial [RFC9368 §6]" {
     bytes[10] = 0; // scid_len
     @memset(bytes[11..], 0);
 
-    const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
+    const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x42), .port = 0 } };
     const out = try srv.feed(&bytes, addr, 1_000_000);
-    try std.testing.expectEqual(quic_zig.Server.FeedOutcome.version_negotiated, out);
+    try std.testing.expectEqual(quic.Server.FeedOutcome.version_negotiated, out);
     try std.testing.expectEqual(@as(usize, 1), srv.statelessResponseCount());
 
     // Drain the queued VN and inspect the supported_versions list.
@@ -404,9 +404,9 @@ test "server VN body mirrors Config.accepted_versions when configured for both [
     bytes[10] = 0;
     @memset(bytes[11..], 0);
 
-    const addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x99), .port = 0 } };
+    const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x99), .port = 0 } };
     const out = try srv.feed(&bytes, addr, 1_000_000);
-    try std.testing.expectEqual(quic_zig.Server.FeedOutcome.version_negotiated, out);
+    try std.testing.expectEqual(quic.Server.FeedOutcome.version_negotiated, out);
     const vn = srv.drainStatelessResponse() orelse return error.UnexpectedNullVn;
     const parsed = try wire.header.parse(vn.slice(), 0);
     const vn_hdr = parsed.header.version_negotiation;
@@ -417,7 +417,7 @@ test "server VN body mirrors Config.accepted_versions when configured for both [
 
 test "Server.init rejects empty versions list [RFC9368 §6]" {
     const protos = [_][]const u8{"hq-test"};
-    try std.testing.expectError(quic_zig.Server.Error.InvalidConfig, quic_zig.Server.init(.{
+    try std.testing.expectError(quic.Server.Error.InvalidConfig, quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = test_cert_pem,
         .tls_key_pem = test_key_pem,
@@ -430,7 +430,7 @@ test "Server.init rejects empty versions list [RFC9368 §6]" {
 test "Server.init rejects unknown version [RFC9368 §6]" {
     const versions = [_]u32{ QUIC_V1, 0xfa11_face };
     const protos = [_][]const u8{"hq-test"};
-    try std.testing.expectError(quic_zig.Server.Error.InvalidConfig, quic_zig.Server.init(.{
+    try std.testing.expectError(quic.Server.Error.InvalidConfig, quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = test_cert_pem,
         .tls_key_pem = test_key_pem,

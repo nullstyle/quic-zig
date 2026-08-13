@@ -38,7 +38,7 @@
 //!                   per-packet draw; covered transitively by the
 //!                   src/conn unit tests for `nextQuicBit()`.
 //!   RFC9287 §3 ¶3   Stateless-reset packets are unlikely to grease
-//!                   the bit — quic_zig's stateless-reset path uses
+//!                   the bit — quic's stateless-reset path uses
 //!                   the spec-mandated 0x40 prefix already (RFC 9000
 //!                   §10.3); not affected by RFC 9287.
 //!   RFC9287 §3 ¶4   NEW_TOKEN-derived "early grease" optimization on
@@ -46,15 +46,15 @@
 //!                   future extension; v0.1 is conservative.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
-const wire = quic_zig.wire;
+const wire = quic.wire;
 const header = wire.header;
 const long_packet = wire.long_packet;
 const short_packet = wire.short_packet;
-const transport_params = quic_zig.tls.transport_params;
+const transport_params = quic.tls.transport_params;
 const initial_mod = wire.initial;
-const Connection = quic_zig.conn.Connection;
+const Connection = quic.conn.Connection;
 
 // ---------------------------------------------------------------- §6.1 transport parameter
 

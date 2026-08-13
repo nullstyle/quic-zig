@@ -18,8 +18,8 @@ and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
   selectable) with RFC 9002 packet pacing, ECN, and DPLPMTUD.
 - High-level `Server` and `Client` wrappers for embedders that want
   quic-zig to own TLS context setup and connection state.
-- Basic `std.Io` loop helpers in `quic_zig.transport.runUdpServer`
-  and `quic_zig.transport.runUdpClient`, allowing integrators to avoid
+- Basic `std.Io` loop helpers in `quic.transport.runUdpServer`
+  and `quic.transport.runUdpClient`, allowing integrators to avoid
   rolling their own UDP loop.
 - Stateless Retry, NEW_TOKEN, stateless reset token helpers, versioned
   0-RTT resumption state with anti-replay persistence hooks,
@@ -66,7 +66,7 @@ those modes.
 
 ## Importing
 
-The public Zig module name is `quic_zig`.
+The public Zig module name is `quic`.
 
 ### Consuming this package
 
@@ -80,22 +80,22 @@ zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.11.0
 Then wire the module in `build.zig`:
 
 ```zig
-const quic_zig_dep = b.dependency("quic_zig", .{
+const quic_dep = b.dependency("quic", .{
     .target = target,
     .optimize = optimize,
 });
-exe.root_module.addImport("quic_zig", quic_zig_dep.module("quic_zig"));
+exe.root_module.addImport("quic", quic_dep.module("quic"));
 ```
 
 Application code imports it as:
 
 ```zig
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 ```
 
 quic-zig also exports its shared BoringSSL module instance as
 `dep.module("boringssl")` — import it when you need to construct a
-`boringssl.tls.Context` that type-unifies with quic_zig's API, e.g.
+`boringssl.tls.Context` that type-unifies with quic's API, e.g.
 for `Client.Config.tls_context_override` (custom session-ticket
 capture, keylog wiring, or any posture the PEM config fields don't
 express — private-CA pinning and mTLS themselves need only
@@ -115,7 +115,7 @@ still owns application policy, shutdown, and any per-stream work.
 
 ```zig
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 pub fn runServer(
     allocator: std.mem.Allocator,
@@ -126,7 +126,7 @@ pub fn runServer(
 ) !void {
     const protos = [_][]const u8{"hq-interop"};
 
-    var server = try quic_zig.Server.init(.{
+    var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = cert_pem,
         .tls_key_pem = key_pem,
@@ -144,7 +144,7 @@ pub fn runServer(
     });
     defer server.deinit();
 
-    try quic_zig.transport.runUdpServer(&server, .{
+    try quic.transport.runUdpServer(&server, .{
         .listen = "0.0.0.0:4433",
         .io = io,
         .shutdown_flag = shutdown,
@@ -166,7 +166,7 @@ DCID/SCID pair, wires transport parameters, and returns a ready
 
 ```zig
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 pub fn runClient(
     allocator: std.mem.Allocator,
@@ -177,7 +177,7 @@ pub fn runClient(
 ) !void {
     const protos = [_][]const u8{"hq-interop"};
 
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .allocator = allocator,
         .server_name = server_name,
         .alpn_protocols = &protos,
@@ -194,7 +194,7 @@ pub fn runClient(
     });
     defer client.deinit();
 
-    try quic_zig.transport.runUdpClient(&client, .{
+    try quic.transport.runUdpClient(&client, .{
         .target = target,
         .io = io,
         .shutdown_flag = shutdown,

@@ -1,5 +1,5 @@
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 
 const Net = std.Io.net;
@@ -32,7 +32,7 @@ const retry_token_lifetime_us: u64 = 30_000_000;
 // the interop reproducibility posture of `retry_token_key`: the
 // official QUIC interop runner spawns a fresh server process per
 // scenario, so per-process random keys would break cross-test reuse
-// of NEW_TOKENs even within a single run. Operators deploying quic_zig
+// of NEW_TOKENs even within a single run. Operators deploying quic
 // outside the interop runner should generate a key with
 // `boringssl.crypto.rand.fillBytes` and persist it across restarts —
 // the per-process choice here is interop-test territory only.
@@ -130,7 +130,7 @@ const stalled_peer_keepalive_min_period_us: u64 = 1_000_000;
 // (interop peers all advertise 2). The lifetime cap is the
 // belt-and-braces line: a misbehaving peer that aggressively retires
 // our SCIDs cannot force an unbounded number of fresh provisions
-// from `quic_zig.conn.stateless_reset.derive` (CSPRNG bytes via the
+// from `quic.conn.stateless_reset.derive` (CSPRNG bytes via the
 // HMAC chain).
 //
 // 8 covers a 60s `rebind-addr` cell (12 rebinds @ 5s freq) with
@@ -206,12 +206,12 @@ const interop_runner_server_ipv6: [16]u8 = .{
 // runner — which spawns a fresh server process per scenario — keeps
 // reset tokens stable across the run, including for the seq-1 alt-CID
 // the `preferred_address` transport parameter advertises (RFC 9000
-// §18.2 / §5.1.1). Operators deploying quic_zig outside the interop
-// runner should generate a key with `quic_zig.conn.stateless_reset.generateKey`
+// §18.2 / §5.1.1). Operators deploying quic outside the interop
+// runner should generate a key with `quic.conn.stateless_reset.generateKey`
 // and persist it across restarts so a cold-start doesn't invalidate
 // every previously-issued reset token. The qns is interop-test
 // territory; reproducibility wins over per-process randomness.
-const stateless_reset_key: quic_zig.conn.stateless_reset.Key = .{
+const stateless_reset_key: quic.conn.stateless_reset.Key = .{
     0x4e, 0x55, 0x4c, 0x4c, 0x51, 0x2d, 0x51, 0x4e,
     0x53, 0x2d, 0x53, 0x52, 0x2d, 0x4b, 0x45, 0x59,
     0xa0, 0x18, 0x6b, 0x52, 0xc4, 0xd1, 0x33, 0x7e,
@@ -237,7 +237,7 @@ const ServerOptions = struct {
     testcase: []const u8 = "",
     /// Optional alt-port literal (e.g. `"[::]:444"`) — only the
     /// PORT is consumed. When set, the server builds a
-    /// `quic_zig.PreferredAddressConfig` whose v4/v6 addresses come
+    /// `quic.PreferredAddressConfig` whose v4/v6 addresses come
     /// from the runner-bridge `interop_runner_server_ipv4` /
     /// `_ipv6` constants and whose port comes from this literal.
     /// Mirroring the public-API `runUdpServer`'s pattern, the loop
@@ -247,7 +247,7 @@ const ServerOptions = struct {
     /// server advertises points at the same address pair, with the
     /// seq-1 alt-CID + matching stateless-reset token minted per-
     /// connection through the public
-    /// `quic_zig.conn.stateless_reset.derive` helper. The runner's
+    /// `quic.conn.stateless_reset.derive` helper. The runner's
     /// `connectionmigration` testcase relies on this server-
     /// initiated migration: the client receives the parameter,
     /// registers the alt-CID at sequence 1, and migrates to the
@@ -269,7 +269,7 @@ const ServerOptions = struct {
     /// `quic-interop-runner/testcases_quic.py:TestCaseV2`); the
     /// `versionnegotiation` value is kept for parity with internal
     /// scripts that pre-date the runner's renaming.
-    versions: []const u32 = &.{quic_zig.QUIC_VERSION_1},
+    versions: []const u32 = &.{quic.QUIC_VERSION_1},
 };
 
 const ClientOptions = struct {
@@ -290,7 +290,7 @@ const ClientOptions = struct {
     /// sends a v1 wire Initial while advertising v2 as a compatible
     /// upgrade target. The runner's actual testcase name for the
     /// compatible-version-negotiation cell is `v2`.
-    versions: []const u32 = &.{quic_zig.QUIC_VERSION_1},
+    versions: []const u32 = &.{quic.QUIC_VERSION_1},
 };
 
 /// Pick the QUIC wire-format version list for the server role given a
@@ -308,7 +308,7 @@ fn serverVersionsForTestcase(testcase: []const u8) []const u32 {
     if (isVersionNegotiationTestcase(testcase)) {
         return &qns_versions_v2_first;
     }
-    return &.{quic_zig.QUIC_VERSION_1};
+    return &.{quic.QUIC_VERSION_1};
 }
 
 /// Pick the QUIC wire-format version list for the client role given a
@@ -326,7 +326,7 @@ fn clientVersionsForTestcase(testcase: []const u8) []const u32 {
     if (isVersionNegotiationTestcase(testcase)) {
         return &qns_versions_v1_first;
     }
-    return &.{quic_zig.QUIC_VERSION_1};
+    return &.{quic.QUIC_VERSION_1};
 }
 
 /// Is this `TESTCASE` value the runner's compatible-version-negotiation
@@ -342,8 +342,8 @@ inline fn isVersionNegotiationTestcase(testcase: []const u8) bool {
 /// Module-level constant slices so the `versionsForTestcase` helpers
 /// can return a stable `[]const u32` view rather than constructing a
 /// fresh array each call.
-const qns_versions_v2_first = [_]u32{ quic_zig.QUIC_VERSION_2, quic_zig.QUIC_VERSION_1 };
-const qns_versions_v1_first = [_]u32{ quic_zig.QUIC_VERSION_1, quic_zig.QUIC_VERSION_2 };
+const qns_versions_v2_first = [_]u32{ quic.QUIC_VERSION_2, quic.QUIC_VERSION_1 };
+const qns_versions_v1_first = [_]u32{ quic.QUIC_VERSION_1, quic.QUIC_VERSION_2 };
 
 const ClientMode = enum {
     normal,
@@ -398,7 +398,7 @@ const ClientConnectionOptions = struct {
     /// 9368 §5) so a multi-version server can pick the highest-
     /// priority overlap and upgrade. Defaults to v1-only;
     /// `TESTCASE=versionnegotiation` flips this to `[QUIC_V1, QUIC_V2]`.
-    versions: []const u32 = &.{quic_zig.QUIC_VERSION_1},
+    versions: []const u32 = &.{quic.QUIC_VERSION_1},
 };
 
 var keylog_io: ?std.Io = null;
@@ -407,9 +407,9 @@ var keylog_file: ?std.Io.File = null;
 const QlogSink = struct {
     io: std.Io,
     file: std.Io.File,
-    writer: quic_zig.qlog.Writer,
+    writer: quic.qlog.Writer,
 
-    // Standard JSON-SEQ qlog via `quic_zig.qlog.Writer` — qvis loads
+    // Standard JSON-SEQ qlog via `quic.qlog.Writer` — qvis loads
     // the emitted `.sqlog` directly. (This replaced an ad-hoc 7-field
     // JSONL format no qlog tool could read.) Packet-level events stay
     // opt-in via `setQlogPacketEvents` at the install site.
@@ -421,7 +421,7 @@ const QlogSink = struct {
         errdefer file.close(io);
         var title_buf: [64]u8 = undefined;
         const title = try std.fmt.bufPrint(&title_buf, "quic-zig qns {s}", .{role});
-        const writer = try quic_zig.qlog.Writer.init(allocator, io, file, .{
+        const writer = try quic.qlog.Writer.init(allocator, io, file, .{
             .vantage_point = if (std.mem.eql(u8, role, "server")) .server else .client,
             .title = title,
         });
@@ -434,7 +434,7 @@ const QlogSink = struct {
         self.* = undefined;
     }
 
-    fn callback(user_data: ?*anyopaque, event: quic_zig.QlogEvent) void {
+    fn callback(user_data: ?*anyopaque, event: quic.QlogEvent) void {
         const self: *QlogSink = @ptrCast(@alignCast(user_data.?));
         self.writer.writeEvent(event);
     }
@@ -475,7 +475,7 @@ const TicketStore = struct {
 /// Process-local capture store for NEW_TOKEN bytes received on a
 /// client-mode connection. The `resumption` and `zerortt` interop
 /// scenarios open two back-to-back connections to the same server;
-/// when quic_zig pairs with itself or with a peer that issues NEW_TOKEN,
+/// when quic pairs with itself or with a peer that issues NEW_TOKEN,
 /// we capture the token on the first connection and replay it on
 /// the second via `Connection.setInitialToken`. The bytes are
 /// borrowed-only inside the callback (per
@@ -565,7 +565,7 @@ const Http09App = struct {
         self.www_dir.close(self.io);
     }
 
-    fn process(self: *Http09App, conn: *quic_zig.Connection) !void {
+    fn process(self: *Http09App, conn: *quic.Connection) !void {
         var it = conn.streamIterator();
         while (it.next()) |entry| {
             try self.processStream(conn, entry.key_ptr.*);
@@ -578,7 +578,7 @@ const Http09App = struct {
         return gop.value_ptr;
     }
 
-    fn processStream(self: *Http09App, conn: *quic_zig.Connection, stream_id: u64) !void {
+    fn processStream(self: *Http09App, conn: *quic.Connection, stream_id: u64) !void {
         const state = try self.stateFor(stream_id);
         if (state.responded) return;
 
@@ -629,7 +629,7 @@ const Http09App = struct {
 };
 
 const ServerConn = struct {
-    conn: quic_zig.Connection,
+    conn: quic.Connection,
     app: Http09App,
     peer: Net.IpAddress,
     transport_params_set: bool = false,
@@ -638,7 +638,7 @@ const ServerConn = struct {
     /// key update for TESTCASE=keyupdate (mirrors the client-side latch in
     /// runClientConnection). At most one server-initiated update per conn.
     key_update_done: bool = false,
-    retry_original_dcid: quic_zig.conn.path.ConnectionId = .{},
+    retry_original_dcid: quic.conn.path.ConnectionId = .{},
     retry_source_cid: [server_cid_len]u8,
     initial_server_cid: [server_cid_len]u8,
     /// DCID the peer put on the first Initial we accepted on this
@@ -649,7 +649,7 @@ const ServerConn = struct {
     /// as a brand-new connection just because the source 4-tuple
     /// changed and the wire DCID is still the peer-chosen pre-handshake
     /// one rather than `initial_server_cid`.
-    client_initial_dcid: quic_zig.conn.path.ConnectionId = .{},
+    client_initial_dcid: quic.conn.path.ConnectionId = .{},
     next_cid_seq: u8 = 1,
     last_activity_us: u64,
     /// Latches once we've minted and queued a NEW_TOKEN on this
@@ -695,12 +695,12 @@ const ServerConn = struct {
     /// `pa_alt_cid_set` discriminates.
     pa_alt_cid: [server_cid_len]u8 = @splat(0),
     /// Matching stateless-reset token for `pa_alt_cid` derived via
-    /// `quic_zig.conn.stateless_reset.derive(stateless_reset_key,
+    /// `quic.conn.stateless_reset.derive(stateless_reset_key,
     /// pa_alt_cid)` at `ServerConn.init`. Cached so the per-Initial
     /// hot path doesn't re-run the HMAC, and so the seq-1
     /// NEW_CONNECTION_ID emitted by `queueServerConnectionIds` carries
     /// the same token bytes the transport-parameter advertise pinned.
-    pa_alt_token: quic_zig.conn.stateless_reset.Token = @splat(0),
+    pa_alt_token: quic.conn.stateless_reset.Token = @splat(0),
     /// Latches when the preferred-address alt-CID + token have been
     /// minted on this connection. Stays false when no
     /// `preferred_address` is configured; `dispatchInbound` and
@@ -747,7 +747,7 @@ const ServerConn = struct {
         errdefer allocator.destroy(self);
         self.* = undefined;
 
-        try quic_zig.Connection.initServerAt(&self.conn, allocator, server_tls);
+        try quic.Connection.initServerAt(&self.conn, allocator, server_tls);
         errdefer self.conn.deinit();
 
         self.app = Http09App.init(allocator, io, try openDir(io, www));
@@ -777,7 +777,7 @@ const ServerConn = struct {
 
         // Mint the seq-1 preferred-address alt-CID via the CSPRNG and
         // derive its matching stateless-reset token via the public
-        // `quic_zig.conn.stateless_reset.derive` helper. Mirrors what
+        // `quic.conn.stateless_reset.derive` helper. Mirrors what
         // `Server.openSlotFromInitial` does for `Config.preferred_address`
         // so the qns becomes a clean reference embedder of the public
         // API rather than a parallel deterministic implementation.
@@ -800,7 +800,7 @@ const ServerConn = struct {
             if (std.mem.eql(u8, cid_slice, &self.initial_server_cid)) {
                 cid_slice[0] +%= 1;
             }
-            const token = quic_zig.conn.stateless_reset.derive(&stateless_reset_key, cid_slice) catch null;
+            const token = quic.conn.stateless_reset.derive(&stateless_reset_key, cid_slice) catch null;
             if (token) |t| {
                 self.pa_alt_token = t;
                 self.pa_alt_cid_set = true;
@@ -1058,7 +1058,7 @@ fn runServer(
     // migrate to once the handshake completes — the runner's
     // `connectionmigration` testcase exercises exactly this server-
     // initiated migration. We mirror the public-API
-    // `quic_zig.transport.runUdpServer` shape: when `preferred_address`
+    // `quic.transport.runUdpServer` shape: when `preferred_address`
     // is configured, bind one alt-listener per configured family (v4
     // first if present, then v6). The qns advertises both families on
     // the same port for the runner; the dispatch loop polls every
@@ -1088,11 +1088,11 @@ fn runServer(
     };
     var sockets_len: usize = 1;
 
-    // Build the runtime `quic_zig.PreferredAddressConfig` once, so the
+    // Build the runtime `quic.PreferredAddressConfig` once, so the
     // bind logic and the per-Initial transport-parameter advertise
     // both read from a single source of truth. `null` when the CLI
     // flag wasn't supplied (every testcase except `connectionmigration`).
-    var pa_config: ?quic_zig.PreferredAddressConfig = null;
+    var pa_config: ?quic.PreferredAddressConfig = null;
     if (opts.pref_addr) |pref_addr_str| {
         const alt_literal = try Net.IpAddress.parseLiteral(pref_addr_str);
         const alt_port: u16 = switch (alt_literal) {
@@ -1153,12 +1153,12 @@ fn runServer(
     if (pa_config) |pa| {
         const alt_port: u16 = if (pa.ipv4) |v4| v4.port else if (pa.ipv6) |v6| v6.port else 0;
         std.debug.print(
-            "quic_zig qns endpoint listening on {f} (main) + {d} alt-listener(s) on port {d} for preferred_address; www={s} retry={}\n",
+            "quic qns endpoint listening on {f} (main) + {d} alt-listener(s) on port {d} for preferred_address; www={s} retry={}\n",
             .{ sockets[0].bind_addr, sockets.len - 1, alt_port, opts.www, opts.retry },
         );
     } else {
         std.debug.print(
-            "quic_zig qns endpoint listening on {f} www={s} retry={}\n",
+            "quic qns endpoint listening on {f} www={s} retry={}\n",
             .{ sockets[0].bind_addr, opts.www, opts.retry },
         );
     }
@@ -1172,7 +1172,7 @@ fn runServer(
     const start = std.Io.Timestamp.now(io, .awake);
     var rx: [64 * 1024]u8 = undefined;
     var tx: [endpoint_udp_payload_size]u8 = undefined;
-    var cmsg_buf: [quic_zig.transport.default_cmsg_buffer_bytes]u8 = undefined;
+    var cmsg_buf: [quic.transport.default_cmsg_buffer_bytes]u8 = undefined;
 
     // When polling multiple sockets we split the per-iteration idle
     // wait across them so the worst-case loop latency stays close to
@@ -1204,7 +1204,7 @@ fn runServer(
             // the cheaper `receiveTimeout` shape (no control buffer,
             // no cmsg parse).
             var maybe_msg: ?Net.IncomingMessage = null;
-            var ecn: quic_zig.transport.EcnCodepoint = .not_ect;
+            var ecn: quic.transport.EcnCodepoint = .not_ect;
             if (s.ecn_active) {
                 var recv_msg: Net.IncomingMessage = .init;
                 recv_msg.control = &cmsg_buf;
@@ -1219,7 +1219,7 @@ fn runServer(
                     error.Timeout => {},
                     else => return err,
                 } else if (ret[1] == 1) {
-                    ecn = quic_zig.transport.parseEcnFromControl(recv_msg.control);
+                    ecn = quic.transport.parseEcnFromControl(recv_msg.control);
                     maybe_msg = recv_msg;
                 }
             } else {
@@ -1270,7 +1270,7 @@ fn runServer(
                     };
                     if (sc.conn.keyUpdateStatus().write_key_phase) {
                         sc.key_update_done = true;
-                        std.debug.print("quic_zig qns server initiated key update\n", .{});
+                        std.debug.print("quic qns server initiated key update\n", .{});
                     }
                 }
             }
@@ -1324,7 +1324,7 @@ const DispatchInboundCtx = struct {
     sockets: []const ServerSocket,
     sock_idx: usize,
     msg: Net.IncomingMessage,
-    ecn: quic_zig.transport.EcnCodepoint,
+    ecn: quic.transport.EcnCodepoint,
     tx: *[endpoint_udp_payload_size]u8,
     now_us: u64,
     /// Runtime preferred-address configuration mirrored from
@@ -1335,7 +1335,7 @@ const DispatchInboundCtx = struct {
     /// value to build the on-wire `PreferredAddress`. Null disables
     /// the advertise — the dispatch path just skips the parameter and
     /// `ServerConn.init` doesn't mint a seq-1 alt-CID.
-    pa_config: ?quic_zig.PreferredAddressConfig,
+    pa_config: ?quic.PreferredAddressConfig,
 };
 
 /// Dispatch one inbound datagram pulled off `ctx.sockets[ctx.sock_idx]`.
@@ -1472,7 +1472,7 @@ fn dispatchInbound(ctx: DispatchInboundCtx) !void {
         };
 
         if (opts.retry and !sc.retry_sent and !new_token_validated) {
-            sc.retry_original_dcid = quic_zig.conn.path.ConnectionId.fromSlice(ids.dcid);
+            sc.retry_original_dcid = quic.conn.path.ConnectionId.fromSlice(ids.dcid);
             const token = try retryToken(msg.from, now_us, ids.dcid, &sc.retry_source_cid);
             const n = try sc.conn.writeRetry(tx, msg.data, &sc.retry_source_cid, &token);
             try sock.send(io, &msg.from, tx[0..n]);
@@ -1480,7 +1480,7 @@ fn dispatchInbound(ctx: DispatchInboundCtx) !void {
             return;
         }
 
-        const original_dcid = if (sc.retry_sent) sc.retry_original_dcid else quic_zig.conn.path.ConnectionId.fromSlice(ids.dcid);
+        const original_dcid = if (sc.retry_sent) sc.retry_original_dcid else quic.conn.path.ConnectionId.fromSlice(ids.dcid);
         // Pin the wire DCID we're about to accept so future
         // Initial retransmits from any peer 4-tuple route here.
         // Pre-Retry: peer-chosen random. Post-Retry:
@@ -1488,9 +1488,9 @@ fn dispatchInbound(ctx: DispatchInboundCtx) !void {
         // but storing it is harmless and keeps the field
         // semantically meaningful: "the DCID the peer is
         // currently addressing on the Initial wire").
-        sc.client_initial_dcid = quic_zig.conn.path.ConnectionId.fromSlice(ids.dcid);
-        const retry_source: ?quic_zig.conn.path.ConnectionId = if (sc.retry_sent)
-            quic_zig.conn.path.ConnectionId.fromSlice(&sc.retry_source_cid)
+        sc.client_initial_dcid = quic.conn.path.ConnectionId.fromSlice(ids.dcid);
+        const retry_source: ?quic.conn.path.ConnectionId = if (sc.retry_sent)
+            quic.conn.path.ConnectionId.fromSlice(&sc.retry_source_cid)
         else
             null;
         if (sc.retry_sent) {
@@ -1509,15 +1509,15 @@ fn dispatchInbound(ctx: DispatchInboundCtx) !void {
         // The CID + token are pre-minted on `sc` so this code path
         // and `queueServerConnectionIds`'s seq-1 frame describe the
         // same on-wire bytes.
-        const preferred_address: ?quic_zig.tls.transport_params.PreferredAddress = blk: {
+        const preferred_address: ?quic.tls.transport_params.PreferredAddress = blk: {
             const pa = ctx.pa_config orelse break :blk null;
             if (!sc.pa_alt_cid_set) break :blk null;
             break :blk buildPreferredAddress(pa, sc);
         };
 
-        var params: quic_zig.tls.TransportParams = .{
+        var params: quic.tls.TransportParams = .{
             .original_destination_connection_id = original_dcid,
-            .initial_source_connection_id = quic_zig.conn.path.ConnectionId.fromSlice(&sc.initial_server_cid),
+            .initial_source_connection_id = quic.conn.path.ConnectionId.fromSlice(&sc.initial_server_cid),
             .retry_source_connection_id = retry_source,
             .max_idle_timeout_ms = 30_000,
             .initial_max_data = endpoint_connection_receive_window,
@@ -1565,7 +1565,7 @@ fn dispatchInbound(ctx: DispatchInboundCtx) !void {
         if (upgrade_target) |upgraded| {
             if (upgraded != ids.version) sc.conn.setPendingVersionUpgrade(upgraded);
         }
-        _ = try sc.conn.setEarlyDataContextForParams(params, hq_alpn, "quic_zig qns endpoint v1");
+        _ = try sc.conn.setEarlyDataContextForParams(params, hq_alpn, "quic qns endpoint v1");
         sc.transport_params_set = true;
     }
     try sc.conn.handleWithEcn(msg.data, netAddressToPathAddress(msg.from), ecn, now_us);
@@ -1639,7 +1639,7 @@ fn runClient(
     defer allocator.free(server_name_z);
 
     const mode = clientMode(opts.testcase);
-    std.debug.print("quic_zig qns client connecting to {f} testcase={s} requests={d}\n", .{
+    std.debug.print("quic qns client connecting to {f} testcase={s} requests={d}\n", .{
         server_addr,
         if (opts.testcase.len == 0) "default" else opts.testcase,
         downloads.len,
@@ -1808,7 +1808,7 @@ fn runClientConnection(
     // arrived. No counter increments anywhere — purely a
     // bridge-layer race.
     //
-    // quic_zig is unusual in starting the handshake within microseconds
+    // quic is unusual in starting the handshake within microseconds
     // of process start, so its first PTO retransmit (RFC 9002 default
     // PTO = 333+4*166.5 = 999ms) lands smack in the bad window. The
     // longrtt testcase asserts ≥2 ClientHellos on the wire; when the
@@ -1839,7 +1839,7 @@ fn runClientConnection(
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(750), .awake) catch {};
     }
 
-    const conn = try quic_zig.Connection.createClient(allocator, client_tls, server_name_z);
+    const conn = try quic.Connection.createClient(allocator, client_tls, server_name_z);
     defer conn.destroy();
     if (conn_opts.qlog_sink) |sink| conn.setQlogCallback(QlogSink.callback, sink);
     if (conn_opts.session) |session| try conn.setSession(session);
@@ -1859,8 +1859,8 @@ fn runClientConnection(
     try conn.setInitialDcid(&initial_dcid);
     try conn.setPeerDcid(&initial_dcid);
 
-    var params: quic_zig.tls.TransportParams = .{
-        .initial_source_connection_id = quic_zig.conn.path.ConnectionId.fromSlice(&client_scid),
+    var params: quic.tls.TransportParams = .{
+        .initial_source_connection_id = quic.conn.path.ConnectionId.fromSlice(&client_scid),
         .max_idle_timeout_ms = 30_000,
         .initial_max_data = endpoint_connection_receive_window,
         .initial_max_stream_data_bidi_local = endpoint_stream_receive_window,
@@ -1902,8 +1902,8 @@ fn runClientConnection(
     var last_progress_us = qnsNowUs(io, start);
     var rx: [64 * 1024]u8 = undefined;
     var tx: [endpoint_udp_payload_size]u8 = undefined;
-    var cmsg_buf: [quic_zig.transport.default_cmsg_buffer_bytes]u8 = undefined;
-    var old_cmsg_buf: [quic_zig.transport.default_cmsg_buffer_bytes]u8 = undefined;
+    var cmsg_buf: [quic.transport.default_cmsg_buffer_bytes]u8 = undefined;
+    var old_cmsg_buf: [quic.transport.default_cmsg_buffer_bytes]u8 = undefined;
     var key_update_done = !conn_opts.request_key_update;
 
     // Active migration plumbing: when `request_active_migration` is
@@ -1940,7 +1940,7 @@ fn runClientConnection(
         const had_ticket = ticketRequirementMet(conn_opts.wait_for_ticket);
 
         var maybe_msg: ?Net.IncomingMessage = null;
-        var ecn: quic_zig.transport.EcnCodepoint = .not_ect;
+        var ecn: quic.transport.EcnCodepoint = .not_ect;
         if (ecn_active) {
             var recv_msg: Net.IncomingMessage = .init;
             recv_msg.control = &cmsg_buf;
@@ -1955,7 +1955,7 @@ fn runClientConnection(
                 error.Timeout => {},
                 else => return err,
             } else if (ret[1] == 1) {
-                ecn = quic_zig.transport.parseEcnFromControl(recv_msg.control);
+                ecn = quic.transport.parseEcnFromControl(recv_msg.control);
                 maybe_msg = recv_msg;
             }
         } else {
@@ -1990,7 +1990,7 @@ fn runClientConnection(
         // window passes.
         if (old_sock) |*old| {
             var old_maybe_msg: ?Net.IncomingMessage = null;
-            var old_ecn: quic_zig.transport.EcnCodepoint = .not_ect;
+            var old_ecn: quic.transport.EcnCodepoint = .not_ect;
             if (ecn_active) {
                 var recv_msg: Net.IncomingMessage = .init;
                 recv_msg.control = &old_cmsg_buf;
@@ -2004,7 +2004,7 @@ fn runClientConnection(
                 if (ret[0]) |_| {
                     // Timeout / unknown — treat as "no message."
                 } else if (ret[1] == 1) {
-                    old_ecn = quic_zig.transport.parseEcnFromControl(recv_msg.control);
+                    old_ecn = quic.transport.parseEcnFromControl(recv_msg.control);
                     old_maybe_msg = recv_msg;
                 }
             } else {
@@ -2086,7 +2086,7 @@ fn runClientConnection(
             };
             if (conn.keyUpdateStatus().write_key_phase) {
                 key_update_done = true;
-                std.debug.print("quic_zig qns client initiated key update\n", .{});
+                std.debug.print("quic qns client initiated key update\n", .{});
                 progressed = true;
             }
         }
@@ -2099,7 +2099,7 @@ fn runClientConnection(
         // exactly once after the handshake is confirmed and a few
         // 1-RTT datagrams have flowed (i.e. there's an actual transfer
         // in progress for the runner's pcap to capture). We bind a
-        // fresh socket on a kernel-chosen ephemeral port; quic_zig core
+        // fresh socket on a kernel-chosen ephemeral port; quic core
         // rotates the peer DCID and queues a PATH_CHALLENGE on the
         // active path. Subsequent `poll` output and inbound recvs
         // route through the new socket.
@@ -2120,7 +2120,7 @@ fn runClientConnection(
                 migration_pending = false;
                 break :migrate;
             };
-            std.debug.print("quic_zig qns client active migration to fresh local socket\n", .{});
+            std.debug.print("quic qns client active migration to fresh local socket\n", .{});
             old_sock = sock;
             // Hold the old socket readable for ~500 ms so server
             // packets already in-flight to the old port still feed
@@ -2336,7 +2336,7 @@ fn parsePort(bytes: []const u8) !u16 {
 
 fn startClientRequests(
     allocator: std.mem.Allocator,
-    conn: *quic_zig.Connection,
+    conn: *quic.Connection,
     downloads: []ClientDownload,
 ) !bool {
     var progressed = false;
@@ -2359,7 +2359,7 @@ fn startClientRequests(
 
 fn drainClientResponses(
     allocator: std.mem.Allocator,
-    conn: *quic_zig.Connection,
+    conn: *quic.Connection,
     downloads: []ClientDownload,
 ) !bool {
     var progressed = false;
@@ -2439,20 +2439,20 @@ fn readWholeFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, max
     return try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_bytes));
 }
 
-/// Apply quic_zig's recommended UDP buffer tuning to a freshly bound
+/// Apply quic's recommended UDP buffer tuning to a freshly bound
 /// socket. Errors are reported but not fatal — a tiny CI box that
 /// rejects 4 MiB buffers can still run the QNS endpoint, just with
 /// the OS-default risk of receive-buffer overflow during bursts.
 fn tuneServerSocket(handle: std.posix.socket_t) void {
-    quic_zig.transport.applyServerTuning(handle, .{}) catch |err| {
+    quic.transport.applyServerTuning(handle, .{}) catch |err| {
         std.debug.print(
             "warning: could not tune QNS UDP socket buffers ({s}); falling back to OS defaults\n",
             .{@errorName(err)},
         );
         return;
     };
-    if (quic_zig.transport.getRecvBufferSize(handle)) |rcv| {
-        if (quic_zig.transport.getSendBufferSize(handle)) |snd| {
+    if (quic.transport.getRecvBufferSize(handle)) |rcv| {
+        if (quic.transport.getSendBufferSize(handle)) |snd| {
             std.debug.print(
                 "tuned QNS UDP socket: SO_RCVBUF={} bytes, SO_SNDBUF={} bytes\n",
                 .{ rcv, snd },
@@ -2470,8 +2470,8 @@ fn tuneServerSocket(handle: std.posix.socket_t) void {
 /// default for QUIC; the runner's `E` testcase observes the
 /// resulting CE marks and ACK ECN counts to verify the path.
 fn enableServerEcn(handle: std.posix.socket_t) bool {
-    quic_zig.transport.setEcnSendMarking(handle, .ect0) catch return false;
-    quic_zig.transport.setEcnRecvEnabled(handle, true) catch return false;
+    quic.transport.setEcnSendMarking(handle, .ect0) catch return false;
+    quic.transport.setEcnRecvEnabled(handle, true) catch return false;
     return true;
 }
 
@@ -2520,7 +2520,7 @@ fn netAddressEql(a: Net.IpAddress, b: Net.IpAddress) bool {
     };
 }
 
-fn sockaddrFromHandle(handle: std.posix.socket_t) quic_zig.conn.path.Address {
+fn sockaddrFromHandle(handle: std.posix.socket_t) quic.conn.path.Address {
     var sa: std.posix.sockaddr.storage = undefined;
     var sa_len: std.posix.socklen_t = @sizeOf(@TypeOf(sa));
     if (std.c.getsockname(handle, @ptrCast(&sa), &sa_len) != 0) return .unspecified;
@@ -2541,7 +2541,7 @@ fn sockaddrFromHandle(handle: std.posix.socket_t) quic_zig.conn.path.Address {
     return .unspecified;
 }
 
-fn netAddressToPathAddress(addr: Net.IpAddress) quic_zig.conn.path.Address {
+fn netAddressToPathAddress(addr: Net.IpAddress) quic.conn.path.Address {
     return switch (addr) {
         .ip4 => |ip4| .{ .ipv4 = .{ .addr = ip4.bytes, .port = ip4.port } },
         .ip6 => |ip6| .{ .ipv6 = .{ .addr = ip6.bytes, .port = ip6.port, .flow = ip6.flow } },
@@ -2553,7 +2553,7 @@ fn netAddressToPathAddress(addr: Net.IpAddress) quic_zig.conn.path.Address {
 /// fall back to a default destination — typically the connection's
 /// original target address. Mirrors the helper that lives in
 /// `src/transport/udp_server.zig` for `runUdpClient`.
-fn pathAddressToNetAddress(addr: ?quic_zig.conn.path.Address) ?Net.IpAddress {
+fn pathAddressToNetAddress(addr: ?quic.conn.path.Address) ?Net.IpAddress {
     const a = addr orelse return null;
     return switch (a) {
         .unspecified => null,
@@ -2575,9 +2575,9 @@ fn writeVersionNegotiation(
         std.mem.writeInt(u32, versions_bytes[i * 4 ..][0..4], version, .big);
     }
 
-    return try quic_zig.wire.header.encode(dst, .{ .version_negotiation = .{
-        .dcid = try quic_zig.wire.header.ConnId.fromSlice(ids.scid),
-        .scid = try quic_zig.wire.header.ConnId.fromSlice(ids.dcid),
+    return try quic.wire.header.encode(dst, .{ .version_negotiation = .{
+        .dcid = try quic.wire.header.ConnId.fromSlice(ids.scid),
+        .scid = try quic.wire.header.ConnId.fromSlice(ids.dcid),
         .versions_bytes = versions_bytes[0 .. supported_versions.len * 4],
     } });
 }
@@ -2595,7 +2595,7 @@ fn isVersionSupported(supported: []const u32, version: u32) bool {
 
 /// RFC 9368 §6 server-side compatible-version-negotiation pre-parse.
 /// Mirrors `Server.preparseUpgradeTarget` in `src/server.zig` but uses
-/// only the public `quic_zig.wire.vneg_preparse` helpers so the qns
+/// only the public `quic.wire.vneg_preparse` helpers so the qns
 /// endpoint stays a pure embedder of the library API.
 ///
 /// Returns `null` when:
@@ -2624,7 +2624,7 @@ fn preparseUpgradeTarget(
     wire_version: u32,
 ) ?u32 {
     if (supported.len <= 1) return null;
-    if (!quic_zig.wire.initial.isSupportedVersion(wire_version)) return null;
+    if (!quic.wire.initial.isSupportedVersion(wire_version)) return null;
 
     const ids = peekLongHeaderIds(bytes) orelse return null;
 
@@ -2632,26 +2632,26 @@ fn preparseUpgradeTarget(
     // in-place header-protection strip doesn't disturb the caller's
     // buffer — `Connection.handleWithEcn` will re-process the same
     // bytes through its normal Initial-handling flow.
-    var pkt_copy: [quic_zig.conn.state.max_recv_plaintext]u8 = undefined;
+    var pkt_copy: [quic.conn.state.max_recv_plaintext]u8 = undefined;
     if (bytes.len > pkt_copy.len) return null;
     @memcpy(pkt_copy[0..bytes.len], bytes);
 
     // Derive client-direction Initial keys for the wire version.
-    const init_keys = quic_zig.wire.initial.deriveInitialKeysFor(wire_version, ids.dcid, false) catch return null;
-    const r_keys = quic_zig.wire.short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret) catch return null;
+    const init_keys = quic.wire.initial.deriveInitialKeysFor(wire_version, ids.dcid, false) catch return null;
+    const r_keys = quic.wire.short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret) catch return null;
 
-    var pt_buf: [quic_zig.conn.state.max_recv_plaintext]u8 = undefined;
-    const opened = quic_zig.wire.long_packet.openInitial(&pt_buf, pkt_copy[0..bytes.len], .{
+    var pt_buf: [quic.conn.state.max_recv_plaintext]u8 = undefined;
+    const opened = quic.wire.long_packet.openInitial(&pt_buf, pkt_copy[0..bytes.len], .{
         .keys = &r_keys,
         .largest_received = 0,
     }) catch return null;
 
-    var ch_buf: [quic_zig.wire.vneg_preparse.max_client_hello_bytes]u8 = undefined;
-    const ch = quic_zig.wire.vneg_preparse.reassembleClientHello(&ch_buf, opened.payload) orelse return null;
-    const qtp = quic_zig.wire.vneg_preparse.findQuicTransportParamsExt(ch) orelse return null;
-    const info = quic_zig.wire.vneg_preparse.findVersionInformation(qtp) orelse return null;
+    var ch_buf: [quic.wire.vneg_preparse.max_client_hello_bytes]u8 = undefined;
+    const ch = quic.wire.vneg_preparse.reassembleClientHello(&ch_buf, opened.payload) orelse return null;
+    const qtp = quic.wire.vneg_preparse.findQuicTransportParamsExt(ch) orelse return null;
+    const info = quic.wire.vneg_preparse.findVersionInformation(qtp) orelse return null;
 
-    return quic_zig.wire.vneg_preparse.chooseUpgradeVersion(supported, info.available());
+    return quic.wire.vneg_preparse.chooseUpgradeVersion(supported, info.available());
 }
 
 fn randomServerCid(io: std.Io) [server_cid_len]u8 {
@@ -2662,7 +2662,7 @@ fn randomServerCid(io: std.Io) [server_cid_len]u8 {
 }
 
 fn queueServerConnectionIds(
-    conn: *quic_zig.Connection,
+    conn: *quic.Connection,
     next_seq: *u8,
     desired_last_seq: u8,
     sc: *ServerConn,
@@ -2671,7 +2671,7 @@ fn queueServerConnectionIds(
     if (budget == 0 or next_seq.* > desired_last_seq) return;
 
     var cid_storage: [8][server_cid_len]u8 = undefined;
-    var provisions: [8]quic_zig.ConnectionIdProvision = undefined;
+    var provisions: [8]quic.ConnectionIdProvision = undefined;
     var count: usize = 0;
     var seq = next_seq.*;
     while (seq <= desired_last_seq and count < provisions.len and count < budget) {
@@ -2693,7 +2693,7 @@ fn queueServerConnectionIds(
         //   * Otherwise (no PA configured, or PA mint failed at
         //     `ServerConn.init`): the historical deterministic
         //     `cid[7] +%= seq` derivation, paired with a token
-        //     derived via `quic_zig.conn.stateless_reset.derive` from
+        //     derived via `quic.conn.stateless_reset.derive` from
         //     the qns-wide `stateless_reset_key`. The wider refactor
         //     replaced an XOR-shaped stand-in token with the public-
         //     API HMAC; the seq-1..N CID derivation stays
@@ -2711,7 +2711,7 @@ fn queueServerConnectionIds(
         } else {
             cid_storage[count] = sc.initial_server_cid;
             cid_storage[count][7] +%= seq;
-            const tok = quic_zig.conn.stateless_reset.derive(&stateless_reset_key, &cid_storage[count]) catch
+            const tok = quic.conn.stateless_reset.derive(&stateless_reset_key, &cid_storage[count]) catch
                 return error.RandFailure;
             provisions[count] = .{
                 .connection_id = cid_storage[count][0..],
@@ -2730,7 +2730,7 @@ fn queueServerConnectionIds(
 /// Build the `preferred_address` transport-parameter value the server
 /// advertises for the runner's `connectionmigration` testcase. Reads
 /// the alt-address pair from `pa_cfg` (the runtime
-/// `quic_zig.PreferredAddressConfig` the qns endpoint constructed at
+/// `quic.PreferredAddressConfig` the qns endpoint constructed at
 /// `runServer`) and pulls the per-connection seq-1 CID + stateless-
 /// reset token off `sc` — both pre-minted in `ServerConn.init` so the
 /// seq-1 NEW_CONNECTION_ID emitted by `queueServerConnectionIds`
@@ -2746,11 +2746,11 @@ fn queueServerConnectionIds(
 /// the on-wire `tls.transport_params.PreferredAddress` shape, with
 /// the missing-family fields zeroed per the §18.2 sentinel.
 fn buildPreferredAddress(
-    pa_cfg: quic_zig.PreferredAddressConfig,
+    pa_cfg: quic.PreferredAddressConfig,
     sc: *const ServerConn,
-) quic_zig.tls.transport_params.PreferredAddress {
-    var out: quic_zig.tls.transport_params.PreferredAddress = .{
-        .connection_id = quic_zig.conn.path.ConnectionId.fromSlice(&sc.pa_alt_cid),
+) quic.tls.transport_params.PreferredAddress {
+    var out: quic.tls.transport_params.PreferredAddress = .{
+        .connection_id = quic.conn.path.ConnectionId.fromSlice(&sc.pa_alt_cid),
         .stateless_reset_token = sc.pa_alt_token,
     };
     if (pa_cfg.ipv4) |v4| {
@@ -2795,11 +2795,11 @@ fn buildPreferredAddress(
 /// deterministically from `base_cid` + the sequence number that
 /// `Connection.replenishConnectionIds` will assign next (queried
 /// via `nextLocalConnectionIdSequence`); stateless reset tokens go
-/// through `quic_zig.conn.stateless_reset.derive` with the
+/// through `quic.conn.stateless_reset.derive` with the
 /// qns-wide `stateless_reset_key`, matching the public-API path
 /// the server side now uses for seq-1 alt-CIDs.
 fn queueClientConnectionIds(
-    conn: *quic_zig.Connection,
+    conn: *quic.Connection,
     lifetime_issued: *u8,
     lifetime_cap: u8,
     base_cid: *const [8]u8,
@@ -2810,7 +2810,7 @@ fn queueClientConnectionIds(
 
     const remaining_lifetime: usize = lifetime_cap - lifetime_issued.*;
     var cid_storage: [8][8]u8 = undefined;
-    var provisions: [8]quic_zig.ConnectionIdProvision = undefined;
+    var provisions: [8]quic.ConnectionIdProvision = undefined;
     var count: usize = 0;
     while (count < provisions.len and count < budget and count < remaining_lifetime) {
         // The sequence number `replenishConnectionIds` will assign
@@ -2825,7 +2825,7 @@ fn queueClientConnectionIds(
         const next_seq: u8 = @intCast(next_seq_u64 & 0xff);
         cid_storage[count] = base_cid.*;
         cid_storage[count][7] +%= next_seq;
-        const tok = quic_zig.conn.stateless_reset.derive(&stateless_reset_key, &cid_storage[count]) catch
+        const tok = quic.conn.stateless_reset.derive(&stateless_reset_key, &cid_storage[count]) catch
             return error.RandFailure;
         provisions[count] = .{
             .connection_id = cid_storage[count][0..],
@@ -2850,10 +2850,10 @@ fn retryToken(
     now_us: u64,
     original_dcid: []const u8,
     retry_scid: []const u8,
-) !quic_zig.RetryToken {
+) !quic.RetryToken {
     var addr_buf: [32]u8 = undefined;
     const client_address = retryAddressContext(&addr_buf, peer);
-    return try quic_zig.retry_token.minted(.{
+    return try quic.retry_token.minted(.{
         .key = &retry_token_key,
         .now_us = now_us,
         .lifetime_us = retry_token_lifetime_us,
@@ -2885,10 +2885,10 @@ fn retryTokenValidationResult(
     original_dcid: []const u8,
     retry_scid: []const u8,
     token: []const u8,
-) quic_zig.RetryTokenValidationResult {
+) quic.RetryTokenValidationResult {
     var addr_buf: [32]u8 = undefined;
     const client_address = retryAddressContext(&addr_buf, peer);
-    return quic_zig.retry_token.validate(token, .{
+    return quic.retry_token.validate(token, .{
         .key = &retry_token_key,
         .now_us = now_us,
         .client_address = client_address,
@@ -2932,18 +2932,18 @@ fn retryAddressContext(dst: []u8, peer: Net.IpAddress) []const u8 {
 }
 
 /// Mint a NEW_TOKEN bound to `peer`. The address-binding shape mirrors
-/// `quic_zig.Server.addressContext` (the full 22-byte `path.Address`
+/// `quic.Server.addressContext` (the full 22-byte `path.Address`
 /// buffer) so a NEW_TOKEN minted by the QNS endpoint round-trips
 /// identically through `Server.applyRetryGate`'s NEW_TOKEN path on a
 /// follow-up connection — useful when the interop runner pairs a
-/// quic_zig server with a third-party client that simply echoes the
+/// quic server with a third-party client that simply echoes the
 /// token bytes verbatim.
-fn newToken(peer: Net.IpAddress, now_us: u64) !quic_zig.conn.NewTokenBlob {
+fn newToken(peer: Net.IpAddress, now_us: u64) !quic.conn.NewTokenBlob {
     const addr = netAddressToPathAddress(peer);
-    var addr_buf: [quic_zig.conn.path.Address.context_max_len]u8 = undefined;
+    var addr_buf: [quic.conn.path.Address.context_max_len]u8 = undefined;
     const addr_ctx = addr.writeContext(&addr_buf);
-    var token: quic_zig.conn.NewTokenBlob = undefined;
-    _ = try quic_zig.conn.new_token.mint(&token, .{
+    var token: quic.conn.NewTokenBlob = undefined;
+    _ = try quic.conn.new_token.mint(&token, .{
         .key = &new_token_key,
         .now_us = now_us,
         .lifetime_us = new_token_lifetime_us,
@@ -2960,11 +2960,11 @@ fn newTokenValidationResult(
     peer: Net.IpAddress,
     now_us: u64,
     token: []const u8,
-) quic_zig.conn.NewTokenValidationResult {
+) quic.conn.NewTokenValidationResult {
     const addr = netAddressToPathAddress(peer);
-    var addr_buf: [quic_zig.conn.path.Address.context_max_len]u8 = undefined;
+    var addr_buf: [quic.conn.path.Address.context_max_len]u8 = undefined;
     const addr_ctx = addr.writeContext(&addr_buf);
-    return quic_zig.conn.new_token.validate(token, .{
+    return quic.conn.new_token.validate(token, .{
         .key = &new_token_key,
         .now_us = now_us,
         .client_address = addr_ctx,
@@ -3069,7 +3069,7 @@ fn shouldArmStalledPeerKeepalive(inputs: StalledPeerKeepaliveInputs) bool {
 }
 
 fn peekInitialToken(bytes: []const u8) ?[]const u8 {
-    const parsed = quic_zig.wire.header.parse(bytes, 0) catch return null;
+    const parsed = quic.wire.header.parse(bytes, 0) catch return null;
     return switch (parsed.header) {
         .initial => |initial| initial.token,
         else => null,
@@ -3090,28 +3090,28 @@ test "Retry-token endpoint validation rejects malformed and replayed probes" {
         &retry_scid,
         &token,
     ));
-    try std.testing.expectEqual(quic_zig.RetryTokenValidationResult.malformed, retryTokenValidationResult(
+    try std.testing.expectEqual(quic.RetryTokenValidationResult.malformed, retryTokenValidationResult(
         peer,
         2_000_000,
         &original_dcid,
         &retry_scid,
         token[0 .. token.len - 1],
     ));
-    try std.testing.expectEqual(quic_zig.RetryTokenValidationResult.invalid, retryTokenValidationResult(
+    try std.testing.expectEqual(quic.RetryTokenValidationResult.invalid, retryTokenValidationResult(
         replay_peer,
         2_000_000,
         &original_dcid,
         &retry_scid,
         &token,
     ));
-    try std.testing.expectEqual(quic_zig.RetryTokenValidationResult.invalid, retryTokenValidationResult(
+    try std.testing.expectEqual(quic.RetryTokenValidationResult.invalid, retryTokenValidationResult(
         peer,
         2_000_000,
         &.{ 1, 2, 3, 4, 5, 6, 7, 9 },
         &retry_scid,
         &token,
     ));
-    try std.testing.expectEqual(quic_zig.RetryTokenValidationResult.expired, retryTokenValidationResult(
+    try std.testing.expectEqual(quic.RetryTokenValidationResult.expired, retryTokenValidationResult(
         peer,
         1_000_000 + retry_token_lifetime_us + 1,
         &original_dcid,
@@ -3129,7 +3129,7 @@ test "Retry-token endpoint validation rejects malformed and replayed probes" {
     // match `opts.quic_version`, so the validator returns
     // `.wrong_version` exactly as the §4.3 path is documented to.
     var addr_buf2: [32]u8 = undefined;
-    const wrong_version_token = try quic_zig.retry_token.minted(.{
+    const wrong_version_token = try quic.retry_token.minted(.{
         .key = &retry_token_key,
         .now_us = 1_000_000,
         .lifetime_us = retry_token_lifetime_us,
@@ -3138,7 +3138,7 @@ test "Retry-token endpoint validation rejects malformed and replayed probes" {
         .retry_scid = &retry_scid,
         .quic_version = 0x6b3343cf,
     });
-    try std.testing.expectEqual(quic_zig.RetryTokenValidationResult.wrong_version, retryTokenValidationResult(
+    try std.testing.expectEqual(quic.RetryTokenValidationResult.wrong_version, retryTokenValidationResult(
         peer,
         2_000_000,
         &original_dcid,
@@ -3157,26 +3157,26 @@ test "NEW_TOKEN endpoint validation accepts a fresh token, rejects expired, reje
     // Same peer, well within the lifetime window: .valid.
     try std.testing.expect(validNewToken(peer, 2_000_000, &token));
     try std.testing.expectEqual(
-        quic_zig.conn.NewTokenValidationResult.valid,
+        quic.conn.NewTokenValidationResult.valid,
         newTokenValidationResult(peer, 2_000_000, &token),
     );
 
     // Different source address (different port — `path.Address.bytes`
     // includes the port at offset 5..7 for IPv4) -> .invalid.
     try std.testing.expectEqual(
-        quic_zig.conn.NewTokenValidationResult.invalid,
+        quic.conn.NewTokenValidationResult.invalid,
         newTokenValidationResult(wrong_peer, 2_000_000, &token),
     );
 
     // Past the issuance lifetime -> .expired.
     try std.testing.expectEqual(
-        quic_zig.conn.NewTokenValidationResult.expired,
+        quic.conn.NewTokenValidationResult.expired,
         newTokenValidationResult(peer, 1_000_000 + new_token_lifetime_us + 1, &token),
     );
 
     // Truncating the wire blob breaks the fixed-length gate -> .malformed.
     try std.testing.expectEqual(
-        quic_zig.conn.NewTokenValidationResult.malformed,
+        quic.conn.NewTokenValidationResult.malformed,
         newTokenValidationResult(peer, 2_000_000, token[0 .. token.len - 1]),
     );
 
@@ -3193,10 +3193,10 @@ test "NEW_TOKEN endpoint validation accepts a fresh token, rejects expired, reje
     // v1-only validator (NEW_TOKEN binds the version inside the AEAD
     // plaintext, not the on-wire format).
     const addr = netAddressToPathAddress(peer);
-    var v2_addr_buf: [quic_zig.conn.path.Address.context_max_len]u8 = undefined;
+    var v2_addr_buf: [quic.conn.path.Address.context_max_len]u8 = undefined;
     const v2_addr_ctx = addr.writeContext(&v2_addr_buf);
-    var v2_token: quic_zig.conn.NewTokenBlob = undefined;
-    _ = try quic_zig.conn.new_token.mint(&v2_token, .{
+    var v2_token: quic.conn.NewTokenBlob = undefined;
+    _ = try quic.conn.new_token.mint(&v2_token, .{
         .key = &new_token_key,
         .now_us = 1_000_000,
         .lifetime_us = new_token_lifetime_us,
@@ -3204,7 +3204,7 @@ test "NEW_TOKEN endpoint validation accepts a fresh token, rejects expired, reje
         .quic_version = 0x6b3343cf,
     });
     try std.testing.expectEqual(
-        quic_zig.conn.NewTokenValidationResult.wrong_version,
+        quic.conn.NewTokenValidationResult.wrong_version,
         newTokenValidationResult(peer, 2_000_000, &v2_token),
     );
 }
@@ -3274,11 +3274,11 @@ test "QNS server/client versions follow TESTCASE=versionnegotiation" {
     // testcases keep their historical wire posture.
     const default_server = serverVersionsForTestcase("");
     try std.testing.expectEqual(@as(usize, 1), default_server.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, default_server[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, default_server[0]);
 
     const default_client = clientVersionsForTestcase("");
     try std.testing.expectEqual(@as(usize, 1), default_client.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, default_client[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, default_client[0]);
 
     // Sanity-check a couple of unrelated TESTCASE values to make sure
     // they don't accidentally trip the v2 opt-in. `transfer` is the
@@ -3287,11 +3287,11 @@ test "QNS server/client versions follow TESTCASE=versionnegotiation" {
     // version-selection path stays orthogonal to it.
     const transfer_server = serverVersionsForTestcase("transfer");
     try std.testing.expectEqual(@as(usize, 1), transfer_server.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, transfer_server[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, transfer_server[0]);
 
     const cm_client = clientVersionsForTestcase("connectionmigration");
     try std.testing.expectEqual(@as(usize, 1), cm_client.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, cm_client[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, cm_client[0]);
 
     // `versionnegotiation`: server prefers v2 first so it advertises
     // v2 as `chosen_version` to a v1-wire client whose
@@ -3299,8 +3299,8 @@ test "QNS server/client versions follow TESTCASE=versionnegotiation" {
     // list as a fallback for legacy clients with no `version_information`.
     const vn_server = serverVersionsForTestcase("versionnegotiation");
     try std.testing.expectEqual(@as(usize, 2), vn_server.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_2, vn_server[0]);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, vn_server[1]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_2, vn_server[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, vn_server[1]);
 
     // `versionnegotiation`: client puts v1 first because that's the
     // wire version of its outbound Initial; v2 is the upgrade target
@@ -3308,8 +3308,8 @@ test "QNS server/client versions follow TESTCASE=versionnegotiation" {
     // server (v2-first) is intentional — see the helper docstrings.
     const vn_client = clientVersionsForTestcase("versionnegotiation");
     try std.testing.expectEqual(@as(usize, 2), vn_client.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, vn_client[0]);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_2, vn_client[1]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, vn_client[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_2, vn_client[1]);
 
     // `v2`: this is the runner's actual testcase name for the
     // compatible-version-negotiation cell
@@ -3323,13 +3323,13 @@ test "QNS server/client versions follow TESTCASE=versionnegotiation" {
     // Initial. Expected 0x6b3343cf, got {'0x1'}" and failed the cell.
     const v2_server = serverVersionsForTestcase("v2");
     try std.testing.expectEqual(@as(usize, 2), v2_server.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_2, v2_server[0]);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, v2_server[1]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_2, v2_server[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, v2_server[1]);
 
     const v2_client = clientVersionsForTestcase("v2");
     try std.testing.expectEqual(@as(usize, 2), v2_client.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, v2_client[0]);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_2, v2_client[1]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, v2_client[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_2, v2_client[1]);
 
     // Defensive: a value that *contains* `v2` as a substring but isn't
     // exactly `v2` (e.g. a hypothetical future `v2+something` testcase)
@@ -3337,26 +3337,26 @@ test "QNS server/client versions follow TESTCASE=versionnegotiation" {
     // `isVersionNegotiationTestcase` uses exact-equality matching.
     const not_v2_server = serverVersionsForTestcase("v22");
     try std.testing.expectEqual(@as(usize, 1), not_v2_server.len);
-    try std.testing.expectEqual(quic_zig.QUIC_VERSION_1, not_v2_server[0]);
+    try std.testing.expectEqual(quic.QUIC_VERSION_1, not_v2_server[0]);
 }
 
 test "isVersionSupported scans the configured list" {
     // Single-version (v1-only default): only v1 hits.
-    try std.testing.expect(isVersionSupported(&.{quic_zig.QUIC_VERSION_1}, quic_zig.QUIC_VERSION_1));
-    try std.testing.expect(!isVersionSupported(&.{quic_zig.QUIC_VERSION_1}, quic_zig.QUIC_VERSION_2));
-    try std.testing.expect(!isVersionSupported(&.{quic_zig.QUIC_VERSION_1}, 0xdeadbeef));
+    try std.testing.expect(isVersionSupported(&.{quic.QUIC_VERSION_1}, quic.QUIC_VERSION_1));
+    try std.testing.expect(!isVersionSupported(&.{quic.QUIC_VERSION_1}, quic.QUIC_VERSION_2));
+    try std.testing.expect(!isVersionSupported(&.{quic.QUIC_VERSION_1}, 0xdeadbeef));
 
     // Multi-version (`TESTCASE=versionnegotiation` posture): both v1
     // and v2 hit; an unknown version misses so the dispatch path
     // sends a Version Negotiation rather than passing the bytes
     // through to `Connection.acceptInitial`.
     const both = serverVersionsForTestcase("versionnegotiation");
-    try std.testing.expect(isVersionSupported(both, quic_zig.QUIC_VERSION_1));
-    try std.testing.expect(isVersionSupported(both, quic_zig.QUIC_VERSION_2));
+    try std.testing.expect(isVersionSupported(both, quic.QUIC_VERSION_1));
+    try std.testing.expect(isVersionSupported(both, quic.QUIC_VERSION_2));
     try std.testing.expect(!isVersionSupported(both, 0xdeadbeef));
     // Empty list: nothing matches (defensive — production code never
     // hits this since the env-derived defaults guarantee >= 1 entry).
-    try std.testing.expect(!isVersionSupported(&.{}, quic_zig.QUIC_VERSION_1));
+    try std.testing.expect(!isVersionSupported(&.{}, quic.QUIC_VERSION_1));
 }
 
 test "queueClientConnectionIds issues a fresh CID once handshake completes" {
@@ -3370,7 +3370,7 @@ test "queueClientConnectionIds issues a fresh CID once handshake completes" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    const conn = try quic.Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
     // The peer's `active_connection_id_limit` governs how many of
@@ -3412,7 +3412,7 @@ test "queueClientConnectionIds no-ops when peer's CID limit is saturated" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    const conn = try quic.Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
     // Peer permits exactly one active CID at a time — the initial
@@ -3449,7 +3449,7 @@ test "queueClientConnectionIds replenishes after peer aggressively retires SCIDs
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    const conn = try quic.Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
     conn.cached_peer_transport_params = .{ .active_connection_id_limit = 2 };
@@ -3485,7 +3485,7 @@ test "queueClientConnectionIds replenishes after peer aggressively retires SCIDs
     // `endpoint_client_cid_max_lifetime_count` extra SCIDs we
     // refuse further provisions even if the peer keeps retiring,
     // so a misbehaving peer cannot force unbounded CSPRNG burn
-    // through `quic_zig.conn.stateless_reset.derive`.
+    // through `quic.conn.stateless_reset.derive`.
     var saturated_issued: u8 = endpoint_client_cid_max_lifetime_count;
     const queue_len_before = conn.pending_frames.new_connection_ids.items.len;
     try queueClientConnectionIds(conn, &saturated_issued, endpoint_client_cid_max_lifetime_count, &base_cid);
@@ -3500,7 +3500,7 @@ test "buildPreferredAddress packs config + identity into transport-param shape" 
     // (§5.1.1 ¶3). The qns server pre-mints those bytes in
     // `ServerConn.init` and `buildPreferredAddress` simply projects
     // them — together with the v4/v6 address pair from
-    // `quic_zig.PreferredAddressConfig` — into the on-wire shape.
+    // `quic.PreferredAddressConfig` — into the on-wire shape.
     // This test pins that projection: any divergence between the
     // pre-minted bytes on `sc` and the encoded transport-parameter
     // would either (a) leave the post-migration packets that bear
@@ -3522,7 +3522,7 @@ test "buildPreferredAddress packs config + identity into transport-param shape" 
     };
     sc.pa_alt_cid_set = true;
 
-    const cfg: quic_zig.PreferredAddressConfig = .{
+    const cfg: quic.PreferredAddressConfig = .{
         .ipv4 = .{ .bytes = interop_runner_server_ipv4, .port = 444 },
         .ipv6 = .{ .bytes = interop_runner_server_ipv6, .port = 444, .flow = 0 },
     };
@@ -3562,16 +3562,16 @@ test "buildPreferredAddress encodes into the transport-params blob" {
         .last_activity_us = 0,
     };
     sc.pa_alt_cid = .{ 'Q', 'N', 'S', '-', 0xb1, 0xb2, 0xb3, 0xb4 };
-    sc.pa_alt_token = try quic_zig.conn.stateless_reset.derive(&stateless_reset_key, &sc.pa_alt_cid);
+    sc.pa_alt_token = try quic.conn.stateless_reset.derive(&stateless_reset_key, &sc.pa_alt_cid);
     sc.pa_alt_cid_set = true;
 
-    const cfg: quic_zig.PreferredAddressConfig = .{
+    const cfg: quic.PreferredAddressConfig = .{
         .ipv4 = .{ .bytes = interop_runner_server_ipv4, .port = 444 },
         .ipv6 = .{ .bytes = interop_runner_server_ipv6, .port = 444, .flow = 0 },
     };
     const pa = buildPreferredAddress(cfg, &sc);
 
-    const params: quic_zig.tls.TransportParams = .{
+    const params: quic.tls.TransportParams = .{
         .max_idle_timeout_ms = 30_000,
         .initial_max_data = 1 * 1024 * 1024,
         .initial_max_stream_data_bidi_local = 1 * 1024 * 1024,
@@ -3586,7 +3586,7 @@ test "buildPreferredAddress encodes into the transport-params blob" {
 
     var buf: [512]u8 = undefined;
     const n = try params.encode(&buf);
-    const decoded = try quic_zig.tls.transport_params.Params.decode(buf[0..n]);
+    const decoded = try quic.tls.transport_params.Params.decode(buf[0..n]);
 
     const got = decoded.preferred_address orelse return error.MissingPreferredAddress;
     try std.testing.expectEqualSlices(u8, pa.connection_id.slice(), got.connection_id.slice());
@@ -3614,7 +3614,7 @@ test "buildPreferredAddress projects v4-only / v6-only configs into RFC 9000 §1
     sc.pa_alt_token = @splat(0xab);
     sc.pa_alt_cid_set = true;
 
-    const v4_only_cfg: quic_zig.PreferredAddressConfig = .{
+    const v4_only_cfg: quic.PreferredAddressConfig = .{
         .ipv4 = .{ .bytes = interop_runner_server_ipv4, .port = 444 },
         .ipv6 = null,
     };
@@ -3625,7 +3625,7 @@ test "buildPreferredAddress projects v4-only / v6-only configs into RFC 9000 §1
     try std.testing.expectEqualSlices(u8, &zero16, &v4_only.ipv6_address);
     try std.testing.expectEqual(@as(u16, 0), v4_only.ipv6_port);
 
-    const v6_only_cfg: quic_zig.PreferredAddressConfig = .{
+    const v6_only_cfg: quic.PreferredAddressConfig = .{
         .ipv4 = null,
         .ipv6 = .{ .bytes = interop_runner_server_ipv6, .port = 444, .flow = 0 },
     };
@@ -3755,7 +3755,7 @@ test "shouldArmStalledPeerKeepalive short-circuits on a fresh pre-handshake serv
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    const conn = try quic_zig.Connection.createServer(allocator, ctx);
+    const conn = try quic.Connection.createServer(allocator, ctx);
     defer conn.destroy();
 
     // Pre-handshake invariants. `handshakeDone()` MUST be false
@@ -3840,7 +3840,7 @@ test "Connection.requestPing arms the application-level pending PING" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    const conn = try quic_zig.Connection.createClient(allocator, ctx, "x");
+    const conn = try quic.Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
     try std.testing.expect(!conn.primaryPath().pending_ping);

@@ -89,10 +89,10 @@ integration. The wasm adapter should sit above these I/O-agnostic APIs.
 |  adapter/deno_wasm.zig                                         |
 |    - handle table                                              |
 |    - config decode                                             |
-|    - Deno address struct <-> quic_zig.conn.path.Address         |
+|    - Deno address struct <-> quic.conn.path.Address         |
 |    - server/client entrypoints                                 |
 |                                                                |
-|  quic_zig.Server / quic_zig.Client / quic_zig.Connection        |
+|  quic.Server / quic.Client / quic.Connection        |
 |  boringssl-zig TLS and packet protection                       |
 +----------------------------------------------------------------+
 ```
@@ -393,7 +393,7 @@ Deno's `DatagramConn` API exposes payload and address, not IP control messages.
 Therefore the MVP calls `feed`/`handle`, not `feedWithEcn`/`handleWithEcn`, and
 outbound ECN marking is unavailable.
 
-Socket buffer tuning from `quic_zig.transport.socket_opts` also stays native
+Socket buffer tuning from `quic.transport.socket_opts` also stays native
 only. Deno's public UDP API does not expose `SO_RCVBUF`, `SO_SNDBUF`, GSO,
 `recvmmsg`, or cmsg parsing. If those become necessary, add optional native
 Deno capabilities in the host wrapper rather than expanding the wasm ABI first.

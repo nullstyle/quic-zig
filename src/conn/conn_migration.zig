@@ -146,7 +146,7 @@ pub fn handlePeerAddressChange(
     // isn't already in use on this path), rotate to it before
     // path validation begins. If no fresh CID is available
     // (peer hasn't issued more, or NAT rebinding without
-    // deliberate CID issuance), quic_zig proceeds with the existing
+    // deliberate CID issuance), quic proceeds with the existing
     // CID — silently rather than refusing the migration outright,
     // because a strict refusal breaks NAT rebinding scenarios
     // where the peer never sent a NEW_CONNECTION_ID. The
@@ -634,7 +634,7 @@ pub fn highestAlternativeAddressSequenceSeen(self: *const Connection) ?u64 {
 }
 
 /// Allow / deny verdict returned by a `MigrationCallback`. The
-/// callback is consulted before quic_zig starts path validation on a
+/// callback is consulted before quic starts path validation on a
 /// candidate 4-tuple (RFC 9000 §9). `.allow` proceeds with
 /// PATH_CHALLENGE; `.deny` skips validation entirely and keeps the
 /// existing path live.
@@ -648,7 +648,7 @@ pub const MigrationDecision = enum {
     deny,
 };
 
-/// Embedder policy hook consulted when quic_zig detects a peer migration
+/// Embedder policy hook consulted when quic detects a peer migration
 /// candidate (RFC 9000 §9). Fires synchronously, **before** the
 /// PATH_CHALLENGE / PATH_RESPONSE round-trip — this lets the embedder
 /// short-circuit purely-address-based allowlists ("only accept
@@ -661,7 +661,7 @@ pub const MigrationDecision = enum {
 ///   `Connection.setMigrationCallback`.
 /// - `conn` — the live Connection, passed by const-pointer so the
 ///   callback can read state (e.g. role, peer SCID, scheduling
-///   policy) but cannot mutate it. quic_zig is single-threaded
+///   policy) but cannot mutate it. quic is single-threaded
 ///   internally; the callback must not call back into this
 ///   Connection.
 /// - `candidate_addr` — the new peer 4-tuple address the datagram

@@ -39,7 +39,7 @@ const PreferredAddressTp = tls_mod.transport_params.PreferredAddress;
 /// set. The seq-1 stateless-reset token in the parameter must match
 /// the token a future stateless-reset on the alt-CID would produce,
 /// and the deterministic `conn.stateless_reset.derive` helper is the
-/// only path quic_zig surfaces for that. Setting `preferred_address`
+/// only path quic surfaces for that. Setting `preferred_address`
 /// without a key fails `Server.init` with `InvalidConfig`.
 pub const PreferredAddressConfig = struct {
     /// Alt IPv4 address + port to advertise + bind, or null. The
@@ -112,7 +112,7 @@ pub const EarlyData = union(enum) {
     /// Accept 0-RTT with NO transport-layer replay protection.
     /// Correct only when every request the application will accept
     /// over early data is idempotent, or the application runs its own
-    /// replay defense above quic_zig (RFC 9001 §5.6 leaves the check
+    /// replay defense above quic (RFC 9001 §5.6 leaves the check
     /// to the application). Spelled out so that shipping unprotected
     /// 0-RTT is always a deliberate, greppable choice.
     without_replay_protection,
@@ -211,8 +211,8 @@ pub const Config = struct {
     /// When set, `installLbConfig` automatically pushes a
     /// NEW_CONNECTION_ID frame to every live slot using the new LB
     /// factory; tokens are derived as
-    /// `HMAC-SHA256(stateless_reset_key, "quic_zig stateless reset
-    /// v1" || cid)` per `quic_zig.conn.stateless_reset.derive`.
+    /// `HMAC-SHA256(stateless_reset_key, "quic stateless reset
+    /// v1" || cid)` per `quic.conn.stateless_reset.derive`.
     ///
     /// **Persist this key across server restarts.** A cold-start
     /// embedder that forgets the key invalidates every previously
@@ -446,7 +446,7 @@ pub const Config = struct {
 
     /// Number of ack-eliciting application packets the server requires
     /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
-    /// matches `quic_zig.conn.state.application_ack_eliciting_threshold`.
+    /// matches `quic.conn.state.application_ack_eliciting_threshold`.
     /// Lower this to 1 for low-RTT links where every packet should be
     /// ACKed; raise it to amortize ACK overhead at the cost of more
     /// peer PTOs. Threaded onto every Connection at slot-open time.
@@ -543,7 +543,7 @@ pub const Config = struct {
     ///
     /// Defaults to `&.{ 0x00000001 }` (QUIC v1 only) so v0.x embedders
     /// keep the same wire posture they had before RFC 9368 v2 support
-    /// landed. Adding `0x6b3343cf` (`quic_zig.QUIC_VERSION_2`) opts
+    /// landed. Adding `0x6b3343cf` (`quic.QUIC_VERSION_2`) opts
     /// the server into v2: incoming v2 Initials are accepted under
     /// the §3.3.1 salt + §3.3.2 labels, outgoing Retries / VN frames
     /// echo the negotiated version, and the optional
@@ -595,7 +595,7 @@ pub const Config = struct {
     /// to the alt-CID authenticate. **Requires
     /// `Config.stateless_reset_key`**; without it `Server.init`
     /// returns `InvalidConfig` (the deterministic token derivation
-    /// is the only path quic_zig surfaces for the seq-1 token).
+    /// is the only path quic surfaces for the seq-1 token).
     ///
     /// `runUdpServer` consults this field to also bind alt listener
     /// socket(s) on the configured port(s), poll all bound sockets

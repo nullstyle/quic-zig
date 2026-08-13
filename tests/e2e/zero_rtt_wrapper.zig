@@ -7,7 +7,7 @@
 //!   2. A second `Client.connect` passes the envelope back as
 //!      `Config.resumption_state`, stages stream data before
 //!      `advance()`, and sends it as 0-RTT.
-//!   3. `quic_zig.Server` — with nothing beyond
+//!   3. `quic.Server` — with nothing beyond
 //!      `Config.early_data` enabled — accepts the early data because
 //!      the accept path now installs the RFC 9001 §4.6.1 replay
 //!      context before the ClientHello is processed.
@@ -16,7 +16,7 @@
 //! BEFORE its handshake completes. Only accepted 0-RTT can do that.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("common.zig");
 
 const protos = [_][]const u8{"hq-test"};
@@ -44,10 +44,10 @@ const EnvelopeSink = struct {
 };
 
 fn pumpClientToServer(
-    cli: *quic_zig.Client,
-    srv: *quic_zig.Server,
+    cli: *quic.Client,
+    srv: *quic.Server,
     rx: []u8,
-    addr: quic_zig.conn.path.Address,
+    addr: quic.conn.path.Address,
     now_us: u64,
 ) !void {
     while (try cli.conn.poll(rx, now_us)) |len| {
@@ -56,8 +56,8 @@ fn pumpClientToServer(
 }
 
 fn pumpServerToClient(
-    srv: *quic_zig.Server,
-    cli: *quic_zig.Client,
+    srv: *quic.Server,
+    cli: *quic.Client,
     rx: []u8,
     now_us: u64,
 ) !void {
@@ -71,7 +71,7 @@ fn pumpServerToClient(
 test "0-RTT: ticket capture + resumption + early data accepted through the wrappers" {
     const allocator = std.testing.allocator;
 
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -85,11 +85,11 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     defer sink.deinit();
 
     var rx: [4096]u8 = undefined;
-    const addr1: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x11), .port = 1111 } };
+    const addr1: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x11), .port = 1111 } };
 
     // ---- Connection 1: earn a ticket via the wrapper callback. ----
     {
-        var cli = try quic_zig.Client.connect(.{
+        var cli = try quic.Client.connect(.{
             .insecure_skip_verify = true, // self-signed test cert
             .allocator = allocator,
             .server_name = "localhost",
@@ -134,8 +134,8 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
 
     // ---- Connection 2: resume with 0-RTT data staged pre-advance. ----
-    const addr2: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x22), .port = 2222 } };
-    var cli2 = try quic_zig.Client.connect(.{
+    const addr2: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x22), .port = 2222 } };
+    var cli2 = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",
@@ -186,14 +186,14 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     try std.testing.expectEqual(early_payload.len, early_read);
     try std.testing.expectEqualStrings(early_payload, rbuf[0..early_read]);
     try std.testing.expect(read_before_handshake_done);
-    try std.testing.expectEqual(quic_zig.EarlyDataStatus.accepted, cli2.conn.earlyDataStatus());
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, cli2.conn.earlyDataStatus());
 
     // ---- Connection 3: rejection recovery. A fresh Server has fresh
     // session-ticket keys, so the resumed ticket cannot be decrypted
     // and 0-RTT is rejected — the routine restart scenario. The client
     // must survive without any Internal-tier calls: the handshake
     // completes as 1-RTT and the staged early data still arrives. ----
-    var srv2 = try quic_zig.Server.init(.{
+    var srv2 = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -203,8 +203,8 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     });
     defer srv2.deinit();
 
-    const addr3: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x33), .port = 3333 } };
-    var cli3 = try quic_zig.Client.connect(.{
+    const addr3: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x33), .port = 3333 } };
+    var cli3 = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = allocator,
         .server_name = "localhost",

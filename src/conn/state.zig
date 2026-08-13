@@ -1,7 +1,7 @@
-//! quic_zig.Connection — per-connection state machine root.
+//! quic.Connection — per-connection state machine root.
 //!
 //! The Connection wraps a `boringssl.tls.Conn` (the SSL object),
-//! installs quic_zig's `tls.quic.Method` callbacks, and exposes a
+//! installs quic's `tls.quic.Method` callbacks, and exposes a
 //! deterministic `advance` driver that pulls peer-provided CRYPTO
 //! bytes through `provideQuicData` + `SSL_do_handshake` until the
 //! handshake completes. Once handshake is done it owns packet number
@@ -218,7 +218,7 @@ pub const Error = error{
     /// token, which RFC 9000 §19.7 forbids.
     ZeroLengthNewToken,
     /// `Connection.queueNewToken` was called with a token longer
-    /// than `pending_frames.NewTokenItem.max_len`. quic_zig mints
+    /// than `pending_frames.NewTokenItem.max_len`. quic mints
     /// fixed-shape 96-byte tokens via `conn.new_token.mint`; only
     /// custom embedder formats can hit this.
     NewTokenTooLong,
@@ -343,7 +343,7 @@ pub const Stream = struct {
 /// lift this per path.
 pub const default_mtu: usize = 1200;
 /// RFC 9000 §20.1 INTERNAL_ERROR (0x01): the endpoint hit an internal
-/// problem and cannot continue. quic_zig uses it as the catch-all for
+/// problem and cannot continue. quic uses it as the catch-all for
 /// failures with no more specific code — never for a TLS rejection,
 /// which gets RFC 9001 §4.8's CRYPTO_ERROR window instead. Note the
 /// bucket is not purely local-side today: a peer-driven resource
@@ -490,7 +490,7 @@ pub const stream_credit_return_divisor: u64 = 1;
 pub const min_path_challenge_interval_us: u64 = 100_000;
 
 /// Implementation allocation policy. QUIC's wire limits are intentionally
-/// enormous; quic_zig caps the resources it advertises and tracks so peer input
+/// enormous; quic caps the resources it advertises and tracks so peer input
 /// cannot force unbounded stream/path/CID state.
 pub const max_streams_per_connection: u64 = 4096;
 /// Largest QUIC multipath path identifier we accept (draft-ietf-quic-multipath-21).
@@ -1079,7 +1079,7 @@ pub const Connection = struct {
     delayed_ack_packet_threshold: u8 = application_ack_eliciting_threshold,
 
     /// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168). When
-    /// `true` (the default), quic_zig will:
+    /// `true` (the default), quic will:
     ///   * count incoming `EcnCodepoint` markings into per-PN-space
     ///     `recv_ect0` / `recv_ect1` / `recv_ce` counters,
     ///   * emit `0x03` ACK frames carrying those counts whenever any
@@ -1480,7 +1480,7 @@ pub const Connection = struct {
     peer_transport_reset_token_installed: bool = false,
     /// Per-connection opt-in for sending queued application bytes in
     /// 0-RTT packets. Session resumption can still happen when this is
-    /// false; quic_zig just waits for 1-RTT before emitting app data.
+    /// false; quic just waits for 1-RTT before emitting app data.
     early_data_send_enabled: bool = false,
     /// Once BoringSSL reports rejection, every tracked 0-RTT packet is
     /// removed from flight and its STREAM bytes are put back on the
@@ -1495,7 +1495,7 @@ pub const Connection = struct {
     /// (e.g. an HTTP/3 session enforcing request deadlines) read this
     /// directly as the connection clock rather than threading their
     /// own timestamp through every call. Read-only for embedders —
-    /// quic_zig maintains it.
+    /// quic maintains it.
     last_activity_us: u64 = 0,
 
     /// Close/draining lifecycle: pending CONNECTION_CLOSE, closing/
@@ -2025,7 +2025,7 @@ pub const Connection = struct {
         self.pending_frames.new_token = item;
     }
 
-    /// Per-connection 0-RTT toggle. This deliberately gates quic_zig's
+    /// Per-connection 0-RTT toggle. This deliberately gates quic's
     /// packet scheduler as well as BoringSSL, so early application data
     /// is only sent after the caller opts in for this connection.
     pub fn setEarlyDataEnabled(self: *Connection, enabled: bool) void {
@@ -2065,7 +2065,7 @@ pub const Connection = struct {
         try self.inner.setQuicEarlyDataContext(ctx);
     }
 
-    /// Server convenience: build and install quic_zig's canonical replay
+    /// Server convenience: build and install quic's canonical replay
     /// context from current transport parameters plus app-owned bytes.
     /// The returned digest is what callers should remember beside the
     /// issued ticket if they keep their own ticket metadata.
@@ -2109,7 +2109,7 @@ pub const Connection = struct {
     }
 
     /// Install an opt-in qlog-style callback for security/lifecycle
-    /// diagnostics. quic_zig never writes logs on its own; embedders can
+    /// diagnostics. quic never writes logs on its own; embedders can
     /// translate these events into qlog JSON, metrics, or test probes.
     pub fn setQlogCallback(self: *Connection, callback: ?QlogCallback, user_data: ?*anyopaque) void {
         return conn_qlog.setQlogCallback(self, callback, user_data);
@@ -3045,7 +3045,7 @@ pub const Connection = struct {
                 // supporting the extension; a non-supporting client
                 // is technically free to ignore the parameter (RFC
                 // 9000 §18 forward-compat would treat an unrecognized
-                // parameter as a no-op). quic_zig deliberately picks
+                // parameter as a no-op). quic deliberately picks
                 // the strict close instead: a server that emits the
                 // parameter is broken regardless of whether *this*
                 // client happens to support the extension, and
@@ -4675,7 +4675,7 @@ pub const Connection = struct {
 // -- tls.quic.Method bridge ---------------------------------------------
 //
 // Each callback recovers the *Connection from the SSL via ex-data,
-// then writes into quic_zig state. The trampolines stay in this module
+// then writes into quic state. The trampolines stay in this module
 // because they reach into Connection's private fields directly.
 
 fn setReadSecret(

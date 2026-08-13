@@ -4,15 +4,15 @@
 //! This suite exercises the small, pure helper modules that QUIC's
 //! data-plane invariants compose into:
 //!
-//!   - `quic_zig.conn.flow_control` — connection-level data limit (§4.1),
+//!   - `quic.conn.flow_control` — connection-level data limit (§4.1),
 //!     stream-level data limit (§4.2), and stream-count limit (§4.6).
-//!   - `quic_zig.conn.send_stream` — send-side stream state machine
+//!   - `quic.conn.send_stream` — send-side stream state machine
 //!     (§3.1) plus FIN/RESET coordination.
-//!   - `quic_zig.conn.recv_stream` — receive-side state machine (§3.2),
+//!   - `quic.conn.recv_stream` — receive-side state machine (§3.2),
 //!     final-size enforcement (§4.5), and RESET_STREAM handling.
-//!   - `quic_zig.conn.lifecycle` — closing/draining/closed transitions
+//!   - `quic.conn.lifecycle` — closing/draining/closed transitions
 //!     (§10.2).
-//!   - `quic_zig.conn.stateless_reset` — token derivation that feeds the
+//!   - `quic.conn.stateless_reset` — token derivation that feeds the
 //!     constant-time compare in `state.tokenEql` (§10.3).
 //!
 //! Requirements that are only enforceable at the full `Connection`
@@ -70,15 +70,15 @@
 //!   RFC9000 §19.19 CONNECTION_CLOSE frame codec                → rfc9000_frames.zig
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
-const flow_control = quic_zig.conn.flow_control;
-const send_stream = quic_zig.conn.send_stream;
-const recv_stream = quic_zig.conn.recv_stream;
-const lifecycle = quic_zig.conn.lifecycle;
-const stateless_reset = quic_zig.conn.stateless_reset;
-const frame = quic_zig.frame;
+const quic = @import("quic");
+const flow_control = quic.conn.flow_control;
+const send_stream = quic.conn.send_stream;
+const recv_stream = quic.conn.recv_stream;
+const lifecycle = quic.conn.lifecycle;
+const stateless_reset = quic.conn.stateless_reset;
+const frame = quic.frame;
 const boringssl = @import("boringssl");
-const conn_state = quic_zig.conn.state;
+const conn_state = quic.conn.state;
 const fixture = @import("_handshake_fixture.zig");
 
 const test_alloc = std.testing.allocator;
@@ -96,22 +96,22 @@ fn testSecretMaterial() conn_state.SecretMaterial {
     return material;
 }
 
-fn installTestHandshakeWriteSecret(conn: *quic_zig.Connection) void {
+fn installTestHandshakeWriteSecret(conn: *quic.Connection) void {
     conn.levels[conn_state.EncryptionLevel.handshake.idx()].write = testSecretMaterial();
 }
 
-fn installTestApplicationWriteSecret(conn: *quic_zig.Connection) !void {
+fn installTestApplicationWriteSecret(conn: *quic.Connection) !void {
     try conn.installApplicationSecret(.write, testSecretMaterial());
 }
 
 fn decodeHandshakeConnectionClose(
-    conn: *quic_zig.Connection,
+    conn: *quic.Connection,
     packet: []u8,
 ) !frame.types.ConnectionClose {
     const keys = (try conn.packetKeys(.handshake, .write)) orelse
         return error.NoHandshakeWriteKeys;
     var plaintext: [2048]u8 = undefined;
-    const opened = try quic_zig.wire.long_packet.openHandshake(&plaintext, packet, .{
+    const opened = try quic.wire.long_packet.openHandshake(&plaintext, packet, .{
         .keys = &keys,
     });
     const decoded = try frame.decode(opened.payload);
@@ -120,7 +120,7 @@ fn decodeHandshakeConnectionClose(
 }
 
 fn decodeApplicationConnectionClose(
-    conn: *quic_zig.Connection,
+    conn: *quic.Connection,
     packet: []u8,
     dcid_len: u8,
     largest_received: u64,
@@ -128,7 +128,7 @@ fn decodeApplicationConnectionClose(
     const keys = (try conn.packetKeys(.application, .write)) orelse
         return error.NoApplicationWriteKeys;
     var plaintext: [2048]u8 = undefined;
-    const opened = try quic_zig.wire.short_packet.open1Rtt(&plaintext, packet, .{
+    const opened = try quic.wire.short_packet.open1Rtt(&plaintext, packet, .{
         .dcid_len = dcid_len,
         .keys = &keys,
         .largest_received = largest_received,
@@ -145,7 +145,7 @@ test "MUST encode (initiator, direction) in the low two bits of a stream id [RFC
     //   0 = client-initiated bidi, 1 = server-initiated bidi,
     //   2 = client-initiated uni,  3 = server-initiated uni.
     //
-    // Verified through quic_zig's `Connection.openBidi` / `openUni`:
+    // Verified through quic's `Connection.openBidi` / `openUni`:
     // a CLIENT-role connection MUST accept stream IDs whose low bits
     // mark them as client-initiated (0b00 for bidi, 0b10 for uni)
     // and MUST reject IDs marked as server-initiated (0b01, 0b11).
@@ -209,7 +209,7 @@ test "MUST reject a peer-initiated stream whose initiator bit conflicts with pee
 
     const close_event = try pair.injectFrameAtServer(buf[0..n]);
     const ev = close_event orelse return error.TestExpectedClose;
-    try std.testing.expectEqual(quic_zig.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
     // RFC 9000 §20.1 STREAM_STATE_ERROR = 0x05. The handler reason
     // string is "peer referenced unopened local stream"; we assert the
     // code, not the reason.
@@ -428,7 +428,7 @@ test "MUST emit a FLOW_CONTROL_ERROR CONNECTION_CLOSE on connection-data overflo
 
     const close_event = try pair.injectFrameAtServer(buf[0..n]);
     const ev = close_event orelse return error.TestExpectedClose;
-    try std.testing.expectEqual(quic_zig.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
     try std.testing.expectEqual(
         fixture.TRANSPORT_ERROR_FLOW_CONTROL_ERROR,
         ev.error_code,
@@ -643,7 +643,7 @@ test "MUST emit STREAM_LIMIT_ERROR CONNECTION_CLOSE when peer opens above the lo
 
     const close_event = try pair.injectFrameAtServer(buf[0..n]);
     const ev = close_event orelse return error.TestExpectedClose;
-    try std.testing.expectEqual(quic_zig.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
     try std.testing.expectEqual(
         fixture.TRANSPORT_ERROR_STREAM_LIMIT_ERROR,
         ev.error_code,
@@ -682,7 +682,7 @@ test "graceful shutdown withholds MAX_STREAMS credit without violating monotonic
 
 test "MUST honour active_connection_id_limit when issuing NEW_CONNECTION_ID [RFC9000 §5.1.1 ¶3]" {
     // RFC 9000 §5.1.1 ¶3: "An endpoint MUST NOT provide more
-    // connection IDs than the peer's limit." quic_zig enforces the
+    // connection IDs than the peer's limit." quic enforces the
     // ceiling in `Connection.localConnectionIdIssueBudget`, which is
     // consulted both directly and inside `replenishLocalConnectionIds`
     // — extra provisions past the budget are silently dropped rather
@@ -712,7 +712,7 @@ test "MUST honour active_connection_id_limit when issuing NEW_CONNECTION_ID [RFC
     // walks `provisions` and stops once `localConnectionIdIssueBudget`
     // hits zero, so only `budget` of the 8 should land in the
     // pending-frames queue and the active SCID list.
-    var provisions: [8]quic_zig.conn.ConnectionIdProvision = undefined;
+    var provisions: [8]quic.conn.ConnectionIdProvision = undefined;
     var cid_bufs: [8][8]u8 = undefined;
     for (0..8) |i| {
         // Distinct, non-zero-length CIDs. Bytes don't have to be
@@ -772,7 +772,7 @@ test "MUST switch to a freshly-issued peer CID after migration [RFC9000 §5.1.2 
     // exists to verify the rotation logic, not the framing.
     const fresh_cid_bytes = [_]u8{ 0xc1, 0xd1, 0xc1, 0xd1, 0xc1, 0xd1, 0xc1, 0xd1 };
     const fresh_token: [16]u8 = @splat(0xee);
-    const fresh_cid = quic_zig.conn.path.ConnectionId.fromSlice(&fresh_cid_bytes);
+    const fresh_cid = quic.conn.path.ConnectionId.fromSlice(&fresh_cid_bytes);
     const server_conn = try pair.serverConn();
     try server_conn.registerPeerCidForTesting(1, 0, fresh_cid, fresh_token);
 
@@ -784,7 +784,7 @@ test "MUST switch to a freshly-issued peer CID after migration [RFC9000 §5.1.2 
     // only seed, the array carries exactly the fresh entry we'll
     // rotate to.
     try std.testing.expect(server_conn.peerCidsCount() >= 1);
-    try std.testing.expect(!quic_zig.conn.path.ConnectionId.eql(initial_peer_dcid, fresh_cid));
+    try std.testing.expect(!quic.conn.path.ConnectionId.eql(initial_peer_dcid, fresh_cid));
 
     // Trigger migration by feeding the server an authenticated 1-RTT
     // packet (a PING) from a DIFFERENT source address. The fixture's
@@ -798,7 +798,7 @@ test "MUST switch to a freshly-issued peer CID after migration [RFC9000 §5.1.2 
     // from the initial one (it consumed a fresh peer_cid from the
     // pool). The §5.1.2 ¶1 invariant on the wire.
     const new_peer_dcid = server_conn.peerDcid();
-    try std.testing.expect(!quic_zig.conn.path.ConnectionId.eql(initial_peer_dcid, new_peer_dcid));
+    try std.testing.expect(!quic.conn.path.ConnectionId.eql(initial_peer_dcid, new_peer_dcid));
 }
 
 // ---------------------------------------------------------------- §10.2 immediate close
@@ -876,7 +876,7 @@ test "MUST track a draining-deadline elapse before transitioning to closed [RFC9
 test "MUST allow a stateless reset to skip draining and go straight to closed [RFC9000 §10.3 ¶6]" {
     // §10.3 ¶6: "An endpoint that receives a Stateless Reset
     // ... enters the draining period for that connection. The
-    // endpoint MUST NOT emit any frames after this point." quic_zig's
+    // endpoint MUST NOT emit any frames after this point." quic's
     // `enterClosed` skips the draining stopwatch — there's nothing
     // to drain because we're treating the connection as already
     // killed by the peer.
@@ -901,7 +901,7 @@ test "NORMATIVE retransmit a CONNECTION_CLOSE in response to attributed packets 
     // limit the rate at which it generates packets in the closing
     // state. For instance, an endpoint could wait for a progressively
     // increasing number of received packets or amount of time before
-    // responding to received packets." quic_zig's policy is exponential
+    // responding to received packets." quic's policy is exponential
     // time backoff (`shouldRearmCloseRepeat`).
     //
     // Test plan: drive a real handshake to confirmed, server-side-
@@ -939,7 +939,7 @@ test "NORMATIVE retransmit a CONNECTION_CLOSE in response to attributed packets 
     try std.testing.expectEqual(lifecycle.CloseState.closing, srv.closeState());
     const deadline = srv.nextTimerDeadline(pair.now_us) orelse
         return error.NoClosingTimer;
-    try std.testing.expectEqual(quic_zig.TimerKind.closing, deadline.kind);
+    try std.testing.expectEqual(quic.TimerKind.closing, deadline.kind);
 
     // §10.2.1 ¶3 SHOULD-rate-limit: a re-arm attempt at the same
     // instant would be denied. We bypass that gate by advancing time
@@ -959,7 +959,7 @@ test "NORMATIVE retransmit a CONNECTION_CLOSE in response to attributed packets 
         return error.PnSpaceExhausted;
     const ping_frame = [_]u8{0x01};
     var ping_packet: [2048]u8 = undefined;
-    const ping_n = try quic_zig.wire.short_packet.seal1Rtt(&ping_packet, .{
+    const ping_n = try quic.wire.short_packet.seal1Rtt(&ping_packet, .{
         .dcid = dcid,
         .pn = pn,
         .payload = &ping_frame,
@@ -1033,14 +1033,14 @@ test "NORMATIVE rate-limit suppresses CONNECTION_CLOSE retransmits in the closin
     const sealAndFeed = struct {
         fn run(
             inner_pair: *fixture.HandshakePair,
-            inner_cli: *quic_zig.conn.Connection,
-            inner_keys: quic_zig.conn.state.PacketKeys,
+            inner_cli: *quic.conn.Connection,
+            inner_keys: quic.conn.state.PacketKeys,
             inner_dcid: []const u8,
         ) !void {
             const inner_pn = inner_cli.allocApplicationPacketNumberForTesting() orelse
                 return error.PnSpaceExhausted;
             var pkt: [2048]u8 = undefined;
-            const n = try quic_zig.wire.short_packet.seal1Rtt(&pkt, .{
+            const n = try quic.wire.short_packet.seal1Rtt(&pkt, .{
                 .dcid = inner_dcid,
                 .pn = inner_pn,
                 .payload = &ping_frame,
@@ -1073,7 +1073,7 @@ test "NORMATIVE rate-limit suppresses CONNECTION_CLOSE retransmits in the closin
 test "SHOULD keep retransmitted CONNECTION_CLOSE error_code and frame_type consistent [RFC9000 §10.2.1 ¶2]" {
     // RFC 9000 §10.2.1 ¶2 permits retransmitted CONNECTION_CLOSE frames
     // to vary in size, but says their error code SHOULD be consistent.
-    // quic_zig re-arms from the sticky CloseEvent, so successive
+    // quic re-arms from the sticky CloseEvent, so successive
     // retransmits should preserve the close namespace, error_code, and
     // frame_type exactly.
     var pair = try fixture.HandshakePair.init(test_alloc);
@@ -1098,14 +1098,14 @@ test "SHOULD keep retransmitted CONNECTION_CLOSE error_code and frame_type consi
     const sealAndFeedPing = struct {
         fn run(
             inner_pair: *fixture.HandshakePair,
-            inner_cli: *quic_zig.Connection,
+            inner_cli: *quic.Connection,
             inner_keys: conn_state.PacketKeys,
             inner_dcid: []const u8,
         ) !void {
             const pn = inner_cli.allocApplicationPacketNumberForTesting() orelse
                 return error.PnSpaceExhausted;
             var pkt: [2048]u8 = undefined;
-            const n = try quic_zig.wire.short_packet.seal1Rtt(&pkt, .{
+            const n = try quic.wire.short_packet.seal1Rtt(&pkt, .{
                 .dcid = inner_dcid,
                 .pn = pn,
                 .payload = &ping_frame,
@@ -1179,7 +1179,7 @@ test "MUST drop to terminal closed when the closing-state deadline elapses [RFC9
 
     const deadline = srv.nextTimerDeadline(pair.now_us) orelse
         return error.NoClosingTimer;
-    try std.testing.expectEqual(quic_zig.TimerKind.closing, deadline.kind);
+    try std.testing.expectEqual(quic.TimerKind.closing, deadline.kind);
 
     // Tick AT the deadline: the closing-state lifecycle hands off to
     // terminal closed (skipping draining since the peer's CC never
@@ -1258,7 +1258,7 @@ test "MUST NOT emit a queued ACK once draining [RFC9000 §10.2.2 ¶1]" {
             return error.PnSpaceExhausted;
         const ping = [_]u8{0x01};
         var pkt: [2048]u8 = undefined;
-        const n = try quic_zig.wire.short_packet.seal1Rtt(&pkt, .{
+        const n = try quic.wire.short_packet.seal1Rtt(&pkt, .{
             .dcid = dcid,
             .pn = pn,
             .payload = &ping,
@@ -1282,7 +1282,7 @@ test "MUST NOT emit a queued ACK once draining [RFC9000 §10.2.2 ¶1]" {
         const pn = cli.allocApplicationPacketNumberForTesting() orelse
             return error.PnSpaceExhausted;
         var pkt: [2048]u8 = undefined;
-        const n = try quic_zig.wire.short_packet.seal1Rtt(&pkt, .{
+        const n = try quic.wire.short_packet.seal1Rtt(&pkt, .{
             .dcid = dcid,
             .pn = pn,
             .payload = cc_buf[0..cc_n],
@@ -1339,7 +1339,7 @@ test "MUST NOT send queued stream data once draining [RFC9000 §10.2.2 ¶1]" {
 
 test "sheds keepalive PING state on entering draining [RFC9000 §10.2 ¶7]" {
     // RFC 9000 §10.2 ¶7: "Once its closing or draining state ends, an
-    // endpoint SHOULD discard all connection state." quic_zig sheds it
+    // endpoint SHOULD discard all connection state." quic sheds it
     // eagerly on the draining transition: `enterDraining` calls
     // `clearPendingPings`. A regression that dropped that call would leave a
     // keepalive PING armed on a dead connection — this asserts the shed.
@@ -1377,7 +1377,7 @@ test "MUST convert app CONNECTION_CLOSE to APPLICATION_ERROR transport close at 
     // records the embedder's application error code.
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    const conn = try quic_zig.Connection.createClient(test_alloc, ctx, "localhost");
+    const conn = try quic.Connection.createClient(test_alloc, ctx, "localhost");
     defer conn.destroy();
 
     try conn.setPeerDcid(&.{0xaa});
@@ -1409,7 +1409,7 @@ test "SHOULD defer app CONNECTION_CLOSE to 1-RTT when application write keys exi
     // 0x1c/APPLICATION_ERROR conversion tested above.
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
-    const conn = try quic_zig.Connection.createClient(test_alloc, ctx, "localhost");
+    const conn = try quic.Connection.createClient(test_alloc, ctx, "localhost");
     defer conn.destroy();
 
     try conn.setPeerDcid(&.{0xaa});
@@ -1439,7 +1439,7 @@ test "SHOULD defer app CONNECTION_CLOSE to 1-RTT when application write keys exi
 test "MUST honour the smaller of local and peer idle_timeout values [RFC9000 §10.1 ¶2]" {
     // RFC 9000 §10.1 ¶2: "Each endpoint advertises a max_idle_timeout,
     // but the effective value at an endpoint is computed as the
-    // minimum of the two advertised values." quic_zig's
+    // minimum of the two advertised values." quic's
     // `Connection.idleTimeoutUs` computes `@min(local, peer)` (in
     // microseconds) and `tick` enters draining with `.idle_timeout`
     // source once `last_activity_us + timeout` has elapsed.
@@ -1479,17 +1479,17 @@ test "MUST honour the smaller of local and peer idle_timeout values [RFC9000 §1
     const cli_conn = pair.clientConn();
     const srv_event = srv_conn.closeEvent() orelse return error.TestExpectedServerIdleClose;
     const cli_event = cli_conn.closeEvent() orelse return error.TestExpectedClientIdleClose;
-    try std.testing.expectEqual(quic_zig.CloseSource.idle_timeout, srv_event.source);
-    try std.testing.expectEqual(quic_zig.CloseSource.idle_timeout, cli_event.source);
+    try std.testing.expectEqual(quic.CloseSource.idle_timeout, srv_event.source);
+    try std.testing.expectEqual(quic.CloseSource.idle_timeout, cli_event.source);
 }
 
 // ---------------------------------------------------------------- §10.3 stateless reset
 
 test "MUST compare stateless reset tokens in constant time [RFC9000 §10.3 ¶17]" {
     // §10.3 ¶17 (last paragraph of §10.3): "An endpoint MUST NOT
-    // ... use any non-constant-time comparison." quic_zig routes
+    // ... use any non-constant-time comparison." quic routes
     // every receive-path token compare through
-    // `quic_zig.conn.stateless_reset.eql` (Connection.tokenEql is a
+    // `quic.conn.stateless_reset.eql` (Connection.tokenEql is a
     // thin wrapper). This test exercises that exact public surface.
     //
     // The constant-time property itself is a source-level guarantee:
@@ -1500,22 +1500,22 @@ test "MUST compare stateless reset tokens in constant time [RFC9000 §10.3 ¶17]
     // every byte position compares not-equal, (c) the function's
     // boolean output matches `std.mem.eql` (the non-constant-time
     // reference) across all those cases.
-    const base: quic_zig.conn.stateless_reset.Token = .{
+    const base: quic.conn.stateless_reset.Token = .{
         0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
         0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0,
     };
-    try std.testing.expect(quic_zig.conn.stateless_reset.eql(base, base));
+    try std.testing.expect(quic.conn.stateless_reset.eql(base, base));
 
     var pos: usize = 0;
     while (pos < 16) : (pos += 1) {
         var differ = base;
         differ[pos] ^= 0x01;
-        try std.testing.expect(!quic_zig.conn.stateless_reset.eql(base, differ));
+        try std.testing.expect(!quic.conn.stateless_reset.eql(base, differ));
         // Cross-check: same answer as the non-constant-time reference
         // — only the timing path differs.
         try std.testing.expectEqual(
             std.mem.eql(u8, &base, &differ),
-            quic_zig.conn.stateless_reset.eql(base, differ),
+            quic.conn.stateless_reset.eql(base, differ),
         );
     }
 }
@@ -1523,9 +1523,9 @@ test "MUST compare stateless reset tokens in constant time [RFC9000 §10.3 ¶17]
 test "MUST derive deterministic stateless reset tokens for the same (key, CID) [RFC9000 §10.3 ¶7]" {
     // §10.3 ¶7: the reset token must be reproducible — the whole
     // mechanism rests on the server being able to re-derive the
-    // same token after losing keying state. quic_zig's
+    // same token after losing keying state. quic's
     // `stateless_reset.derive` implements the recommended
-    // HMAC-SHA256(key, "quic_zig stateless reset v1" || cid)
+    // HMAC-SHA256(key, "quic stateless reset v1" || cid)
     // construction. This test pins the determinism property.
     const key: stateless_reset.Key = @splat(0x77);
     const cid: [8]u8 = .{ 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe };

@@ -601,11 +601,11 @@ fn injectQuicZigImplementation(
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidImplementationsJson;
 
-    var quic_zig = try std.json.ObjectMap.init(allocator, &.{}, &.{});
-    try quic_zig.put(allocator, "image", .{ .string = image });
-    try quic_zig.put(allocator, "url", .{ .string = "https://github.com/nullstyle/quic-zig" });
-    try quic_zig.put(allocator, "role", .{ .string = role });
-    try parsed.value.object.put(allocator, "quic-zig", .{ .object = quic_zig });
+    var quic = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try quic.put(allocator, "image", .{ .string = image });
+    try quic.put(allocator, "url", .{ .string = "https://github.com/nullstyle/quic-zig" });
+    try quic.put(allocator, "role", .{ .string = role });
+    try parsed.value.object.put(allocator, "quic-zig", .{ .object = quic });
 
     const rendered = try std.fmt.allocPrint(allocator, "{f}\n", .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })});
     defer allocator.free(rendered);
@@ -890,7 +890,7 @@ test "case expansion supports presets and aliases" {
 test "runner paths are normalized to absolute paths" {
     const allocator = std.testing.allocator;
     var cfg = Config{
-        .repo = "/tmp/quic_zig",
+        .repo = "/tmp/quic",
         .workspace = "/tmp",
     };
     const args = [_][]const u8{
@@ -930,7 +930,7 @@ test "runner paths are normalized to absolute paths" {
 test "runner client role defaults to client result path" {
     const allocator = std.testing.allocator;
     var cfg = Config{
-        .repo = "/tmp/quic_zig",
+        .repo = "/tmp/quic",
         .workspace = "/tmp",
     };
     const args = [_][]const u8{
@@ -954,15 +954,15 @@ test "runner client role defaults to client result path" {
 test "host Zig package cache honors ZIG_GLOBAL_CACHE_DIR first" {
     const allocator = std.testing.allocator;
     const cfg = Config{
-        .repo = "/tmp/quic_zig",
+        .repo = "/tmp/quic",
         .workspace = "/tmp",
         .home_env = "/home/user",
-        .zig_global_cache_env = "/tmp/quic_zig/.zig-global-cache",
+        .zig_global_cache_env = "/tmp/quic/.zig-global-cache",
     };
     const cache = (try hostZigPackageCachePath(allocator, cfg)).?;
     defer allocator.free(cache);
 
-    const expected = try std.fs.path.join(allocator, &.{ "/tmp/quic_zig/.zig-global-cache", "p" });
+    const expected = try std.fs.path.join(allocator, &.{ "/tmp/quic/.zig-global-cache", "p" });
     defer allocator.free(expected);
     try std.testing.expectEqualStrings(expected, cache);
 }

@@ -632,7 +632,7 @@ test "server validatePeerTransportRole accepts when initial_wire_version is unse
 
 // -- HANDSHAKE_DONE → discard handshake keys (RFC 9001 §4.9.2) -------
 //
-// Failure mode (pre-fix): a quic_zig client kept its Handshake-level
+// Failure mode (pre-fix): a quic client kept its Handshake-level
 // secrets and sent tracker alive forever after the TLS handshake
 // completed. If the client's last Handshake-CRYPTO Finished went
 // unACKed (typical: peers like quic-go and quiche discard their own

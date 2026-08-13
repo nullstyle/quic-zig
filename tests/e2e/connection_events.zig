@@ -5,7 +5,7 @@
 //! including RFC 9000 §3.2 implicit creation of lower same-type indices).
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
@@ -35,7 +35,7 @@ fn buildContexts(
     });
 }
 
-fn handshake(client: *quic_zig.Connection, server: *quic_zig.Connection) !void {
+fn handshake(client: *quic.Connection, server: *quic.Connection) !void {
     var step: u32 = 0;
     while (step < 50) : (step += 1) {
         if (client.handshakeDone() and server.handshakeDone()) break;
@@ -47,8 +47,8 @@ fn handshake(client: *quic_zig.Connection, server: *quic_zig.Connection) !void {
 }
 
 const Pair = struct {
-    client: quic_zig.Connection,
-    server: quic_zig.Connection,
+    client: quic.Connection,
+    server: quic.Connection,
 
     fn deinit(self: *Pair) void {
         self.client.deinit();
@@ -66,14 +66,14 @@ fn establishPair(
     server_tls: boringssl.tls.Context,
     client_tls: boringssl.tls.Context,
 ) !void {
-    try quic_zig.Connection.initClientAt(&pair.client, allocator, client_tls, "localhost");
+    try quic.Connection.initClientAt(&pair.client, allocator, client_tls, "localhost");
     errdefer pair.client.deinit();
-    try quic_zig.Connection.initServerAt(&pair.server, allocator, server_tls);
+    try quic.Connection.initServerAt(&pair.server, allocator, server_tls);
     errdefer pair.server.deinit();
     pair.client.peer = &pair.server;
     pair.server.peer = &pair.client;
 
-    const tp: quic_zig.tls.TransportParams = .{
+    const tp: quic.tls.TransportParams = .{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_local = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
@@ -125,12 +125,12 @@ test "handshake_established surfaces exactly once per side" {
     // First poll after completion yields the one-shot, on both roles.
     const client_ev = pair.client.pollEvent() orelse return error.MissingEvent;
     try std.testing.expectEqual(
-        quic_zig.ConnectionEvent.handshake_established,
+        quic.ConnectionEvent.handshake_established,
         std.meta.activeTag(client_ev),
     );
     const server_ev = pair.server.pollEvent() orelse return error.MissingEvent;
     try std.testing.expectEqual(
-        quic_zig.ConnectionEvent.handshake_established,
+        quic.ConnectionEvent.handshake_established,
         std.meta.activeTag(server_ev),
     );
 
@@ -186,7 +186,7 @@ test "stream_opened surfaces peer streams in order, including implicit opens" {
         .stream_opened => |info| {
             try std.testing.expectEqual(
                 info.bidi,
-                quic_zig.StreamType.fromId(info.stream_id).isBidi(),
+                quic.StreamType.fromId(info.stream_id).isBidi(),
             );
             if (info.bidi) {
                 try opened_bidi.append(allocator, info.stream_id);

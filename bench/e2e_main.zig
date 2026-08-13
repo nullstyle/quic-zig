@@ -1,4 +1,4 @@
-//! quic_zig end-to-end benchmarks: whole-Connection numbers the
+//! quic end-to-end benchmarks: whole-Connection numbers the
 //! microbenchmarks in `main.zig` deliberately leave out.
 //!
 //!  - goodput:    in-process bulk stream transfer (client -> server
@@ -19,7 +19,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const report_mod = @import("report.zig");
 const harness = @import("e2e/harness.zig");
 
@@ -57,7 +57,7 @@ fn stats(samples: []const f64) struct { median: f64, mad: f64 } {
     return .{ .median = median, .mad = mad };
 }
 
-fn runGoodput(allocator: std.mem.Allocator, samples: usize, cc: quic_zig.CongestionAlgorithm) !GoodputEntry {
+fn runGoodput(allocator: std.mem.Allocator, samples: usize, cc: quic.CongestionAlgorithm) !GoodputEntry {
     var entry: GoodputEntry = undefined;
     entry.sample_count = samples;
     var last: harness.GoodputResult = undefined;
@@ -156,7 +156,7 @@ const impairment_cells = [_]harness.ImpairmentOptions{
 fn runImpairment(
     allocator: std.mem.Allocator,
     out: *Entries,
-    cc: quic_zig.CongestionAlgorithm,
+    cc: quic.CongestionAlgorithm,
     hystart: bool,
 ) !void {
     for (impairment_cells) |cell| {
@@ -255,7 +255,7 @@ pub fn main(init: std.process.Init) !void {
 
     var scenario: Scenario = .all;
     var samples: usize = default_samples;
-    var cc: quic_zig.CongestionAlgorithm = .cubic;
+    var cc: quic.CongestionAlgorithm = .cubic;
     var hystart = true;
     var json_path: ?[]const u8 = null;
     var json_dir: ?[]const u8 = null;
@@ -269,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--cc")) {
             i += 1;
             if (i >= args.len) return error.MissingCcAlgorithm;
-            cc = std.meta.stringToEnum(quic_zig.CongestionAlgorithm, args[i]) orelse return error.UnknownCcAlgorithm;
+            cc = std.meta.stringToEnum(quic.CongestionAlgorithm, args[i]) orelse return error.UnknownCcAlgorithm;
         } else if (std.mem.eql(u8, args[i], "--hystart")) {
             i += 1;
             if (i >= args.len) return error.MissingHyStartValue;
@@ -300,7 +300,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    std.debug.print("quic_zig e2e benchmarks ({s}, {d} samples, cc={s}, hystart={s}, {s})\n", .{
+    std.debug.print("quic e2e benchmarks ({s}, {d} samples, cc={s}, hystart={s}, {s})\n", .{
         @tagName(scenario),           samples,                @tagName(cc),
         if (hystart) "on" else "off", @tagName(builtin.mode),
     });
@@ -360,7 +360,7 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             .{
-                .suite = "quic_zig.bench_e2e",
+                .suite = "quic.bench_e2e",
                 .generated_unix_ns = generated_unix_ns,
                 .machine_id = machine_id,
                 .hostname = hostname,

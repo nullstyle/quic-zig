@@ -1,4 +1,4 @@
-//! Echo server — the canonical first-hour quic_zig hosting example.
+//! Echo server — the canonical first-hour quic hosting example.
 //!
 //! One process, one UDP socket, real loopback traffic:
 //!
@@ -10,8 +10,8 @@
 //!
 //! The shape to copy for your own server:
 //!
-//!  1. `quic_zig.Server.init` owns TLS + the connection table.
-//!  2. `quic_zig.transport.runUdpServer` owns the socket and the
+//!  1. `quic.Server.init` owns TLS + the connection table.
+//!  2. `quic.transport.runUdpServer` owns the socket and the
 //!     receive/tick/drain loop.
 //!  3. ALL application logic lives in the `on_iteration` hook — the
 //!     one place where touching a loop-owned `Server` is safe
@@ -41,7 +41,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("echo_common.zig");
 
 /// Max concurrently-tracked peer bidi streams per connection. An
@@ -85,7 +85,7 @@ const StreamEcho = struct {
 
 /// Per-connection application state, allocated on the first event
 /// from a connection, hung off `Slot.user_data`, and freed in
-/// `onConnectionWillClose`. This is the pattern to copy: quic_zig
+/// `onConnectionWillClose`. This is the pattern to copy: quic
 /// never reads or frees `user_data`; the will-close hook is the last
 /// safe place to release it.
 const ConnState = struct {
@@ -115,7 +115,7 @@ pub const EchoApp = struct {
     /// `transport.RunUdpOptions.on_iteration` — fires once per loop
     /// iteration on the loop thread. Drains each slot's event queue,
     /// then does the actual echo work.
-    pub fn onIteration(ctx: ?*anyopaque, server: *quic_zig.Server, now_us: u64) anyerror!void {
+    pub fn onIteration(ctx: ?*anyopaque, server: *quic.Server, now_us: u64) anyerror!void {
         _ = now_us;
         const app: *EchoApp = @ptrCast(@alignCast(ctx.?));
         for (server.iterator()) |slot| {
@@ -157,7 +157,7 @@ pub const EchoApp = struct {
     /// `Server.Config.on_connection_will_close` — runs inside `reap`
     /// for each closed slot while `slot.conn` / `slot.user_data` are
     /// still valid. Free per-connection state here and nowhere else.
-    pub fn onConnectionWillClose(ctx: ?*anyopaque, slot: *quic_zig.Server.Slot) void {
+    pub fn onConnectionWillClose(ctx: ?*anyopaque, slot: *quic.Server.Slot) void {
         const app: *EchoApp = @ptrCast(@alignCast(ctx.?));
         const state = connState(slot) orelse return;
         std.debug.print(
@@ -168,7 +168,7 @@ pub const EchoApp = struct {
         slot.user_data = null;
     }
 
-    fn ensureState(app: *EchoApp, slot: *quic_zig.Server.Slot) !*ConnState {
+    fn ensureState(app: *EchoApp, slot: *quic.Server.Slot) !*ConnState {
         if (connState(slot)) |state| return state;
         const state = try app.allocator.create(ConnState);
         state.* = .{};
@@ -177,13 +177,13 @@ pub const EchoApp = struct {
     }
 };
 
-fn connState(slot: *quic_zig.Server.Slot) ?*ConnState {
+fn connState(slot: *quic.Server.Slot) ?*ConnState {
     const ptr = slot.user_data orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
 /// Pump every tracked bidi stream one pass.
-fn echoStreams(slot: *quic_zig.Server.Slot, state: *ConnState) !void {
+fn echoStreams(slot: *quic.Server.Slot, state: *ConnState) !void {
     for (&state.streams) |*e| {
         if (!e.active) continue;
         const finished = echoStream(slot.conn, e) catch |err| switch (err) {
@@ -212,7 +212,7 @@ fn echoStreams(slot: *quic_zig.Server.Slot, state: *ConnState) !void {
 /// would truncate any stream longer than `stream_chunk_bytes` — the
 /// FIN frame can arrive while chunks are still queued for us — and
 /// stopping at the first short `streamWrite` would drop the tail.
-fn echoStream(conn: *quic_zig.Connection, e: *StreamEcho) !bool {
+fn echoStream(conn: *quic.Connection, e: *StreamEcho) !bool {
     if (!try flushEcho(conn, e)) return false;
     while (true) {
         const res = try conn.streamReadFin(e.id, &e.buf);
@@ -232,7 +232,7 @@ fn echoStream(conn: *quic_zig.Connection, e: *StreamEcho) !bool {
 /// Hand `e`'s staged bytes to the connection, keeping whatever it
 /// refuses. False means `streamWrite` short-wrote (the send buffer is
 /// full) and the tail is still staged.
-fn flushEcho(conn: *quic_zig.Connection, e: *StreamEcho) !bool {
+fn flushEcho(conn: *quic.Connection, e: *StreamEcho) !bool {
     while (e.off < e.len) {
         const accepted = try conn.streamWrite(e.id, e.buf[e.off..e.len]);
         if (accepted == 0) return false;
@@ -244,7 +244,7 @@ fn flushEcho(conn: *quic_zig.Connection, e: *StreamEcho) !bool {
 }
 
 /// Echo every queued inbound DATAGRAM verbatim.
-fn echoDatagrams(slot: *quic_zig.Server.Slot, state: *ConnState) !void {
+fn echoDatagrams(slot: *quic.Server.Slot, state: *ConnState) !void {
     var buf: [datagram_chunk_bytes]u8 = undefined;
     while (slot.conn.receiveDatagram(&buf)) |n| {
         slot.conn.sendDatagram(buf[0..n]) catch |err| switch (err) {
@@ -274,7 +274,7 @@ pub fn serve(
     var app: EchoApp = .{ .allocator = allocator };
     const protos = [_][]const u8{common.alpn};
 
-    var server = try quic_zig.Server.init(.{
+    var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.cert_pem,
         .tls_key_pem = common.key_pem,
@@ -287,7 +287,7 @@ pub fn serve(
 
     std.debug.print("[server] echo server listening on {s} (ALPN {s})\n", .{ listen, common.alpn });
 
-    try quic_zig.transport.runUdpServer(&server, .{
+    try quic.transport.runUdpServer(&server, .{
         .listen = listen,
         .io = io,
         .shutdown_flag = shutdown_flag,

@@ -20,7 +20,7 @@ const path_mod = @import("../conn/path.zig");
 /// just to construct a CID.
 pub const ConnectionId = path_mod.ConnectionId;
 
-/// Multipath QUIC draft version targeted by quic_zig's public API.
+/// Multipath QUIC draft version targeted by quic's public API.
 pub const multipath_draft_version: u32 = 21;
 
 /// IANA Transport Parameter Registry — RFC 9000 §18.2 + RFC 9221.
@@ -61,7 +61,7 @@ pub const Id = struct {
     pub const retry_source_connection_id: u64 = 0x10;
     /// RFC 9368 §5 — `version_information`. Carries the sender's
     /// chosen version followed by the list of versions it considers
-    /// compatible with that choice. quic_zig surfaces this as
+    /// compatible with that choice. quic surfaces this as
     /// `Params.compatible_versions` (a `[]const u32`); the first
     /// entry is the chosen version and the remaining entries are the
     /// compatibility set in preference order.

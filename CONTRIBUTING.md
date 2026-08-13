@@ -131,7 +131,7 @@ harness itself).
   the compilation-level flag on the *root* module, and every
   `std.testing.fuzz` site lives in `src/`, which is the root module of
   `zig build test`. Forcing the per-module flag instead instruments
-  `quic_zig` where it is a non-root *dependency* (`tests/`,
+  `quic` where it is a non-root *dependency* (`tests/`,
   `tests/conformance.zig`, `interop/`, the `examples/` targets), and those
   binaries' test runners are compiled with `builtin.fuzz == false`, so the
   seven `export fn runner_*` hooks in Zig's `lib/compiler/test_runner.zig`

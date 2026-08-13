@@ -1,6 +1,6 @@
-//! Opinionated `std.Io`-based UDP server loop for `quic_zig.Server`.
+//! Opinionated `std.Io`-based UDP server loop for `quic.Server`.
 //!
-//! `quic_zig.Server` is intentionally I/O-agnostic: the embedder owns the
+//! `quic.Server` is intentionally I/O-agnostic: the embedder owns the
 //! UDP socket and the wall clock. That keeps the library minimal but
 //! means every embedder spelling out their first server reaches for the
 //! same boilerplate — bind a UDP socket, tune `SO_RCVBUF` /
@@ -72,7 +72,7 @@ pub const RunUdpOptions = struct {
     /// `"127.0.0.1:4433"`, `"[::]:443"`, etc. Parsed by
     /// `std.Io.net.IpAddress.parseLiteral`.
     listen: []const u8,
-    /// Caller-provided `std.Io` instance. quic_zig does not pick its
+    /// Caller-provided `std.Io` instance. quic does not pick its
     /// own I/O backend — pass whatever you're already using
     /// (typically `std.Io.threaded` or a single-threaded harness).
     io: std.Io,
@@ -82,7 +82,7 @@ pub const RunUdpOptions = struct {
     /// millisecond-ish granularity) without busy-spinning when the
     /// network is idle. Match what the QNS endpoint uses.
     receive_timeout: std.Io.Duration = std.Io.Duration.fromMilliseconds(5),
-    /// Apply quic_zig's recommended `SO_RCVBUF` / `SO_SNDBUF` tuning to
+    /// Apply quic's recommended `SO_RCVBUF` / `SO_SNDBUF` tuning to
     /// the bound socket via `transport.applyServerTuning`. On by
     /// default — production QUIC servers want big OS buffers to
     /// absorb open-internet bursts. Turn off only for tiny fixtures
@@ -159,7 +159,7 @@ pub const RunUdpOptions = struct {
     /// `std.Io` does not surface any zero-copy receive hooks today.
     rx_buffer_bytes: usize = default_rx_buffer_bytes,
     /// Send scratch buffer size. Should be at least the connection's
-    /// negotiated `max_udp_payload_size` (default 1200 in quic_zig, plus
+    /// negotiated `max_udp_payload_size` (default 1200 in quic, plus
     /// header overhead — 1500 is safe; bump for jumbo-frame paths).
     tx_buffer_bytes: usize = default_tx_buffer_bytes,
     /// How often (in iterations) to call `Server.reap`. Reaping is
@@ -1078,7 +1078,7 @@ pub fn monotonicNowUs(io: std.Io, start: std.Io.Timestamp) u64 {
     return @intCast(delta);
 }
 
-/// Project a `std.Io.net.IpAddress` into quic_zig's tagged-union
+/// Project a `std.Io.net.IpAddress` into quic's tagged-union
 /// `path.Address`. The variants line up one-to-one, so this is a
 /// straight copy. Also reused by `runUdpClient`.
 pub fn ipAddressToPathAddress(addr: Net.IpAddress) Address {

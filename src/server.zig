@@ -1,5 +1,5 @@
-//! quic_zig.Server — production-grade convenience wrapper for embedding
-//! quic_zig as a QUIC server.
+//! quic.Server — production-grade convenience wrapper for embedding
+//! quic as a QUIC server.
 //!
 //! `Connection` is intentionally I/O-agnostic: it consumes incoming
 //! UDP datagrams via `handle()` and produces outgoing ones via
@@ -67,13 +67,13 @@
 //!
 //! For a hand-rolled loop, see the README. Embedders that just want
 //! "bind a socket and serve QUIC" should reach for
-//! `quic_zig.transport.runUdpServer` instead — it owns the
+//! `quic.transport.runUdpServer` instead — it owns the
 //! `std.Io`-based bind / tune / receive / feed / poll / tick / reap
 //! cadence. The QNS endpoint at `interop/qns_endpoint.zig` keeps its
 //! own bespoke loop because it has interop-specific quirks
 //! (deterministic CID prefix, per-testcase wiring); general-purpose
 //! embedders should reach for `Server` (server side) or
-//! `quic_zig.Client` (client side) first.
+//! `quic.Client` (client side) first.
 
 const std = @import("std");
 const boringssl = @import("boringssl");
@@ -157,7 +157,7 @@ const StatelessResponseImpl = struct {
 };
 
 /// Maximum number of routing CIDs a slot tracks at once. Bounded
-/// by the peer's `active_connection_id_limit` (default 8 in quic_zig);
+/// by the peer's `active_connection_id_limit` (default 8 in quic);
 /// 32 leaves headroom for embedders that lift the limit and for
 /// in-flight retires, while keeping the router a fixed, alloc-free
 /// slot footprint. If a `Connection` ever issues more than this
@@ -233,7 +233,7 @@ const SlotImpl = struct {
     slot_id: u64,
     /// W3C traceparent trace-id (16 bytes), or null if the embedder
     /// has not associated a trace with this slot. Embedders set via
-    /// `setTraceContext`; quic_zig itself never reads it.
+    /// `setTraceContext`; quic itself never reads it.
     trace_id: ?[16]u8 = null,
     /// W3C traceparent parent-span-id (8 bytes), or null.
     parent_span_id: ?[8]u8 = null,
@@ -251,7 +251,7 @@ const SlotImpl = struct {
     /// for the slot's lifetime when `Server.new_token_key` is null.
     new_token_emitted: bool = false,
 
-    /// Embedder-owned per-connection pointer; quic_zig never reads or
+    /// Embedder-owned per-connection pointer; quic never reads or
     /// frees it. Set it when `feed` reports `.accepted` (the new slot is
     /// at the back of `Server.slots`) to hang application state — an
     /// HTTP/3 session, routing context, metrics — off the slot without
@@ -291,7 +291,7 @@ const SlotImpl = struct {
 
     /// Attach a W3C tracecontext to this slot. Embedders typically
     /// call this after `Server.feed` returns `.accepted` and the
-    /// upstream service has assigned trace identifiers. quic_zig does
+    /// upstream service has assigned trace identifiers. quic does
     /// not interpret these bytes — they are pure metadata for
     /// embedder-side correlation.
     pub fn setTraceContext(

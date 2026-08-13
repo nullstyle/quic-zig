@@ -33,18 +33,18 @@
 //! mirrors `server_client_handshake.zig`.
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const common = @import("common.zig");
 
 const protos = [_][]const u8{"hq-test"};
-const peer_addr: quic_zig.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
+const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xab), .port = 0 } };
 
 /// Pump both directions until the client and ANY server slot report
 /// handshakeDone, or the step budget runs out. `base_us` keeps time
 /// monotonic when several drives run against one Server. Returns
 /// true on a completed handshake. `try`s every error — use only for
 /// scenarios expected to succeed.
-fn driveToCompletion(cli: *quic_zig.Client, srv: *quic_zig.Server, base_us: u64) !bool {
+fn driveToCompletion(cli: *quic.Client, srv: *quic.Server, base_us: u64) !bool {
     var rx: [4096]u8 = undefined;
     try cli.conn.advance();
     var step: u32 = 0;
@@ -93,7 +93,7 @@ fn driveToCompletion(cli: *quic_zig.Client, srv: *quic_zig.Server, base_us: u64)
 /// Returns true if a rejection was observed, the server received at
 /// least one datagram, and no server slot ever completed the
 /// handshake.
-fn driveExpectingRejection(cli: *quic_zig.Client, srv: *quic_zig.Server, base_us: u64) !bool {
+fn driveExpectingRejection(cli: *quic.Client, srv: *quic.Server, base_us: u64) !bool {
     var rx: [4096]u8 = undefined;
     var saw_rejection = false;
     var server_completed = false;
@@ -150,20 +150,20 @@ fn driveExpectingRejection(cli: *quic_zig.Client, srv: *quic_zig.Server, base_us
 
 /// Assert a TLS rejection landed in RFC 9001 §4.8's CRYPTO_ERROR window
 /// (0x0100-0x01ff). §4.8 turns TLS alert N into QUIC error code
-/// 0x0100 + N, and quic_zig closes an alert-less handshake failure with
+/// 0x0100 + N, and quic closes an alert-less handshake failure with
 /// §4.8's generic `handshake_failure` (0x0128) — so *every* TLS
 /// rejection must report a code in that window. INTERNAL_ERROR (0x01)
 /// here would mean the transport blamed itself for a TLS decision.
-fn expectCryptoErrorClose(ev: quic_zig.CloseEvent) !void {
-    try std.testing.expectEqual(quic_zig.CloseSource.local, ev.source);
-    try std.testing.expectEqual(quic_zig.CloseErrorSpace.transport, ev.error_space);
+fn expectCryptoErrorClose(ev: quic.CloseEvent) !void {
+    try std.testing.expectEqual(quic.CloseSource.local, ev.source);
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
     try std.testing.expect(ev.error_code >= 0x0100 and ev.error_code <= 0x01ff);
 }
 
 /// First slot carrying a latched close event. `Server.iterator` keeps
 /// closed slots until `reap`, which this suite never calls, so the
 /// event is still readable after the pump loop returns.
-fn serverCloseEvent(srv: *quic_zig.Server) ?quic_zig.CloseEvent {
+fn serverCloseEvent(srv: *quic.Server) ?quic.CloseEvent {
     for (srv.iterator()) |slot| {
         if (slot.conn.closeEvent()) |ev| return ev;
     }
@@ -171,7 +171,7 @@ fn serverCloseEvent(srv: *quic_zig.Server) ?quic_zig.CloseEvent {
 }
 
 test "ca_pem pins the fixture root and the verified handshake completes (no insecure_skip_verify)" {
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -180,7 +180,7 @@ test "ca_pem pins the fixture root and the verified handshake completes (no inse
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost", // matches the fixture SAN
         .alpn_protocols = &protos,
@@ -193,7 +193,7 @@ test "ca_pem pins the fixture root and the verified handshake completes (no inse
 }
 
 test "ca_pem client rejects a server_name outside the certificate SAN (identity, not just chain)" {
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -207,7 +207,7 @@ test "ca_pem client rejects a server_name outside the certificate SAN (identity,
     // handshake completes, `ca_pem` silently skipped identity
     // binding — the exact failure a private-CA embedder cannot
     // afford.
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "not-the-cert.example",
         .alpn_protocols = &protos,
@@ -229,7 +229,7 @@ test "ca_pem client rejects a server whose certificate chains to a different roo
     // is built with `verify = .none` and only the install flips it
     // to SSL_VERIFY_PEER, so a no-op would let this handshake
     // complete and the rejection assertion below fail.
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = common.test_untrusted_cert_pem,
         .tls_key_pem = common.test_untrusted_key_pem,
@@ -238,7 +238,7 @@ test "ca_pem client rejects a server whose certificate chains to a different roo
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -252,7 +252,7 @@ test "ca_pem client rejects a server whose certificate chains to a different roo
 }
 
 test "mTLS: server requires a client certificate and the handshake completes when one is presented" {
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -266,7 +266,7 @@ test "mTLS: server requires a client certificate and the handshake completes whe
     // self-signed, so it chains to itself against the server's
     // pinned bundle. Both verifying directions are live — no
     // insecure_skip_verify anywhere.
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -281,7 +281,7 @@ test "mTLS: server requires a client certificate and the handshake completes whe
 }
 
 test "mTLS: a client presenting no certificate is refused" {
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -291,7 +291,7 @@ test "mTLS: a client presenting no certificate is refused" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true, // this test targets the server-side gate
         .allocator = std.testing.allocator,
         .server_name = "localhost",
@@ -310,7 +310,7 @@ test "mTLS: a client certificate not chaining to client_ca_pem is refused" {
     // SSL_VERIFY_FAIL_IF_NO_PEER_CERT but accepted any presented
     // certificate would pass the no-cert test above and the happy
     // path — only this test catches it.
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -320,7 +320,7 @@ test "mTLS: a client certificate not chaining to client_ca_pem is refused" {
     });
     defer srv.deinit();
 
-    var cli = try quic_zig.Client.connect(.{
+    var cli = try quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -336,7 +336,7 @@ test "mTLS: a client certificate not chaining to client_ca_pem is refused" {
 }
 
 test "mTLS posture survives replaceTlsContext(.pem) rotation; .override is rejected" {
-    var srv = try quic_zig.Server.init(.{
+    var srv = try quic.Server.init(.{
         .allocator = std.testing.allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
@@ -351,7 +351,7 @@ test "mTLS posture survives replaceTlsContext(.pem) rotation; .override is rejec
     // client_ca_pem is configured (validated before the context is
     // touched, so an undefined inner pointer is safe here).
     try std.testing.expectError(
-        quic_zig.Server.Error.InvalidConfig,
+        quic.Server.Error.InvalidConfig,
         srv.replaceTlsContext(.{ .override = .{ .inner = undefined, .mode = .server } }),
     );
 
@@ -364,7 +364,7 @@ test "mTLS posture survives replaceTlsContext(.pem) rotation; .override is rejec
     } });
 
     // A certificate-less client must still be refused post-rotation...
-    var bare = try quic_zig.Client.connect(.{
+    var bare = try quic.Client.connect(.{
         .insecure_skip_verify = true,
         .allocator = std.testing.allocator,
         .server_name = "localhost",
@@ -378,7 +378,7 @@ test "mTLS posture survives replaceTlsContext(.pem) rotation; .override is rejec
     // ...and a certificate-bearing client must still complete
     // (proving rotation didn't just break TLS wholesale). Later
     // time base keeps the shared server's clock monotonic.
-    var authed = try quic_zig.Client.connect(.{
+    var authed = try quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -399,17 +399,17 @@ test "tls.pem failure paths on real fixtures: truncated bundle, garbage key, mis
     // malformed block via PEM_R_NO_START_LINE).
     const truncated_bundle = common.test_cert_pem ++
         "-----BEGIN CERTIFICATE-----\nnot-base64!!\n";
-    var cli_err = quic_zig.Client.connect(.{
+    var cli_err = quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
         .transport_params = common.defaultParams(),
         .ca_pem = truncated_bundle,
     });
-    try std.testing.expectError(quic_zig.Client.Error.InvalidPem, cli_err);
+    try std.testing.expectError(quic.Client.Error.InvalidPem, cli_err);
 
     // Valid client chain + unparseable key.
-    cli_err = quic_zig.Client.connect(.{
+    cli_err = quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -417,7 +417,7 @@ test "tls.pem failure paths on real fixtures: truncated bundle, garbage key, mis
         .client_cert_pem = common.test_cert_pem,
         .client_key_pem = "-----BEGIN PRIVATE KEY-----\ngarbage\n-----END PRIVATE KEY-----\n",
     });
-    try std.testing.expectError(quic_zig.Client.Error.InvalidPem, cli_err);
+    try std.testing.expectError(quic.Client.Error.InvalidPem, cli_err);
 
     // Valid client chain + well-formed key belonging to a different
     // certificate — the classic wrong-key-file mistake. BoringSSL
@@ -425,7 +425,7 @@ test "tls.pem failure paths on real fixtures: truncated bundle, garbage key, mis
     // when a certificate is already installed, so the mismatch
     // surfaces as UsePrivateKeyFailed (KeyMismatch is the
     // check_private_key backstop, unreachable on this ordering).
-    cli_err = quic_zig.Client.connect(.{
+    cli_err = quic.Client.connect(.{
         .allocator = std.testing.allocator,
         .server_name = "localhost",
         .alpn_protocols = &protos,
@@ -433,5 +433,5 @@ test "tls.pem failure paths on real fixtures: truncated bundle, garbage key, mis
         .client_cert_pem = common.test_cert_pem,
         .client_key_pem = common.test_untrusted_key_pem,
     });
-    try std.testing.expectError(quic_zig.Client.Error.UsePrivateKeyFailed, cli_err);
+    try std.testing.expectError(quic.Client.Error.UsePrivateKeyFailed, cli_err);
 }

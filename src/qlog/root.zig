@@ -13,14 +13,14 @@
 //! gracefully.
 //!
 //! ```zig
-//! var writer = try quic_zig.qlog.Writer.init(allocator, io, file, .{
+//! var writer = try quic.qlog.Writer.init(allocator, io, file, .{
 //!     .vantage_point = .server,
 //!     .title = "my-server",
 //!     .odcid = original_dcid,
 //!     .reference_time_us = now_us,
 //! });
 //! defer writer.deinit();
-//! conn.setQlogCallback(quic_zig.qlog.Writer.callback, &writer);
+//! conn.setQlogCallback(quic.qlog.Writer.callback, &writer);
 //! conn.setQlogPacketEvents(true); // opt into per-packet events
 //! ```
 //!

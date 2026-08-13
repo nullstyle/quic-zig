@@ -107,10 +107,10 @@ top-level `test` blocks.
 //!   RFC9000 §6 negotiation lives in rfc9000_negotiation_validation.zig
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 
 test "MUST reject a v1 long-header packet whose Version field is 0 [RFC9000 §17.2.1 ¶1]" {
-    _ = quic_zig;
+    _ = quic;
     // Arrange, act, and assert one observable behavior.
 }
 ```

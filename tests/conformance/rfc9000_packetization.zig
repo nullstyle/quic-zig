@@ -28,7 +28,7 @@
 //!   RFC9000 §20.1   MUST     transport error codes 0x01..0x10 round-trip on CONNECTION_CLOSE
 //!   RFC9000 §20.1   MUST     CRYPTO_ERROR range 0x0100..0x01ff round-trips on CONNECTION_CLOSE
 //!   RFC9000 §20.1   MUST     CONNECTION_CLOSE distinguishes transport (0x1c) from application (0x1d)
-//!   RFC9000 §20.1   NORMATIVE quic_zig's `excessive_load` extension lives at the RFC's reserved 0x09 slot
+//!   RFC9000 §20.1   NORMATIVE quic's `excessive_load` extension lives at the RFC's reserved 0x09 slot
 //!
 //! Visible debt:
 //!   RFC9000 §12.2   MUST NOT coalesce packets from different connections in one UDP datagram
@@ -36,7 +36,7 @@
 //!   RFC9000 §13.2.1 SHOULD   send ACK on every ack-eliciting packet within max_ack_delay
 //!                            — covered indirectly by ack_tracker addPacketDelayed unit tests.
 //!   RFC9000 §13.2.2 NORMATIVE max_ack_delay handling — covered by transport-params suite.
-//!   RFC9000 §13.3   NORMATIVE PATH_RESPONSE retransmission policy — quic_zig requeues from the
+//!   RFC9000 §13.3   NORMATIVE PATH_RESPONSE retransmission policy — quic requeues from the
 //!                            sent-packet record (RFC says "send a new one" in §13.3 ¶8).
 //!
 //! Out of scope here:
@@ -46,11 +46,11 @@
 //!   RFC9000 §6      version negotiation                    → rfc9000_negotiation_validation.zig
 
 const std = @import("std");
-const quic_zig = @import("quic_zig");
+const quic = @import("quic");
 const fixture = @import("_initial_fixture.zig");
 
-const conn = quic_zig.conn;
-const frame = quic_zig.frame;
+const conn = quic.conn;
+const frame = quic.frame;
 const sent_packets = conn.sent_packets;
 const ack_tracker_mod = conn.ack_tracker;
 const pn_space_mod = conn.pn_space;
@@ -59,7 +59,7 @@ const loss_recovery_mod = conn.loss_recovery;
 /// `TransportParams` shape used by the §14 client-side first-flight
 /// test — matches `tests/e2e/common.defaultParams()`. Kept inline so
 /// the suite stays self-contained (no `common.zig` dependency).
-fn defaultParams() quic_zig.tls.TransportParams {
+fn defaultParams() quic.tls.TransportParams {
     return .{
         .max_idle_timeout_ms = 30_000,
         .initial_max_data = 1 << 20,
@@ -221,7 +221,7 @@ test "MUST NOT build an ACK frame when no packets have been received [RFC9000 §
 
 test "MUST NOT acknowledge a packet number the sender never put on the wire [RFC9000 §13.1 ¶3]" {
     // RFC 9000 §13.1 ¶3: "An endpoint MUST NOT acknowledge any other
-    // packet number." quic_zig's loss-recovery `processAck` walks the
+    // packet number." quic's loss-recovery `processAck` walks the
     // sent-packet tracker; PNs claimed by the peer that the local
     // sender never recorded get silently dropped (no removal, no RTT
     // sample, no congestion-controller update). This is the
@@ -256,7 +256,7 @@ test "MUST NOT acknowledge a packet number the sender never put on the wire [RFC
 
 test "MUST track CRYPTO frames on the sent-packet record so loss can requeue them [RFC9000 §13.3 Table 3]" {
     // RFC 9000 §13.3 Table 3 lists CRYPTO data as "Yes" — must be
-    // retransmitted on loss. quic_zig routes CRYPTO retransmits through
+    // retransmitted on loss. quic routes CRYPTO retransmits through
     // a separate per-level pending-bytes queue keyed by the offset/PN
     // pair captured on `SentPacket`; the observable invariant we check
     // here is that a sent packet *can* carry the bookkeeping needed
@@ -339,7 +339,7 @@ test "NORMATIVE the v1 minimum UDP payload size constant equals 1200 bytes [RFC9
     // datagrams carrying Initial packets to at least the smallest
     // allowed maximum datagram size of 1200 bytes…" The
     // implementation surfaces this constant via
-    // `quic_zig.conn.state.min_quic_udp_payload_size`. A reachable test
+    // `quic.conn.state.min_quic_udp_payload_size`. A reachable test
     // documents the magic number so a future bump (or PMTU tuning
     // mistake) is auditable.
     try std.testing.expectEqual(@as(usize, 1200), conn.state.min_quic_udp_payload_size);
@@ -361,9 +361,9 @@ test "MUST server discards v1 Initial UDP datagrams smaller than 1200 bytes [RFC
     // Long-header Initial with QUIC v1 version, but the UDP datagram
     // payload is 7 bytes — well below the 1200-byte floor.
     var tiny_v1_initial = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x01, 0, 0 };
-    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x01), .port = 0 } };
+    const addr = quic.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x01), .port = 0 } };
     const outcome = try srv.feed(&tiny_v1_initial, addr, 1_000);
-    try std.testing.expectEqual(quic_zig.Server.FeedOutcome.dropped, outcome);
+    try std.testing.expectEqual(quic.Server.FeedOutcome.dropped, outcome);
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
 
     const metrics = srv.metricsSnapshot();
@@ -384,9 +384,9 @@ test "MUST NOT §14 size gate fire on a non-v1 long-header datagram [RFC9000 §1
     // Same shape as the v1 fixture above but with a non-v1 version.
     // dcid_len=4 then 4 dcid bytes, scid_len=4 then 4 scid bytes.
     var tiny_unsupported_version = [_]u8{ 0xc0, 0xde, 0xad, 0xbe, 0xef, 4, 0xa, 0xb, 0xc, 0xd, 4, 0x1, 0x2, 0x3, 0x4 };
-    const addr = quic_zig.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x02), .port = 0 } };
+    const addr = quic.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x02), .port = 0 } };
     const outcome = try srv.feed(&tiny_unsupported_version, addr, 2_000);
-    try std.testing.expectEqual(quic_zig.Server.FeedOutcome.version_negotiated, outcome);
+    try std.testing.expectEqual(quic.Server.FeedOutcome.version_negotiated, outcome);
 
     const metrics = srv.metricsSnapshot();
     try std.testing.expectEqual(@as(u64, 0), metrics.feeds_initial_too_small);
@@ -395,12 +395,12 @@ test "MUST NOT §14 size gate fire on a non-v1 long-header datagram [RFC9000 §1
 
 test "MUST pad the client first-flight Initial UDP datagram to >= 1200 bytes [RFC9000 §14 ¶1]" {
     // RFC 9000 §14 ¶1: a client's first-flight Initial UDP datagram
-    // MUST be >= 1200 bytes. quic_zig's `Client.connect` + `advance` +
+    // MUST be >= 1200 bytes. quic's `Client.connect` + `advance` +
     // `poll` produces exactly that — the Initial is internally padded
     // (PADDING frames) so the encoded datagram is at least 1200
     // bytes when the embedder hands it to the socket.
     const protos = [_][]const u8{"hq-test"};
-    var client = try quic_zig.Client.connect(.{
+    var client = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
         .allocator = std.testing.allocator,
         .server_name = "example.com",
@@ -456,7 +456,7 @@ test "MUST round-trip the canonical transport error codes 0x01..0x10 [RFC9000 §
         0x06, // FINAL_SIZE_ERROR
         0x07, // FRAME_ENCODING_ERROR
         0x08, // TRANSPORT_PARAMETER_ERROR
-        0x09, // CONNECTION_ID_LIMIT_ERROR / quic_zig's EXCESSIVE_LOAD ext
+        0x09, // CONNECTION_ID_LIMIT_ERROR / quic's EXCESSIVE_LOAD ext
         0x0a, // PROTOCOL_VIOLATION
         0x0b, // INVALID_TOKEN
         0x0c, // APPLICATION_ERROR
@@ -545,7 +545,7 @@ test "MUST distinguish transport (0x1c) from application (0x1d) CONNECTION_CLOSE
 }
 
 test "NORMATIVE the implementation's excessive_load extension uses the 0x09 reserved code [RFC9000 §20.1]" {
-    // RFC 9000 §20.1 assigns 0x09 to CONNECTION_ID_LIMIT_ERROR. quic_zig
+    // RFC 9000 §20.1 assigns 0x09 to CONNECTION_ID_LIMIT_ERROR. quic
     // additionally exposes an `excessive_load = 0x09` constant used
     // by the §3.5 / §8 hardening backstop (reserves are spent → close
     // with this code). The numeric collision is intentional: a peer
