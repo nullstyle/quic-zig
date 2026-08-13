@@ -5,6 +5,16 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Changed
+
+- Internal: the `src/server/` import seam was cleaned — pure
+  header-peek/CID-key helpers moved to a new `wire_peek.zig` leaf,
+  siblings now import siblings directly instead of round-tripping
+  `server.zig`, and the hub-and-spokes layout rules are codified in
+  `CONTRIBUTING.md`. No embedder-visible change.
+
 ## [0.13.0] - 2026-08-13
 
 The integration release. Everything in it exists because a downstream

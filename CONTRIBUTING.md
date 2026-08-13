@@ -208,6 +208,46 @@ RELEASE_READINESS.md, not an open item.)
   unrepresentable over catching it with a runtime `InvalidConfig`
   check; `docs/API_STABILITY.md` carries the full rule.
 
+## File layout: hubs, siblings, and leaves
+
+The two big aggregates (`Connection` in `src/conn/state.zig`, `Server`
+in `src/server.zig`) are composed across files using the same
+hub-and-spokes idiom as Zig's standard library (`std/fs.zig` and
+friends back-import `std.zig` while it forward-imports them; Zig's
+lazy per-decl resolution makes the mutual import well-formed, and
+`usingnamespace` no longer exists as an alternative). The canonical
+per-file ownership map lives at the top of `src/conn/state.zig`.
+
+Rules that keep the seam clean:
+
+1. **Hub files own the struct**: fields, construction, lifecycle,
+   public API, and thin delegating thunks. Method bodies live in
+   sibling free-function files taking the hub type (`*Connection`,
+   `*Server`) as their first argument.
+2. **A sibling's back-import may reach only hub-owned things**: the
+   hub type, its nested `Type.X` API, and constants/helpers whose
+   semantics belong to the hub (e.g. `max_tracked_cids_per_slot`
+   sizes `Server.Slot`'s own array). If the thing you're reaching is
+   declared in — or conceptually belongs to — another sibling, rule 3
+   applies instead.
+3. **Sibling-to-sibling needs are direct imports**, never
+   round-tripped through the hub's namespace or a hub method thunk.
+   Mark such decls `// INTERNAL: pub for direct sibling import
+   (<file>)`.
+4. **Hub-independent helpers live in leaf files** with no back-import
+   (example: `src/server/wire_peek.zig` — pure byte-in/value-out wire
+   peeking). A leaf that imports the hub is not a leaf; if a helper
+   needs the hub, it belongs in a sibling method file.
+5. **Thunk retention** (established in 95a4472): a hub method thunk
+   is kept only if it has callers in tests, examples, bench, the QNS
+   endpoint, or `src/` outside the hub's own directory — or is
+   documented embedder API. Sibling-only thunks are demoted to direct
+   free-function calls.
+
+An unreferenced alias to a nonexistent decl compiles silently (lazy
+analysis) and detonates on first use — when you delete a decl, grep
+for aliases to it rather than trusting the build.
+
 ## Style
 
 - Keep one logical change per commit.
