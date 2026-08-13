@@ -339,6 +339,58 @@ test "server writeVersionNegotiation echoes client CIDs and versions" {
     try std.testing.expectEqual(quic_version_1, parsed.header.version_negotiation.version(0));
 }
 
+test "acceptInitial leaves connection state untouched on a truncated Initial" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // v2 Initial (type bits 0b01 under the RFC 9368 §3.2 rotation)
+    // whose header claims an 8-byte DCID but whose datagram ends
+    // after two of them.
+    var truncated: [8]u8 = undefined;
+    truncated[0] = 0xd0;
+    std.mem.writeInt(u32, truncated[1..5], quic_version_2, .big);
+    truncated[5] = 0x08;
+    truncated[6] = 0xaa;
+    truncated[7] = 0xbb;
+
+    try std.testing.expectError(
+        Error.InsufficientBytes,
+        conn.acceptInitial(&truncated, .{}),
+    );
+    // The rejected datagram must not have adopted the peer's version
+    // or latched the RFC 9368 §6 downgrade snapshot.
+    try std.testing.expectEqual(quic_version_1, conn.version);
+    try std.testing.expect(conn.initial_wire_version == null);
+}
+
+test "acceptInitial rejects a well-formed non-Initial long header [RFC9368 §3.2]" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // A v1 Handshake long header (type bits 0b10) with fully intact
+    // CIDs: the CID parse succeeds but the Initial type gate must
+    // still reject it — without touching connection state.
+    var pkt: [13]u8 = undefined;
+    pkt[0] = 0xe0;
+    std.mem.writeInt(u32, pkt[1..5], quic_version_1, .big);
+    pkt[5] = 0x04;
+    @memcpy(pkt[6..10], &[_]u8{ 1, 2, 3, 4 });
+    pkt[10] = 0x02;
+    @memcpy(pkt[11..13], &[_]u8{ 5, 6 });
+
+    try std.testing.expectError(
+        Error.NotInitialPacket,
+        conn.acceptInitial(&pkt, .{}),
+    );
+    try std.testing.expect(conn.initial_wire_version == null);
+}
+
 test "peekNextBidi returns the id a limit-blocked retry will reuse" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

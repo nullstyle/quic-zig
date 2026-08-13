@@ -79,6 +79,18 @@ last_refill_us: u64 = 0,
 /// First use seeds a full bucket (the §7.7 initial burst).
 primed: bool = false,
 
+/// Tokens the bucket holds at `now_us` after the lazy refill. The
+/// single source of truth for the accrual math: `refill` COMMITS this
+/// value, `nextReadyUs` only PROJECTS it. They must never disagree —
+/// a divergence makes `nextTimerDeadline` compute pacing deadlines the
+/// `canSend` gate disagrees with (early = hot re-arm spin, late =
+/// throughput pinned below the paced rate).
+fn projectedTokens(self: *const Pacer, now_us: u64, rate: u64, capacity: i64) i64 {
+    const elapsed = now_us -| self.last_refill_us;
+    const accrued = std.math.lossyCast(i64, (@as(u128, rate) * elapsed) / std.time.us_per_s);
+    return @min(self.tokens +| accrued, capacity);
+}
+
 /// Bring the bucket up to date at `now_us` for the given pacing
 /// rate. Call before `canSend`/`consume` on the send path; refill
 /// is lazy — there is no timer-driven upkeep. The rate comes from
@@ -100,16 +112,11 @@ pub fn refill(
         self.tokens = capacity;
         return;
     }
-    const elapsed = now_us -| self.last_refill_us;
+    // Commit the projection BEFORE stamping `last_refill_us` —
+    // `projectedTokens` reads it to derive the elapsed window, so
+    // stamping first would zero every accrual.
+    self.tokens = self.projectedTokens(now_us, rate, capacity);
     self.last_refill_us = now_us;
-    if (elapsed != 0) {
-        const add = std.math.lossyCast(
-            i64,
-            (@as(u128, rate) * elapsed) / std.time.us_per_s,
-        );
-        self.tokens = self.tokens +| add;
-    }
-    if (self.tokens > capacity) self.tokens = capacity;
 }
 
 /// Is there credit for a `bytes`-sized datagram right now?
@@ -137,9 +144,7 @@ pub fn nextReadyUs(
     const rate = rate_bytes_per_s;
     const capacity = std.math.lossyCast(i64, bucketCapacity(rate, mds));
     // Project the lazy refill forward from last_refill_us.
-    const elapsed = now_us -| self.last_refill_us;
-    const accrued = std.math.lossyCast(i64, (@as(u128, rate) * elapsed) / std.time.us_per_s);
-    const effective = @min(self.tokens +| accrued, capacity);
+    const effective = self.projectedTokens(now_us, rate, capacity);
     const need = std.math.lossyCast(i64, bytes);
     if (effective >= need) return null;
     if (rate == 0) return null; // degenerate; treat as unpaced

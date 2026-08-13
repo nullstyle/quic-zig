@@ -157,7 +157,10 @@ pub fn promoteDelayedAck(self: *AckTracker, now_ms: u64, max_ack_delay_ms: u64) 
 
 /// Build an `Ack` frame from the current ranges, encoding the
 /// gap/length pairs into `ranges_bytes_buf`. The returned
-/// `Ack.ranges_bytes` is a sub-slice of that buffer.
+/// `Ack.ranges_bytes` is a sub-slice of that buffer. All-or-error:
+/// fails with `BufferTooSmall` when the buffer cannot hold every
+/// range — the `toAckFrameLimited*` builders are the paths that
+/// truncate instead.
 pub fn toAckFrame(
     self: *const AckTracker,
     ack_delay_scaled: u64,
@@ -176,35 +179,20 @@ pub fn toAckFrameWithEcn(
     ranges_bytes_buf: []u8,
     ecn_counts: ?frame_types.EcnCounts,
 ) Error!frame_types.Ack {
-    if (self.range_count == 0) return Error.Empty;
-
-    const top = self.ranges[self.range_count - 1];
-    const first_range = top.largest - top.smallest;
-
-    var pos: usize = 0;
-    // Iterate intervals from second-from-top down to the bottom.
-    var prev = top;
-    var i: u8 = self.range_count - 1;
-    while (i > 0) {
-        i -= 1;
-        const this = self.ranges[i];
-        // RFC 9000 §19.3.1: gap = prev_smallest - this_largest - 2
-        //                   length = this_largest - this_smallest
-        const gap = prev.smallest - this.largest - 2;
-        const length = this.largest - this.smallest;
-        pos += try varint.encode(ranges_bytes_buf[pos..], gap);
-        pos += try varint.encode(ranges_bytes_buf[pos..], length);
-        prev = this;
-    }
-
-    return .{
-        .largest_acked = top.largest,
-        .ack_delay = ack_delay_scaled,
-        .first_range = first_range,
-        .range_count = @as(u64, @intCast(self.range_count - 1)),
-        .ranges_bytes = ranges_bytes_buf[0..pos],
-        .ecn_counts = ecn_counts,
-    };
+    const ack = try self.toAckFrameLimitedRangesWithEcn(
+        ack_delay_scaled,
+        ranges_bytes_buf,
+        ranges_bytes_buf.len,
+        std.math.maxInt(u64),
+        ecn_counts,
+    );
+    // All-or-error contract: with the byte budget pinned to the whole
+    // buffer and no range cap, the walk stops early only when the
+    // next gap/length pair would overrun `ranges_bytes_buf` — exactly
+    // where an unbudgeted `varint.encode` would have failed. Surface
+    // that as the error instead of silently truncating.
+    if (ack.range_count != self.range_count - 1) return Error.BufferTooSmall;
+    return ack;
 }
 
 /// Build an ACK frame that includes the largest contiguous range and
@@ -268,11 +256,14 @@ pub fn toAckFrameLimitedRangesWithEcn(
 
     var pos: usize = 0;
     var included_ranges: u64 = 0;
+    // Iterate intervals from second-from-top down to the bottom.
     var prev = top;
     var i: u8 = self.range_count - 1;
     while (i > 0 and included_ranges < max_lower_ranges) {
         i -= 1;
         const this = self.ranges[i];
+        // RFC 9000 §19.3.1: gap = prev_smallest - this_largest - 2
+        //                   length = this_largest - this_smallest
         const gap = prev.smallest - this.largest - 2;
         const length = this.largest - this.smallest;
         const needed = varint.encodedLen(gap) + varint.encodedLen(length);
@@ -452,6 +443,21 @@ test "toAckFrame: round-trip via ack_range Iterator" {
     try std.testing.expectEqual(@as(u64, 92), mid.largest);
     try std.testing.expectEqual(@as(u64, 80), bot.smallest);
     try std.testing.expectEqual(@as(u64, 82), bot.largest);
+}
+
+test "toAckFrame errors on a short buffer instead of truncating" {
+    var t: AckTracker = .{};
+    // Five disjoint single-PN ranges: 0, 2, 4, 6, 8 — the four lower
+    // ranges need 8 bytes of gap/length varints.
+    var pn: u64 = 0;
+    while (pn <= 8) : (pn += 2) t.add(pn, 0);
+
+    // The unlimited builder keeps the all-or-error contract...
+    var buf: [3]u8 = undefined;
+    try std.testing.expectError(Error.BufferTooSmall, t.toAckFrame(0, &buf));
+    // ...while the bounded builder truncates to what fits.
+    const ack = try t.toAckFrameLimited(0, &buf, buf.len);
+    try std.testing.expect(ack.range_count < t.range_count - 1);
 }
 
 test "toAckFrameLimited truncates older ranges to fit budget" {

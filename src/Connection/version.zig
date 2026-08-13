@@ -27,22 +27,19 @@ pub fn acceptInitial(
     params: TransportParams,
 ) Error!void {
     if (conn.role != .server) return Error.NotServerContext;
-    if (bytes.len < 6) return Error.InsufficientBytes;
-    if ((bytes[0] & 0x80) == 0) return Error.NotInitialPacket; // bit 7 clear → short header
-    // RFC 9368 §3.2: the v2 long-header type rotation puts Initial
-    // at 0b01 instead of 0b00. Resolve through `longTypeFromBits`
-    // so a v2 ClientHello survives this gate.
-    const version = std.mem.readInt(u32, bytes[1..5], .big);
-    const long_type_bits: u2 = @intCast((bytes[0] >> 4) & 0x03);
-    if (wire_header.longTypeFromBits(version, long_type_bits) != .initial) {
-        return Error.NotInitialPacket;
-    }
+    // `initialHeaderCids` owns the whole unprotected-header parse,
+    // including the RFC 9368 §3.2 version-keyed Initial type gate
+    // (the v2 rotation puts Initial at 0b01, so a v2 ClientHello
+    // survives it). Nothing below runs until the packet has parsed
+    // cleanly, so a truncated or mistyped datagram leaves the
+    // connection untouched.
+    const cids = try initialHeaderCids(bytes);
     // Adopt the peer's version so subsequent Initial-key
     // derivation (`ensureInitialKeys`), header encoding, and
     // Retry-tag construction all key off the right RFC 9001 §5
     // / RFC 9368 §3.3 constants. Invalidates any pre-existing
     // Initial keys via `setVersion`.
-    if (version != conn.version) setVersion(conn, version);
+    if (cids.version != conn.version) setVersion(conn, cids.version);
     // RFC 9368 §6 ¶6/¶7 downgrade-attack guard: snapshot the wire
     // version of the FIRST Initial we accepted, BEFORE any
     // compatible-version upgrade flips `conn.version`. The client's
@@ -52,20 +49,27 @@ pub fn acceptInitial(
     // ClientHello intact. Latched once: subsequent `acceptInitial`
     // calls (e.g. retransmits) leave the snapshot alone.
     if (conn.initial_wire_version == null) {
-        conn.initial_wire_version = version;
+        conn.initial_wire_version = cids.version;
     }
 
-    const cids = try longHeaderCids(bytes);
     try setInitialDcid(conn, cids.dcid);
     try conn.setPeerDcid(cids.scid);
     try conn.setTransportParams(params);
 }
 
-fn longHeaderCids(bytes: []const u8) Error!struct {
+/// Unprotected long-header prefix (RFC 9000 §17.2): the wire version
+/// plus DCID/SCID slices borrowed from the input datagram.
+const LongHeaderCids = struct {
     version: u32,
     dcid: []const u8,
     scid: []const u8,
-} {
+};
+
+/// Parse the unprotected version + CID prefix of any long-header
+/// packet. Type-agnostic — Version Negotiation must respond to every
+/// long-header type, not just Initials; use `initialHeaderCids` when
+/// the packet must be an Initial.
+fn longHeaderCids(bytes: []const u8) Error!LongHeaderCids {
     if (bytes.len < 6) return Error.InsufficientBytes;
     if ((bytes[0] & 0x80) == 0) return Error.NotInitialPacket;
     // Canonical RFC 8999 §5.1 invariant-field walk; remap the wire
@@ -77,10 +81,9 @@ fn longHeaderCids(bytes: []const u8) Error!struct {
     return .{ .version = common.version, .dcid = common.dcid, .scid = common.scid };
 }
 
-fn initialHeaderCids(bytes: []const u8) Error!struct {
-    dcid: []const u8,
-    scid: []const u8,
-} {
+/// Like `longHeaderCids`, but additionally requires the packet to be
+/// an Initial under its own wire version.
+fn initialHeaderCids(bytes: []const u8) Error!LongHeaderCids {
     const cids = try longHeaderCids(bytes);
     const long_type_bits: u2 = @intCast((bytes[0] >> 4) & 0x03);
     // RFC 9368 §3.2: the v2 long-header type rotation makes the
@@ -88,7 +91,7 @@ fn initialHeaderCids(bytes: []const u8) Error!struct {
     // `longTypeFromBits` so v2 Initials don't get rejected here.
     const long_type = wire_header.longTypeFromBits(cids.version, long_type_bits);
     if (long_type != .initial) return Error.NotInitialPacket;
-    return .{ .dcid = cids.dcid, .scid = cids.scid };
+    return cids;
 }
 
 /// Server-side helper: write a Version Negotiation packet in
@@ -131,14 +134,11 @@ pub fn writeRetry(
     retry_token: []const u8,
 ) Error!usize {
     if (conn.role != .server) return error.NotServerContext;
-    const cids = try longHeaderCids(client_initial);
-    // Make sure the leading long-header packet really is an Initial
-    // under the client's chosen version (RFC 9368 §3.2 v2 layout
-    // moves the Retry slot, so a v1-only check would mis-classify
-    // a v2 Retry as "not an Initial").
-    const long_type_bits: u2 = @intCast((client_initial[0] >> 4) & 0x03);
-    const long_type = wire_header.longTypeFromBits(cids.version, long_type_bits);
-    if (long_type != .initial) return Error.NotInitialPacket;
+    // `initialHeaderCids` verifies the leading long-header packet
+    // really is an Initial under the client's chosen version (RFC
+    // 9368 §3.2's v2 layout moves the Retry slot, so a v1-only check
+    // would mis-classify a v2 Retry as "not an Initial").
+    const cids = try initialHeaderCids(client_initial);
     return try long_packet_mod.sealRetry(dst, .{
         .version = cids.version,
         .original_dcid = cids.dcid,
