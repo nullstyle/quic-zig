@@ -40,18 +40,16 @@
 //! `.malformed` it falls through to Retry validation.
 
 const std = @import("std");
-const boringssl = @import("boringssl");
 
 const path = @import("path.zig");
-
-const AesGcm256 = boringssl.crypto.aead.AesGcm256;
+const token_envelope = @import("token_envelope.zig");
 
 /// AES-GCM-256 key length in bytes (also `Key`).
-pub const key_len: usize = AesGcm256.key_len;
+pub const key_len: usize = token_envelope.key_len;
 /// AEAD nonce length in bytes (12, GCM standard).
-pub const nonce_len: usize = AesGcm256.nonce_len;
+pub const nonce_len: usize = token_envelope.nonce_len;
 /// AEAD authentication tag length in bytes (16, GCM standard).
-pub const tag_len: usize = AesGcm256.tag_len;
+pub const tag_len: usize = token_envelope.tag_len;
 
 /// Maximum address length the format can carry. Tracks
 /// `path.Address.context_max_len` so the token can always bind a full
@@ -60,22 +58,22 @@ pub const tag_len: usize = AesGcm256.tag_len;
 /// silently disabling NEW_TOKEN issuance for the whole address family.
 pub const max_address_len: usize = path.Address.context_max_len;
 
-/// Plaintext layout overhead: 4 (version) + 8 (issued) + 8 (expires)
-/// + 1 length prefix byte for the address slot.
-const plaintext_fixed_overhead: usize = 4 + 8 + 8 + 1;
-
 /// Total token length on the wire (and in `Token`). Fixed at 96 bytes
 /// so NEW_TOKEN is bytewise indistinguishable from the v2 Retry token
-/// shape on the wire.
-pub const max_token_len: usize = 96;
+/// shape on the wire — the constant is owned by `token_envelope` for
+/// exactly that reason.
+pub const max_token_len: usize = token_envelope.token_len;
 
-/// Plaintext payload size: equal to `max_token_len - nonce_len - tag_len`.
-/// Plaintext is zero-padded to this length before AEAD seal so every
-/// minted token is a constant-length opaque blob.
-const plaintext_len: usize = max_token_len - nonce_len - tag_len;
+/// The shared AEAD envelope, instantiated with the v1 NEW_TOKEN
+/// domain separator and the single address bound field. The envelope
+/// owns the seal/open/parse/compare mechanics; this module keeps the
+/// key material, error vocabulary, and budget policy.
+const Env = token_envelope.Envelope(.{
+    .domain_separator = "quic new_token v1",
+    .field_caps = &.{max_address_len},
+});
 
 comptime {
-    std.debug.assert(plaintext_len >= plaintext_fixed_overhead);
     // Couple the address-field cap to the real Address context size so
     // a future Address change can't silently shrink token capacity and
     // reintroduce the IPv6 NEW_TOKEN regression.
@@ -85,7 +83,7 @@ comptime {
 
 /// Maximum address-field length that fits the fixed plaintext budget.
 /// Mint enforces this at runtime.
-const max_bound_total: usize = plaintext_len - plaintext_fixed_overhead;
+const max_bound_total: usize = Env.max_bound_total;
 
 /// 32-byte AES-GCM-256 key. The server keeps this stable across every
 /// outstanding token's lifetime so a client returning hours later can
@@ -98,10 +96,6 @@ pub const Key = [key_len]u8;
 
 /// Fixed-size NEW_TOKEN. Always exactly `max_token_len` bytes.
 pub const Token = [max_token_len]u8;
-
-/// Domain separator. Mixed into the AEAD AAD; replaying a Retry token
-/// blob through NEW_TOKEN.validate (or vice versa) returns `.malformed`.
-const domain_separator = "quic new_token v1";
 
 /// Errors raised by `mint` (and surfaced as `.malformed` from
 /// `validate`).
@@ -167,25 +161,14 @@ pub fn mint(dst: []u8, opts: MintOptions) Error!usize {
     try validateBoundInputs(opts.client_address);
     if (opts.client_address.len > max_bound_total) return Error.OutputTooSmall;
 
-    // Per-token random nonce. AES-GCM nonce reuse under a fixed key
-    // breaks confidentiality and integrity, so the CSPRNG path is
-    // load-bearing.
-    var nonce: [nonce_len]u8 = undefined;
-    boringssl.crypto.rand.fillBytes(&nonce) catch return Error.RandFailure;
-    @memcpy(dst[0..nonce_len], &nonce);
-
-    var pt_buf: [plaintext_len]u8 = @splat(0);
-    writePlaintext(&pt_buf, opts);
-
-    var aead = AesGcm256.init(opts.key) catch return Error.AeadFailure;
-    defer aead.deinit();
-    const ct_len = aead.seal(
-        dst[nonce_len..max_token_len],
-        &nonce,
-        domain_separator,
-        &pt_buf,
-    ) catch return Error.AeadFailure;
-    std.debug.assert(ct_len == plaintext_len + tag_len);
+    try Env.seal(
+        dst[0..max_token_len],
+        opts.key,
+        opts.quic_version,
+        opts.now_us,
+        opts.lifetime_us,
+        .{opts.client_address},
+    );
     return max_token_len;
 }
 
@@ -204,95 +187,26 @@ pub fn minted(opts: MintOptions) Error!Token {
 /// errors. Address comparison runs in constant time over the
 /// recovered plaintext.
 pub fn validate(token: []const u8, opts: ValidateOptions) ValidationResult {
-    if (token.len != max_token_len) return .malformed;
     validateBoundInputs(opts.client_address) catch return .malformed;
-
-    var nonce: [nonce_len]u8 = undefined;
-    @memcpy(&nonce, token[0..nonce_len]);
-    const ciphertext = token[nonce_len..max_token_len];
-
-    var aead = AesGcm256.init(opts.key) catch return .malformed;
-    defer aead.deinit();
-    var pt_buf: [plaintext_len]u8 = undefined;
-    const opened_len = aead.open(&pt_buf, &nonce, domain_separator, ciphertext) catch return .malformed;
-    std.debug.assert(opened_len == plaintext_len);
-
-    var fields: PlaintextFields = undefined;
-    parsePlaintext(&pt_buf, &fields) catch return .malformed;
-
-    if (fields.quic_version != opts.quic_version) return .wrong_version;
-    if (addSat(opts.now_us, opts.max_clock_skew_us) < fields.issued_at_us) return .not_yet_valid;
-    if (opts.now_us > addSat(fields.expires_at_us, opts.max_clock_skew_us)) return .expired;
-
-    if (!equalCt(fields.client_address, opts.client_address)) return .invalid;
-    return .valid;
+    return switch (Env.validate(
+        token,
+        opts.key,
+        opts.quic_version,
+        opts.now_us,
+        opts.max_clock_skew_us,
+        .{opts.client_address},
+    )) {
+        .valid => .valid,
+        .malformed => .malformed,
+        .wrong_version => .wrong_version,
+        .not_yet_valid => .not_yet_valid,
+        .expired => .expired,
+        .invalid => .invalid,
+    };
 }
 
 fn validateBoundInputs(client_address: []const u8) Error!void {
     if (client_address.len > max_address_len) return Error.ContextTooLong;
-}
-
-/// Write the v1 plaintext layout into `dst`, which must be exactly
-/// `plaintext_len` bytes (caller pre-zeros for trailing padding).
-fn writePlaintext(dst: *[plaintext_len]u8, opts: MintOptions) void {
-    var pos: usize = 0;
-    std.mem.writeInt(u32, dst[pos..][0..4], opts.quic_version, .big);
-    pos += 4;
-    std.mem.writeInt(u64, dst[pos..][0..8], opts.now_us, .big);
-    pos += 8;
-    std.mem.writeInt(u64, dst[pos..][0..8], addSat(opts.now_us, opts.lifetime_us), .big);
-    pos += 8;
-
-    dst[pos] = @intCast(opts.client_address.len);
-    pos += 1;
-    @memcpy(dst[pos..][0..opts.client_address.len], opts.client_address);
-    // Caller zero-initialised `dst`; trailing padding bytes are
-    // well-defined zeros.
-}
-
-const PlaintextFields = struct {
-    quic_version: u32,
-    issued_at_us: u64,
-    expires_at_us: u64,
-    client_address: []const u8,
-};
-
-const ParseError = error{TruncatedField};
-
-fn parsePlaintext(pt: *const [plaintext_len]u8, out: *PlaintextFields) ParseError!void {
-    out.quic_version = std.mem.readInt(u32, pt[0..4], .big);
-    out.issued_at_us = std.mem.readInt(u64, pt[4..12], .big);
-    out.expires_at_us = std.mem.readInt(u64, pt[12..20], .big);
-
-    var pos: usize = 20;
-    out.client_address = try readLengthPrefixed(pt, &pos, max_address_len);
-}
-
-fn readLengthPrefixed(pt: *const [plaintext_len]u8, pos: *usize, cap: usize) ParseError![]const u8 {
-    if (pos.* + 1 > pt.len) return ParseError.TruncatedField;
-    const len: usize = pt[pos.*];
-    pos.* += 1;
-    if (len > cap) return ParseError.TruncatedField;
-    if (pos.* + len > pt.len) return ParseError.TruncatedField;
-    const slice = pt[pos.* .. pos.* + len];
-    pos.* += len;
-    return slice;
-}
-
-/// Length-aware constant-time byte slice equality. `timing_safe.eql`
-/// requires fixed-size arrays, so we route through fixed-size scratch
-/// buffers sized to fit any v1 bound field.
-fn equalCt(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    var sa: [plaintext_len]u8 = @splat(0);
-    var sb: [plaintext_len]u8 = @splat(0);
-    @memcpy(sa[0..a.len], a);
-    @memcpy(sb[0..b.len], b);
-    return std.crypto.timing_safe.eql([plaintext_len]u8, sa, sb);
-}
-
-fn addSat(a: u64, b: u64) u64 {
-    return std.math.add(u64, a, b) catch std.math.maxInt(u64);
 }
 
 const testing_key: Key = .{

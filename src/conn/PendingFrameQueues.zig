@@ -35,10 +35,10 @@ pub const MaxStreamDataItem = struct {
 /// `conn.new_token.max_token_len`) plus a `len`. quic mints a single
 /// fixed-shape format so a heap allocation isn't needed.
 pub const NewTokenItem = struct {
-    /// Maximum supported NEW_TOKEN length on the wire. Matches
-    /// `conn.new_token.max_token_len`. Tracked here to keep
-    /// `pending_frames` self-contained.
-    pub const max_len: usize = 96;
+    /// Maximum supported NEW_TOKEN length on the wire. Bound to the
+    /// shared token envelope's constant so the queue slot can't drift
+    /// from the codec that fills it.
+    pub const max_len: usize = @import("token_envelope.zig").token_len;
     bytes: [max_len]u8 = @splat(0),
     len: u8 = 0,
 

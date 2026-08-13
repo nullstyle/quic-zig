@@ -69,6 +69,9 @@ pub const retry_token = @import("retry_token.zig");
 /// + client-side opaque blob, distinct from `retry_token` so its key
 /// can be rotated independently.
 pub const new_token = @import("new_token.zig");
+/// Shared 96-byte AEAD envelope behind both token codecs — the one
+/// copy of the wire shape they are required to keep identical.
+pub const token_envelope = @import("token_envelope.zig");
 /// RFC 9000 §10.3 stateless-reset token derivation
 /// (default-safe HMAC-SHA256 over CID).
 pub const stateless_reset = @import("stateless_reset.zig");
@@ -252,6 +255,7 @@ test {
     _ = path;
     _ = retry_token;
     _ = new_token;
+    _ = token_envelope;
     _ = stateless_reset;
     _ = event_queue;
     _ = pending_frames;
