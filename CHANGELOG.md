@@ -58,7 +58,12 @@ is still CUBIC):
   `quic.microbench` / `quic.bench_e2e` and the version key is
   `quic_version` (committed baselines updated in-commit, header-only).
   Historical CHANGELOG entries below keep the names that were true
-  when they shipped.
+  when they shipped. Migration note from the first downstream to take
+  this bump: with the conventional `const quic = @import("quic")`,
+  any local variable or parameter already named `quic` becomes a
+  shadowing error under Zig's no-shadowing rule — rename those locals
+  first (http3-zig hit 7 of them; the compile errors point at every
+  one).
 - **A `Connection` now has one address for its whole life** — the
   init-then-move-then-`bind()` dance is gone, and with it the window
   where moving a bound Connection silently dangled the `*Connection`
