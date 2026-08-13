@@ -77,6 +77,17 @@ current tag (`v0.13.0` as of this writing):
 zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.13.0.tar.gz
 ```
 
+Pin the **archive tarball URL exactly as above** — not a
+`git+https://…#v0.13.0` reference. Release tags here are annotated
+tag objects, and on current Zig master a `git+…#tag` pin resolves
+them to a different (unnamed `N-V`) fingerprint than the tarball,
+failing the hash check (first reported by a downstream on
+0.17.0-dev). Two related field notes from the same report: standalone
+`zig fetch` and `zig build --fetch` unpacked the tarball's wrapper
+directory differently on that toolchain, so if a consumer sees an
+`N-V` mismatch despite the correct URL, repopulating the package
+store from the canonical cached tarball resolves it.
+
 Then wire the module in `build.zig`:
 
 ```zig
