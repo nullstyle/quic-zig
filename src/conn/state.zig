@@ -624,6 +624,33 @@ pub const ConnectionPhase = enum {
 /// Tagged-union of all connection-level events the embedder polls via `nextEvent`.
 /// Each variant carries enough context for the embedder to react without re-querying
 /// Connection state.
+/// Point-in-time send-side flow-control view for one stream
+/// (RFC 9000 §4, the sender's half). All figures are NEW-data bytes:
+/// retransmissions below the wire high-water mark consume no credit
+/// and are invisible here. Congestion control and pacing are
+/// deliberately excluded — this answers "what would the peer's
+/// windows accept", the input backpressure needs; `sendAllowance`
+/// on the congestion side answers "what may leave right now".
+pub const SendWindow = struct {
+    /// Connection-level credit remaining: peer `max_data` minus new
+    /// stream bytes already sent. Shared across all streams — two
+    /// streams both reporting 10 KB here are drawing on the same 10 KB.
+    connection: u64,
+    /// Stream-level credit remaining: peer `max_stream_data` minus
+    /// this stream's wire high-water mark.
+    stream: u64,
+    /// This stream's queued-but-unsent NEW bytes (accepted by
+    /// `streamWrite`, not yet on the wire). They will consume credit
+    /// when they go out, so they are already subtracted from
+    /// `writable`.
+    queued: u64,
+    /// `min(connection, stream) -| queued`: bytes a further
+    /// `streamWrite` could accept AND eventually transmit as new data
+    /// under the current peer windows, ignoring other streams' queues.
+    /// The number a `canWrite`-style backpressure gate wants.
+    writable: u64,
+};
+
 pub const ConnectionEvent = union(enum) {
     close: CloseEvent,
     /// The TLS handshake just completed (`handshakeDone()` latched true):
@@ -2441,6 +2468,23 @@ pub const Connection = struct {
 
     pub fn recordPeerStreamOpenOrClose(self: *Connection, id: u64) bool {
         return conn_streams.recordPeerStreamOpenOrClose(self, id);
+    }
+
+    /// Connection-level send flow credit: new stream bytes the peer's
+    /// MAX_DATA window accepts right now. See `streamSendWindow` for
+    /// the per-stream composite view.
+    pub fn sendWindow(self: *const Connection) u64 {
+        return conn_streams.connectionSendWindow(self);
+    }
+
+    /// Send-side flow-control snapshot for one stream: connection and
+    /// stream credit, queued-but-unsent backlog, and the net
+    /// `writable` figure a backpressure gate wants (see `SendWindow`).
+    /// Null for unknown streams and peer-initiated uni streams.
+    /// Reflects peer flow-control windows only — congestion control
+    /// and pacing intentionally excluded.
+    pub fn streamSendWindow(self: *const Connection, id: u64) ?SendWindow {
+        return conn_streams.streamSendWindow(self, id);
     }
 
     pub fn limitChunkToSendFlow(

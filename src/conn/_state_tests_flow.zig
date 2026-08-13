@@ -272,6 +272,79 @@ test "MAX_DATA MAX_STREAM_DATA and MAX_STREAMS raise send-side limits" {
     try std.testing.expectEqual(@as(u64, 16), conn.stream(0).?.send_max_data);
 }
 
+test "sendWindow / streamSendWindow report credit, backlog, and net writable" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try conn.setLocalScid(&.{ 9, 9, 9, 9 });
+    try conn.setTransportParams(.{
+        .initial_max_data = 1 << 22,
+        .initial_max_stream_data_bidi_local = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_streams_bidi = 16,
+    });
+    try installTestApplicationWriteSecret(conn);
+
+    conn.peer_max_data = 10_000;
+    const s0 = try conn.openBidi(0);
+    s0.send_max_data = 6_000;
+
+    // Fresh stream: full credits, nothing queued, stream limit binds.
+    try std.testing.expectEqual(@as(u64, 10_000), conn.sendWindow());
+    var w = conn.streamSendWindow(0).?;
+    try std.testing.expectEqual(@as(u64, 10_000), w.connection);
+    try std.testing.expectEqual(@as(u64, 6_000), w.stream);
+    try std.testing.expectEqual(@as(u64, 0), w.queued);
+    try std.testing.expectEqual(@as(u64, 6_000), w.writable);
+
+    // Buffered-but-unsent bytes shrink writable without touching the
+    // credits — nothing is on the wire yet.
+    var data: [2_000]u8 = @splat(0xab);
+    try std.testing.expectEqual(@as(usize, 2_000), try conn.streamWrite(0, &data));
+    w = conn.streamSendWindow(0).?;
+    try std.testing.expectEqual(@as(u64, 10_000), w.connection);
+    try std.testing.expectEqual(@as(u64, 6_000), w.stream);
+    try std.testing.expectEqual(@as(u64, 2_000), w.queued);
+    try std.testing.expectEqual(@as(u64, 4_000), w.writable);
+
+    // On the wire: both credit levels fall by the sent bytes, the
+    // queue drains, and writable is unchanged (the same bytes moved
+    // from "queued" to "spent").
+    var pkt: [2048]u8 = undefined;
+    var now_us: u64 = 1_000_000;
+    while (try conn.pollDatagram(&pkt, now_us)) |_| now_us += 100;
+    w = conn.streamSendWindow(0).?;
+    try std.testing.expectEqual(@as(u64, 8_000), w.connection);
+    try std.testing.expectEqual(@as(u64, 8_000), conn.sendWindow());
+    try std.testing.expectEqual(@as(u64, 4_000), w.stream);
+    try std.testing.expectEqual(@as(u64, 0), w.queued);
+    try std.testing.expectEqual(@as(u64, 4_000), w.writable);
+
+    // Peer window raises are visible immediately.
+    conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 9_000 });
+    w = conn.streamSendWindow(0).?;
+    try std.testing.expectEqual(@as(u64, 7_000), w.stream);
+    try std.testing.expectEqual(@as(u64, 7_000), w.writable);
+
+    // A second stream draws on the SAME connection credit: its
+    // generous stream window is capped by the shared 8_000.
+    conn.peer_max_streams_bidi = 4;
+    const s4 = try conn.openBidi(4);
+    s4.send_max_data = 100_000;
+    const w4 = conn.streamSendWindow(4).?;
+    try std.testing.expectEqual(@as(u64, 8_000), w4.connection);
+    try std.testing.expectEqual(@as(u64, 100_000), w4.stream);
+    try std.testing.expectEqual(@as(u64, 8_000), w4.writable);
+
+    // Guards: a peer-initiated uni stream is never sendable by us,
+    // and unknown streams report null rather than zero.
+    try std.testing.expectEqual(@as(?state.SendWindow, null), conn.streamSendWindow(3));
+    try std.testing.expectEqual(@as(?state.SendWindow, null), conn.streamSendWindow(8));
+}
+
 // -- StreamType + openNext* convenience openers (RFC 9000 §2.1) ---------
 // HTTP/3 (and any embedder) classifies streams and opens its control /
 // QPACK streams by the low-two-bit id encoding; these helpers remove the

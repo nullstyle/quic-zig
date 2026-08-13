@@ -180,6 +180,8 @@ pub const StreamOpenedInfo = conn.StreamOpenedInfo;
 /// was hit, whether the local or remote side holds it, the limit value,
 /// and (for stream-data) which stream tripped it.
 pub const FlowBlockedInfo = conn.FlowBlockedInfo;
+/// Send-side flow-control snapshot (`Connection.streamSendWindow`).
+pub const SendWindow = conn.SendWindow;
 
 /// Which flow-control axis a `FlowBlockedInfo` refers to: connection
 /// `data`, per-stream `stream_data`, or `streams` count (RFC 9000 §4).

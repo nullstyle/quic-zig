@@ -7,6 +7,20 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **Send-window introspection** — `Connection.sendWindow()`
+  (connection-level flow credit remaining) and
+  `Connection.streamSendWindow(id) ?SendWindow`, a per-stream snapshot
+  carrying the connection credit, stream credit, queued-but-unsent
+  backlog, and the net `writable` figure a `canWrite`-style
+  backpressure gate wants. Mirrors the send gate's own accounting
+  (new-data bytes only; retransmissions are invisible; congestion
+  control deliberately excluded — `sendAllowance` answers that side).
+  Requested by http3-zig, whose backpressure previously could only
+  consult its own buffer cap and the binary blocked events. Newly
+  added surface: Unstable tier until it soaks, per policy.
+
 ### Changed
 
 - **The 0-RTT / early-data surface is Stable tier** —

@@ -332,6 +332,32 @@ pub fn limitChunkToSendFlowAfterPlanned(
     return limited;
 }
 
+/// Connection-level send flow credit: new stream bytes the peer's
+/// MAX_DATA window would accept right now (RFC 9000 §4.1, sender
+/// side). Before peer transport parameters arrive the limit reads as
+/// unlimited — the same view the send gate itself enforces.
+pub fn connectionSendWindow(self: *const Connection) u64 {
+    return self.peer_max_data -| self.we_sent_stream_data;
+}
+
+/// Send-window snapshot for `id` (see `state.SendWindow`). Null when
+/// the stream is unknown or is a peer-initiated unidirectional stream
+/// (we can never send there). Mirrors `limitChunkToSendFlow`'s
+/// accounting exactly: the same fields, read instead of enforced.
+pub fn streamSendWindow(self: *const Connection, id: u64) ?state_mod.SendWindow {
+    if (!localMaySendOnStream(self, id)) return null;
+    const s = self.streams.get(id) orelse return null;
+    const conn_credit = connectionSendWindow(self);
+    const stream_credit = s.send_max_data -| s.send_flow_highest;
+    const queued = s.send.write_offset -| s.send_flow_highest;
+    return .{
+        .connection = conn_credit,
+        .stream = stream_credit,
+        .queued = queued,
+        .writable = @min(conn_credit, stream_credit) -| queued,
+    };
+}
+
 pub fn streamFlowNewBytes(s: *const Stream, chunk: send_stream_mod.Chunk) u64 {
     const end = std.math.add(u64, chunk.offset, chunk.length) catch return 0;
     if (end <= s.send_flow_highest) return 0;
