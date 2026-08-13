@@ -339,6 +339,63 @@ fn parseShort(src: []const u8, first: u8, dcid_len: u8) Error!Parsed {
     };
 }
 
+/// The RFC 8999 §5.1 version-invariant long-header prefix: Version,
+/// length-prefixed Destination Connection ID, length-prefixed Source
+/// Connection ID. Returned by `peekLongCommon`.
+pub const LongCommonSlices = struct {
+    version: u32,
+    /// Borrowed sub-slice of the input — never a copy.
+    dcid: []const u8,
+    /// Borrowed sub-slice of the input — never a copy.
+    scid: []const u8,
+    /// Position of the first byte after SCID (where version- and
+    /// type-specific fields begin).
+    end_pos: usize,
+};
+
+/// Errors `peekLongCommon` can produce — a subset of `Error`, kept
+/// narrow so callers that remap onto their own typed error surfaces
+/// can switch exhaustively.
+pub const PeekLongCommonError = error{ InsufficientBytes, ConnIdTooLong };
+
+/// Walk the version-invariant long-header prefix (RFC 8999 §5.1 /
+/// RFC 9000 §17.2): u32 version at offset 1, DCID length byte plus
+/// DCID, SCID length byte plus SCID, each CID capped at
+/// `max_cid_len`. This is the single canonical walk of these
+/// fields — `parse`, the server's pre-decrypt routing peek, the
+/// Connection Initial-acceptance path, and long-packet open all
+/// route through it, so it must keep returning borrowed slices into
+/// `src` (never copies) and must never panic on hostile input; the
+/// fuzz harness below pins both properties.
+///
+/// Byte 0 is skipped, not validated: callers decide whether the
+/// packet is long-header (and, where relevant, whether the long
+/// type is Initial) on their own.
+pub fn peekLongCommon(src: []const u8) PeekLongCommonError!LongCommonSlices {
+    var pos: usize = 1;
+    if (src.len < pos + 4) return error.InsufficientBytes;
+    const version = std.mem.readInt(u32, src[pos..][0..4], .big);
+    pos += 4;
+
+    if (src.len < pos + 1) return error.InsufficientBytes;
+    const dcid_len = src[pos];
+    pos += 1;
+    if (dcid_len > max_cid_len) return error.ConnIdTooLong;
+    if (src.len < pos + dcid_len) return error.InsufficientBytes;
+    const dcid = src[pos .. pos + dcid_len];
+    pos += dcid_len;
+
+    if (src.len < pos + 1) return error.InsufficientBytes;
+    const scid_len = src[pos];
+    pos += 1;
+    if (scid_len > max_cid_len) return error.ConnIdTooLong;
+    if (src.len < pos + scid_len) return error.InsufficientBytes;
+    const scid = src[pos .. pos + scid_len];
+    pos += scid_len;
+
+    return .{ .version = version, .dcid = dcid, .scid = scid, .end_pos = pos };
+}
+
 const LongCommon = struct {
     version: u32,
     dcid: ConnId,
@@ -349,28 +406,13 @@ const LongCommon = struct {
 };
 
 fn parseLongCommon(src: []const u8) Error!LongCommon {
-    var pos: usize = 1;
-    if (src.len < pos + 4) return Error.InsufficientBytes;
-    const version = std.mem.readInt(u32, src[pos..][0..4], .big);
-    pos += 4;
-
-    if (src.len < pos + 1) return Error.InsufficientBytes;
-    const dcid_len = src[pos];
-    pos += 1;
-    if (dcid_len > max_cid_len) return Error.ConnIdTooLong;
-    if (src.len < pos + dcid_len) return Error.InsufficientBytes;
-    const dcid = try ConnId.fromSlice(src[pos .. pos + dcid_len]);
-    pos += dcid_len;
-
-    if (src.len < pos + 1) return Error.InsufficientBytes;
-    const scid_len = src[pos];
-    pos += 1;
-    if (scid_len > max_cid_len) return Error.ConnIdTooLong;
-    if (src.len < pos + scid_len) return Error.InsufficientBytes;
-    const scid = try ConnId.fromSlice(src[pos .. pos + scid_len]);
-    pos += scid_len;
-
-    return .{ .version = version, .dcid = dcid, .scid = scid, .end_pos = pos };
+    const common = try peekLongCommon(src);
+    return .{
+        .version = common.version,
+        .dcid = try ConnId.fromSlice(common.dcid),
+        .scid = try ConnId.fromSlice(common.scid),
+        .end_pos = common.end_pos,
+    };
 }
 
 fn parseLong(src: []const u8, first: u8) Error!Parsed {
@@ -904,6 +946,49 @@ test "parse rejects DCID length > 20 in long header" {
     try std.testing.expectError(Error.ConnIdTooLong, parse(&bytes, 0));
 }
 
+test "peekLongCommon extracts version, borrowed CIDs, and end_pos" {
+    const bytes = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01, // first + version
+        2, 0xaa, 0xbb, // dcid_len + dcid
+        3, 0x11, 0x22, 0x33, // scid_len + scid
+        0xff, // first type-specific byte (must not be consumed)
+    };
+    const common = try peekLongCommon(&bytes);
+    try std.testing.expectEqual(@as(u32, 1), common.version);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, common.dcid);
+    try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x22, 0x33 }, common.scid);
+    try std.testing.expectEqual(@as(usize, 12), common.end_pos);
+    // The CID slices are borrowed from the input, never copied —
+    // downstream pre-decrypt peeks (Server routing) rely on this.
+    try std.testing.expectEqual(@intFromPtr(bytes[6..].ptr), @intFromPtr(common.dcid.ptr));
+    try std.testing.expectEqual(@intFromPtr(bytes[9..].ptr), @intFromPtr(common.scid.ptr));
+}
+
+test "peekLongCommon rejects truncation at every field boundary" {
+    const full = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        2,    0xaa, 0xbb, 3,    0x11,
+        0x22, 0x33,
+    };
+    var len: usize = 0;
+    while (len < full.len) : (len += 1) {
+        try std.testing.expectError(
+            error.InsufficientBytes,
+            peekLongCommon(full[0..len]),
+        );
+    }
+    // The exactly-sized prefix parses.
+    _ = try peekLongCommon(&full);
+}
+
+test "peekLongCommon rejects CID lengths over max_cid_len" {
+    const zeros: [30]u8 = @splat(0);
+    const bad_dcid = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21 } ++ zeros;
+    try std.testing.expectError(error.ConnIdTooLong, peekLongCommon(&bad_dcid));
+    const bad_scid = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x01, 0, 21 } ++ zeros;
+    try std.testing.expectError(error.ConnIdTooLong, peekLongCommon(&bad_scid));
+}
+
 test "parse rejects truncated PN in short header" {
     const dcid: [4]u8 = @splat(0xaa);
     var bytes: [5]u8 = undefined;
@@ -1176,4 +1261,30 @@ fn fuzzHeaderRoundTrip(_: void, smith: *std.testing.Smith) anyerror!void {
     var reencoded: [256]u8 = undefined;
     const reencoded_len = try encode(&reencoded, parsed.header);
     try std.testing.expectEqualSlices(u8, encoded[0..encoded_len], reencoded[0..reencoded_len]);
+}
+
+// `peekLongCommon` is the single canonical walk of the RFC 8999 §5.1
+// invariant fields, shared by every pre-decrypt path that faces
+// arbitrary internet bytes (`Server.feed` routing, Connection Initial
+// acceptance, long-packet open). It must never panic on hostile input
+// and must only ever return borrowed in-bounds slices.
+
+test "fuzz: peekLongCommon never panics and returns in-bounds slices" {
+    try std.testing.fuzz({}, fuzzPeekLongCommon, .{});
+}
+
+fn fuzzPeekLongCommon(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input_buf: [256]u8 = undefined;
+    const len = smith.slice(&input_buf);
+    const input = input_buf[0..len];
+
+    const common = peekLongCommon(input) catch return;
+    try std.testing.expect(common.dcid.len <= max_cid_len);
+    try std.testing.expect(common.scid.len <= max_cid_len);
+    try std.testing.expect(common.end_pos <= input.len);
+    // Returned CID slices must point into `input`.
+    try std.testing.expect(@intFromPtr(common.dcid.ptr) >= @intFromPtr(input.ptr));
+    try std.testing.expect(@intFromPtr(common.dcid.ptr) + common.dcid.len <= @intFromPtr(input.ptr) + input.len);
+    try std.testing.expect(@intFromPtr(common.scid.ptr) >= @intFromPtr(input.ptr));
+    try std.testing.expect(@intFromPtr(common.scid.ptr) + common.scid.len <= @intFromPtr(input.ptr) + input.len);
 }

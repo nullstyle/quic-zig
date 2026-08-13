@@ -55,20 +55,9 @@ pub fn acceptInitial(
         conn.initial_wire_version = version;
     }
 
-    const dcid_len = bytes[5];
-    if (dcid_len > path_mod.max_cid_len) return Error.DcidTooLong;
-    var pos: usize = 6;
-    if (bytes.len < pos + @as(usize, dcid_len) + 1) return Error.InsufficientBytes;
-    const dcid = bytes[pos .. pos + dcid_len];
-    pos += dcid_len;
-    const scid_len = bytes[pos];
-    if (scid_len > path_mod.max_cid_len) return Error.DcidTooLong;
-    pos += 1;
-    if (bytes.len < pos + @as(usize, scid_len)) return Error.InsufficientBytes;
-    const scid = bytes[pos .. pos + scid_len];
-
-    try setInitialDcid(conn, dcid);
-    try conn.setPeerDcid(scid);
+    const cids = try longHeaderCids(bytes);
+    try setInitialDcid(conn, cids.dcid);
+    try conn.setPeerDcid(cids.scid);
     try conn.setTransportParams(params);
 }
 
@@ -79,20 +68,13 @@ fn longHeaderCids(bytes: []const u8) Error!struct {
 } {
     if (bytes.len < 6) return Error.InsufficientBytes;
     if ((bytes[0] & 0x80) == 0) return Error.NotInitialPacket;
-    const version = std.mem.readInt(u32, bytes[1..5], .big);
-
-    const dcid_len = bytes[5];
-    if (dcid_len > path_mod.max_cid_len) return Error.DcidTooLong;
-    var pos: usize = 6;
-    if (bytes.len < pos + @as(usize, dcid_len) + 1) return Error.InsufficientBytes;
-    const dcid = bytes[pos .. pos + dcid_len];
-    pos += dcid_len;
-    const scid_len = bytes[pos];
-    if (scid_len > path_mod.max_cid_len) return Error.DcidTooLong;
-    pos += 1;
-    if (bytes.len < pos + @as(usize, scid_len)) return Error.InsufficientBytes;
-    const scid = bytes[pos .. pos + scid_len];
-    return .{ .version = version, .dcid = dcid, .scid = scid };
+    // Canonical RFC 8999 §5.1 invariant-field walk; remap the wire
+    // module's CID-length error onto this module's typed surface.
+    const common = wire_header.peekLongCommon(bytes) catch |err| switch (err) {
+        error.ConnIdTooLong => return Error.DcidTooLong,
+        error.InsufficientBytes => return Error.InsufficientBytes,
+    };
+    return .{ .version = common.version, .dcid = common.dcid, .scid = common.scid };
 }
 
 fn initialHeaderCids(bytes: []const u8) Error!struct {

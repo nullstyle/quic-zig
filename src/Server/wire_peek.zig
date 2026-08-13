@@ -46,24 +46,16 @@ pub const LongHeaderIds = struct {
     scid: []const u8,
 };
 
+/// Peek the version + DCID + SCID out of a long-header packet, or
+/// null if the bytes don't parse as one. Option-typed adapter over
+/// the canonical `wire.header.peekLongCommon` invariant-field walk
+/// (this is the pre-decrypt hot path — callers route on the result,
+/// they don't distinguish failure reasons). The returned slices are
+/// borrowed from `bytes`.
 pub fn peekLongHeaderIds(bytes: []const u8) ?LongHeaderIds {
-    if (bytes.len < 6) return null;
-    if ((bytes[0] & 0x80) == 0) return null;
-    const version = std.mem.readInt(u32, bytes[1..5], .big);
-    const dcid_len = bytes[5];
-    if (dcid_len > 20) return null;
-    var pos: usize = 6;
-    if (bytes.len < pos + @as(usize, dcid_len) + 1) return null;
-    const dcid = bytes[pos .. pos + dcid_len];
-    pos += dcid_len;
-
-    const scid_len = bytes[pos];
-    if (scid_len > 20) return null;
-    pos += 1;
-    if (bytes.len < pos + @as(usize, scid_len)) return null;
-    const scid = bytes[pos .. pos + scid_len];
-
-    return .{ .version = version, .dcid = dcid, .scid = scid };
+    if (bytes.len == 0 or (bytes[0] & 0x80) == 0) return null;
+    const common = wire.header.peekLongCommon(bytes) catch return null;
+    return .{ .version = common.version, .dcid = common.dcid, .scid = common.scid };
 }
 
 /// True if `bytes` looks like a long-header Initial under the

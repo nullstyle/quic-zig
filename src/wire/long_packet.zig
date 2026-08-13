@@ -555,27 +555,14 @@ fn openLongHeader(
         return Error.UnsupportedSuite;
     }
 
-    // Walk the unprotected header structure manually; the PN bytes
-    // are still HP-masked, so we ignore the parser's pn_length /
-    // pn_truncated and re-derive them after HP is removed.
-    var pos: usize = 1;
-    pos += 4; // version
-
-    if (src.len < pos + 1) return Error.InsufficientBytes;
-    const dcid_len = src[pos];
-    pos += 1;
-    if (dcid_len > header.max_cid_len) return Error.ConnIdTooLong;
-    if (src.len < pos + dcid_len) return Error.InsufficientBytes;
-    const dcid = try header.ConnId.fromSlice(src[pos .. pos + dcid_len]);
-    pos += dcid_len;
-
-    if (src.len < pos + 1) return Error.InsufficientBytes;
-    const scid_len = src[pos];
-    pos += 1;
-    if (scid_len > header.max_cid_len) return Error.ConnIdTooLong;
-    if (src.len < pos + scid_len) return Error.InsufficientBytes;
-    const scid = try header.ConnId.fromSlice(src[pos .. pos + scid_len]);
-    pos += scid_len;
+    // Walk the unprotected version-invariant prefix via the shared
+    // `header.peekLongCommon`; the PN bytes are still HP-masked, so
+    // we deliberately avoid `header.parse` and re-derive pn_length /
+    // pn_truncated ourselves after HP is removed.
+    const common = try header.peekLongCommon(src);
+    const dcid = try header.ConnId.fromSlice(common.dcid);
+    const scid = try header.ConnId.fromSlice(common.scid);
+    var pos: usize = common.end_pos;
 
     var token: []const u8 = &.{};
     if (expected_type == .initial) {
