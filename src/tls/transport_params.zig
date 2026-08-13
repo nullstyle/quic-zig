@@ -261,146 +261,96 @@ pub const Params = struct {
     /// emitted; the resulting blob is the same shape regardless of
     /// whether the sender is client or server.
     pub fn encode(self: Params, dst: []u8) Error!usize {
-        var pos: usize = 0;
-        if (self.original_destination_connection_id) |cid| {
-            pos += try writeBytes(dst, pos, Id.original_destination_connection_id, cid.slice());
-        }
-        if (self.max_idle_timeout_ms != 0) {
-            pos += try writeVarint(dst, pos, Id.max_idle_timeout, self.max_idle_timeout_ms);
-        }
-        if (self.stateless_reset_token) |tok| {
-            pos += try writeBytes(dst, pos, Id.stateless_reset_token, &tok);
-        }
-        if (self.max_udp_payload_size != 65527) {
-            pos += try writeVarint(dst, pos, Id.max_udp_payload_size, self.max_udp_payload_size);
-        }
-        if (self.initial_max_data != 0) {
-            pos += try writeVarint(dst, pos, Id.initial_max_data, self.initial_max_data);
-        }
-        if (self.initial_max_stream_data_bidi_local != 0) {
-            pos += try writeVarint(dst, pos, Id.initial_max_stream_data_bidi_local, self.initial_max_stream_data_bidi_local);
-        }
-        if (self.initial_max_stream_data_bidi_remote != 0) {
-            pos += try writeVarint(dst, pos, Id.initial_max_stream_data_bidi_remote, self.initial_max_stream_data_bidi_remote);
-        }
-        if (self.initial_max_stream_data_uni != 0) {
-            pos += try writeVarint(dst, pos, Id.initial_max_stream_data_uni, self.initial_max_stream_data_uni);
-        }
-        if (self.initial_max_streams_bidi != 0) {
-            pos += try writeVarint(dst, pos, Id.initial_max_streams_bidi, self.initial_max_streams_bidi);
-        }
-        if (self.initial_max_streams_uni != 0) {
-            pos += try writeVarint(dst, pos, Id.initial_max_streams_uni, self.initial_max_streams_uni);
-        }
-        if (self.ack_delay_exponent != 3) {
-            pos += try writeVarint(dst, pos, Id.ack_delay_exponent, self.ack_delay_exponent);
-        }
-        if (self.max_ack_delay_ms != 25) {
-            pos += try writeVarint(dst, pos, Id.max_ack_delay, self.max_ack_delay_ms);
-        }
-        if (self.disable_active_migration) {
-            pos += try writeFlag(dst, pos, Id.disable_active_migration);
-        }
-        if (self.preferred_address) |addr| {
-            pos += try writePreferredAddress(dst, pos, addr);
-        }
-        if (self.active_connection_id_limit != 2) {
-            pos += try writeVarint(dst, pos, Id.active_connection_id_limit, self.active_connection_id_limit);
-        }
-        if (self.initial_source_connection_id) |cid| {
-            pos += try writeBytes(dst, pos, Id.initial_source_connection_id, cid.slice());
-        }
-        if (self.retry_source_connection_id) |cid| {
-            pos += try writeBytes(dst, pos, Id.retry_source_connection_id, cid.slice());
-        }
-        if (self.compatible_versions_count > 0) {
-            pos += try writeVersionList(dst, pos, Id.version_information, self.compatibleVersions());
-        }
-        if (self.max_datagram_frame_size != 0) {
-            pos += try writeVarint(dst, pos, Id.max_datagram_frame_size, self.max_datagram_frame_size);
-        }
-        if (self.grease_quic_bit) {
-            pos += try writeFlag(dst, pos, Id.grease_quic_bit);
-        }
-        if (self.initial_max_path_id) |max_path_id| {
-            pos += try writeVarint(dst, pos, Id.initial_max_path_id, max_path_id);
-        }
-        if (self.alternative_address) {
-            pos += try writeFlag(dst, pos, Id.alternative_address);
-        }
-        return pos;
+        var sink: ByteSink = .{ .dst = dst };
+        return self.emit(&sink);
     }
 
-    /// Exact byte length `encode` will emit for `self`.
+    /// Exact byte length `encode` will emit for `self`. True by
+    /// construction: both functions drive the same `emit` arm list
+    /// and differ only in the sink each parameter is fed to.
+    ///
+    /// Structurally cannot return `BufferTooSmall` (a `CountSink`
+    /// has no buffer); `resumption_state` sizes persisted envelopes
+    /// from this and hands `encode` an exactly-sized sub-slice.
     pub fn encodedLen(self: Params) Error!usize {
-        var len: usize = 0;
+        var sink: CountSink = .{};
+        return self.emit(&sink);
+    }
+
+    /// Single source of truth for the emit-predicate list: which
+    /// parameters are emitted, in which order, and under which
+    /// non-default conditions. The RFC 9000 §18.2 default sentinels
+    /// (65527 / 3 / 25 / 2) live here and nowhere else. `encode` and
+    /// `encodedLen` both run this body — with a `*ByteSink` and a
+    /// `*CountSink` respectively — so the two can never drift.
+    fn emit(self: Params, sink: anytype) Error!usize {
         if (self.original_destination_connection_id) |cid| {
-            len += try bytesEncodedLen(Id.original_destination_connection_id, cid.slice().len);
+            try sink.bytesParam(Id.original_destination_connection_id, cid.slice());
         }
         if (self.max_idle_timeout_ms != 0) {
-            len += try varintParamEncodedLen(Id.max_idle_timeout, self.max_idle_timeout_ms);
+            try sink.varintParam(Id.max_idle_timeout, self.max_idle_timeout_ms);
         }
         if (self.stateless_reset_token) |tok| {
-            len += try bytesEncodedLen(Id.stateless_reset_token, tok.len);
+            try sink.bytesParam(Id.stateless_reset_token, &tok);
         }
         if (self.max_udp_payload_size != 65527) {
-            len += try varintParamEncodedLen(Id.max_udp_payload_size, self.max_udp_payload_size);
+            try sink.varintParam(Id.max_udp_payload_size, self.max_udp_payload_size);
         }
         if (self.initial_max_data != 0) {
-            len += try varintParamEncodedLen(Id.initial_max_data, self.initial_max_data);
+            try sink.varintParam(Id.initial_max_data, self.initial_max_data);
         }
         if (self.initial_max_stream_data_bidi_local != 0) {
-            len += try varintParamEncodedLen(Id.initial_max_stream_data_bidi_local, self.initial_max_stream_data_bidi_local);
+            try sink.varintParam(Id.initial_max_stream_data_bidi_local, self.initial_max_stream_data_bidi_local);
         }
         if (self.initial_max_stream_data_bidi_remote != 0) {
-            len += try varintParamEncodedLen(Id.initial_max_stream_data_bidi_remote, self.initial_max_stream_data_bidi_remote);
+            try sink.varintParam(Id.initial_max_stream_data_bidi_remote, self.initial_max_stream_data_bidi_remote);
         }
         if (self.initial_max_stream_data_uni != 0) {
-            len += try varintParamEncodedLen(Id.initial_max_stream_data_uni, self.initial_max_stream_data_uni);
+            try sink.varintParam(Id.initial_max_stream_data_uni, self.initial_max_stream_data_uni);
         }
         if (self.initial_max_streams_bidi != 0) {
-            len += try varintParamEncodedLen(Id.initial_max_streams_bidi, self.initial_max_streams_bidi);
+            try sink.varintParam(Id.initial_max_streams_bidi, self.initial_max_streams_bidi);
         }
         if (self.initial_max_streams_uni != 0) {
-            len += try varintParamEncodedLen(Id.initial_max_streams_uni, self.initial_max_streams_uni);
+            try sink.varintParam(Id.initial_max_streams_uni, self.initial_max_streams_uni);
         }
         if (self.ack_delay_exponent != 3) {
-            len += try varintParamEncodedLen(Id.ack_delay_exponent, self.ack_delay_exponent);
+            try sink.varintParam(Id.ack_delay_exponent, self.ack_delay_exponent);
         }
         if (self.max_ack_delay_ms != 25) {
-            len += try varintParamEncodedLen(Id.max_ack_delay, self.max_ack_delay_ms);
+            try sink.varintParam(Id.max_ack_delay, self.max_ack_delay_ms);
         }
         if (self.disable_active_migration) {
-            len += try flagEncodedLen(Id.disable_active_migration);
+            try sink.flag(Id.disable_active_migration);
         }
         if (self.preferred_address) |addr| {
-            len += try preferredAddressEncodedLen(addr);
+            try sink.preferredAddress(addr);
         }
         if (self.active_connection_id_limit != 2) {
-            len += try varintParamEncodedLen(Id.active_connection_id_limit, self.active_connection_id_limit);
+            try sink.varintParam(Id.active_connection_id_limit, self.active_connection_id_limit);
         }
         if (self.initial_source_connection_id) |cid| {
-            len += try bytesEncodedLen(Id.initial_source_connection_id, cid.slice().len);
+            try sink.bytesParam(Id.initial_source_connection_id, cid.slice());
         }
         if (self.retry_source_connection_id) |cid| {
-            len += try bytesEncodedLen(Id.retry_source_connection_id, cid.slice().len);
+            try sink.bytesParam(Id.retry_source_connection_id, cid.slice());
         }
         if (self.compatible_versions_count > 0) {
-            len += try versionListEncodedLen(Id.version_information, self.compatibleVersions());
+            try sink.versionList(Id.version_information, self.compatibleVersions());
         }
         if (self.max_datagram_frame_size != 0) {
-            len += try varintParamEncodedLen(Id.max_datagram_frame_size, self.max_datagram_frame_size);
+            try sink.varintParam(Id.max_datagram_frame_size, self.max_datagram_frame_size);
         }
         if (self.grease_quic_bit) {
-            len += try flagEncodedLen(Id.grease_quic_bit);
+            try sink.flag(Id.grease_quic_bit);
         }
         if (self.initial_max_path_id) |max_path_id| {
-            len += try varintParamEncodedLen(Id.initial_max_path_id, max_path_id);
+            try sink.varintParam(Id.initial_max_path_id, max_path_id);
         }
         if (self.alternative_address) {
-            len += try flagEncodedLen(Id.alternative_address);
+            try sink.flag(Id.alternative_address);
         }
-        return len;
+        return sink.total();
     }
 
     /// Parse a transport-parameters blob. Unknown parameter ids are
@@ -561,17 +511,129 @@ pub const PreferredAddress = struct {
     stateless_reset_token: [16]u8 = @splat(0),
 };
 
-fn writeVarint(dst: []u8, pos: usize, id: u64, value: u64) Error!usize {
-    var written: usize = 0;
-    if (dst.len < pos) return Error.BufferTooSmall;
-    written += try varint.encode(dst[pos..], id);
-    const value_len = varint.encodedLen(value);
-    if (value_len == 0) return Error.ValueTooLarge;
-    written += try varint.encode(dst[pos + written ..], value_len);
-    written += try varint.encode(dst[pos + written ..], value);
-    return written;
-}
+/// Byte-writing sink for `Params.emit`: each method is the wire
+/// encoder for one parameter shape, appending at `pos` in `dst`.
+/// `CountSink` is the paired size oracle — its methods must return
+/// exactly the number of bytes these methods write.
+const ByteSink = struct {
+    dst: []u8,
+    pos: usize = 0,
 
+    fn total(self: *const ByteSink) usize {
+        return self.pos;
+    }
+
+    fn varintParam(self: *ByteSink, id: u64, value: u64) Error!void {
+        const dst = self.dst;
+        const pos = self.pos;
+        var written: usize = 0;
+        if (dst.len < pos) return Error.BufferTooSmall;
+        written += try varint.encode(dst[pos..], id);
+        const value_len = varint.encodedLen(value);
+        if (value_len == 0) return Error.ValueTooLarge;
+        written += try varint.encode(dst[pos + written ..], value_len);
+        written += try varint.encode(dst[pos + written ..], value);
+        self.pos = pos + written;
+    }
+
+    fn bytesParam(self: *ByteSink, id: u64, bytes: []const u8) Error!void {
+        const dst = self.dst;
+        const pos = self.pos;
+        var written: usize = 0;
+        written += try varint.encode(dst[pos..], id);
+        written += try varint.encode(dst[pos + written ..], bytes.len);
+        if (dst.len < pos + written + bytes.len) return Error.BufferTooSmall;
+        @memcpy(dst[pos + written .. pos + written + bytes.len], bytes);
+        written += bytes.len;
+        self.pos = pos + written;
+    }
+
+    fn flag(self: *ByteSink, id: u64) Error!void {
+        const dst = self.dst;
+        const pos = self.pos;
+        var written: usize = 0;
+        written += try varint.encode(dst[pos..], id);
+        written += try varint.encode(dst[pos + written ..], 0);
+        self.pos = pos + written;
+    }
+
+    fn versionList(self: *ByteSink, id: u64, versions: []const u32) Error!void {
+        const value_len = try versionListValueLen(versions);
+        const dst = self.dst;
+        const pos = self.pos;
+        var written: usize = 0;
+        written += try varint.encode(dst[pos..], id);
+        written += try varint.encode(dst[pos + written ..], value_len);
+        if (dst.len < pos + written + value_len) return Error.BufferTooSmall;
+        var i: usize = 0;
+        while (i < versions.len) : (i += 1) {
+            std.mem.writeInt(u32, dst[pos + written + i * 4 ..][0..4], versions[i], .big);
+        }
+        written += value_len;
+        self.pos = pos + written;
+    }
+
+    fn preferredAddress(self: *ByteSink, addr: PreferredAddress) Error!void {
+        const cid_len = addr.connection_id.len;
+        const value_len = preferredAddressValueLen(addr);
+        const dst = self.dst;
+        const pos = self.pos;
+        var written: usize = 0;
+        written += try varint.encode(dst[pos..], Id.preferred_address);
+        written += try varint.encode(dst[pos + written ..], value_len);
+        if (dst.len < pos + written + value_len) return Error.BufferTooSmall;
+
+        const value_start = pos + written;
+        @memcpy(dst[value_start .. value_start + 4], &addr.ipv4_address);
+        std.mem.writeInt(u16, dst[value_start + 4 ..][0..2], addr.ipv4_port, .big);
+        @memcpy(dst[value_start + 6 .. value_start + 22], &addr.ipv6_address);
+        std.mem.writeInt(u16, dst[value_start + 22 ..][0..2], addr.ipv6_port, .big);
+        dst[value_start + 24] = cid_len;
+        @memcpy(dst[value_start + 25 .. value_start + 25 + cid_len], addr.connection_id.slice());
+        @memcpy(dst[value_start + 25 + cid_len .. value_start + value_len], &addr.stateless_reset_token);
+        written += value_len;
+        self.pos = pos + written;
+    }
+};
+
+/// Counting sink for `Params.emit`: each method computes the exact
+/// wire size its `ByteSink` counterpart writes, without touching a
+/// buffer. Must never return `BufferTooSmall` (there is no buffer to
+/// overrun) — `resumption_state` relies on that when it sizes the
+/// persisted 0-RTT envelope from `encodedLen` and then hands `encode`
+/// an exactly-sized sub-slice.
+const CountSink = struct {
+    len: usize = 0,
+
+    fn total(self: *const CountSink) usize {
+        return self.len;
+    }
+
+    fn varintParam(self: *CountSink, id: u64, value: u64) Error!void {
+        const value_len = varint.encodedLen(value);
+        if (value_len == 0) return Error.ValueTooLarge;
+        self.len += try fieldEncodedLen(id, value_len);
+    }
+
+    fn bytesParam(self: *CountSink, id: u64, bytes: []const u8) Error!void {
+        self.len += try fieldEncodedLen(id, bytes.len);
+    }
+
+    fn flag(self: *CountSink, id: u64) Error!void {
+        self.len += try fieldEncodedLen(id, 0);
+    }
+
+    fn versionList(self: *CountSink, id: u64, versions: []const u32) Error!void {
+        self.len += try fieldEncodedLen(id, try versionListValueLen(versions));
+    }
+
+    fn preferredAddress(self: *CountSink, addr: PreferredAddress) Error!void {
+        self.len += try fieldEncodedLen(Id.preferred_address, preferredAddressValueLen(addr));
+    }
+};
+
+/// Size of one `(id, length, value)` triple on the wire given the
+/// value's byte length: varint(id) + varint(length) + value bytes.
 fn fieldEncodedLen(id: u64, value_len: usize) Error!usize {
     const id_len = varint.encodedLen(id);
     if (id_len == 0) return Error.ValueTooLarge;
@@ -581,57 +643,23 @@ fn fieldEncodedLen(id: u64, value_len: usize) Error!usize {
     return @as(usize, id_len) + @as(usize, len_len) + value_len;
 }
 
-fn varintParamEncodedLen(id: u64, value: u64) Error!usize {
-    const value_len = varint.encodedLen(value);
-    if (value_len == 0) return Error.ValueTooLarge;
-    return fieldEncodedLen(id, value_len);
-}
-
-fn bytesEncodedLen(id: u64, bytes_len: usize) Error!usize {
-    return fieldEncodedLen(id, bytes_len);
-}
-
-fn flagEncodedLen(id: u64) Error!usize {
-    return fieldEncodedLen(id, 0);
-}
-
-fn versionListEncodedLen(id: u64, versions: []const u32) Error!usize {
+/// Validates the RFC 9368 §5 version list once for both sinks and
+/// returns its encoded value size (4 bytes per version).
+fn versionListValueLen(versions: []const u32) Error!usize {
     if (versions.len == 0) return Error.InvalidValue;
     if (versions.len > max_compatible_versions) return Error.InvalidValue;
-    return fieldEncodedLen(id, versions.len * 4);
+    return versions.len * 4;
 }
 
-fn writeBytes(dst: []u8, pos: usize, id: u64, bytes: []const u8) Error!usize {
-    var written: usize = 0;
-    written += try varint.encode(dst[pos..], id);
-    written += try varint.encode(dst[pos + written ..], bytes.len);
-    if (dst.len < pos + written + bytes.len) return Error.BufferTooSmall;
-    @memcpy(dst[pos + written .. pos + written + bytes.len], bytes);
-    written += bytes.len;
-    return written;
-}
+/// Fixed portion of the `preferred_address` value (RFC 9000 §18.2):
+/// IPv4 address (4) + IPv4 port (2) + IPv6 address (16) + IPv6 port
+/// (2) + CID length prefix (1) + stateless reset token (16).
+const preferred_address_fixed_len: usize = 4 + 2 + 16 + 2 + 1 + 16;
 
-fn writeFlag(dst: []u8, pos: usize, id: u64) Error!usize {
-    var written: usize = 0;
-    written += try varint.encode(dst[pos..], id);
-    written += try varint.encode(dst[pos + written ..], 0);
-    return written;
-}
-
-fn writeVersionList(dst: []u8, pos: usize, id: u64, versions: []const u32) Error!usize {
-    if (versions.len == 0) return Error.InvalidValue;
-    if (versions.len > max_compatible_versions) return Error.InvalidValue;
-    const value_len: usize = versions.len * 4;
-    var written: usize = 0;
-    written += try varint.encode(dst[pos..], id);
-    written += try varint.encode(dst[pos + written ..], value_len);
-    if (dst.len < pos + written + value_len) return Error.BufferTooSmall;
-    var i: usize = 0;
-    while (i < versions.len) : (i += 1) {
-        std.mem.writeInt(u32, dst[pos + written + i * 4 ..][0..4], versions[i], .big);
-    }
-    written += value_len;
-    return written;
+/// Wire size of a `preferred_address` value: the fixed fields plus
+/// the connection-id bytes.
+fn preferredAddressValueLen(addr: PreferredAddress) usize {
+    return preferred_address_fixed_len + addr.connection_id.len;
 }
 
 fn setVersionInformation(p: *Params, value: []const u8) Error!void {
@@ -649,31 +677,6 @@ fn setVersionInformation(p: *Params, value: []const u8) Error!void {
     }
     @memset(p.compatible_versions_buf[count..], 0);
     p.compatible_versions_count = @intCast(count);
-}
-
-fn writePreferredAddress(dst: []u8, pos: usize, addr: PreferredAddress) Error!usize {
-    const cid_len = addr.connection_id.len;
-    const value_len: usize = 4 + 2 + 16 + 2 + 1 + cid_len + 16;
-    var written: usize = 0;
-    written += try varint.encode(dst[pos..], Id.preferred_address);
-    written += try varint.encode(dst[pos + written ..], value_len);
-    if (dst.len < pos + written + value_len) return Error.BufferTooSmall;
-
-    const value_start = pos + written;
-    @memcpy(dst[value_start .. value_start + 4], &addr.ipv4_address);
-    std.mem.writeInt(u16, dst[value_start + 4 ..][0..2], addr.ipv4_port, .big);
-    @memcpy(dst[value_start + 6 .. value_start + 22], &addr.ipv6_address);
-    std.mem.writeInt(u16, dst[value_start + 22 ..][0..2], addr.ipv6_port, .big);
-    dst[value_start + 24] = cid_len;
-    @memcpy(dst[value_start + 25 .. value_start + 25 + cid_len], addr.connection_id.slice());
-    @memcpy(dst[value_start + 25 + cid_len .. value_start + 41 + cid_len], &addr.stateless_reset_token);
-    written += value_len;
-    return written;
-}
-
-fn preferredAddressEncodedLen(addr: PreferredAddress) Error!usize {
-    const value_len: usize = 4 + 2 + 16 + 2 + 1 + addr.connection_id.len + 16;
-    return fieldEncodedLen(Id.preferred_address, value_len);
 }
 
 fn hasParameterId(src: []const u8, needle: u64) Error!bool {
@@ -763,10 +766,10 @@ fn setOne(p: *Params, id: u64, value: []const u8) Error!void {
 }
 
 fn decodePreferredAddress(value: []const u8) Error!PreferredAddress {
-    if (value.len < 41) return Error.InvalidValue;
+    if (value.len < preferred_address_fixed_len) return Error.InvalidValue;
     const cid_len = value[24];
     if (cid_len > path_mod.max_cid_len) return Error.InvalidValue;
-    const expected_len: usize = 41 + @as(usize, cid_len);
+    const expected_len: usize = preferred_address_fixed_len + @as(usize, cid_len);
     if (value.len != expected_len) return Error.InvalidValue;
 
     var addr: PreferredAddress = .{
@@ -970,6 +973,41 @@ test "decode skips unknown ids" {
     try testing.expectEqual(@as(u64, 5), got.initial_max_data);
 }
 
+test "encodedLen matches encode with every parameter set" {
+    // Every one of the 22 emit arms fires, including the three no
+    // subset round-trip covers (grease_quic_bit, alternative_address,
+    // compatible_versions). Guards the encode/encodedLen contract
+    // deterministically across the full parameter list.
+    var sent: Params = .{
+        .original_destination_connection_id = ConnectionId.fromSlice(&.{ 1, 2, 3, 4 }),
+        .max_idle_timeout_ms = 30_000,
+        .stateless_reset_token = @splat(0x5a),
+        .max_udp_payload_size = 1350,
+        .initial_max_data = 1 << 20,
+        .initial_max_stream_data_bidi_local = 1 << 18,
+        .initial_max_stream_data_bidi_remote = 1 << 17,
+        .initial_max_stream_data_uni = 1 << 16,
+        .initial_max_streams_bidi = 100,
+        .initial_max_streams_uni = 3,
+        .ack_delay_exponent = 5,
+        .max_ack_delay_ms = 40,
+        .disable_active_migration = true,
+        .preferred_address = .{ .connection_id = ConnectionId.fromSlice(&.{ 9, 8, 7 }) },
+        .active_connection_id_limit = 4,
+        .initial_source_connection_id = ConnectionId.fromSlice(&.{ 5, 6 }),
+        .retry_source_connection_id = ConnectionId.fromSlice(&.{7}),
+        .max_datagram_frame_size = 1200,
+        .grease_quic_bit = true,
+        .initial_max_path_id = 3,
+        .alternative_address = true,
+    };
+    try sent.setCompatibleVersions(&.{ 0x0000_0001, 0x6b33_43cf });
+
+    var buf: [512]u8 = undefined;
+    const n = try sent.encode(&buf);
+    try testing.expectEqual(try sent.encodedLen(), n);
+}
+
 test "default-only Params encodes to empty blob" {
     const empty: Params = .{};
     var buf: [16]u8 = undefined;
@@ -1016,12 +1054,12 @@ test "decodeAs rejects max_udp_payload_size below 1200 (universal §18.2 ¶9)" {
 
 test "decodeAs rejects initial_max_streams_bidi above 2^60 (universal §18.2 ¶19)" {
     var buf: [32]u8 = undefined;
-    var pos: usize = 0;
-    pos += try writeVarint(&buf, pos, Id.initial_max_streams_bidi, (1 << 60) + 1);
-    pos += try writeBytes(&buf, pos, Id.initial_source_connection_id, example_scid.slice());
+    var sink: ByteSink = .{ .dst = &buf };
+    try sink.varintParam(Id.initial_max_streams_bidi, (1 << 60) + 1);
+    try sink.bytesParam(Id.initial_source_connection_id, example_scid.slice());
     try testing.expectError(
         Error.TransportParameterError,
-        decodeAs(buf[0..pos], .{ .role = .client }),
+        decodeAs(buf[0..sink.pos], .{ .role = .client }),
     );
 }
 
@@ -1355,6 +1393,7 @@ fn fuzzTransportParamsRoundTrip(_: void, smith: *std.testing.Smith) anyerror!voi
 
     var encoded: [1024]u8 = undefined;
     const encoded_len = try params.encode(&encoded);
+    try testing.expectEqual(try params.encodedLen(), encoded_len);
     const decoded = try Params.decode(encoded[0..encoded_len]);
     var reencoded: [1024]u8 = undefined;
     const reencoded_len = try decoded.encode(&reencoded);
