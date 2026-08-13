@@ -42,7 +42,9 @@ const posix = std.posix;
 /// resolve to `void` on macOS / Darwin (the `std.c` switch elides
 /// Apple), so we hard-code the numeric values from the kernel
 /// headers — these are wire-stable ABI on every Unix we run on.
-const ip_consts = blk: {
+// INTERNAL: pub for direct sibling import (udp_batch.zig tests build
+// synthetic IP_TOS control buffers with it).
+pub const ip_consts = blk: {
     if (builtin.os.tag == .linux) {
         // include/uapi/linux/in.h
         break :blk struct {
@@ -227,76 +229,156 @@ fn setsockoptIntChecked(handle: Handle, level: u32, optname: u32, opt_bytes: []c
     }
 }
 
-/// Walk a populated `recvmsg` control buffer and extract the IP
-/// ECN codepoint, if present. Returns `not_ect` when no IP_TOS /
-/// IPV6_TCLASS cmsg was found — that's the conservative choice
-/// (no ECN marking observed). The walker tolerates malformed cmsg
-/// payloads (zero-length data, oversized `cmsg_len`) by skipping
-/// them; QUIC peers can't influence our control buffer so the
-/// guards are belt-and-suspenders for kernel quirks.
-pub fn parseEcnFromControl(control: []const u8) EcnCodepoint {
-    if (!has_ip_ecn_sockopts) return .not_ect;
+/// One `CMSG_ALIGN` unit: both `CMSG_DATA` (header -> payload) and
+/// `CMSG_NXTHDR` (entry -> entry) pad to this boundary. Matches the
+/// Linux kernel and glibc/musl (`sizeof(size_t)`).
+///
+/// KNOWN DIVERGENCE, deliberately preserved: Darwin's kernel macros
+/// use `__DARWIN_ALIGN32` (4 bytes), so this constant over-advances
+/// there for cmsg payloads of 5-8 bytes mod 8. It is harmless for
+/// every payload actually in play (1-byte IP_TOS and 4-byte
+/// IPV6_TCLASS / UDP_GRO all pad to the same boundary either way),
+/// but if a differently-sized cmsg ever matters on macOS, the fix is
+/// this one constant — every walker and builder in the tree shares it.
+const cmsg_align: usize = @sizeOf(usize);
+
+/// Iterator over the cmsg entries of a populated `recvmsg` control
+/// buffer — the one shared POSIX `CMSG_FIRSTHDR` / `CMSG_NXTHDR` walk
+/// that `parseEcnFromControl` and `parseGroSegmentFromControl` used
+/// to hand-roll separately. Tolerates malformed entries (`cmsg_len`
+/// shorter than a header, or overrunning the buffer) by ending the
+/// walk; QUIC peers can't influence our control buffer so the guards
+/// are belt-and-suspenders for kernel quirks.
+///
+/// The layout projection lives in struct-level decls so it is only
+/// sema'd when a caller actually uses the iterator — callers MUST
+/// gate on `has_cmsg_layout` first (`std.c.cmsghdr` is `void` on
+/// Windows, where `@offsetOf` would be a compile error).
+const CmsgIter = struct {
+    control: []const u8,
+    pos: usize = 0,
 
     // cmsghdr layout differs between glibc Linux (`size_t` len, two
     // `int`) and BSD/macOS (`socklen_t` len, two `int`). We read both
     // by reaching into `std.c.cmsghdr` (the `extern struct` defined
     // for every supported OS) and projecting the byte offsets via
-    // `@offsetOf` / `@sizeOf`. CMSG_DATA pads the header to
-    // pointer-alignment; CMSG_NXTHDR pads `cmsg_len` to the same.
+    // `@offsetOf` / `@sizeOf`.
     const Cmsg = std.c.cmsghdr;
     const header_size: usize = @sizeOf(Cmsg);
     const len_off: usize = @offsetOf(Cmsg, "len");
     const level_off: usize = @offsetOf(Cmsg, "level");
     const type_off: usize = @offsetOf(Cmsg, "type");
     const len_size: usize = @sizeOf(@FieldType(Cmsg, "len"));
-    const align_to: usize = @sizeOf(usize);
 
-    var pos: usize = 0;
-    while (pos + header_size <= control.len) {
+    /// One decoded cmsg entry. `data` is the payload
+    /// (`CMSG_DATA(cmsg)[0 .. cmsg_len - header]`), already
+    /// bounds-checked against the control buffer.
+    const Entry = struct {
+        level: i32,
+        cmsg_type: i32,
+        data: []const u8,
+    };
+
+    fn init(control: []const u8) CmsgIter {
+        return .{ .control = control };
+    }
+
+    fn next(self: *CmsgIter) ?Entry {
+        const pos = self.pos;
+        if (pos + header_size > self.control.len) return null;
         const cmsg_len: usize = blk: {
             if (len_size == @sizeOf(usize)) {
-                break :blk std.mem.readInt(usize, control[pos + len_off ..][0..@sizeOf(usize)], native_endian);
+                break :blk std.mem.readInt(usize, self.control[pos + len_off ..][0..@sizeOf(usize)], native_endian);
             } else {
-                break :blk @intCast(std.mem.readInt(u32, control[pos + len_off ..][0..@sizeOf(u32)], native_endian));
+                break :blk @intCast(std.mem.readInt(u32, self.control[pos + len_off ..][0..@sizeOf(u32)], native_endian));
             }
         };
-        if (cmsg_len < header_size or pos + cmsg_len > control.len) break;
-        const cmsg_level = std.mem.readInt(i32, control[pos + level_off ..][0..4], native_endian);
-        const cmsg_type = std.mem.readInt(i32, control[pos + type_off ..][0..4], native_endian);
+        if (cmsg_len < header_size or pos + cmsg_len > self.control.len) return null;
+        const cmsg_level = std.mem.readInt(i32, self.control[pos + level_off ..][0..4], native_endian);
+        const cmsg_type = std.mem.readInt(i32, self.control[pos + type_off ..][0..4], native_endian);
 
-        const data_off = pos + header_size;
-        const data_len = cmsg_len - header_size;
+        // Advance to the next cmsg, aligned per `CMSG_ALIGN`.
+        const aligned = std.mem.alignForward(usize, cmsg_len, cmsg_align);
+        if (aligned == 0) return null;
+        self.pos = pos + aligned;
 
-        if (cmsg_level == @as(i32, @intCast(ip_consts.ip_proto)) and
-            (cmsg_type == @as(i32, @intCast(ip_consts.ip_tos)) or
-                cmsg_type == @as(i32, @intCast(ip_consts.ip_recvtos))))
+        return .{
+            .level = cmsg_level,
+            .cmsg_type = cmsg_type,
+            .data = self.control[pos + header_size ..][0 .. cmsg_len - header_size],
+        };
+    }
+};
+
+/// Serialize one cmsg (header plus payload copy, zero-padded to the
+/// kernel's `CMSG_SPACE`) into `buf`, returning the number of bytes
+/// written. The write-side twin of `CmsgIter` — one home for the
+/// projected `std.c.cmsghdr` layout, so builder and walker cannot
+/// drift. Asserts `buf` is large enough; callers must gate on
+/// `has_cmsg_layout` (see `CmsgIter`).
+// INTERNAL: pub for direct sibling import (udp_batch.zig tests build
+// synthetic UDP_GRO / IP_TOS control buffers with it).
+pub fn writeCmsg(buf: []u8, cmsg_level: i32, cmsg_type: i32, data: []const u8) usize {
+    const cmsg_len = CmsgIter.header_size + data.len;
+    const space = std.mem.alignForward(usize, cmsg_len, cmsg_align);
+    std.debug.assert(buf.len >= space);
+
+    @memset(buf[0..space], 0);
+    if (CmsgIter.len_size == @sizeOf(usize)) {
+        std.mem.writeInt(usize, buf[CmsgIter.len_off..][0..@sizeOf(usize)], cmsg_len, native_endian);
+    } else {
+        std.mem.writeInt(u32, buf[CmsgIter.len_off..][0..@sizeOf(u32)], @intCast(cmsg_len), native_endian);
+    }
+    std.mem.writeInt(i32, buf[CmsgIter.level_off..][0..4], cmsg_level, native_endian);
+    std.mem.writeInt(i32, buf[CmsgIter.type_off..][0..4], cmsg_type, native_endian);
+    @memcpy(buf[CmsgIter.header_size..][0..data.len], data);
+    return space;
+}
+
+/// Walk a populated `recvmsg` control buffer and extract the IP
+/// ECN codepoint, if present. Returns `not_ect` when no IP_TOS /
+/// IPV6_TCLASS cmsg was found — that's the conservative choice
+/// (no ECN marking observed). Malformed cmsg payloads are skipped
+/// (the walk keeps scanning); see `CmsgIter` for the traversal
+/// guards.
+///
+/// Two gates, deliberately distinct: the comptime `has_cmsg_layout`
+/// gate is structural (can this target's `std.c.cmsghdr` be walked
+/// at all — Windows can't), while `has_ip_ecn_sockopts` is policy
+/// (only targets where `setEcnRecvEnabled` can actually request
+/// TOS/TCLASS delivery should ever interpret control bytes as ECN —
+/// a BSD kernel we never asked must not have its cmsgs parsed).
+pub fn parseEcnFromControl(control: []const u8) EcnCodepoint {
+    if (comptime !has_cmsg_layout) return .not_ect;
+    if (!has_ip_ecn_sockopts) return .not_ect;
+
+    var it: CmsgIter = .init(control);
+    while (it.next()) |c| {
+        if (c.level == @as(i32, @intCast(ip_consts.ip_proto)) and
+            (c.cmsg_type == @as(i32, @intCast(ip_consts.ip_tos)) or
+                c.cmsg_type == @as(i32, @intCast(ip_consts.ip_recvtos))))
         {
             // The IP TOS byte may be carried as a single u8 (Linux
             // / macOS) or as a 4-byte int (some BSDs). Either way
             // the low byte holds the TOS.
-            if (data_len >= 1 and data_off < control.len) {
-                const tos_byte: u8 = control[data_off];
-                return @fromBackingInt(@intCast(@as(u2, @truncate(tos_byte & 0x03))));
+            if (c.data.len >= 1) {
+                return @fromBackingInt(@intCast(@as(u2, @truncate(c.data[0] & 0x03))));
             }
         }
-        if (cmsg_level == @as(i32, @intCast(ip_consts.ipv6_proto)) and cmsg_type == @as(i32, @intCast(ip_consts.ipv6_tclass))) {
+        if (c.level == @as(i32, @intCast(ip_consts.ipv6_proto)) and
+            c.cmsg_type == @as(i32, @intCast(ip_consts.ipv6_tclass)))
+        {
             // IPV6_TCLASS is documented as a 4-byte int across all
             // major Unixes; the low byte holds the TCLASS (DSCP +
             // ECN), of which we only consume the low two ECN bits.
-            if (data_len >= 4 and data_off + 4 <= control.len) {
-                const tclass = std.mem.readInt(i32, control[data_off..][0..4], native_endian);
+            if (c.data.len >= 4) {
+                const tclass = std.mem.readInt(i32, c.data[0..4], native_endian);
                 return @fromBackingInt(@intCast(@as(u2, @truncate(@as(u32, @bitCast(tclass)) & 0x03))));
             }
-            if (data_len >= 1 and data_off < control.len) {
-                const tos_byte: u8 = control[data_off];
-                return @fromBackingInt(@intCast(@as(u2, @truncate(tos_byte & 0x03))));
+            if (c.data.len >= 1) {
+                return @fromBackingInt(@intCast(@as(u2, @truncate(c.data[0] & 0x03))));
             }
         }
-
-        // Advance to the next cmsg, aligned per `CMSG_ALIGN`.
-        const aligned = std.mem.alignForward(usize, cmsg_len, align_to);
-        if (aligned == 0) break;
-        pos += aligned;
     }
     return .not_ect;
 }
@@ -708,52 +790,52 @@ test "parseEcnFromControl: empty buffer is not_ect" {
 
 test "parseEcnFromControl: hand-rolled IP_TOS cmsg returns the codepoint" {
     if (!has_ip_ecn_sockopts) return error.SkipZigTest;
-    const Cmsg = std.c.cmsghdr;
-    const header_size: usize = @sizeOf(Cmsg);
-    const align_to: usize = @sizeOf(usize);
-    const data_len: usize = 1;
-    const cmsg_total = std.mem.alignForward(usize, header_size + data_len, align_to);
-    var buf: [64]u8 = @splat(0);
-    const len_off: usize = @offsetOf(Cmsg, "len");
-    const level_off: usize = @offsetOf(Cmsg, "level");
-    const type_off: usize = @offsetOf(Cmsg, "type");
-    const len_size: usize = @sizeOf(@FieldType(Cmsg, "len"));
-    if (len_size == @sizeOf(usize)) {
-        std.mem.writeInt(usize, buf[len_off..][0..@sizeOf(usize)], header_size + data_len, native_endian);
-    } else {
-        std.mem.writeInt(u32, buf[len_off..][0..@sizeOf(u32)], @as(u32, @intCast(header_size + data_len)), native_endian);
-    }
-    std.mem.writeInt(i32, buf[level_off..][0..4], @as(i32, @intCast(ip_consts.ip_proto)), native_endian);
-    std.mem.writeInt(i32, buf[type_off..][0..4], @as(i32, @intCast(ip_consts.ip_tos)), native_endian);
+    var buf: [64]u8 = undefined;
     // ECT(0) on the wire is the byte 0x02 (low two bits of TOS).
-    buf[header_size] = 0x02;
+    const cmsg_total = writeCmsg(
+        &buf,
+        @intCast(ip_consts.ip_proto),
+        @intCast(ip_consts.ip_tos),
+        &.{0x02},
+    );
     const out = parseEcnFromControl(buf[0..cmsg_total]);
     try testing.expectEqual(EcnCodepoint.ect0, out);
 }
 
 test "parseEcnFromControl: hand-rolled IPV6_TCLASS cmsg returns the codepoint" {
     if (!has_ip_ecn_sockopts) return error.SkipZigTest;
-    const Cmsg = std.c.cmsghdr;
-    const header_size: usize = @sizeOf(Cmsg);
-    const align_to: usize = @sizeOf(usize);
-    const data_len: usize = 4;
-    const cmsg_total = std.mem.alignForward(usize, header_size + data_len, align_to);
-    var buf: [64]u8 = @splat(0);
-    const len_off: usize = @offsetOf(Cmsg, "len");
-    const level_off: usize = @offsetOf(Cmsg, "level");
-    const type_off: usize = @offsetOf(Cmsg, "type");
-    const len_size: usize = @sizeOf(@FieldType(Cmsg, "len"));
-    if (len_size == @sizeOf(usize)) {
-        std.mem.writeInt(usize, buf[len_off..][0..@sizeOf(usize)], header_size + data_len, native_endian);
-    } else {
-        std.mem.writeInt(u32, buf[len_off..][0..@sizeOf(u32)], @as(u32, @intCast(header_size + data_len)), native_endian);
-    }
-    std.mem.writeInt(i32, buf[level_off..][0..4], @as(i32, @intCast(ip_consts.ipv6_proto)), native_endian);
-    std.mem.writeInt(i32, buf[type_off..][0..4], @as(i32, @intCast(ip_consts.ipv6_tclass)), native_endian);
-    // CE = 0b11.
-    std.mem.writeInt(i32, buf[header_size..][0..4], 0x03, native_endian);
+    var buf: [64]u8 = undefined;
+    // CE = 0b11, carried as the 4-byte int the kernel uses.
+    var tclass: [4]u8 = undefined;
+    std.mem.writeInt(i32, &tclass, 0x03, native_endian);
+    const cmsg_total = writeCmsg(
+        &buf,
+        @intCast(ip_consts.ipv6_proto),
+        @intCast(ip_consts.ipv6_tclass),
+        &tclass,
+    );
     const out = parseEcnFromControl(buf[0..cmsg_total]);
     try testing.expectEqual(EcnCodepoint.ce, out);
+}
+
+test "cmsg walker advances across multiple entries in one buffer" {
+    if (!has_ip_ecn_sockopts) return error.SkipZigTest;
+    // Kernel-realistic combined buffer: a UDP_GRO segment-size cmsg
+    // followed by an IP_TOS cmsg. Each parser must step over the
+    // other's entry (the aligned CMSG_NXTHDR advance) to find its own.
+    var buf: [128]u8 = undefined;
+    var seg: [4]u8 = undefined;
+    std.mem.writeInt(i32, &seg, 1350, native_endian);
+    const first = writeCmsg(&buf, sol_udp, udp_gro, &seg);
+    const second = writeCmsg(
+        buf[first..],
+        @intCast(ip_consts.ip_proto),
+        @intCast(ip_consts.ip_tos),
+        &.{0x02},
+    );
+    const control = buf[0 .. first + second];
+    try testing.expectEqual(EcnCodepoint.ect0, parseEcnFromControl(control));
+    try testing.expectEqual(@as(?u16, 1350), parseGroSegmentFromControl(control));
 }
 
 // -- Linux UDP GSO / GRO (generic segmentation / receive offload) -----------
@@ -809,85 +891,42 @@ pub fn setUdpGroEnabled(handle: Handle) SetEcnError!void {
 
 /// Serialize one `UDP_SEGMENT` cmsg carrying `segment_size` into
 /// `buf`, returning the number of bytes written (header + u16 payload,
-/// aligned like the kernel's CMSG_SPACE). Pure byte math — mirrors the
-/// layout projection `parseEcnFromControl` uses, so it is testable on
-/// every platform that has a cmsg layout at all (Windows does not; see
+/// aligned like the kernel's CMSG_SPACE). Pure byte math over the
+/// shared `writeCmsg` builder, so it is testable on every platform
+/// that has a cmsg layout at all (Windows does not; see
 /// `has_cmsg_layout`). Writes nothing there, which is unreachable in
 /// practice since GSO is Linux-only.
 pub fn writeUdpSegmentCmsg(buf: []u8, segment_size: u16) usize {
     if (comptime !has_cmsg_layout) return 0;
-    const Cmsg = std.c.cmsghdr;
-    const header_size: usize = @sizeOf(Cmsg);
-    const len_off: usize = @offsetOf(Cmsg, "len");
-    const level_off: usize = @offsetOf(Cmsg, "level");
-    const type_off: usize = @offsetOf(Cmsg, "type");
-    const len_size: usize = @sizeOf(@FieldType(Cmsg, "len"));
-    const align_to: usize = @sizeOf(usize);
-
-    const cmsg_len = header_size + @sizeOf(u16);
-    const space = std.mem.alignForward(usize, cmsg_len, align_to);
-    std.debug.assert(buf.len >= space);
-
-    @memset(buf[0..space], 0);
-    if (len_size == @sizeOf(usize)) {
-        std.mem.writeInt(usize, buf[len_off..][0..@sizeOf(usize)], cmsg_len, native_endian);
-    } else {
-        std.mem.writeInt(u32, buf[len_off..][0..@sizeOf(u32)], @intCast(cmsg_len), native_endian);
-    }
-    std.mem.writeInt(i32, buf[level_off..][0..4], sol_udp, native_endian);
-    std.mem.writeInt(i32, buf[type_off..][0..4], udp_segment, native_endian);
-    std.mem.writeInt(u16, buf[header_size..][0..2], segment_size, native_endian);
-    return space;
+    var payload: [2]u8 = undefined;
+    std.mem.writeInt(u16, &payload, segment_size, native_endian);
+    return writeCmsg(buf, sol_udp, udp_segment, &payload);
 }
 
 /// Walk a populated `recvmsg` control buffer for the kernel's
 /// `UDP_GRO` cmsg: the original segment size of a coalesced datagram.
-/// Null when absent (not coalesced, or GRO off). Same tolerant walker
-/// posture as `parseEcnFromControl`, including its comptime layout
-/// gate: platforms without a cmsg layout can never see a GRO cmsg.
+/// Null when absent (not coalesced, or GRO off). Shares `CmsgIter`
+/// with `parseEcnFromControl` — same tolerant walker, same comptime
+/// layout gate: platforms without a cmsg layout can never see a GRO
+/// cmsg.
 pub fn parseGroSegmentFromControl(control: []const u8) ?u16 {
     if (comptime !has_cmsg_layout) return null;
-    const Cmsg = std.c.cmsghdr;
-    const header_size: usize = @sizeOf(Cmsg);
-    const len_off: usize = @offsetOf(Cmsg, "len");
-    const level_off: usize = @offsetOf(Cmsg, "level");
-    const type_off: usize = @offsetOf(Cmsg, "type");
-    const len_size: usize = @sizeOf(@FieldType(Cmsg, "len"));
-    const align_to: usize = @sizeOf(usize);
-
-    var pos: usize = 0;
-    while (pos + header_size <= control.len) {
-        const cmsg_len: usize = blk: {
-            if (len_size == @sizeOf(usize)) {
-                break :blk std.mem.readInt(usize, control[pos + len_off ..][0..@sizeOf(usize)], native_endian);
-            } else {
-                break :blk @intCast(std.mem.readInt(u32, control[pos + len_off ..][0..@sizeOf(u32)], native_endian));
-            }
-        };
-        if (cmsg_len < header_size or pos + cmsg_len > control.len) break;
-        const cmsg_level = std.mem.readInt(i32, control[pos + level_off ..][0..4], native_endian);
-        const cmsg_type = std.mem.readInt(i32, control[pos + type_off ..][0..4], native_endian);
-        const data_off = pos + header_size;
-        const data_len = cmsg_len - header_size;
-
-        if (cmsg_level == sol_udp and cmsg_type == udp_gro) {
+    var it: CmsgIter = .init(control);
+    while (it.next()) |c| {
+        if (c.level == sol_udp and c.cmsg_type == udp_gro) {
             // The kernel writes an int; accept 2- or 4-byte payloads
             // like the ECN walker does.
-            if (data_len >= 4 and data_off + 4 <= control.len) {
-                const v = std.mem.readInt(i32, control[data_off..][0..4], native_endian);
+            if (c.data.len >= 4) {
+                const v = std.mem.readInt(i32, c.data[0..4], native_endian);
                 if (v > 0 and v <= std.math.maxInt(u16)) return @intCast(v);
                 return null;
             }
-            if (data_len >= 2 and data_off + 2 <= control.len) {
-                const v = std.mem.readInt(u16, control[data_off..][0..2], native_endian);
+            if (c.data.len >= 2) {
+                const v = std.mem.readInt(u16, c.data[0..2], native_endian);
                 return if (v > 0) v else null;
             }
             return null;
         }
-
-        const aligned = std.mem.alignForward(usize, cmsg_len, align_to);
-        if (aligned == 0) break;
-        pos += aligned;
     }
     return null;
 }
@@ -913,4 +952,116 @@ test "parseGroSegmentFromControl tolerates junk and empty buffers" {
     try std.testing.expectEqual(@as(?u16, null), parseGroSegmentFromControl(&.{}));
     var junk: [24]u8 = @splat(0xff);
     try std.testing.expectEqual(@as(?u16, null), parseGroSegmentFromControl(&junk));
+}
+
+// -- One-shot per-socket offload negotiation ---------------------------------
+
+/// What `negotiateUdpOffloads` should attempt on a socket. Fields
+/// mirror the `RunUdpOptions` / `RunUdpClientOptions` knobs of the
+/// same names.
+pub const UdpOffloadRequest = struct {
+    /// Attempt IETF ECN (RFC 9000 §13.4): outbound TOS/TCLASS marking
+    /// plus inbound per-datagram TOS cmsg delivery.
+    enable_ecn: bool,
+    /// Send-side codepoint applied when `enable_ecn` is set. ECT(0)
+    /// per RFC 9000 §13.4 guidance.
+    ecn_send_codepoint: EcnCodepoint = .ect0,
+    /// Probe Linux `UDP_SEGMENT` (GSO). Probe only — no default
+    /// segmentation is left configured on the socket.
+    enable_gso: bool,
+    /// Enable Linux `UDP_GRO` receive-side coalescing.
+    enable_gro: bool,
+};
+
+/// Per-socket outcome of `negotiateUdpOffloads`. Plain values on
+/// purpose: `gso_active` is mutated at runtime by the send paths
+/// (a rejected offloaded send clears it), so callers store these in
+/// their own mutable per-socket state.
+pub const UdpOffloadState = struct {
+    /// ECN is fully active: outbound marking set AND inbound cmsg
+    /// delivery enabled (see the all-or-nothing rule on
+    /// `negotiateUdpOffloads`).
+    ecn_active: bool = false,
+    /// `probeUdpGso` passed — `UDP_SEGMENT` cmsgs may be attached to
+    /// sends on this socket.
+    gso_active: bool = false,
+    /// `UDP_GRO` enabled — received datagrams may be kernel-coalesced
+    /// and carry a segment-size cmsg.
+    gro_active: bool = false,
+};
+
+/// Negotiate the datapath offloads for one freshly bound UDP socket:
+/// ECN marking + cmsg delivery, the GSO probe, and GRO. Best-effort
+/// by design — every step degrades to "inactive" rather than erroring,
+/// matching both bundled loops' per-socket posture. Socket tuning
+/// (`applyServerTuning`) is deliberately NOT part of this helper: the
+/// callers want three different failure postures for it (fatal on a
+/// primary listener, silent on alt-listeners, warn-and-continue in the
+/// QNS endpoint).
+///
+/// Two orchestration invariants live here, stated once:
+///
+///   * ECN is all-or-nothing per socket. If `setEcnSendMarking`
+///     succeeds but `setEcnRecvEnabled` fails, ECN reports INACTIVE —
+///     otherwise the loop would mark outbound packets it can never
+///     observe feedback for, and parse cmsg bytes the kernel never
+///     populates.
+///   * `gso_active` may only come from `probeUdpGso` — the
+///     load-bearing gate: the std maps a rejected sendmsg cmsg to a
+///     PANIC, so a `UDP_SEGMENT` cmsg must never reach an unprobed
+///     socket (see `probeUdpGso`).
+pub fn negotiateUdpOffloads(handle: Handle, request: UdpOffloadRequest) UdpOffloadState {
+    var state: UdpOffloadState = .{};
+    if (request.enable_ecn) {
+        var ok = true;
+        setEcnSendMarking(handle, request.ecn_send_codepoint) catch {
+            ok = false;
+        };
+        if (ok) {
+            setEcnRecvEnabled(handle, true) catch {
+                ok = false;
+            };
+        }
+        state.ecn_active = ok;
+    }
+    if (request.enable_gso) state.gso_active = probeUdpGso(handle);
+    if (request.enable_gro) {
+        if (setUdpGroEnabled(handle)) |_| {
+            state.gro_active = true;
+        } else |_| {}
+    }
+    return state;
+}
+
+test "negotiateUdpOffloads: disabled requests stay inactive" {
+    var ts = try TestSocket.init();
+    defer ts.deinit();
+    const state = negotiateUdpOffloads(ts.handle(), .{
+        .enable_ecn = false,
+        .enable_gso = false,
+        .enable_gro = false,
+    });
+    try testing.expect(!state.ecn_active);
+    try testing.expect(!state.gso_active);
+    try testing.expect(!state.gro_active);
+}
+
+test "negotiateUdpOffloads: best-effort on loopback, never errors" {
+    var ts = try TestSocket.init();
+    defer ts.deinit();
+    const state = negotiateUdpOffloads(ts.handle(), .{
+        .enable_ecn = true,
+        .enable_gso = true,
+        .enable_gro = true,
+    });
+    // GSO/GRO are Linux-only; everywhere else the probe/enable must
+    // degrade to inactive rather than error.
+    if (!has_udp_gso) {
+        try testing.expect(!state.gso_active);
+        try testing.expect(!state.gro_active);
+    }
+    // ECN can only be active where the sockopts exist at all.
+    if (!has_ip_ecn_sockopts) {
+        try testing.expect(!state.ecn_active);
+    }
 }

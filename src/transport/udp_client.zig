@@ -49,6 +49,7 @@ const std = @import("std");
 const Client = @import("../Client.zig");
 const conn_state = @import("../Connection.zig");
 const Connection = conn_state.Connection;
+const egress = @import("egress.zig");
 const path_mod = @import("../conn/path.zig");
 const socket_opts = @import("socket_opts.zig");
 const udp_batch = @import("udp_batch.zig");
@@ -248,29 +249,25 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
         };
     }
 
-    var ecn_active = options.enable_ecn;
-    if (ecn_active) {
-        socket_opts.setEcnSendMarking(sock.handle, options.ecn_send_codepoint) catch {
-            ecn_active = false;
-        };
-        if (ecn_active) {
-            socket_opts.setEcnRecvEnabled(sock.handle, true) catch {
-                ecn_active = false;
-            };
-        }
-    }
-    var gso_active = options.enable_gso and socket_opts.probeUdpGso(sock.handle);
-    var gro_active = false;
-    if (options.enable_gro) {
-        if (socket_opts.setUdpGroEnabled(sock.handle)) |_| {
-            gro_active = true;
-        } else |_| {}
-    }
+    // Negotiate socket offloads — the same per-socket best-effort
+    // posture, all-or-nothing ECN rule, and probe-before-GSO gate as
+    // the server loop, stated once in
+    // `socket_opts.negotiateUdpOffloads`.
+    const offloads = socket_opts.negotiateUdpOffloads(sock.handle, .{
+        .enable_ecn = options.enable_ecn,
+        .ecn_send_codepoint = options.ecn_send_codepoint,
+        .enable_gso = options.enable_gso,
+        .enable_gro = options.enable_gro,
+    });
+    const ecn_active = offloads.ecn_active;
+    // Mutable: a runtime GSO send error clears it (see drainOutbound).
+    var gso_active = offloads.gso_active;
+    const gro_active = offloads.gro_active;
 
     const allocator = client.allocator;
     const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
     defer allocator.free(rx);
-    var send_batch = try udp_server.SendBatch.init(
+    var send_batch = try egress.SendBatch.init(
         allocator,
         @max(1, options.max_send_batch_datagrams),
         options.tx_buffer_bytes,
@@ -381,46 +378,23 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
         now_us = udp_server.monotonicNowUs(options.io, start);
 
         if (received > batch_msgs.len) received = batch_msgs.len;
-        for (batch_msgs[0..received]) |*msg| {
-            if (msg.flags.trunc) continue;
-            const ecn: socket_opts.EcnCodepoint = if (ecn_active)
-                socket_opts.parseEcnFromControl(msg.control)
-            else
-                .not_ect;
-            const from_addr = udp_server.ipAddressToPathAddress(msg.from);
-            // GRO: split a kernel-coalesced buffer back into original
-            // datagrams (see runUdpServer).
-            if (gro_active) {
-                if (socket_opts.parseGroSegmentFromControl(msg.control)) |gro_seg| {
-                    if (msg.data.len > gro_seg) {
-                        var off: usize = 0;
-                        var gro_failed = false;
-                        while (off < msg.data.len) {
-                            const end = @min(off + @as(usize, gro_seg), msg.data.len);
-                            client.conn.handleWithEcn(msg.data[off..end], from_addr, ecn, now_us) catch |err| switch (err) {
-                                error.HandshakeFailed,
-                                error.PeerAlerted,
-                                error.UnsupportedCipherSuite,
-                                => {
-                                    gro_failed = true;
-                                    break;
-                                },
-                                else => return err,
-                            };
-                            off = end;
-                        }
-                        if (gro_failed) return;
-                        continue;
-                    }
-                }
-            }
+        // The iterator hands back ready-to-handle datagrams:
+        // trunc-filtered, ECN-parsed, address-converted, and GRO-split
+        // (see `udp_batch.IngressIterator` — shared with runUdpServer).
+        var ingress: udp_batch.IngressIterator = .init(
+            batch_msgs[0..received],
+            .{ .ecn_active = ecn_active, .gro_active = gro_active },
+        );
+        while (ingress.next()) |d| {
             // `Connection.handleWithEcn` swallows per-frame errors
             // internally; only fatal connection-level errors
             // propagate out (e.g. OOM during a stream allocation).
             // The legacy `handle` is a Not-ECT thunk over the same
             // path so embedders that opt out of ECN still go through
-            // the same dispatcher.
-            client.conn.handleWithEcn(msg.data, from_addr, ecn, now_us) catch |err| switch (err) {
+            // the same dispatcher. A dead handshake ends the loop
+            // quietly, whether the datagram arrived alone or as a
+            // GRO-split segment.
+            client.conn.handleWithEcn(d.data, d.from, d.ecn, now_us) catch |err| switch (err) {
                 error.HandshakeFailed,
                 error.PeerAlerted,
                 error.UnsupportedCipherSuite,
@@ -442,27 +416,9 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
     }
 }
 
-/// Send one datagram, tolerating peer-provoked failures.
-///
-/// Every egress site in this file goes through here so the policy is
-/// stated once: an ICMP provoked by a peer that went away must not end
-/// the client loop, while a local fault still reaches the embedder.
-/// See `udp_server.classifySendError`.
-fn sendTolerant(
-    io: std.Io,
-    sock: Net.Socket,
-    dest: *const Net.IpAddress,
-    data: []const u8,
-) !void {
-    sock.send(io, dest, data) catch |err| switch (udp_server.classifySendError(err)) {
-        .tolerate => {},
-        .fatal => return err,
-    };
-}
-
 fn drainOutbound(
     conn: *Connection,
-    batch: *udp_server.SendBatch,
+    batch: *egress.SendBatch,
     gso: struct { buf: []u8, active: *bool },
     now_us: u64,
     sock: Net.Socket,
@@ -470,49 +426,20 @@ fn drainOutbound(
     fallback: Net.IpAddress,
 ) RunError!void {
     if (gso.active.*) {
-        while (true) {
-            const filled = try udp_batch.fillGsoBatch(
-                conn,
-                gso.buf,
-                socket_opts.default_gso_max_segments,
-                now_us,
-            );
-            if (filled.count == 0) return;
-            var dest: Net.IpAddress = fallback;
-            if (filled.to) |path_addr| {
-                if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| dest = resolved;
-            }
-            if (filled.count == 1) {
-                try sendTolerant(io, sock, &dest, gso.buf[0..filled.total_len]);
-            } else {
-                var cmsg: [64]u8 = undefined;
-                const cmsg_len = socket_opts.writeUdpSegmentCmsg(&cmsg, @intCast(filled.seg_size));
-                var msgs = [_]Net.OutgoingMessage{.{
-                    .address = &dest,
-                    .data_ptr = gso.buf.ptr,
-                    .data_len = filled.total_len,
-                    .control = cmsg[0..cmsg_len],
-                }};
-                sock.sendMany(io, &msgs, .{}) catch {
-                    // Runtime offload failure: disable and re-ship the
-                    // already-built segments plainly.
-                    gso.active.* = false;
-                    var off: usize = 0;
-                    while (off < filled.total_len) {
-                        const end = @min(off + filled.seg_size, filled.total_len);
-                        try sendTolerant(io, sock, &dest, gso.buf[off..end]);
-                        off = end;
-                    }
-                };
-            }
-            if (filled.hasCarry()) {
-                var carry_dest: Net.IpAddress = fallback;
-                if (filled.carry_to) |path_addr| {
-                    if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| carry_dest = resolved;
-                }
-                try sendTolerant(io, sock, &carry_dest, gso.buf[filled.carry_offset..][0..filled.carry_len]);
-            }
-        }
+        // GSO egress, shared with the server loop — see
+        // `egress.drainGso`.
+        try egress.drainGso(
+            conn,
+            gso.buf,
+            socket_opts.default_gso_max_segments,
+            now_us,
+            gso.active,
+            GsoSendCtx{ .sock = sock, .io = io, .fallback = fallback },
+        );
+        // Offload still on: outbox drained, done. A cleared flag means
+        // the socket rejected offload mid-drain — fall through and
+        // finish via plain batching.
+        if (gso.active.*) return;
     }
     while (true) {
         const dst = batch.nextSlot() orelse blk: {
@@ -545,6 +472,34 @@ fn drainOutbound(
         .fatal => return err,
     };
 }
+
+/// `egress.drainGso` policy for the client loop: batch destinations
+/// fall back to the configured target address (a single-path client
+/// always has one, so `resolve` never returns null), and immediate
+/// sends tolerate peer-provoked errno — see `udp_server.sendTolerant`.
+const GsoSendCtx = struct {
+    sock: Net.Socket,
+    io: std.Io,
+    fallback: Net.IpAddress,
+
+    pub fn resolve(self: GsoSendCtx, to: ?Address) ?Net.IpAddress {
+        if (to) |path_addr| {
+            if (udp_server.pathAddressToIpAddress(path_addr)) |resolved| return resolved;
+        }
+        // No explicit destination on the outgoing batch (the common
+        // path for a single-path client) — send to the configured
+        // target.
+        return self.fallback;
+    }
+
+    pub fn send(self: GsoSendCtx, dest: *const Net.IpAddress, data: []const u8) !void {
+        try udp_server.sendTolerant(self.io, self.sock, dest, data);
+    }
+
+    pub fn sendMany(self: GsoSendCtx, msgs: []Net.OutgoingMessage) !void {
+        try self.sock.sendMany(self.io, msgs, .{});
+    }
+};
 
 // ---- Tests --------------------------------------------------------------
 

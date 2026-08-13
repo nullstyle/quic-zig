@@ -1,21 +1,29 @@
-//! GSO super-datagram assembly: pack consecutive same-destination,
-//! same-size QUIC datagrams from one connection back-to-back into a
-//! caller buffer so a single `sendmsg` with a `UDP_SEGMENT` cmsg
-//! ships them all (Linux; see `socket_opts.probeUdpGso` — the probe
-//! is load-bearing, never attach the cmsg without it).
+//! Batched-UDP offload helpers, both directions:
+//!
+//! * Send: GSO super-datagram assembly — pack consecutive
+//!   same-destination, same-size QUIC datagrams from one connection
+//!   back-to-back into a caller buffer so a single `sendmsg` with a
+//!   `UDP_SEGMENT` cmsg ships them all (Linux; see
+//!   `socket_opts.probeUdpGso` — the probe is load-bearing, never
+//!   attach the cmsg without it).
+//! * Receive: the `IngressIterator` mirror image — split batched
+//!   (possibly GRO-coalesced) `IncomingMessage`s back into individual
+//!   QUIC datagrams, trunc-filtered, ECN-parsed, address-converted.
 //!
 //! Pure transport-side logic over the public Connection API
-//! (`pollDatagram` + `pmtu`) — no Connection changes, and usable by
-//! foreign-loop embedders doing their own `sendmsg`. Platform-neutral
-//! and unit-tested everywhere; only the socket that the result is
-//! sent on is Linux-specific.
+//! (`pollDatagram` + `pmtu`) and plain message values — no Connection
+//! changes, and usable by foreign-loop embedders doing their own
+//! `sendmsg` / `recvmmsg`. Platform-neutral and unit-tested
+//! everywhere; only the socket the bytes cross is Linux-specific.
 
 const std = @import("std");
 const conn_mod = @import("../conn/root.zig");
 const socket_opts = @import("socket_opts.zig");
 
+const Net = std.Io.net;
 const Connection = conn_mod.Connection;
 const Address = conn_mod.path.Address;
+const EcnCodepoint = socket_opts.EcnCodepoint;
 
 /// Result of one `fillGsoBatch` pass.
 pub const GsoBatch = struct {
@@ -107,6 +115,147 @@ fn destEql(a: ?Address, b: ?Address) bool {
     return Address.eql(a.?, b.?);
 }
 
+/// Project a `std.Io.net.IpAddress` into quic's tagged-union
+/// `path.Address`. The variants line up one-to-one, so this is a
+/// straight copy. Used by `IngressIterator` and both bundled loops
+/// (`udp_server.ipAddressToPathAddress` remains as a decl alias).
+pub fn ipAddressToPathAddress(addr: Net.IpAddress) Address {
+    return switch (addr) {
+        .ip4 => |ip4| .{ .ipv4 = .{ .addr = ip4.bytes, .port = ip4.port } },
+        .ip6 => |ip6| .{ .ipv6 = .{ .addr = ip6.bytes, .port = ip6.port, .flow = ip6.flow } },
+    };
+}
+
+/// Which per-datagram ancillary features are active on the receiving
+/// socket (see `socket_opts.negotiateUdpOffloads`): whether
+/// `IngressIterator` parses ECN cmsgs, and whether it splits
+/// GRO-coalesced buffers.
+pub const IngressOptions = struct {
+    /// Parse `IP_TOS` / `IPV6_TCLASS` cmsgs into per-datagram ECN
+    /// codepoints; when inactive every datagram yields `.not_ect`.
+    ecn_active: bool,
+    /// Honor the kernel's `UDP_GRO` segment-size cmsg by splitting a
+    /// coalesced buffer back into the original datagrams.
+    gro_active: bool,
+};
+
+/// One QUIC datagram carved out of a received batch by
+/// `IngressIterator` — already truncation-filtered, ECN-parsed,
+/// address-converted, and GRO-split. Feed `data` / `from` / `ecn`
+/// straight into `Server.feedWithEcn` / `Connection.handleWithEcn`.
+pub const IngressDatagram = struct {
+    /// Datagram payload (a sub-slice of the source message's buffer
+    /// when GRO split it). Mutable because `Server.feed` /
+    /// `Connection.handle` decrypt in place.
+    data: []u8,
+    /// Source address, converted to quic's `path.Address`.
+    from: Address,
+    /// ECN codepoint parsed once per source message (`.not_ect` when
+    /// ECN is inactive or no TOS/TCLASS cmsg was present).
+    ecn: EcnCodepoint,
+    /// Index of the source `IncomingMessage` in the batch slice.
+    msg_index: usize,
+    /// True for the final datagram carved from its source message —
+    /// the once-per-message hook point. `runUdpServer` stamps its
+    /// listener routing here so a GRO-coalesced buffer costs ONE
+    /// O(slots) scan, not one per split segment.
+    last_in_message: bool,
+};
+
+/// Iterator over the QUIC datagrams contained in one batched-receive
+/// result. Handles, in one place for both bundled loops (and for
+/// foreign-loop embedders doing their own `recvmmsg`):
+///
+///   * skipping truncated messages (a truncated QUIC datagram is
+///     useless);
+///   * per-message ECN extraction from the cmsg control buffer;
+///   * `IpAddress` -> `path.Address` conversion;
+///   * GRO: splitting a kernel-coalesced buffer back into original
+///     datagrams on the cmsg-reported stride (final segment may be
+///     short) — QUIC coalescing rules apply per original datagram.
+///
+/// The caller supplies only its sink and error policy: the server
+/// feeds each datagram (stamping once per message), the client
+/// handles each datagram (returning early on handshake failure).
+pub const IngressIterator = struct {
+    msgs: []const Net.IncomingMessage,
+    options: IngressOptions,
+    /// Index into `msgs` of the next message to open.
+    next_msg: usize = 0,
+    /// GRO split in progress (`seg != 0`): per-message state carried
+    /// across `next` calls while a coalesced buffer drains.
+    cur: Split = .{},
+
+    const Split = struct {
+        data: []u8 = &.{},
+        from: Address = .unspecified,
+        ecn: EcnCodepoint = .not_ect,
+        off: usize = 0,
+        seg: usize = 0,
+        index: usize = 0,
+    };
+
+    pub fn init(msgs: []const Net.IncomingMessage, options: IngressOptions) IngressIterator {
+        return .{ .msgs = msgs, .options = options };
+    }
+
+    pub fn next(self: *IngressIterator) ?IngressDatagram {
+        while (true) {
+            // Drain an in-progress GRO split first.
+            if (self.cur.seg != 0) {
+                const end = @min(self.cur.off + self.cur.seg, self.cur.data.len);
+                const last = end == self.cur.data.len;
+                const out: IngressDatagram = .{
+                    .data = self.cur.data[self.cur.off..end],
+                    .from = self.cur.from,
+                    .ecn = self.cur.ecn,
+                    .msg_index = self.cur.index,
+                    .last_in_message = last,
+                };
+                self.cur.off = end;
+                if (last) self.cur.seg = 0;
+                return out;
+            }
+            if (self.next_msg >= self.msgs.len) return null;
+            const index = self.next_msg;
+            self.next_msg += 1;
+            const msg = &self.msgs[index];
+            // A datagram that didn't fit its buffer arrives flagged
+            // truncated — drop it whole.
+            if (msg.flags.trunc) continue;
+            const ecn: EcnCodepoint = if (self.options.ecn_active)
+                socket_opts.parseEcnFromControl(msg.control)
+            else
+                .not_ect;
+            const from = ipAddressToPathAddress(msg.from);
+            // GRO: the kernel may hand us several original datagrams
+            // coalesced into one buffer; the cmsg carries the split
+            // stride.
+            if (self.options.gro_active) {
+                if (socket_opts.parseGroSegmentFromControl(msg.control)) |gro_seg| {
+                    if (msg.data.len > gro_seg) {
+                        self.cur = .{
+                            .data = msg.data,
+                            .from = from,
+                            .ecn = ecn,
+                            .seg = gro_seg,
+                            .index = index,
+                        };
+                        continue;
+                    }
+                }
+            }
+            return .{
+                .data = msg.data,
+                .from = from,
+                .ecn = ecn,
+                .msg_index = index,
+                .last_in_message = true,
+            };
+        }
+    }
+};
+
 // -- tests -------------------------------------------------------------------
 
 const testing = std.testing;
@@ -115,7 +264,9 @@ const boringssl = @import("boringssl");
 // NOTE: construct Connections inline in each test — `Connection` is
 // multiple megabytes by value (embedded sent-packet trackers), and an
 // extra helper return hop overflows the test thread's stack.
-fn prepareSender(conn: *Connection) !void {
+// INTERNAL: pub for direct sibling import (egress.zig tests reuse the
+// same queued-sender fixture for `drainGso`).
+pub fn prepareSender(conn: *Connection) !void {
     try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     try conn.setLocalScid(&.{ 9, 9, 9, 9 });
     try conn.setTransportParams(.{
@@ -206,4 +357,145 @@ test "fillGsoBatch on an idle connection returns an empty batch" {
     const batch = try fillGsoBatch(conn, &buf, 64, 1_000_000);
     try testing.expectEqual(@as(u32, 0), batch.count);
     try testing.expectEqual(@as(usize, 0), batch.total_len);
+}
+
+// -- IngressIterator ----------------------------------------------------------
+
+const builtin = @import("builtin");
+const native_endian = builtin.cpu.arch.endian();
+
+const no_flags: Net.IncomingMessage.Flags = .{
+    .eor = false,
+    .trunc = false,
+    .ctrunc = false,
+    .oob = false,
+    .errqueue = false,
+};
+
+const trunc_flags: Net.IncomingMessage.Flags = .{
+    .eor = false,
+    .trunc = true,
+    .ctrunc = false,
+    .oob = false,
+    .errqueue = false,
+};
+
+const test_from: Net.IpAddress = .{ .ip4 = .{
+    .bytes = .{ 127, 0, 0, 1 },
+    .port = 9,
+} };
+
+test "IngressIterator skips truncated messages and converts the source address" {
+    var d1 = [_]u8{ 1, 2, 3 };
+    var d2 = [_]u8{ 4, 5 };
+    const msgs = [_]Net.IncomingMessage{
+        .{ .from = test_from, .data = &d1, .control = &.{}, .flags = trunc_flags },
+        .{ .from = test_from, .data = &d2, .control = &.{}, .flags = no_flags },
+    };
+    var it: IngressIterator = .init(&msgs, .{ .ecn_active = false, .gro_active = false });
+    const first = it.next().?;
+    try testing.expectEqualSlices(u8, &d2, first.data);
+    try testing.expectEqual(@as(usize, 1), first.msg_index);
+    try testing.expect(first.last_in_message);
+    try testing.expectEqual(EcnCodepoint.not_ect, first.ecn);
+    try testing.expect(first.from == .ipv4);
+    try testing.expectEqual(@as(u16, 9), first.from.ipv4.port);
+    try testing.expect(it.next() == null);
+}
+
+test "IngressIterator splits a GRO-coalesced buffer on the cmsg stride" {
+    if (comptime @typeInfo(std.c.cmsghdr) != .@"struct") return error.SkipZigTest;
+    var control: [64]u8 = undefined;
+    var seg: [4]u8 = undefined;
+    std.mem.writeInt(i32, &seg, 4, native_endian);
+    const n = socket_opts.writeCmsg(&control, socket_opts.sol_udp, socket_opts.udp_gro, &seg);
+
+    // 10 bytes on a stride of 4: three original datagrams, short tail.
+    var data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const msgs = [_]Net.IncomingMessage{
+        .{ .from = test_from, .data = &data, .control = control[0..n], .flags = no_flags },
+    };
+    var it: IngressIterator = .init(&msgs, .{ .ecn_active = false, .gro_active = true });
+
+    const a = it.next().?;
+    try testing.expectEqualSlices(u8, data[0..4], a.data);
+    try testing.expect(!a.last_in_message);
+    const b = it.next().?;
+    try testing.expectEqualSlices(u8, data[4..8], b.data);
+    try testing.expect(!b.last_in_message);
+    const c = it.next().?;
+    try testing.expectEqualSlices(u8, data[8..10], c.data);
+    try testing.expect(c.last_in_message);
+    try testing.expectEqual(@as(usize, 0), c.msg_index);
+    try testing.expect(it.next() == null);
+}
+
+test "IngressIterator: a buffer no longer than the stride passes through unsplit" {
+    if (comptime @typeInfo(std.c.cmsghdr) != .@"struct") return error.SkipZigTest;
+    var control: [64]u8 = undefined;
+    var seg: [4]u8 = undefined;
+    std.mem.writeInt(i32, &seg, 4, native_endian);
+    const n = socket_opts.writeCmsg(&control, socket_opts.sol_udp, socket_opts.udp_gro, &seg);
+
+    // data.len == gro_seg: exactly one original datagram, no split.
+    var data = [_]u8{ 9, 8, 7, 6 };
+    const msgs = [_]Net.IncomingMessage{
+        .{ .from = test_from, .data = &data, .control = control[0..n], .flags = no_flags },
+    };
+    var it: IngressIterator = .init(&msgs, .{ .ecn_active = false, .gro_active = true });
+    const only = it.next().?;
+    try testing.expectEqualSlices(u8, &data, only.data);
+    try testing.expect(only.last_in_message);
+    try testing.expect(it.next() == null);
+}
+
+test "IngressIterator parses ECN once per message and applies it to every split segment" {
+    if (comptime !(builtin.os.tag == .linux or builtin.os.tag.isDarwin())) return error.SkipZigTest;
+    // Kernel-realistic control buffer for a coalesced ECN-marked
+    // receive: an IP_TOS cmsg (ECT(0)) followed by the UDP_GRO
+    // segment-size cmsg.
+    var control: [128]u8 = undefined;
+    const first = socket_opts.writeCmsg(
+        &control,
+        @intCast(socket_opts.ip_consts.ip_proto),
+        @intCast(socket_opts.ip_consts.ip_tos),
+        &.{0x02},
+    );
+    var seg: [4]u8 = undefined;
+    std.mem.writeInt(i32, &seg, 3, native_endian);
+    const second = socket_opts.writeCmsg(
+        control[first..],
+        socket_opts.sol_udp,
+        socket_opts.udp_gro,
+        &seg,
+    );
+
+    var data = [_]u8{ 0, 1, 2, 3, 4, 5 };
+    const msgs = [_]Net.IncomingMessage{
+        .{
+            .from = test_from,
+            .data = &data,
+            .control = control[0 .. first + second],
+            .flags = no_flags,
+        },
+    };
+    var it: IngressIterator = .init(&msgs, .{ .ecn_active = true, .gro_active = true });
+    var count: usize = 0;
+    while (it.next()) |d| {
+        try testing.expectEqual(EcnCodepoint.ect0, d.ecn);
+        try testing.expectEqual(@as(usize, 3), d.data.len);
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), count);
+}
+
+test "IngressIterator yields an empty datagram for an empty message" {
+    const msgs = [_]Net.IncomingMessage{
+        .{ .from = test_from, .data = &.{}, .control = &.{}, .flags = no_flags },
+    };
+    var it: IngressIterator = .init(&msgs, .{ .ecn_active = false, .gro_active = false });
+    const only = it.next().?;
+    try testing.expectEqual(@as(usize, 0), only.data.len);
+    try testing.expect(only.last_in_message);
+    try testing.expect(it.next() == null);
 }

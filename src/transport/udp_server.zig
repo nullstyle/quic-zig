@@ -36,12 +36,14 @@
 const std = @import("std");
 
 const Server = @import("../Server.zig");
+const egress = @import("egress.zig");
 const path_mod = @import("../conn/path.zig");
 const socket_opts = @import("socket_opts.zig");
 const udp_batch = @import("udp_batch.zig");
 
 const Net = std.Io.net;
 const Address = path_mod.Address;
+const SendBatch = egress.SendBatch;
 
 /// Default size of the receive buffer scratch space used by the loop.
 /// 64 KiB is the maximum a single UDP datagram can be, and matches
@@ -350,11 +352,9 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     const listeners = listeners_storage[0..listeners_len];
     defer for (listeners) |l| l.sock.close(options.io);
 
-    // Tune + ECN-mark every bound socket identically. Tuning failures
-    // surface from the primary listener; alt-listener tuning failures
-    // degrade silently to the kernel default. ECN setup is per-socket so a
-    // kernel that rejects IPV6_TCLASS on one family but not the
-    // other still gets ECN on the accepting socket.
+    // Tune every bound socket identically. Tuning failures surface
+    // from the primary listener; alt-listener tuning failures degrade
+    // silently to the kernel default.
     if (options.tune_socket) {
         socket_opts.applyServerTuning(listeners[0].sock.handle, options.tuning) catch {
             return error.SocketTuningFailed;
@@ -366,26 +366,21 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
         }
     }
 
-    if (options.enable_ecn) {
-        for (listeners) |*l| {
-            var ok = true;
-            socket_opts.setEcnSendMarking(l.sock.handle, options.ecn_send_codepoint) catch {
-                ok = false;
-            };
-            if (ok) {
-                socket_opts.setEcnRecvEnabled(l.sock.handle, true) catch {
-                    ok = false;
-                };
-            }
-            l.ecn_active = ok;
-        }
-    }
+    // Negotiate offloads (ECN marking + cmsg delivery, GSO probe, GRO)
+    // per socket, so a kernel that rejects IPV6_TCLASS on one family
+    // but not the other still gets ECN on the accepting socket.
+    // `negotiateUdpOffloads` owns the all-or-nothing ECN rule and the
+    // probe-before-GSO gate.
     for (listeners) |*l| {
-        if (options.enable_gso) l.gso_active = socket_opts.probeUdpGso(l.sock.handle);
-        if (options.enable_gro) {
-            socket_opts.setUdpGroEnabled(l.sock.handle) catch continue;
-            l.gro_active = true;
-        }
+        const offloads = socket_opts.negotiateUdpOffloads(l.sock.handle, .{
+            .enable_ecn = options.enable_ecn,
+            .ecn_send_codepoint = options.ecn_send_codepoint,
+            .enable_gso = options.enable_gso,
+            .enable_gro = options.enable_gro,
+        });
+        l.ecn_active = offloads.ecn_active;
+        l.gso_active = offloads.gso_active;
+        l.gro_active = offloads.gro_active;
     }
 
     const allocator = server.allocator;
@@ -541,55 +536,38 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             now_us = monotonicNowUs(options.io, start);
 
             if (received > batch_msgs.len) received = batch_msgs.len;
-            for (batch_msgs[0..received]) |*msg| {
-                if (msg.flags.trunc) continue;
-                const ecn: socket_opts.EcnCodepoint = if (l.ecn_active)
-                    socket_opts.parseEcnFromControl(msg.control)
-                else
-                    .not_ect;
-                const from_addr = ipAddressToPathAddress(msg.from);
-                // GRO: the kernel may hand us several original
-                // datagrams coalesced into one buffer; the cmsg
-                // carries the split stride. Feed each original
-                // datagram — QUIC coalescing rules apply per datagram.
-                if (l.gro_active) {
-                    if (socket_opts.parseGroSegmentFromControl(msg.control)) |gro_seg| {
-                        if (msg.data.len > gro_seg) {
-                            var off: usize = 0;
-                            while (off < msg.data.len) {
-                                const end = @min(off + @as(usize, gro_seg), msg.data.len);
-                                _ = try server.feedWithEcn(msg.data[off..end], from_addr, ecn, now_us);
-                                off = end;
-                            }
-                            stampLastRecvSocket(
-                                server,
-                                from_addr,
-                                @intCast(sock_idx),
-                                listeners[sock_idx].bind_addr,
-                                now_us,
-                            );
-                            continue;
-                        }
-                    }
-                }
+            // The iterator hands back ready-to-feed datagrams:
+            // trunc-filtered, ECN-parsed, address-converted, and
+            // GRO-split (the kernel may coalesce several original
+            // datagrams into one buffer; QUIC coalescing rules apply
+            // per original datagram).
+            var ingress: udp_batch.IngressIterator = .init(
+                batch_msgs[0..received],
+                .{ .ecn_active = l.ecn_active, .gro_active = l.gro_active },
+            );
+            while (ingress.next()) |d| {
                 // `feed` swallows per-connection errors internally;
                 // OutOfMemory and rarely RandFailed propagate out, and
                 // either is already a hard failure for the loop. The
                 // FeedOutcome is informational — production embedders
                 // may want to plumb it into a metrics counter, but the
                 // default loop just lets it ride.
-                _ = try server.feedWithEcn(msg.data, from_addr, ecn, now_us);
+                _ = try server.feedWithEcn(d.data, d.from, d.ecn, now_us);
                 // Stamp the receiving listener-index on the slot so the
-                // outbound drain below picks the right socket. We look
-                // up the slot by source address (the most recently
-                // touched slot for this peer) — any post-handshake
-                // datagram routes to the same slot regardless of which
-                // listener it arrived on. Pre-handshake retransmits in
-                // the .accepted / .routed buckets are equally fine to
-                // stamp; the field is purely an outbound hint.
-                stampLastRecvSocket(
+                // outbound drain below picks the right socket — once
+                // per source message, after its last (possibly
+                // GRO-split) datagram: the stamp is an O(slots) scan,
+                // so a kernel-coalesced buffer must not multiply it.
+                // We look up the slot by source address (the most
+                // recently touched slot for this peer) — any
+                // post-handshake datagram routes to the same slot
+                // regardless of which listener it arrived on.
+                // Pre-handshake retransmits in the .accepted / .routed
+                // buckets are equally fine to stamp; the field is
+                // purely an outbound hint.
+                if (d.last_in_message) stampLastRecvSocket(
                     server,
-                    from_addr,
+                    d.from,
                     @intCast(sock_idx),
                     listeners[sock_idx].bind_addr,
                     now_us,
@@ -706,80 +684,11 @@ fn stampLastRecvSocket(
 }
 
 /// Drain every queued outgoing datagram for one slot. Caller wraps
-/// the call in a `catch {}` so a per-connection failure (TLS hiccup,
+/// the call in a `catch` so a per-connection failure (TLS hiccup,
 /// CID exhaustion) doesn't abort the whole server loop. Errors only
-/// propagate when `sock.send` itself fails — that's a real I/O
-/// failure the embedder needs to know about.
-/// Per-listener egress accumulator: outbound datagrams (for any
-/// number of peers) collect here and ship via one `Socket.sendMany`.
-/// `addrs` is parallel stable storage — `OutgoingMessage.address` is a
-/// pointer, so the addresses must not move between fill and flush.
-pub const SendBatch = struct {
-    msgs: []Net.OutgoingMessage,
-    addrs: []Net.IpAddress,
-    buf: []u8,
-    datagram_bytes: usize,
-    len: usize = 0,
-    used: usize = 0,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        capacity: usize,
-        datagram_bytes: usize,
-    ) !SendBatch {
-        const msgs = try allocator.alloc(Net.OutgoingMessage, capacity);
-        errdefer allocator.free(msgs);
-        const addrs = try allocator.alloc(Net.IpAddress, capacity);
-        errdefer allocator.free(addrs);
-        const buf = try allocator.alloc(u8, capacity * datagram_bytes);
-        errdefer allocator.free(buf);
-        return .{
-            .msgs = msgs,
-            .addrs = addrs,
-            .buf = buf,
-            .datagram_bytes = datagram_bytes,
-        };
-    }
-
-    pub fn deinit(self: *SendBatch, allocator: std.mem.Allocator) void {
-        allocator.free(self.msgs);
-        allocator.free(self.addrs);
-        allocator.free(self.buf);
-        self.* = undefined;
-    }
-
-    /// Scratch space for the next datagram, or null when full.
-    pub fn nextSlot(self: *SendBatch) ?[]u8 {
-        if (self.len >= self.msgs.len) return null;
-        return self.buf[self.used..][0..self.datagram_bytes];
-    }
-
-    /// Commit `len` bytes of the slot returned by `nextSlot` for `to`.
-    pub fn commit(self: *SendBatch, to: Net.IpAddress, len: usize) void {
-        std.debug.assert(self.len < self.msgs.len);
-        self.addrs[self.len] = to;
-        self.msgs[self.len] = .{
-            .address = &self.addrs[self.len],
-            .data_ptr = self.buf.ptr + self.used,
-            .data_len = len,
-        };
-        self.len += 1;
-        self.used += len;
-    }
-
-    /// Ship everything accumulated (one sendMany; the std lowers to
-    /// sendmmsg in 64-message chunks on Linux, a send loop elsewhere)
-    /// and reset. Send failures are the caller's policy.
-    pub fn flush(self: *SendBatch, io: std.Io, sock: Net.Socket) !void {
-        if (self.len == 0) return;
-        defer {
-            self.len = 0;
-            self.used = 0;
-        }
-        try sock.sendMany(io, self.msgs[0..self.len], .{});
-    }
-};
-
+/// propagate when the socket itself fails locally — that's a real
+/// I/O failure the embedder needs to know about (peer-provoked send
+/// errno on the immediate GSO path is tolerated; see `sendTolerant`).
 fn drainSlot(
     slot: *Server.Slot,
     batch: *SendBatch,
@@ -789,7 +698,23 @@ fn drainSlot(
     now_us: u64,
     io: std.Io,
 ) !void {
-    if (l.gso_active) return drainSlotGso(slot, l, gso_buf, max_gso_segments, now_us, io);
+    if (l.gso_active) {
+        // GSO egress: pack the slot's outbox into equal-size
+        // super-datagrams (one sendmsg per up to 64 packets); shared
+        // with the client loop — see `egress.drainGso`.
+        try egress.drainGso(
+            slot.conn,
+            gso_buf,
+            max_gso_segments,
+            now_us,
+            &l.gso_active,
+            GsoSendCtx{ .slot = slot, .sock = l.sock, .io = io },
+        );
+        // Offload still on: the outbox is empty, done. A cleared flag
+        // means the socket rejected offload mid-drain — fall through
+        // and finish this slot's outbox via plain batching.
+        if (l.gso_active) return;
+    }
     while (true) {
         const dst = batch.nextSlot() orelse blk: {
             // Batch full mid-drain: ship it and keep going.
@@ -809,59 +734,30 @@ fn drainSlot(
     }
 }
 
-/// GSO egress: pack the slot's outbox into equal-size super-datagrams
-/// (one sendmsg per up to 64 packets). Bypasses the cross-slot batch —
-/// the syscall saving already happened inside the super-datagram, and
-/// immediate sends sidestep buffer-lifetime coupling with other slots.
-/// A send error clears `gso_active` (kernel/offload quirk) and
-/// re-ships the already-built segments individually before falling
-/// back to plain batching next pass.
-fn drainSlotGso(
+/// `egress.drainGso` policy for the server loop: batch destinations
+/// fall back to the slot's current peer address, and immediate sends
+/// tolerate peer-provoked errno so one unreachable peer can't abandon
+/// the rest of the slot's drain — or its migration-probe carry
+/// datagram — for the iteration (the same `classifySendError` policy
+/// the outer drain path applies via `countEgressFault`).
+const GsoSendCtx = struct {
     slot: *Server.Slot,
-    l: *Listener,
-    gso_buf: []u8,
-    max_gso_segments: u32,
-    now_us: u64,
+    sock: Net.Socket,
     io: std.Io,
-) !void {
-    while (true) {
-        const filled = try udp_batch.fillGsoBatch(slot.conn, gso_buf, max_gso_segments, now_us);
-        if (filled.count == 0) return;
-        const target = filled.to orelse slot.peer_addr orelse return;
-        var dest = pathAddressToIpAddress(target) orelse return;
 
-        if (filled.count == 1) {
-            try l.sock.send(io, &dest, gso_buf[0..filled.total_len]);
-        } else {
-            var cmsg: [64]u8 = undefined;
-            const cmsg_len = socket_opts.writeUdpSegmentCmsg(&cmsg, @intCast(filled.seg_size));
-            var msgs = [_]Net.OutgoingMessage{.{
-                .address = &dest,
-                .data_ptr = gso_buf.ptr,
-                .data_len = filled.total_len,
-                .control = cmsg[0..cmsg_len],
-            }};
-            l.sock.sendMany(io, &msgs, .{}) catch {
-                // Offload rejected at runtime (EIO family): disable for
-                // this socket and re-ship the built segments plainly —
-                // they are already segment-aligned in gso_buf.
-                l.gso_active = false;
-                var off: usize = 0;
-                while (off < filled.total_len) {
-                    const end = @min(off + filled.seg_size, filled.total_len);
-                    try l.sock.send(io, &dest, gso_buf[off..end]);
-                    off = end;
-                }
-            };
-        }
-
-        if (filled.hasCarry()) {
-            const carry_target = filled.carry_to orelse slot.peer_addr orelse return;
-            var carry_dest = pathAddressToIpAddress(carry_target) orelse return;
-            try l.sock.send(io, &carry_dest, gso_buf[filled.carry_offset..][0..filled.carry_len]);
-        }
+    pub fn resolve(self: GsoSendCtx, to: ?Address) ?Net.IpAddress {
+        const target = to orelse self.slot.peer_addr orelse return null;
+        return pathAddressToIpAddress(target);
     }
-}
+
+    pub fn send(self: GsoSendCtx, dest: *const Net.IpAddress, data: []const u8) !void {
+        try sendTolerant(self.io, self.sock, dest, data);
+    }
+
+    pub fn sendMany(self: GsoSendCtx, msgs: []Net.OutgoingMessage) !void {
+        try self.sock.sendMany(self.io, msgs, .{});
+    }
+};
 
 /// Convert the loop's monotonic-clock origin into a non-negative
 /// microsecond offset suitable for `Server.feed` / `Server.tick`.
@@ -1046,6 +942,25 @@ pub fn classifySendError(err: anyerror) SendDisposition {
     };
 }
 
+/// Send one datagram, tolerating peer-provoked failures.
+///
+/// Both bundled loops route their immediate (non-batched) egress
+/// through here so the policy is stated once: an ICMP provoked by a
+/// peer that went away must not end a loop or abandon a drain, while
+/// a local fault still reaches the caller. See `classifySendError`.
+// INTERNAL: pub for direct sibling import (udp_client.zig).
+pub fn sendTolerant(
+    io: std.Io,
+    sock: Net.Socket,
+    dest: *const Net.IpAddress,
+    data: []const u8,
+) !void {
+    sock.send(io, dest, data) catch |err| switch (classifySendError(err)) {
+        .tolerate => {},
+        .fatal => return err,
+    };
+}
+
 test "a peer cannot end a loop through the send path" {
     // Remote-influenced, and all reachable by ICMP from a peer that
     // went away or a path that changed.
@@ -1078,15 +993,12 @@ pub fn monotonicNowUs(io: std.Io, start: std.Io.Timestamp) u64 {
     return @intCast(delta);
 }
 
-/// Project a `std.Io.net.IpAddress` into quic's tagged-union
-/// `path.Address`. The variants line up one-to-one, so this is a
-/// straight copy. Also reused by `runUdpClient`.
-pub fn ipAddressToPathAddress(addr: Net.IpAddress) Address {
-    return switch (addr) {
-        .ip4 => |ip4| .{ .ipv4 = .{ .addr = ip4.bytes, .port = ip4.port } },
-        .ip6 => |ip6| .{ .ipv6 = .{ .addr = ip6.bytes, .port = ip6.port, .flow = ip6.flow } },
-    };
-}
+/// Re-export of `udp_batch.ipAddressToPathAddress` — the
+/// `std.Io.net.IpAddress` -> `path.Address` projection lives in the
+/// batch-helpers leaf now (`udp_batch.IngressIterator` needs it); the
+/// alias keeps this loop's historical address-helper pair intact for
+/// embedders (pinned by the internal-surface smoke).
+pub const ipAddressToPathAddress = udp_batch.ipAddressToPathAddress;
 
 /// Inverse projection. Returns `null` for `.unspecified` — the loop
 /// treats that as "no usable destination" and skips the send.

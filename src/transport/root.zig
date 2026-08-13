@@ -13,9 +13,14 @@ pub const socket_opts = @import("socket_opts.zig");
 pub const udp_server = @import("udp_server.zig");
 /// Submodule of the opinionated `std.Io`-based UDP client loop.
 pub const udp_client = @import("udp_client.zig");
-/// Submodule of GSO super-datagram assembly (Linux `UDP_SEGMENT`) for
-/// batching embedders — see `udp_batch.fillGsoBatch`.
+/// Submodule of GSO super-datagram assembly (Linux `UDP_SEGMENT`) and
+/// the batched-ingress splitter for batching embedders — see
+/// `udp_batch.fillGsoBatch` / `udp_batch.IngressIterator`.
 pub const udp_batch = @import("udp_batch.zig");
+/// Submodule of socket-facing UDP egress shared by the bundled loops:
+/// the cross-peer `SendBatch` accumulator and the GSO super-datagram
+/// drain (`egress.drainGso`).
+pub const egress = @import("egress.zig");
 
 /// Re-export of `socket_opts.ServerTuning`, the buffer-size knob struct.
 pub const ServerTuning = socket_opts.ServerTuning;
@@ -67,11 +72,26 @@ pub const default_cmsg_buffer_bytes = socket_opts.default_cmsg_buffer_bytes;
 /// embedders pair it with `probeUdpGso` + `writeUdpSegmentCmsg`).
 pub const fillGsoBatch = udp_batch.fillGsoBatch;
 pub const GsoBatch = udp_batch.GsoBatch;
+/// Re-export of `udp_batch.IngressIterator` and friends — the
+/// receive-side mirror of the GSO assembler: split one batched
+/// (possibly GRO-coalesced) receive result into ready-to-feed QUIC
+/// datagrams (trunc-filtered, ECN-parsed, address-converted). For
+/// foreign-loop embedders doing their own `recvmmsg`.
+pub const IngressIterator = udp_batch.IngressIterator;
+pub const IngressDatagram = udp_batch.IngressDatagram;
+pub const IngressOptions = udp_batch.IngressOptions;
 /// Re-export of `socket_opts.probeUdpGso` — the LOAD-BEARING gate for
 /// attaching GSO cmsgs (see its doc).
 pub const probeUdpGso = socket_opts.probeUdpGso;
 /// Re-export of `socket_opts.setUdpGroEnabled`.
 pub const setUdpGroEnabled = socket_opts.setUdpGroEnabled;
+/// Re-export of `socket_opts.negotiateUdpOffloads` and its
+/// request/state structs — one-shot per-socket ECN/GSO/GRO
+/// negotiation, carrying the all-or-nothing ECN rule and the
+/// probe-before-GSO gate both bundled loops rely on.
+pub const negotiateUdpOffloads = socket_opts.negotiateUdpOffloads;
+pub const UdpOffloadRequest = socket_opts.UdpOffloadRequest;
+pub const UdpOffloadState = socket_opts.UdpOffloadState;
 /// Re-export of `socket_opts.writeUdpSegmentCmsg`.
 pub const writeUdpSegmentCmsg = socket_opts.writeUdpSegmentCmsg;
 /// Re-export of `socket_opts.parseGroSegmentFromControl`.
@@ -104,4 +124,5 @@ test {
     _ = udp_server;
     _ = udp_client;
     _ = udp_batch;
+    _ = egress;
 }
