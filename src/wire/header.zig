@@ -108,6 +108,15 @@ pub const PnLength = enum(u8) {
         };
     }
 
+    /// Convert a byte count to `PnLength`. Callers must validate the
+    /// 1..4 range first (the seal paths gate with their
+    /// `pn_len < 1 or pn_len > 4` check before converting), so an
+    /// out-of-range value is safety-checked illegal behavior here.
+    /// Not peer-reachable.
+    pub fn fromBytes(n: u8) PnLength {
+        return @fromBackingInt(@intCast(n));
+    }
+
     /// Encode this length as the 2-bit (N-1) field for the first byte.
     pub fn toTwoBits(self: PnLength) u2 {
         return @intCast(@backingInt(self) - 1);

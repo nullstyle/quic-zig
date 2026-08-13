@@ -157,7 +157,7 @@ pub fn sealInitial(dst: []u8, opts: InitialSealOptions) Error!usize {
     if (opts.scid.len > header.max_cid_len) return Error.ScidTooLong;
     if (opts.keys.suite != .aes128_gcm_sha256) return Error.UnsupportedSuite;
 
-    const pn_len = opts.pn_length_override orelse chooseLongPnLength(opts.pn, opts.largest_acked);
+    const pn_len = opts.pn_length_override orelse packet_number_mod.chooseLength(opts.pn, opts.largest_acked);
     if (pn_len < 1 or pn_len > 4) return protection.Error.InvalidPnLength;
 
     // Plaintext padding to satisfy:
@@ -210,8 +210,8 @@ pub fn sealInitial(dst: []u8, opts: InitialSealOptions) Error!usize {
     // Encode the unprotected header.
     const dcid_id = try header.ConnId.fromSlice(opts.dcid);
     const scid_id = try header.ConnId.fromSlice(opts.scid);
-    const pn_length: header.PnLength = pnLengthFromInt(pn_len);
-    const truncated = packetNumberTruncated(opts.pn, pn_len);
+    const pn_length = header.PnLength.fromBytes(pn_len);
+    const truncated = packet_number_mod.truncate(opts.pn, pn_len);
 
     const hdr_len = try header.encode(dst, .{ .initial = .{
         .version = opts.version,
@@ -295,11 +295,26 @@ pub fn openInitial(pt_dst: []u8, src: []u8, opts: InitialOpenOptions) Error!Long
     return openLongHeader(pt_dst, src, opts.keys, opts.largest_received, .initial);
 }
 
-// -- 0-RTT ---------------------------------------------------------------
+// -- 0-RTT / Handshake ----------------------------------------------------
+//
+// RFC 9000 §17.2.3 (0-RTT) and §17.2.4 (Handshake) specify
+// byte-identical long-header layouts; the only wire difference is the
+// 2-bit Long Packet Type, and even the QUIC v2 rotation of those bits
+// (RFC 9368 §3.2) is absorbed inside `header.longTypeToBits`. Both
+// seal variants therefore share one options struct and one body
+// (`sealLongPn`), mirroring `openLongHeader` on the open side.
 
-/// Inputs to `sealZeroRtt`. Builds an unprotected 0-RTT header and
-/// applies AEAD + header protection per RFC 9000 §17.2.3.
-pub const ZeroRttSealOptions = struct {
+/// Which PN-carrying long-header type `sealLongPn` emits. Initial is
+/// deliberately excluded: it carries a token varint, the RFC 9000 §14
+/// pad_to reflow, and the AES-128-GCM suite pin, so `sealInitial`
+/// keeps its own body.
+const LongPnKind = enum { zero_rtt, handshake };
+
+/// Inputs to `sealZeroRtt` / `sealHandshake`. The two packet types
+/// take identical inputs (see the section comment), so they share
+/// this struct via the `ZeroRttSealOptions` / `HandshakeSealOptions`
+/// aliases.
+pub const LongPnSealOptions = struct {
     version: u32 = 0x00000001,
     dcid: []const u8,
     scid: []const u8,
@@ -312,62 +327,16 @@ pub const ZeroRttSealOptions = struct {
     quic_bit: u1 = 1,
 };
 
+/// Inputs to `sealZeroRtt` (RFC 9000 §17.2.3).
+pub const ZeroRttSealOptions = LongPnSealOptions;
+
+/// Inputs to `sealHandshake` (RFC 9000 §17.2.4).
+pub const HandshakeSealOptions = LongPnSealOptions;
+
 /// Build a fully-protected 0-RTT packet into `dst`. Returns total
 /// bytes written.
 pub fn sealZeroRtt(dst: []u8, opts: ZeroRttSealOptions) Error!usize {
-    if (opts.dcid.len > header.max_cid_len) return Error.DcidTooLong;
-    if (opts.scid.len > header.max_cid_len) return Error.ScidTooLong;
-
-    const pn_len = opts.pn_length_override orelse chooseLongPnLength(opts.pn, opts.largest_acked);
-    if (pn_len < 1 or pn_len > 4) return protection.Error.InvalidPnLength;
-
-    const min_pt_for_sample: usize = if (pn_len < 4) @as(usize, 4 - pn_len) else 0;
-    const pt_len: usize = @max(opts.payload.len, min_pt_for_sample);
-    const length_field_value: u64 = @as(u64, pt_len) + 16 + pn_len;
-    const length_varint_size = varint.encodedLen(length_field_value);
-
-    const total_size: usize = 1 + 4 + 1 + opts.dcid.len + 1 + opts.scid.len +
-        length_varint_size + pn_len + pt_len + 16;
-
-    if (dst.len < total_size) return Error.OutputTooSmall;
-
-    const dcid_id = try header.ConnId.fromSlice(opts.dcid);
-    const scid_id = try header.ConnId.fromSlice(opts.scid);
-    const pn_length: header.PnLength = pnLengthFromInt(pn_len);
-    const truncated = packetNumberTruncated(opts.pn, pn_len);
-
-    const hdr_len = try header.encode(dst, .{ .zero_rtt = .{
-        .version = opts.version,
-        .dcid = dcid_id,
-        .scid = scid_id,
-        .pn_length = pn_length,
-        .pn_truncated = truncated,
-        .payload_length = length_field_value,
-        .reserved_bits = 0,
-        .quic_bit = opts.quic_bit,
-    } });
-    const pn_offset = hdr_len - pn_len;
-
-    var stage_buf: [2048]u8 = undefined;
-    if (pt_len > stage_buf.len) return Error.OutputTooSmall;
-    @memcpy(stage_buf[0..opts.payload.len], opts.payload);
-    @memset(stage_buf[opts.payload.len..pt_len], 0);
-
-    const ct_len = try short_packet.sealPayloadWithKeys(
-        opts.keys,
-        null,
-        opts.pn,
-        dst[0..hdr_len],
-        stage_buf[0..pt_len],
-        dst[hdr_len..],
-    );
-    const total_len = hdr_len + ct_len;
-
-    const sample = try protection.sampleAt(dst[0..total_len], pn_offset);
-    const mask = try short_packet.headerProtectionMask(opts.keys, &sample);
-    try protection.applyHpMask(dst[0..total_len], .long, pn_offset, pn_len, mask);
-
-    return total_len;
+    return sealLongPn(dst, opts, .zero_rtt);
 }
 
 /// Open a protected 0-RTT packet from `src`. See `openInitial` for
@@ -376,30 +345,26 @@ pub fn openZeroRtt(pt_dst: []u8, src: []u8, opts: InitialOpenOptions) Error!Long
     return openLongHeader(pt_dst, src, opts.keys, opts.largest_received, .zero_rtt);
 }
 
-// -- Handshake -----------------------------------------------------------
-
-/// Inputs to `sealHandshake`. Builds an unprotected Handshake header
-/// and applies AEAD + header protection per RFC 9000 §17.2.4.
-pub const HandshakeSealOptions = struct {
-    version: u32 = 0x00000001,
-    dcid: []const u8,
-    scid: []const u8,
-    pn: u64,
-    largest_acked: ?u64 = null,
-    payload: []const u8,
-    keys: *const PacketKeys,
-    pn_length_override: ?u8 = null,
-    /// QUIC Bit. See `InitialSealOptions.quic_bit`.
-    quic_bit: u1 = 1,
-};
-
 /// Build a fully-protected Handshake packet into `dst`. Returns total
 /// bytes written.
 pub fn sealHandshake(dst: []u8, opts: HandshakeSealOptions) Error!usize {
+    return sealLongPn(dst, opts, .handshake);
+}
+
+/// Open a protected Handshake packet from `src`. See `openInitial`
+/// for the shared semantics.
+pub fn openHandshake(pt_dst: []u8, src: []u8, opts: InitialOpenOptions) Error!LongOpenResult {
+    return openLongHeader(pt_dst, src, opts.keys, opts.largest_received, .handshake);
+}
+
+/// Shared seal body for the PN-carrying non-Initial long-header
+/// types: build the unprotected header, satisfy the RFC 9001 §5.4.2
+/// sample floor, AEAD-seal the payload, and apply header protection.
+fn sealLongPn(dst: []u8, opts: LongPnSealOptions, comptime kind: LongPnKind) Error!usize {
     if (opts.dcid.len > header.max_cid_len) return Error.DcidTooLong;
     if (opts.scid.len > header.max_cid_len) return Error.ScidTooLong;
 
-    const pn_len = opts.pn_length_override orelse chooseLongPnLength(opts.pn, opts.largest_acked);
+    const pn_len = opts.pn_length_override orelse packet_number_mod.chooseLength(opts.pn, opts.largest_acked);
     if (pn_len < 1 or pn_len > 4) return protection.Error.InvalidPnLength;
 
     const min_pt_for_sample: usize = if (pn_len < 4) @as(usize, 4 - pn_len) else 0;
@@ -414,10 +379,14 @@ pub fn sealHandshake(dst: []u8, opts: HandshakeSealOptions) Error!usize {
 
     const dcid_id = try header.ConnId.fromSlice(opts.dcid);
     const scid_id = try header.ConnId.fromSlice(opts.scid);
-    const pn_length: header.PnLength = pnLengthFromInt(pn_len);
-    const truncated = packetNumberTruncated(opts.pn, pn_len);
+    const pn_length = header.PnLength.fromBytes(pn_len);
+    const truncated = packet_number_mod.truncate(opts.pn, pn_len);
 
-    const hdr_len = try header.encode(dst, .{ .handshake = .{
+    // `header.ZeroRtt` and `header.Handshake` are distinct structs
+    // with identical fields; `@unionInit` gives the one literal the
+    // kind-selected field type (`LongPnKind` tags mirror the
+    // `header.Header` tags).
+    const hdr_len = try header.encode(dst, @unionInit(header.Header, @tagName(kind), .{
         .version = opts.version,
         .dcid = dcid_id,
         .scid = scid_id,
@@ -426,7 +395,7 @@ pub fn sealHandshake(dst: []u8, opts: HandshakeSealOptions) Error!usize {
         .payload_length = length_field_value,
         .reserved_bits = 0,
         .quic_bit = opts.quic_bit,
-    } });
+    }));
     const pn_offset = hdr_len - pn_len;
 
     var stage_buf: [2048]u8 = undefined;
@@ -449,12 +418,6 @@ pub fn sealHandshake(dst: []u8, opts: HandshakeSealOptions) Error!usize {
     try protection.applyHpMask(dst[0..total_len], .long, pn_offset, pn_len, mask);
 
     return total_len;
-}
-
-/// Open a protected Handshake packet from `src`. See `openInitial`
-/// for the shared semantics.
-pub fn openHandshake(pt_dst: []u8, src: []u8, opts: InitialOpenOptions) Error!LongOpenResult {
-    return openLongHeader(pt_dst, src, opts.keys, opts.largest_received, .handshake);
 }
 
 // -- Retry ---------------------------------------------------------------
@@ -646,40 +609,6 @@ fn unexpectedPacketType(expected_type: header.LongType) Error {
         .handshake => Error.NotHandshakePacket,
         .retry => Error.NotInitialPacket,
     };
-}
-
-/// Choose a PN length for a long-header packet. Same shape as
-/// short_packet.chooseShortPnLength but exposed locally to avoid
-/// reaching into a private symbol of that module.
-fn chooseLongPnLength(pn: u64, largest_acked: ?u64) u8 {
-    const space: u64 = if (largest_acked) |la|
-        (if (pn > la) pn - la else 1)
-    else
-        std.math.maxInt(u64);
-    if (space < (1 << 7)) return 1;
-    if (space < (1 << 15)) return 2;
-    if (space < (1 << 23)) return 3;
-    return 4;
-}
-
-fn pnLengthFromInt(pn_len: u8) header.PnLength {
-    return switch (pn_len) {
-        1 => .one,
-        2 => .two,
-        3 => .three,
-        4 => .four,
-        // invariant: callers validate with the
-        // `pn_len < 1 or pn_len > 4` check before converting.
-        // Not peer-reachable.
-        else => unreachable,
-    };
-}
-
-fn packetNumberTruncated(pn: u64, pn_len: u8) u64 {
-    if (pn_len >= 8) return pn;
-    const shift: u6 = @intCast(@as(u32, pn_len) * 8);
-    const mask: u64 = (@as(u64, 1) << shift) - 1;
-    return pn & mask;
 }
 
 // -- tests ---------------------------------------------------------------

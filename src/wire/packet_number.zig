@@ -56,6 +56,50 @@ pub fn encodedLength(pn_to_send: u64, largest_acked: ?u64) Error!u8 {
     return Error.UnacknowledgedTooFar;
 }
 
+/// Sender-side packet-number length policy used by the seal paths:
+/// enough bytes to carry `pn - largest_acked` unambiguously
+/// (RFC 9000 §17.1). Returns 1..4.
+///
+/// Deliberately NOT the same rule as `encodedLength` (§A.2); this is
+/// total where `encodedLength` errors, and more conservative at every
+/// boundary. The three disagreements, kept as sender headroom rather
+/// than reconciled:
+///  - boundaries are off by one in the safe direction: 1 byte only
+///    while `pn - largest_acked` <= 127, where §A.2 still allows
+///    1 byte at num_unacked = 128 (and likewise at each wider size);
+///  - `largest_acked == null` always yields 4 bytes, where §A.2's
+///    `num_unacked = pn + 1` rule could pick 1-2 for small PNs;
+///  - `pn <= largest_acked` silently clamps to a 1-byte space, where
+///    `encodedLength` returns `Error.InvalidLength` (unreachable for
+///    a monotonic sender).
+/// Over-sized PNs are always decodable on the wire, so the gap is
+/// waste, not an interop bug. Switching the sender to `encodedLength`
+/// would change wire bytes (shorter PNs pre-first-ACK) and add an
+/// error branch to every seal entry point — a deliberate follow-up,
+/// not a refactor.
+pub fn chooseLength(pn: u64, largest_acked: ?u64) u8 {
+    const space: u64 = if (largest_acked) |la|
+        (if (pn > la) pn - la else 1)
+    else
+        std.math.maxInt(u64);
+    if (space < (1 << 7)) return 1;
+    if (space < (1 << 15)) return 2;
+    if (space < (1 << 23)) return 3;
+    return 4;
+}
+
+/// Truncate `pn` to its low `length` bytes — the value carried on the
+/// wire (RFC 9000 §17.1) and stored in a header's `pn_truncated`
+/// field. `length` is normally 1..4 (the seal paths validate before
+/// calling); lengths >= 8 return `pn` unchanged as a defensive guard
+/// against an oversized shift.
+pub fn truncate(pn: u64, length: u8) u64 {
+    if (length >= 8) return pn;
+    const shift: u6 = @intCast(@as(u32, length) * 8);
+    const mask: u64 = (@as(u64, 1) << shift) - 1;
+    return pn & mask;
+}
+
 /// Write the low `length` bytes of `pn` to `dst` in network byte
 /// order. `length` must be 1..4.
 pub fn encode(dst: []u8, pn: u64, length: u8) Error!void {
@@ -214,6 +258,34 @@ test "encodedLength baseline cases" {
     try std.testing.expectEqual(@as(u8, 1), try encodedLength(11, 10));
     try std.testing.expectEqual(@as(u8, 2), try encodedLength(1000, 800));
     try std.testing.expectEqual(@as(u8, 3), try encodedLength(0x123456, 0x100000));
+}
+
+test "chooseLength: with no largest_acked, uses 4 bytes" {
+    // Contrast with `encodedLength(0, null) == 1` above — the sender
+    // policy deliberately burns the full 4 bytes pre-first-ACK.
+    try std.testing.expectEqual(@as(u8, 4), chooseLength(0, null));
+    try std.testing.expectEqual(@as(u8, 4), chooseLength(1_000_000, null));
+}
+
+test "chooseLength: scales with delta" {
+    try std.testing.expectEqual(@as(u8, 1), chooseLength(50, 0));
+    try std.testing.expectEqual(@as(u8, 1), chooseLength(127, 0));
+    // Boundary disagreement with §A.2, recorded in the doc comment:
+    // `encodedLength(128, null)` above asserts 2 as well, but
+    // `encodedLength(128, 0)` would allow 1 byte (num_unacked = 128).
+    try std.testing.expectEqual(@as(u8, 2), chooseLength(128, 0));
+    try std.testing.expectEqual(@as(u8, 2), chooseLength(32_767, 0));
+    try std.testing.expectEqual(@as(u8, 3), chooseLength(32_768, 0));
+    try std.testing.expectEqual(@as(u8, 4), chooseLength(8_388_608, 0));
+}
+
+test "truncate keeps only the low `length` bytes" {
+    try std.testing.expectEqual(@as(u64, 0x32), truncate(0xa82f9b32, 1));
+    try std.testing.expectEqual(@as(u64, 0x9b32), truncate(0xa82f9b32, 2));
+    try std.testing.expectEqual(@as(u64, 0x2f9b32), truncate(0xa82f9b32, 3));
+    try std.testing.expectEqual(@as(u64, 0xa82f9b32), truncate(0xa82f9b32, 4));
+    // Defensive guard: lengths >= 8 pass the PN through unchanged.
+    try std.testing.expectEqual(@as(u64, 0xa82f9b32), truncate(0xa82f9b32, 8));
 }
 
 test "encode then decode round-trip with realistic gaps" {

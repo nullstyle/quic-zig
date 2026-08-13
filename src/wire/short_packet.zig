@@ -334,19 +334,6 @@ fn openPayloadWithAead(
         );
 }
 
-/// Choose a packet-number length per RFC 9000 §17.1: enough bits to
-/// carry `pn - largest_acked` unambiguously. With no prior ACK, use 4.
-fn chooseShortPnLength(pn: u64, largest_acked: ?u64) u8 {
-    const space: u64 = if (largest_acked) |la|
-        (if (pn > la) pn - la else 1)
-    else
-        std.math.maxInt(u64);
-    if (space < (1 << 7)) return 1;
-    if (space < (1 << 15)) return 2;
-    if (space < (1 << 23)) return 3;
-    return 4;
-}
-
 /// Inputs to `seal1Rtt`. The DCID is what the peer expects on the
 /// wire; the keys carry per-direction AEAD/HP material.
 pub const SealOptions = struct {
@@ -396,7 +383,7 @@ pub const SealOptions = struct {
 /// (0x00 bytes) inside the AEAD-protected payload.
 pub fn seal1Rtt(dst: []u8, opts: SealOptions) Error!usize {
     if (opts.dcid.len > header.max_cid_len) return Error.DcidTooLong;
-    const pn_len = opts.pn_length_override orelse chooseShortPnLength(opts.pn, opts.largest_acked);
+    const pn_len = opts.pn_length_override orelse packet_number_mod.chooseLength(opts.pn, opts.largest_acked);
     if (pn_len < 1 or pn_len > 4) return protection.Error.InvalidPnLength;
 
     // Minimum plaintext length so HP sample (16 bytes starting at
@@ -424,17 +411,8 @@ pub fn seal1Rtt(dst: []u8, opts: SealOptions) Error!usize {
 
     // Encode unprotected header.
     const conn_id = try header.ConnId.fromSlice(opts.dcid);
-    const pn_length: header.PnLength = switch (pn_len) {
-        1 => .one,
-        2 => .two,
-        3 => .three,
-        4 => .four,
-        // invariant: the `pn_len < 1 or pn_len > 4` check above
-        // returns InvalidPnLength for any pn_len outside [1, 4].
-        // Not peer-reachable.
-        else => unreachable,
-    };
-    const truncated = packetNumberTruncated(opts.pn, pn_len);
+    const pn_length = header.PnLength.fromBytes(pn_len);
+    const truncated = packet_number_mod.truncate(opts.pn, pn_len);
     const hdr_len = try header.encode(dst, .{ .one_rtt = .{
         .dcid = conn_id,
         .spin_bit = opts.spin_bit,
@@ -576,13 +554,6 @@ pub fn open1Rtt(pt_dst: []u8, src: []u8, opts: OpenOptions) Error!Open1RttResult
     };
 }
 
-fn packetNumberTruncated(pn: u64, pn_len: u8) u64 {
-    if (pn_len >= 8) return pn;
-    const shift: u6 = @intCast(@as(u32, pn_len) * 8);
-    const mask: u64 = (@as(u64, 1) << shift) - 1;
-    return pn & mask;
-}
-
 // -- tests ---------------------------------------------------------------
 
 const testing = std.testing;
@@ -660,20 +631,6 @@ test "derivePacketKeys rejects mis-sized secrets" {
         Error.SecretWrongLength,
         derivePacketKeys(.aes128_gcm_sha256, &tiny),
     );
-}
-
-test "chooseShortPnLength: with no largest_acked, uses 4 bytes" {
-    try testing.expectEqual(@as(u8, 4), chooseShortPnLength(0, null));
-    try testing.expectEqual(@as(u8, 4), chooseShortPnLength(1_000_000, null));
-}
-
-test "chooseShortPnLength: scales with delta" {
-    try testing.expectEqual(@as(u8, 1), chooseShortPnLength(50, 0));
-    try testing.expectEqual(@as(u8, 1), chooseShortPnLength(127, 0));
-    try testing.expectEqual(@as(u8, 2), chooseShortPnLength(128, 0));
-    try testing.expectEqual(@as(u8, 2), chooseShortPnLength(32_767, 0));
-    try testing.expectEqual(@as(u8, 3), chooseShortPnLength(32_768, 0));
-    try testing.expectEqual(@as(u8, 4), chooseShortPnLength(8_388_608, 0));
 }
 
 test "seal1Rtt + open1Rtt round-trip" {
