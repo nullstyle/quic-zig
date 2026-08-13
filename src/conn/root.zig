@@ -83,6 +83,10 @@ pub const event_queue = @import("event_queue.zig");
 
 /// Top-level QUIC connection state machine (RFC 9000).
 pub const Connection = state.Connection;
+/// Role-neutral per-connection tunables bundle applied at
+/// construction time by the `Server` accept path and
+/// `Client.connect` (re-export of `Connection.Tunables`).
+pub const ConnTunables = state.Tunables;
 /// The error set every `Connection` method draws from. Re-exported so
 /// embedders composing their own error sets don't have to name the
 /// `conn.state` submodule.

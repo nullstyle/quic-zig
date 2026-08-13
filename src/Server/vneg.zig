@@ -254,16 +254,12 @@ pub fn advancePendingUpgrade(server: *Server, slot: *Slot, bytes: []const u8) vo
     // `setTransportParams` call wins the race and the EE goes
     // out advertising chosen=upgrade.
     var params = slot.conn.localTransportParams();
-    var ordered: [16]u32 = undefined;
-    ordered[0] = chosen;
-    var n: usize = 1;
-    for (server.versions) |v| {
-        if (v == chosen) continue;
-        if (n >= ordered.len) break;
-        ordered[n] = v;
-        n += 1;
-    }
-    params.setCompatibleVersions(ordered[0..n]) catch return;
+    var ordered: [wire.vneg_preparse.max_versions]u32 = undefined;
+    params.setCompatibleVersions(wire.vneg_preparse.orderedAvailableVersions(
+        chosen,
+        server.versions,
+        &ordered,
+    )) catch return;
     slot.conn.setTransportParams(params) catch return;
     slot.conn.setPendingVersionUpgrade(chosen);
 }

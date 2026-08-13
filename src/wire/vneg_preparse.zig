@@ -467,7 +467,105 @@ pub fn chooseUpgradeVersion(
     return null;
 }
 
+/// RFC 9368 §5 server advertisement rule, the counterpart of
+/// `chooseUpgradeVersion`: build the outbound `available_versions`
+/// list as `chosen` first (§5 requires the Chosen Version to lead),
+/// then every other entry of `others` in its original preference
+/// order, with `chosen` deduplicated out of the tail.
+///
+/// Capped at `max_versions` entries: excess entries are silently
+/// dropped, never surfaced as an error — the server's
+/// `accepted_versions` config has no length validation, and this
+/// cap is what keeps `TransportParams.setCompatibleVersions` (whose
+/// own bound mirrors `max_versions`) from rejecting an oversized
+/// config on the accept path.
+///
+/// `out` is caller-owned storage; the returned slice borrows into
+/// it. Total function — no allocation, no error set. Both server
+/// call sites (`Server/accept.zig` building the first-flight
+/// transport parameters, `Server/vneg.zig` rebuilding them when a
+/// fragmented ClientHello resolves to a different chosen version)
+/// share this body so the single-Initial and multi-Initial paths
+/// can never advertise different lists for the same config.
+pub fn orderedAvailableVersions(
+    chosen: u32,
+    others: []const u32,
+    out: *[max_versions]u32,
+) []const u32 {
+    out[0] = chosen;
+    var n: usize = 1;
+    for (others) |v| {
+        if (v == chosen) continue;
+        if (n >= out.len) break;
+        out[n] = v;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 // -- tests ---------------------------------------------------------------
+
+test "orderedAvailableVersions puts chosen first and dedups it from the tail" {
+    const v1: u32 = 0x00000001;
+    const v2: u32 = 0x6b3343cf;
+
+    var buf: [max_versions]u32 = undefined;
+
+    // chosen appears mid-list: leads the output, tail keeps config order.
+    try std.testing.expectEqualSlices(
+        u32,
+        &.{ v2, v1, 0xff00001d },
+        orderedAvailableVersions(v2, &.{ v1, v2, 0xff00001d }, &buf),
+    );
+
+    // chosen == first entry: list is unchanged.
+    try std.testing.expectEqualSlices(
+        u32,
+        &.{ v1, v2 },
+        orderedAvailableVersions(v1, &.{ v1, v2 }, &buf),
+    );
+
+    // chosen absent from `others` (the Client-side "additional
+    // versions" shape): everything is appended after it.
+    try std.testing.expectEqualSlices(
+        u32,
+        &.{ v2, v1 },
+        orderedAvailableVersions(v2, &.{v1}, &buf),
+    );
+
+    // Duplicates of chosen are ALL removed; other duplicates pass
+    // through untouched (the config is trusted for those).
+    try std.testing.expectEqualSlices(
+        u32,
+        &.{ v2, v1, v1 },
+        orderedAvailableVersions(v2, &.{ v2, v1, v2, v1 }, &buf),
+    );
+
+    // Single-version degenerate case: chosen alone.
+    try std.testing.expectEqualSlices(
+        u32,
+        &.{v1},
+        orderedAvailableVersions(v1, &.{v1}, &buf),
+    );
+}
+
+test "orderedAvailableVersions caps at max_versions without erroring" {
+    var big: [max_versions + 8]u32 = undefined;
+    for (&big, 0..) |*v, i| v.* = @intCast(i + 0x100);
+
+    var buf: [max_versions]u32 = undefined;
+    const got = orderedAvailableVersions(0x1, &big, &buf);
+
+    // Exactly max_versions entries survive: chosen + the first
+    // (max_versions - 1) others; the overflow is dropped silently.
+    try std.testing.expectEqual(max_versions, got.len);
+    try std.testing.expectEqual(@as(u32, 0x1), got[0]);
+    try std.testing.expectEqual(@as(u32, 0x100), got[1]);
+    try std.testing.expectEqual(
+        @as(u32, 0x100 + max_versions - 2),
+        got[max_versions - 1],
+    );
+}
 
 test "chooseUpgradeVersion picks highest-priority overlap" {
     const v1: u32 = 0x00000001;

@@ -37,20 +37,11 @@ pub fn openSlotFromInitial(
 
     const conn_ptr = try Connection.createServer(server.allocator, server.tls_ctx);
     errdefer conn_ptr.destroy();
-    conn_ptr.reveal_close_reason_on_wire = server.reveal_close_reason_on_wire;
-    conn_ptr.max_connection_memory = server.max_connection_memory;
-    conn_ptr.delayed_ack_packet_threshold = server.delayed_ack_packet_threshold;
-    conn_ptr.ecn_enabled = server.ecn_enabled;
-    // RFC 8899 DPLPMTUD: thread the embedder config to the
-    // connection. setPmtudConfig also re-initialises every
-    // existing path (only the primary at this point), so the
-    // per-path pmtu / pmtu_state lands consistent with the config.
-    conn_ptr.setPmtudConfig(server.pmtud_config);
-    conn_ptr.setCongestionAlgorithm(server.congestion_control);
-    conn_ptr.pacing_enabled = server.pacing_enabled;
-    conn_ptr.setHyStartEnabled(server.hystart_enabled);
-
-    if (server.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, server.qlog_user_data);
+    // Role-neutral tunables (close-reason redaction, memory cap,
+    // delayed-ACK, ECN, PMTUD, congestion control, pacing,
+    // HyStart++, qlog) — the same bundle `Client.connect` applies,
+    // so the two construction paths can't silently diverge.
+    conn_ptr.applyTunables(server.tunables);
 
     // Post-Retry connections use the SCID we minted in the Retry
     // packet — that SCID was bound into the token HMAC and is
@@ -145,16 +136,12 @@ pub fn openSlotFromInitial(
     const upgrade_target = server_vneg.preparseUpgradeTarget(server, bytes, ids.version, &ch_complete);
     const chosen_version: u32 = upgrade_target orelse ids.version;
     if (server.versions.len > 1) {
-        var ordered: [16]u32 = undefined;
-        ordered[0] = chosen_version;
-        var n: usize = 1;
-        for (server.versions) |v| {
-            if (v == chosen_version) continue;
-            if (n >= ordered.len) break;
-            ordered[n] = v;
-            n += 1;
-        }
-        try params.setCompatibleVersions(ordered[0..n]);
+        var ordered: [wire.vneg_preparse.max_versions]u32 = undefined;
+        try params.setCompatibleVersions(wire.vneg_preparse.orderedAvailableVersions(
+            chosen_version,
+            server.versions,
+            &ordered,
+        ));
     }
     try conn_ptr.acceptInitial(bytes, params);
     // RFC 9001 §4.6.1: install the 0-RTT replay context BEFORE the

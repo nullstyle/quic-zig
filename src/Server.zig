@@ -93,7 +93,6 @@ const ConnectionError = conn_mod.state.Error;
 const TransportParams = tls_mod.TransportParams;
 const ConnectionId = conn_mod.path.ConnectionId;
 const Address = conn_mod.path.Address;
-const QlogCallback = conn_mod.QlogCallback;
 const RetryTokenKey = conn_mod.RetryTokenKey;
 const PreferredAddressTp = tls_mod.transport_params.PreferredAddress;
 
@@ -404,8 +403,6 @@ lb_factory: ?lb_mod.Factory,
 /// means rotation is "lazy" (peers retain existing CIDs until
 /// they organically retire).
 stateless_reset_key: ?conn_mod.stateless_reset.Key,
-qlog_callback: ?QlogCallback,
-qlog_user_data: ?*anyopaque,
 log_callback: ?LogCallback,
 log_user_data: ?*anyopaque,
 on_connection_will_close: ?ConnectionWillCloseCallback,
@@ -465,30 +462,14 @@ enable_0rtt: bool,
 /// `consumeUsingInternalClock` call.
 early_data_anti_replay: ?*tls_mod.anti_replay.AntiReplayTracker,
 
-/// Captured `Config.reveal_close_reason_on_wire` — applied to
-/// every Connection the Server creates so the close-reason
-/// redaction posture matches the embedder's choice.
-reveal_close_reason_on_wire: bool,
-
-/// Captured `Config.max_connection_memory` — threaded onto every
-/// Connection at slot-open time so `tryReserveResidentBytes` has
-/// a per-connection cap. Hardening guide §3.5 / §8.
-max_connection_memory: u64,
-
-/// Captured `Config.delayed_ack_packet_threshold` — threaded onto
-/// every Connection at slot-open time. RFC 9000 §13.2.1.
-delayed_ack_packet_threshold: u8,
-
-/// Captured `Config.enable_ecn` — threaded onto every Connection
-/// at slot-open time. RFC 9000 §13.4 IETF ECN signaling. Default
-/// true; flip to false in environments known to bleach ECN bits.
-ecn_enabled: bool,
-congestion_control: conn_mod.CongestionAlgorithm,
-pacing_enabled: bool,
-hystart_enabled: bool,
-/// Captured `Config.pmtud` — applied to every Connection at
-/// slot-open time. RFC 8899 DPLPMTUD.
-pmtud_config: conn_mod.PmtudConfig,
+/// Role-neutral per-connection tunables captured from `Config` at
+/// `init` (close-reason redaction, memory cap, delayed-ACK
+/// threshold, ECN, PMTUD, congestion control, pacing, HyStart++,
+/// qlog) — applied wholesale to every Connection the Server
+/// creates at slot-open time via `Connection.applyTunables`, the
+/// same bundle `Client.connect` applies, so the two construction
+/// paths can't silently diverge knob-by-knob.
+tunables: conn_mod.ConnTunables,
 
 /// Captured `Config.preferred_address` — used by `openSlotFromInitial`
 /// to auto-build the `preferred_address` transport parameter for
@@ -778,34 +759,18 @@ pub fn init(config: Config) Error!Server {
     if (config.tls_context_override) |ctx| {
         tls_ctx = ctx;
     } else {
-        tls_ctx = try boringssl.tls.Context.initServer(.{
-            .verify = .none,
-            .min_version = boringssl.raw.TLS1_3_VERSION,
-            .max_version = boringssl.raw.TLS1_3_VERSION,
-            .alpn = config.alpn_protocols,
-            .early_data_enabled = config.early_data.enabled(),
-        });
-        errdefer tls_ctx.deinit();
-        try tls_ctx.loadCertChainAndKey(config.tls_cert_pem, config.tls_key_pem);
-        // mTLS: require and verify a client certificate against
-        // the embedder's pinned roots. Rejected during validation
-        // when combined with `tls_context_override`.
-        if (config.client_ca_pem) |ca| {
-            try tls_mod.pem.installTrustAnchors(tls_ctx, ca, .require_peer_cert);
-        }
-        // Hardening §5.2 / RFC 9001 §5.6: when the embedder
-        // installs an `AntiReplayTracker`, hook BoringSSL's
-        // pre-resumption early-data callback so duplicate 0-RTT
-        // attempts are rejected at the TLS layer (not just at
-        // application post-handshake). Only fires on the
-        // auto-built path; override-mode embedders own the hook
-        // themselves.
-        if (config.early_data.antiReplayTracker()) |tracker| {
-            try tls_ctx.setAllowEarlyDataCallback(
-                server_tls.antiReplayEarlyDataTrampoline,
-                @ptrCast(tracker),
-            );
-        }
+        // Shared with `replaceTlsContext({.pem = ...})` so a cert
+        // rotation rebuilds the exact same TLS posture (mTLS trust
+        // anchors, 0-RTT knob, anti-replay hook) this context gets.
+        // Override-mode embedders own all of that themselves.
+        tls_ctx = try server_tls.buildServerContext(
+            config.alpn_protocols,
+            config.tls_cert_pem,
+            config.tls_key_pem,
+            config.client_ca_pem,
+            config.early_data.enabled(),
+            config.early_data.antiReplayTracker(),
+        );
         owns_tls = true;
     }
 
@@ -848,8 +813,6 @@ pub fn init(config: Config) Error!Server {
         .local_cid_len = resolved_local_cid_len,
         .lb_factory = resolved_lb_factory,
         .stateless_reset_key = config.stateless_reset_key,
-        .qlog_callback = config.qlog_callback,
-        .qlog_user_data = config.qlog_user_data,
         .log_callback = config.log_callback,
         .log_user_data = config.log_user_data,
         .on_connection_will_close = config.on_connection_will_close,
@@ -876,13 +839,18 @@ pub fn init(config: Config) Error!Server {
         .new_token_lifetime_us = config.new_token_lifetime_us,
         .enable_0rtt = config.early_data.enabled(),
         .early_data_anti_replay = config.early_data.antiReplayTracker(),
-        .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
-        .max_connection_memory = config.max_connection_memory,
-        .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
-        .ecn_enabled = config.enable_ecn,
-        .congestion_control = config.congestion_control,
-        .pacing_enabled = config.enable_pacing,
-        .hystart_enabled = config.enable_hystart,
+        .tunables = .{
+            .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
+            .max_connection_memory = config.max_connection_memory,
+            .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
+            .ecn_enabled = config.enable_ecn,
+            .pmtud = config.pmtud,
+            .congestion_control = config.congestion_control,
+            .pacing_enabled = config.enable_pacing,
+            .hystart_enabled = config.enable_hystart,
+            .qlog_callback = config.qlog_callback,
+            .qlog_user_data = config.qlog_user_data,
+        },
         // The listener and bandwidth limiters recommend "off"
         // (envelope-dependent), so `.default` resolves through a
         // zero default cap to null.
@@ -894,7 +862,6 @@ pub fn init(config: Config) Error!Server {
             Config.default_log_source_rate_cap,
         ),
         .versions = config.accepted_versions,
-        .pmtud_config = config.pmtud,
         .preferred_address = config.preferred_address,
         .stateless_responses = .empty,
     };

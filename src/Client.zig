@@ -156,6 +156,17 @@ pub const Config = struct {
     /// close events is unaffected.
     reveal_close_reason_on_wire: bool = false,
 
+    /// Hard ceiling on the aggregate bytes resident in peer-controlled
+    /// reassembly / queue buffers for this connection (the
+    /// `Connection.max_connection_memory` memory-DoS cap; hardening
+    /// guide §3.5 / §8). Mirrors `Server.Config.max_connection_memory`
+    /// — a client talking to a hostile or buggy server benefits from
+    /// the same aggregate bound. Defaults to
+    /// `Connection.default_max_connection_memory` (32 MiB), the value
+    /// every client-side connection already ran with before this knob
+    /// existed.
+    max_connection_memory: u64 = Connection.default_max_connection_memory,
+
     /// Number of ack-eliciting application packets the client requires
     /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
     /// matches `quic.conn.state.application_ack_eliciting_threshold`.
@@ -478,22 +489,28 @@ pub fn connect(config: Config) Error!Client {
 
     const conn_ptr = try Connection.createClient(config.allocator, tls_ctx, server_name_z);
     errdefer conn_ptr.destroy();
-    conn_ptr.reveal_close_reason_on_wire = config.reveal_close_reason_on_wire;
-    conn_ptr.delayed_ack_packet_threshold = config.delayed_ack_packet_threshold;
     // RFC 9368 §3 / §5: pick the wire-format version *before*
     // any Initial keys are derived. `setVersion` is a no-op when
     // the value is already current, so this works for the v1
-    // default path too.
+    // default path too. Client-only — the server picks its
+    // version through the vneg/compatible-upgrade path instead.
     conn_ptr.setVersion(config.preferred_version);
-    conn_ptr.ecn_enabled = config.enable_ecn;
-    // RFC 8899 DPLPMTUD: apply the embedder config and
-    // re-initialise the per-path PMTUD state.
-    conn_ptr.setPmtudConfig(config.pmtud);
-    conn_ptr.setCongestionAlgorithm(config.congestion_control);
-    conn_ptr.pacing_enabled = config.enable_pacing;
-    conn_ptr.setHyStartEnabled(config.enable_hystart);
-
-    if (config.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, config.qlog_user_data);
+    // Role-neutral tunables — the same bundle the `Server` accept
+    // path applies, so the two construction paths can't silently
+    // diverge (a knob added to `Connection.Tunables` fails to
+    // compile here until it's wired up).
+    conn_ptr.applyTunables(.{
+        .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
+        .max_connection_memory = config.max_connection_memory,
+        .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
+        .ecn_enabled = config.enable_ecn,
+        .pmtud = config.pmtud,
+        .congestion_control = config.congestion_control,
+        .pacing_enabled = config.enable_pacing,
+        .hystart_enabled = config.enable_hystart,
+        .qlog_callback = config.qlog_callback,
+        .qlog_user_data = config.qlog_user_data,
+    });
 
     // NEW_TOKEN receive callback — wire it before any frame
     // could be processed. Server-side connections never fire

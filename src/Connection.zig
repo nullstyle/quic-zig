@@ -1794,6 +1794,74 @@ pub fn setHyStartEnabled(self: *Connection, enabled: bool) void {
     }
 }
 
+/// Role-neutral per-connection tunables applied right after
+/// `createClient`/`createServer` by both construction wrappers —
+/// the `Server` accept path and `Client.connect` — via
+/// `applyTunables`. One shared bundle instead of two hand-mirrored
+/// assignment blocks, so a knob added on one side can't silently go
+/// missing on the other.
+///
+/// Every field is deliberately DEFAULT-FREE: a Zig struct literal
+/// may omit defaulted fields, so a default here would let a newly
+/// added knob silently drop out of one wrapper's projection. With
+/// no defaults, adding a field is a compile error at every
+/// projection until each wires it up. The user-facing defaults
+/// stay on `Server.Config` / `Client.Config`, where they always
+/// lived.
+///
+/// Genuinely role-specific setup (e.g. the client's RFC 9368
+/// `setVersion` call) stays at the wrapper call sites — only knobs
+/// meaningful to both roles belong here.
+pub const Tunables = struct {
+    /// See `Connection.reveal_close_reason_on_wire`.
+    reveal_close_reason_on_wire: bool,
+    /// See `Connection.max_connection_memory` (hardening §3.5 / §8
+    /// aggregate memory DoS cap).
+    max_connection_memory: u64,
+    /// See `Connection.delayed_ack_packet_threshold` (RFC 9000
+    /// §13.2.1).
+    delayed_ack_packet_threshold: u8,
+    /// See `Connection.ecn_enabled` (RFC 9000 §13.4).
+    ecn_enabled: bool,
+    /// RFC 8899 DPLPMTUD configuration; applied via
+    /// `setPmtudConfig`.
+    pmtud: path_mod.PmtudConfig,
+    /// Congestion-control algorithm; applied via
+    /// `setCongestionAlgorithm`.
+    congestion_control: congestion_mod.Algorithm,
+    /// See `Connection.pacing_enabled` (RFC 9002 §7.7).
+    pacing_enabled: bool,
+    /// RFC 9406 HyStart++; applied via `setHyStartEnabled`.
+    hystart_enabled: bool,
+    /// Optional qlog sink; installed via `setQlogCallback` when
+    /// non-null (which also emits `connection_started`).
+    qlog_callback: ?QlogCallback,
+    qlog_user_data: ?*anyopaque,
+};
+
+/// Apply a `Tunables` bundle to a freshly-created Connection. Call
+/// during setup, right after `createClient`/`createServer`: the
+/// congestion / HyStart setters re-initialise every existing
+/// path's controller, and the qlog hook fires
+/// `connection_started` on install. The statement order preserves
+/// the historical wrapper order (plain field writes and setters
+/// first, qlog hook last).
+pub fn applyTunables(self: *Connection, t: Tunables) void {
+    self.reveal_close_reason_on_wire = t.reveal_close_reason_on_wire;
+    self.max_connection_memory = t.max_connection_memory;
+    self.delayed_ack_packet_threshold = t.delayed_ack_packet_threshold;
+    self.ecn_enabled = t.ecn_enabled;
+    // RFC 8899 DPLPMTUD: `setPmtudConfig` also re-initialises every
+    // existing path (only the primary at this point), so the
+    // per-path pmtu / pmtu_state lands consistent with the config.
+    self.setPmtudConfig(t.pmtud);
+    self.setCongestionAlgorithm(t.congestion_control);
+    self.pacing_enabled = t.pacing_enabled;
+    self.setHyStartEnabled(t.hystart_enabled);
+
+    if (t.qlog_callback) |cb| self.setQlogCallback(cb, t.qlog_user_data);
+}
+
 /// RFC 8899 DPLPMTUD: current PMTU floor (in bytes) for the active
 /// application-data path. The send path consults this when sizing
 /// outbound 1-RTT packets; embedders surface it via observability.

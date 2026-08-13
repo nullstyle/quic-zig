@@ -103,42 +103,87 @@ pub fn antiReplayEarlyDataTrampoline(
     };
 }
 
+/// Build a server-mode TLS context from PEM credentials, carrying
+/// the FULL TLS security posture: TLS-1.3-only version pin, ALPN
+/// preference order, mTLS trust anchors (`client_ca_pem`), the
+/// 0-RTT `early_data_enabled` knob, and the anti-replay early-data
+/// hook (`tracker`).
+///
+/// This is the ONLY constructor for Server-owned contexts — both
+/// `Server.init` and `replaceTlsContext({.pem = ...})` go through
+/// it, deliberately: the two paths used to carry hand-mirrored
+/// copies of this sequence, and commit 7fc58b6 landed the
+/// anti-replay hook (RFC 9001 §5.6 / hardening §5.2) on the init
+/// copy only, leaving `.pem` cert rotations silently accepting
+/// replayed 0-RTT flights until 1b69f8a backfilled it. Every
+/// future posture knob (ticket keys, cipher preferences, OCSP,
+/// ...) must land here so a cert reload can never downgrade the
+/// server's security posture again.
+///
+/// Empty `cert_pem`/`key_pem` is rejected as `Error.InvalidConfig`
+/// (both callers share that rule). On any failure the
+/// partially-built context is torn down internally; on success the
+/// caller owns the returned context.
+///
+/// `tracker` non-null implies early data is enabled
+/// (`Config.EarlyData.antiReplayTracker` only returns a tracker
+/// for `.with_anti_replay`, which also enables 0-RTT); the hook is
+/// installed whenever a tracker is supplied, matching the
+/// historical `Server.init` behavior.
+pub fn buildServerContext(
+    alpn: []const []const u8,
+    cert_pem: []const u8,
+    key_pem: []const u8,
+    client_ca_pem: ?[]const u8,
+    early_data_enabled: bool,
+    tracker: ?*tls_mod.anti_replay.AntiReplayTracker,
+) Error!boringssl.tls.Context {
+    if (cert_pem.len == 0 or key_pem.len == 0) return Error.InvalidConfig;
+    var ctx = try boringssl.tls.Context.initServer(.{
+        .verify = .none,
+        .min_version = boringssl.raw.TLS1_3_VERSION,
+        .max_version = boringssl.raw.TLS1_3_VERSION,
+        .alpn = alpn,
+        .early_data_enabled = early_data_enabled,
+    });
+    errdefer ctx.deinit();
+    try ctx.loadCertChainAndKey(cert_pem, key_pem);
+    // mTLS: require and verify a client certificate against the
+    // embedder's pinned roots. On the reload path this carries the
+    // init-time posture onto the replacement context — a cert
+    // rotation must not silently stop verifying clients.
+    if (client_ca_pem) |ca| {
+        try tls_mod.pem.installTrustAnchors(ctx, ca, .require_peer_cert);
+    }
+    // Hardening §5.2 / RFC 9001 §5.6: when the embedder installs an
+    // `AntiReplayTracker`, hook BoringSSL's pre-resumption
+    // early-data callback so duplicate 0-RTT attempts are rejected
+    // at the TLS layer (not just at application post-handshake). A
+    // context that enables early data without it would silently
+    // accept replayed 0-RTT flights.
+    if (tracker) |t| {
+        try ctx.setAllowEarlyDataCallback(
+            antiReplayEarlyDataTrampoline,
+            @ptrCast(t),
+        );
+    }
+    return ctx;
+}
+
 // Doc comment lives on the `Server.replaceTlsContext` thunk in Server.zig.
 pub fn replaceTlsContext(server: *Server, reload: TlsReload) Error!void {
     var new_ctx: boringssl.tls.Context = switch (reload) {
-        .pem => |pem| blk: {
-            if (pem.cert_pem.len == 0 or pem.key_pem.len == 0) return Error.InvalidConfig;
-            var ctx = try boringssl.tls.Context.initServer(.{
-                .verify = .none,
-                .min_version = boringssl.raw.TLS1_3_VERSION,
-                .max_version = boringssl.raw.TLS1_3_VERSION,
-                .alpn = server.alpn_protocols,
-                .early_data_enabled = server.enable_0rtt,
-            });
-            errdefer ctx.deinit();
-            try ctx.loadCertChainAndKey(pem.cert_pem, pem.key_pem);
-            // Carry the init-time mTLS posture onto the
-            // replacement context — a cert rotation must not
-            // silently stop verifying clients.
-            if (server.client_ca_pem) |ca| {
-                try tls_mod.pem.installTrustAnchors(ctx, ca, .require_peer_cert);
-            }
-            // Same for the 0-RTT anti-replay hook: `Server.init`
-            // installs it on the original context; a rotated
-            // context that re-enables early data without it would
-            // silently accept replayed 0-RTT flights for every
-            // ticket minted after the swap (RFC 9001 §5.6 /
-            // hardening §5.2).
-            if (server.enable_0rtt) {
-                if (server.early_data_anti_replay) |tracker| {
-                    try ctx.setAllowEarlyDataCallback(
-                        antiReplayEarlyDataTrampoline,
-                        @ptrCast(tracker),
-                    );
-                }
-            }
-            break :blk ctx;
-        },
+        // Rebuild with the same posture the original context was
+        // built with — `buildServerContext` is shared with
+        // `Server.init` precisely so the two can't drift.
+        .pem => |pem| try buildServerContext(
+            server.alpn_protocols,
+            pem.cert_pem,
+            pem.key_pem,
+            server.client_ca_pem,
+            server.enable_0rtt,
+            server.early_data_anti_replay,
+        ),
         // Mirror the `Server.init` rule that rejects
         // `client_ca_pem` + `tls_context_override`: an adopted
         // context owns its own verification posture, and adopting
