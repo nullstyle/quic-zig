@@ -17,7 +17,7 @@ const frame_types = state.frame_types;
 const incoming_ack_range_cap = state.incoming_ack_range_cap;
 const max_recv_plaintext = state.max_recv_plaintext;
 const path_mod = state.path_mod;
-const sent_packets_mod = state.sent_packets_mod;
+const SentPacketTracker = state.SentPacketTracker;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const util = @import("_test_util.zig");
@@ -33,7 +33,7 @@ test "poll helper emits one draft multipath control frame with retransmit metada
     defer conn.destroy();
 
     try conn.queuePathStatus(2, false, 7);
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
         .bytes = 0,
@@ -66,7 +66,7 @@ test "poll helper coalesces draft multipath control frames with retransmit metad
     conn.queueMaxPathId(4);
     conn.queuePathsBlocked(3);
 
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
         .bytes = 0,
@@ -103,7 +103,7 @@ test "PTO requeues retransmittable draft multipath control frames" {
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 11,
         .sent_time_us = 0,
         .bytes = 90,
@@ -712,7 +712,7 @@ test "PTO requeues retransmittable controls on non-zero application path" {
 
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0x02}));
     const path = conn.paths.get(path_id).?;
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
         .bytes = 90,

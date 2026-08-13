@@ -16,7 +16,7 @@ const Role = state.Role;
 const default_mtu = state.default_mtu;
 const frame_mod = state.frame_mod;
 const path_mod = state.path_mod;
-const sent_packets_mod = state.sent_packets_mod;
+const SentPacketTracker = state.SentPacketTracker;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_aead_limit_reached = state.transport_error_aead_limit_reached;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
@@ -46,7 +46,7 @@ test "qlog callback records application key update lifecycle" {
     try conn.requestKeyUpdate(1_100_000);
     const write_epoch = conn.app_write_current.?;
     try std.testing.expect(recorder.contains(.application_write_key_updated));
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 42,
         .sent_time_us = 1_100_000,
         .bytes = 64,

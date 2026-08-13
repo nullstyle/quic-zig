@@ -16,7 +16,7 @@ const std = @import("std");
 const congestion = @import("../congestion.zig");
 const delivery_rate = @import("../delivery_rate.zig");
 const hystart_mod = @import("../hystart.zig");
-const pacing_mod = @import("../Pacer.zig");
+const Pacer = @import("../Pacer.zig");
 
 /// CUBIC multiplicative-decrease factor β_cubic = 0.7 (RFC 9438 §4.6).
 pub const beta_num: u64 = 7;
@@ -282,7 +282,7 @@ pub fn onPacketNewlyLost(self: *Cubic, info: *const delivery_rate.LostPacketInfo
 
 /// RFC 9002 §7.7 pacing rate: gain x cwnd / srtt, gain by phase.
 pub fn pacingRateBps(self: *const Cubic, srtt_us: u64) u64 {
-    return pacing_mod.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
+    return Pacer.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
 }
 
 // -- the two float helpers (all f64 confined here) --------------------------

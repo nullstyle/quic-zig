@@ -30,7 +30,7 @@ const ApplicationOpenResult = state_mod.ApplicationOpenResult;
 const wire_header = state_mod.wire_header;
 const frame_mod = state_mod.frame_mod;
 const frame_types = state_mod.frame_types;
-const rtt_mod = state_mod.rtt_mod;
+const RttEstimator = state_mod.RttEstimator;
 const short_packet_mod = state_mod.short_packet_mod;
 const socket_opts_mod = state_mod.socket_opts_mod;
 const stateless_reset_mod = state_mod.stateless_reset_mod;
@@ -360,12 +360,12 @@ pub fn recordApplicationReceivedPacket(
 ) void {
     const ack_eliciting = packetPayloadAckEliciting(payload);
     if (ack_eliciting and packetPayloadNeedsImmediateAck(payload)) {
-        app_pn_space.recordReceivedPacket(pn, now_us / rtt_mod.ms, true);
+        app_pn_space.recordReceivedPacket(pn, now_us / RttEstimator.ms, true);
         return;
     }
     app_pn_space.recordReceivedPacketDelayed(
         pn,
-        now_us / rtt_mod.ms,
+        now_us / RttEstimator.ms,
         ack_eliciting,
         delayed_ack_threshold,
     );

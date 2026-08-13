@@ -204,7 +204,7 @@ fn testLivePns(tr: *const SentPacketTracker, buf: []u64) []const u64 {
     return buf[0..n];
 }
 
-const ack_tracker_mod = @import("AckTracker.zig");
+const AckTracker = @import("AckTracker.zig");
 
 fn buildAck(largest: u64, first_range: u64) frame_types.Ack {
     return .{
@@ -256,7 +256,7 @@ test "processAck handles an ACK with multiple ranges" {
 
     // Build ACK covering [10..10] and [3..5] using a multi-range frame.
     var ranges_buf: [16]u8 = undefined;
-    const ranges = [_]ack_tracker_mod.Range{}; // placeholder to silence import
+    const ranges = [_]AckTracker.Range{}; // placeholder to silence import
     _ = ranges;
 
     // Wire ranges: largest = 10, first_range = 0 → [10..10].

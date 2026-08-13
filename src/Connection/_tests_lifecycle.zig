@@ -89,7 +89,7 @@ test "per-space tracker capacities: 256 for Initial/Handshake, 4096 for Applicat
     // connection-level spaces must get the small capacity, the
     // per-path Application space the large one. If this fails after
     // an intentional resize, update the constants' rationale first.
-    const sent_packets = state.sent_packets_mod;
+    const sent_packets = state.SentPacketTracker;
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();

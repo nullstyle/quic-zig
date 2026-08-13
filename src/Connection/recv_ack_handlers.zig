@@ -15,8 +15,8 @@ const EncryptionLevel = state_mod.EncryptionLevel;
 const PathState = state_mod.PathState;
 const frame_types = state_mod.frame_types;
 const ack_range_mod = state_mod.ack_range_mod;
-const sent_packets_mod = state_mod.sent_packets_mod;
-const pn_space_mod = state_mod.pn_space_mod;
+const SentPacketTracker = state_mod.SentPacketTracker;
+const PnSpace = state_mod.PnSpace;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
 
 /// Scale a peer-reported ACK Delay (a varint, 0..2^62-1) by the peer's
@@ -47,7 +47,7 @@ fn scaledAckDelayUs(raw: u64, exponent: u6) u64 {
 /// so subsequent ACKs at this level stop emitting our own ECN
 /// counts and stop reacting to peer-reported CE bumps.
 fn validateAndApplyAckEcn(
-    pn_space: *pn_space_mod.PnSpace,
+    pn_space: *PnSpace.PnSpace,
     ecn_counts: ?frame_types.EcnCounts,
 ) bool {
     const counts = ecn_counts orelse return true; // No ECN trailer → no validation.
@@ -97,7 +97,7 @@ const LevelAckDispatchCtx = struct {
 
 fn dispatchAckedAtLevel(
     ctx: *LevelAckDispatchCtx,
-    acked: *sent_packets_mod.SentPacket,
+    acked: *SentPacketTracker.SentPacket,
 ) Error!void {
     defer acked.deinit(ctx.conn.allocator);
     if (acked.pn == ctx.ack.largest_acked) {
@@ -153,7 +153,7 @@ const PathAckDispatchCtx = struct {
 
 fn dispatchAckedOnPath(
     ctx: *PathAckDispatchCtx,
-    acked: *sent_packets_mod.SentPacket,
+    acked: *SentPacketTracker.SentPacket,
 ) Error!void {
     defer acked.deinit(ctx.conn.allocator);
     if (acked.pn == ctx.ack.largest_acked) {
@@ -484,7 +484,7 @@ pub fn handleApplicationAckOnPath(
 
 pub fn dispatchLostControlFrames(
     conn: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
 ) Error!bool {
     return conn.dispatchLostControlFramesOnPath(packet, conn.activePath().id);
 }

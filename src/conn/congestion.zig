@@ -19,7 +19,7 @@ const bbr_mod = @import("congestion/Bbr.zig");
 const cubic_mod = @import("congestion/Cubic.zig");
 const delivery_rate = @import("delivery_rate.zig");
 const hystart_mod = @import("hystart.zig");
-const pacing_mod = @import("Pacer.zig");
+const Pacer = @import("Pacer.zig");
 
 /// RFC 9406 HyStart++ state/config, shared by both controllers.
 pub const HyStart = hystart_mod.State;
@@ -559,7 +559,7 @@ pub const NewReno = struct {
 
     /// RFC 9002 §7.7 pacing rate: gain x cwnd / srtt, gain by phase.
     pub fn pacingRateBps(self: *const NewReno, srtt_us: u64) u64 {
-        return pacing_mod.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
+        return Pacer.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
     }
 };
 
@@ -797,7 +797,7 @@ test "rate-sample surface: no-op hooks leave observables untouched, pacing outle
             cc.setCwndForTest(w);
             for ([_]u64{ 0, 500, 25_000, 333_000 }) |srtt| {
                 try std.testing.expectEqual(
-                    pacing_mod.rateBytesPerSecond(w, srtt, cc.isSlowStart()),
+                    Pacer.rateBytesPerSecond(w, srtt, cc.isSlowStart()),
                     cc.pacingRateBps(srtt),
                 );
             }
@@ -806,7 +806,7 @@ test "rate-sample surface: no-op hooks leave observables untouched, pacing outle
         try std.testing.expect(!cc.isSlowStart());
         for ([_]u64{ 500, 25_000 }) |srtt| {
             try std.testing.expectEqual(
-                pacing_mod.rateBytesPerSecond(cc.cwndBytes(), srtt, false),
+                Pacer.rateBytesPerSecond(cc.cwndBytes(), srtt, false),
                 cc.pacingRateBps(srtt),
             );
         }

@@ -19,24 +19,18 @@ const std = @import("std");
 
 const congestion_mod = @import("congestion.zig");
 const delivery_rate_mod = @import("delivery_rate.zig");
-const pacing_mod = @import("Pacer.zig");
-const pn_space_mod = @import("PnSpace.zig");
+const Pacer = @import("Pacer.zig");
+pub const PnSpace = @import("PnSpace.zig");
 const path_validator_mod = @import("PathValidator.zig");
-const rtt_mod = @import("RttEstimator.zig");
-const sent_packets_mod = @import("SentPacketTracker.zig");
+pub const RttEstimator = @import("RttEstimator.zig");
+pub const SentPacketTracker = @import("SentPacketTracker.zig");
 
 /// Re-export of the per-path NewReno congestion controller.
 pub const NewReno = congestion_mod.NewReno;
 /// Re-export of the algorithm-dispatching controller each path holds.
 pub const CongestionController = congestion_mod.CongestionController;
-/// Re-export of the QUIC packet number space type.
-pub const PnSpace = pn_space_mod.PnSpace;
 /// Re-export of the RFC 9000 §8.2 path validator.
 pub const PathValidator = path_validator_mod.PathValidator;
-/// Re-export of the RFC 9002 RTT estimator.
-pub const RttEstimator = rtt_mod.RttEstimator;
-/// Re-export of the per-path sent-packet tracker.
-pub const SentPacketTracker = sent_packets_mod.SentPacketTracker;
 
 /// QUIC connection IDs are between 0 and 20 bytes (RFC 9000 §17.2).
 pub const max_cid_len: usize = 20;
@@ -190,7 +184,7 @@ pub const Path = struct {
     cc: CongestionController,
     /// RFC 9002 §7.7 token-bucket pacer; refilled lazily on the send
     /// path from this path's cwnd/srtt.
-    pacer: pacing_mod.Pacer = .{},
+    pacer: Pacer.Pacer = .{},
     /// Delivery-rate estimator (draft-cheng-iccrg-delivery-rate-
     /// estimation-02, as embedded/updated by draft-ietf-ccwg-bbr-06
     /// §4.1.2): per-path C.delivered/C.lost clocks, per-ACK rate
@@ -527,7 +521,7 @@ pub const PathState = struct {
         return .{
             .id = id,
             .path = Path.init(peer_addr, local_addr, local_cid, peer_cid, cc_cfg),
-            .sent = try SentPacketTracker.init(allocator, sent_packets_mod.max_tracked),
+            .sent = try SentPacketTracker.init(allocator, SentPacketTracker.max_tracked),
         };
     }
 

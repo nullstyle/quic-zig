@@ -24,10 +24,10 @@ const LossStats = state_mod.LossStats;
 const TimerDeadline = state_mod.TimerDeadline;
 const congestion_mod = state_mod.congestion_mod;
 const loss_recovery_mod = state_mod.loss_recovery_mod;
-const pending_frames_mod = state_mod.pending_frames_mod;
-const rtt_mod = state_mod.rtt_mod;
+const PendingFrameQueues = state_mod.PendingFrameQueues;
+const RttEstimator = state_mod.RttEstimator;
 const send_stream_mod = state_mod.send_stream_mod;
-const sent_packets_mod = state_mod.sent_packets_mod;
+const SentPacketTracker = state_mod.SentPacketTracker;
 
 fn backoffDuration(base: u64, count: u32) u64 {
     const shift: u6 = @intCast(@min(count, 16));
@@ -87,7 +87,7 @@ pub fn lossDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 
     const time_threshold = @max(
         reference_rtt * loss_recovery_mod.time_threshold_num /
             loss_recovery_mod.time_threshold_den,
-        rtt_mod.granularity_us,
+        RttEstimator.granularity_us,
     );
 
     var best: ?u64 = null;
@@ -109,7 +109,7 @@ pub fn lossDeadlineForApplicationPath(conn: *const Connection, path: *const Path
     const time_threshold = @max(
         reference_rtt * loss_recovery_mod.time_threshold_num /
             loss_recovery_mod.time_threshold_den,
-        rtt_mod.granularity_us,
+        RttEstimator.granularity_us,
     );
 
     var best: ?u64 = null;
@@ -159,7 +159,7 @@ pub fn idleDeadline(conn: *const Connection) ?u64 {
 
 pub fn dispatchAckedPacketToStreams(
     conn: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
 ) Error!void {
     var refs = packet.streamRefs();
     while (refs.next()) |ref| {
@@ -180,7 +180,7 @@ pub fn dispatchAckedPacketToStreams(
 
 pub fn dispatchLostPacketToStreams(
     conn: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
 ) Error!bool {
     var any = false;
     var refs = packet.streamRefs();
@@ -240,7 +240,7 @@ fn requeueSentCryptoForPacket(
 
 pub fn dispatchAckedControlFrames(
     conn: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
 ) void {
     for (packet.retransmit_frames.items) |frame| {
         switch (frame) {
@@ -261,7 +261,7 @@ pub fn dispatchAckedControlFrames(
 
 pub fn dispatchLostControlFramesOnPath(
     conn: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
     path_id: u32,
 ) Error!bool {
     var any = false;
@@ -385,7 +385,7 @@ pub fn dispatchLostControlFramesOnPath(
                 // hasn't already queued a fresh NEW_TOKEN over
                 // the top, restage the bytes from the lost copy.
                 if (conn.pending_frames.new_token == null) {
-                    var stage: pending_frames_mod.NewTokenItem = .{};
+                    var stage: PendingFrameQueues.NewTokenItem = .{};
                     @memcpy(stage.bytes[0..item.len], item.slice());
                     stage.len = item.len;
                     conn.pending_frames.new_token = stage;
@@ -424,7 +424,7 @@ pub fn dispatchLostControlFramesOnPath(
 pub fn requeueLostPacket(
     conn: *Connection,
     lvl: EncryptionLevel,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
 ) Error!bool {
     return requeueLostPacketOnPath(conn, lvl, packet, conn.activePath().id);
 }
@@ -432,7 +432,7 @@ pub fn requeueLostPacket(
 fn requeueLostPacketOnPath(
     conn: *Connection,
     lvl: EncryptionLevel,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
     path_id: u32,
 ) Error!bool {
     var any = false;
@@ -520,7 +520,7 @@ fn onApplicationPathPacketsLost(
 fn pmtudHandleProbeLossIfMatches(
     conn: *Connection,
     path: *PathState,
-    lost: *const sent_packets_mod.SentPacket,
+    lost: *const SentPacketTracker.SentPacket,
 ) bool {
     const probe_pn = path.pmtu_probe_pn orelse return false;
     if (probe_pn != lost.pn) return false;
@@ -565,7 +565,7 @@ pub fn detectLossesByPacketThresholdAtLevel(
         path: *PathState,
         stats: *LossStats,
 
-        fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
+        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
             defer lost.deinit(ctx.conn.allocator);
             conn_qlog.emitPacketLost(ctx.conn, ctx.lvl, lost.pn, @intCast(lost.bytes), .packet_threshold);
             const is_probe = ctx.lvl == .application and
@@ -642,7 +642,7 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
         path: *PathState,
         stats: *LossStats,
 
-        fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
+        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
             defer lost.deinit(ctx.conn.allocator);
             conn_qlog.emitPacketLost(ctx.conn, .application, lost.pn, @intCast(lost.bytes), .packet_threshold);
             const is_probe = pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
@@ -698,7 +698,7 @@ pub fn detectLossesByTimeThresholdAtLevel(
     const time_threshold = @max(
         reference_rtt * loss_recovery_mod.time_threshold_num /
             loss_recovery_mod.time_threshold_den,
-        rtt_mod.granularity_us,
+        RttEstimator.granularity_us,
     );
     if (now_us <= time_threshold) return;
     const cutoff = now_us - time_threshold;
@@ -715,7 +715,7 @@ pub fn detectLossesByTimeThresholdAtLevel(
         path: *PathState,
         stats: *LossStats,
 
-        fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
+        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
             defer lost.deinit(ctx.conn.allocator);
             conn_qlog.emitPacketLost(ctx.conn, ctx.lvl, lost.pn, @intCast(lost.bytes), .time_threshold);
             const is_probe = ctx.lvl == .application and
@@ -779,7 +779,7 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
     const time_threshold = @max(
         reference_rtt * loss_recovery_mod.time_threshold_num /
             loss_recovery_mod.time_threshold_den,
-        rtt_mod.granularity_us,
+        RttEstimator.granularity_us,
     );
     if (now_us <= time_threshold) return;
     const cutoff = now_us - time_threshold;
@@ -792,7 +792,7 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
         path: *PathState,
         stats: *LossStats,
 
-        fn handle(ctx: *@This(), lost: *sent_packets_mod.SentPacket) Error!void {
+        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
             defer lost.deinit(ctx.conn.allocator);
             conn_qlog.emitPacketLost(ctx.conn, .application, lost.pn, @intCast(lost.bytes), .time_threshold);
             const is_probe = pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);

@@ -28,7 +28,7 @@ const varint = state_mod.varint;
 const long_packet_mod = state_mod.long_packet_mod;
 const short_packet_mod = state_mod.short_packet_mod;
 const send_stream_mod = state_mod.send_stream_mod;
-const sent_packets_mod = state_mod.sent_packets_mod;
+const SentPacketTracker = state_mod.SentPacketTracker;
 const path_frame_queue = state_mod.path_frame_queue;
 const max_recv_plaintext = state_mod.max_recv_plaintext;
 const max_application_ack_lower_ranges = state_mod.max_application_ack_lower_ranges;
@@ -221,7 +221,7 @@ pub fn pollLevelOnPath(
     var pl_buf: [max_recv_plaintext]u8 = undefined;
     var pl_pos: usize = 0;
     var ack_eliciting = false;
-    var sent_packet: sent_packets_mod.SentPacket = .{
+    var sent_packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = now_us,
         .bytes = 0,
@@ -235,7 +235,7 @@ pub fn pollLevelOnPath(
         offset: u64,
         data: []u8,
     } = null;
-    var sent_datagram: ?sent_packets_mod.SentDatagram = null;
+    var sent_datagram: ?SentPacketTracker.SentDatagram = null;
     var crypto_copy: ?[]u8 = null;
     var retx_crypto_index: ?usize = null;
     errdefer if (crypto_copy) |bytes| conn.allocator.free(bytes);
@@ -515,7 +515,7 @@ pub fn pollLevelOnPath(
                 .quic_bit = close_quic_bit,
             }),
         };
-        var close_packet: sent_packets_mod.SentPacket = .{
+        var close_packet: SentPacketTracker.SentPacket = .{
             .pn = pn,
             .sent_time_us = now_us,
             .bytes = n_close,
@@ -693,7 +693,7 @@ pub fn pollLevelOnPath(
             // Stash a copy in the retransmit slot so loss
             // recovery can requeue from the captured bytes
             // (the pending-frames slot is about to be cleared).
-            var retx_item: sent_packets_mod.NewTokenRetransmit = .{};
+            var retx_item: SentPacketTracker.NewTokenRetransmit = .{};
             @memcpy(retx_item.bytes[0..item.len], item.slice());
             retx_item.len = item.len;
             try sent_packet.addRetransmitFrame(conn.allocator, .{
@@ -944,7 +944,7 @@ pub fn pollLevelOnPath(
         if (max_payload >= pl_pos + overhead_alt) {
             const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], candidate);
             pl_pos += wrote;
-            const retx: sent_packets_mod.RetransmitFrame = switch (item) {
+            const retx: SentPacketTracker.RetransmitFrame = switch (item) {
                 .v4 => |a| .{ .alternative_v4_address = a },
                 .v6 => |a| .{ .alternative_v6_address = a },
             };
@@ -1108,7 +1108,7 @@ pub fn pollLevelOnPath(
         chunk: send_stream_mod.Chunk,
         stream_key: u64,
     };
-    var sent_chunks: [sent_packets_mod.max_stream_keys_per_packet]SentStreamChunk = undefined;
+    var sent_chunks: [SentPacketTracker.max_stream_keys_per_packet]SentStreamChunk = undefined;
     var sent_chunk_count: usize = 0;
     var planned_conn_new_bytes: u64 = 0;
     if (!path_response_used_addr_override and !congestion_blocked and (lvl == .application or lvl == .early_data)) {
@@ -1117,7 +1117,7 @@ pub fn pollLevelOnPath(
         // lead each packet. Bounded to the per-packet chunk cap; excess
         // ready streams are served on later packets. With no explicit
         // priorities every stream is urgency 3, so this is stream-id order.
-        var pri_buf: [sent_packets_mod.max_stream_keys_per_packet]*Stream = undefined;
+        var pri_buf: [SentPacketTracker.max_stream_keys_per_packet]*Stream = undefined;
         const ready_streams = conn.collectSendableStreamsByPriority(&pri_buf);
         for (ready_streams) |s| {
             if (sent_chunk_count >= sent_chunks.len) break;
@@ -1343,7 +1343,7 @@ fn encodeFrameIfFits(
 
 pub fn emitOnePendingMultipathFrame(
     conn: *Connection,
-    sent_packet: *sent_packets_mod.SentPacket,
+    sent_packet: *SentPacketTracker.SentPacket,
     pl_buf: *[max_recv_plaintext]u8,
     pl_pos: *usize,
     max_payload: usize,
@@ -1422,13 +1422,13 @@ pub fn emitOnePendingMultipathFrame(
 
 pub fn emitPendingMultipathFrames(
     conn: *Connection,
-    sent_packet: *sent_packets_mod.SentPacket,
+    sent_packet: *SentPacketTracker.SentPacket,
     pl_buf: *[max_recv_plaintext]u8,
     pl_pos: *usize,
     max_payload: usize,
 ) Error!bool {
     var emitted = false;
-    const control_budget = sent_packets_mod.max_retransmit_frames - 1;
+    const control_budget = SentPacketTracker.max_retransmit_frames - 1;
     while (sent_packet.retransmit_frames.items.len < control_budget) {
         const before = pl_pos.*;
         if (!try emitOnePendingMultipathFrame(conn, sent_packet, pl_buf, pl_pos, max_payload)) break;

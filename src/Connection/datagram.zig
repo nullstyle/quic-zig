@@ -9,7 +9,7 @@ const state_mod = @import("../Connection.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const event_queue_mod = state_mod.event_queue_mod;
-const sent_packets_mod = state_mod.sent_packets_mod;
+const SentPacketTracker = state_mod.SentPacketTracker;
 const StoredDatagramSendEvent = event_queue_mod.StoredDatagramSendEvent;
 const default_mtu = state_mod.default_mtu;
 const max_datagram_frame_size = state_mod.max_datagram_frame_size;
@@ -23,12 +23,12 @@ fn recordDatagramSendEvent(conn: *Connection, event: StoredDatagramSendEvent) vo
     conn.datagram_send_events.push(event);
 }
 
-pub fn recordDatagramAcked(conn: *Connection, packet: *const sent_packets_mod.SentPacket) void {
+pub fn recordDatagramAcked(conn: *Connection, packet: *const SentPacketTracker.SentPacket) void {
     const event = event_queue_mod.datagramEventFromPacket(packet) orelse return;
     recordDatagramSendEvent(conn, .{ .acked = event });
 }
 
-pub fn recordDatagramLost(conn: *Connection, packet: *const sent_packets_mod.SentPacket) void {
+pub fn recordDatagramLost(conn: *Connection, packet: *const SentPacketTracker.SentPacket) void {
     const event = event_queue_mod.datagramEventFromPacket(packet) orelse return;
     recordDatagramSendEvent(conn, .{ .lost = event });
 }

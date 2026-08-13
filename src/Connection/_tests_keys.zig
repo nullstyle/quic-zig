@@ -15,7 +15,7 @@ const long_packet_mod = state.long_packet_mod;
 const max_application_ack_lower_ranges = state.max_application_ack_lower_ranges;
 const max_application_ack_ranges_bytes = state.max_application_ack_ranges_bytes;
 const max_recv_plaintext = state.max_recv_plaintext;
-const sent_packets_mod = state.sent_packets_mod;
+const SentPacketTracker = state.SentPacketTracker;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_aead_limit_reached = state.transport_error_aead_limit_reached;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
@@ -367,7 +367,7 @@ test "client discards Handshake keys when HANDSHAKE_DONE arrives [RFC9001 §4.9.
     conn.levels[hsk_idx].write = hsk_material;
     // Plant a phantom unACKed Handshake-level packet so we can pin
     // the post-discard sent-tracker invariant.
-    const packet: sent_packets_mod.SentPacket = .{
+    const packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
         .bytes = 36,
@@ -427,7 +427,7 @@ test "server discards Handshake keys at handshake-complete [RFC9001 §4.1.2 ¶1]
     conn.levels[hsk_idx].read = material;
     conn.levels[hsk_idx].write = material;
 
-    const packet: sent_packets_mod.SentPacket = .{
+    const packet: SentPacketTracker.SentPacket = .{
         .pn = 1,
         .sent_time_us = 0,
         .bytes = 700,

@@ -11,11 +11,9 @@
 pub const PnSpace = @This();
 
 const std = @import("std");
-const ack_tracker_mod = @import("AckTracker.zig");
+const AckTracker = @import("AckTracker.zig");
 const socket_opts = @import("../transport/socket_opts.zig");
 
-/// Re-export of the underlying received-PN tracker.
-pub const AckTracker = ack_tracker_mod.AckTracker;
 /// Re-export of the IETF ECN codepoint enum (RFC 3168 §5).
 pub const EcnCodepoint = socket_opts.EcnCodepoint;
 

@@ -24,7 +24,7 @@ const max_supported_active_connection_id_limit = state.max_supported_active_conn
 const max_supported_path_id = state.max_supported_path_id;
 const max_tracked_stream_data_blocked = state.max_tracked_stream_data_blocked;
 const min_quic_udp_payload_size = state.min_quic_udp_payload_size;
-const sent_packets_mod = state.sent_packets_mod;
+const SentPacketTracker = state.SentPacketTracker;
 const transport_error_flow_control = state.transport_error_flow_control;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const transport_error_stream_limit = state.transport_error_stream_limit;
@@ -612,7 +612,7 @@ test "stale blocked frames are not requeued after peer raises limits" {
     conn.clearLocalStreamDataBlocked(0, 12);
     conn.clearLocalStreamsBlocked(true, 4);
 
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 9,
         .sent_time_us = 1_000,
         .bytes = 100,

@@ -18,7 +18,7 @@ const ApplicationKeyUpdateLimits = state_mod.ApplicationKeyUpdateLimits;
 const ApplicationKeyUpdateStatus = state_mod.ApplicationKeyUpdateStatus;
 const short_packet_mod = state_mod.short_packet_mod;
 const initial_keys_mod = state_mod.initial_keys_mod;
-const sent_packets_mod = state_mod.sent_packets_mod;
+const SentPacketTracker = state_mod.SentPacketTracker;
 const transport_error_aead_limit_reached = state_mod.transport_error_aead_limit_reached;
 
 /// Are read/write secrets installed at the given encryption level?
@@ -363,7 +363,7 @@ pub fn prepareApplicationWriteKeys(conn: *Connection, now_us: u64) Error!void {
 
 pub fn recordApplicationPacketProtected(
     conn: *Connection,
-    sent_packet: *sent_packets_mod.SentPacket,
+    sent_packet: *SentPacketTracker.SentPacket,
 ) void {
     if (conn.app_write_current) |*epoch| {
         epoch.packets_protected +|= 1;
@@ -374,7 +374,7 @@ pub fn recordApplicationPacketProtected(
 
 pub fn onApplicationPacketAckedForKeys(
     conn: *Connection,
-    packet: *const sent_packets_mod.SentPacket,
+    packet: *const SentPacketTracker.SentPacket,
     now_us: u64,
 ) void {
     const epoch_id = packet.key_epoch orelse return;

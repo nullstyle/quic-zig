@@ -18,7 +18,7 @@ const default_mtu = state.default_mtu;
 const frame_mod = state.frame_mod;
 const max_close_reason_len = state.max_close_reason_len;
 const max_recv_plaintext = state.max_recv_plaintext;
-const sent_packets_mod = state.sent_packets_mod;
+const SentPacketTracker = state.SentPacketTracker;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const util = @import("_test_util.zig");
@@ -200,7 +200,7 @@ test "PTO requeues retransmittable control frames" {
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 8,
         .sent_time_us = 0,
         .bytes = 90,
@@ -713,7 +713,7 @@ test "tick skips handshake-level PTO once handshake_keys_discarded latches" {
     // `ptoDeadlineForLevel(.handshake)` return non-null pre-fix and
     // arm a PTO. Post-fix, the latch makes `tick` skip the level
     // entirely so the deadline never fires.
-    const packet: sent_packets_mod.SentPacket = .{
+    const packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
         .bytes = 36,

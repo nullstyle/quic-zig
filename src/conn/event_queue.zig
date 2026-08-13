@@ -13,7 +13,7 @@
 
 const std = @import("std");
 
-const sent_packets_mod = @import("SentPacketTracker.zig");
+const SentPacketTracker = @import("SentPacketTracker.zig");
 
 /// Whether a flow-control block was hit on the local side or reported by the peer.
 pub const FlowBlockedSource = enum {
@@ -174,7 +174,7 @@ pub const StoredDatagramSendEvent = union(enum) {
 /// Build a `DatagramSendEvent` snapshot from the metadata stashed on a sent
 /// DATAGRAM packet at send time. Returns `null` when the packet did not
 /// carry a DATAGRAM frame.
-pub fn datagramEventFromPacket(packet: *const sent_packets_mod.SentPacket) ?DatagramSendEvent {
+pub fn datagramEventFromPacket(packet: *const SentPacketTracker.SentPacket) ?DatagramSendEvent {
     const dg = packet.datagram orelse return null;
     return .{
         .id = dg.id,

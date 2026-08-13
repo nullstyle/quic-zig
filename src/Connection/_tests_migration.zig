@@ -19,8 +19,8 @@ const frame_types = state.frame_types;
 const max_recv_plaintext = state.max_recv_plaintext;
 const min_path_challenge_interval_us = state.min_path_challenge_interval_us;
 const path_mod = state.path_mod;
-const rtt_mod = state.rtt_mod;
-const sent_packets_mod = state.sent_packets_mod;
+const RttEstimator = state.RttEstimator;
+const SentPacketTracker = state.SentPacketTracker;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_transport_parameter = state.transport_error_transport_parameter;
 const transport_params_mod = state.transport_params_mod;
@@ -156,7 +156,7 @@ test "authenticated NAT rebinding starts validation and resets recovery after re
     try std.testing.expect(conn.pathStats(0).?.validated);
     try std.testing.expect(!path.pending_migration_reset);
     try std.testing.expect(path.migration_rollback == null);
-    try std.testing.expectEqual(rtt_mod.initial_rtt_us, path.path.rtt.smoothed_rtt_us);
+    try std.testing.expectEqual(RttEstimator.initial_rtt_us, path.path.rtt.smoothed_rtt_us);
     try std.testing.expectEqual(@as(u64, 0), path.path.rtt.latest_rtt_us);
     const expected_cwnd = (congestion_mod.Config{ .max_datagram_size = default_mtu }).initialWindow();
     try std.testing.expectEqual(expected_cwnd, path.path.cc.cwndBytes());
@@ -277,7 +277,7 @@ test "failed NAT rebinding validation rolls back to the previous address" {
     try std.testing.expectEqual(@as(u64, 300), path.path.bytes_sent);
     try std.testing.expect(conn.pending_frames.path_challenge == null);
 
-    var stale_packet: sent_packets_mod.SentPacket = .{
+    var stale_packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 1_000_000,
         .bytes = 64,
@@ -844,7 +844,7 @@ test "client active migration: PATH_RESPONSE clears migration state and resets r
     try std.testing.expect(conn.pending_frames.path_challenge == null);
     // RFC 9000 §9.4: RTT and CC reset to initial values after a
     // successful migration.
-    try std.testing.expectEqual(rtt_mod.initial_rtt_us, path.path.rtt.smoothed_rtt_us);
+    try std.testing.expectEqual(RttEstimator.initial_rtt_us, path.path.rtt.smoothed_rtt_us);
     const expected_cwnd = (congestion_mod.Config{ .max_datagram_size = default_mtu }).initialWindow();
     try std.testing.expectEqual(expected_cwnd, path.path.cc.cwndBytes());
 }
@@ -1209,7 +1209,7 @@ test "lost ALTERNATIVE_V4_ADDRESS frame is requeued for retransmission" {
     const conn = try Connection.createServer(allocator, ctx);
     defer conn.destroy();
 
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
         .bytes = 0,
@@ -1246,7 +1246,7 @@ test "lost ALTERNATIVE_V6_ADDRESS frame is requeued for retransmission" {
     const conn = try Connection.createServer(allocator, ctx);
     defer conn.destroy();
 
-    var packet: sent_packets_mod.SentPacket = .{
+    var packet: SentPacketTracker.SentPacket = .{
         .pn = 0,
         .sent_time_us = 0,
         .bytes = 0,

@@ -70,22 +70,22 @@ pub const varint = @import("wire/varint.zig");
 pub const frame_mod = @import("frame/root.zig");
 pub const frame_types = @import("frame/types.zig");
 pub const ack_range_mod = @import("frame/ack_range.zig");
-pub const ack_tracker_mod = @import("conn/AckTracker.zig");
+pub const AckTracker = @import("conn/AckTracker.zig");
 pub const send_stream_mod = @import("conn/SendStream.zig");
 pub const recv_stream_mod = @import("conn/RecvStream.zig");
-pub const pn_space_mod = @import("conn/PnSpace.zig");
-pub const sent_packets_mod = @import("conn/SentPacketTracker.zig");
+pub const PnSpace = @import("conn/PnSpace.zig");
+pub const SentPacketTracker = @import("conn/SentPacketTracker.zig");
 pub const loss_recovery_mod = @import("conn/loss_recovery.zig");
 pub const path_mod = @import("conn/path.zig");
 pub const congestion_mod = @import("conn/congestion.zig");
-pub const rtt_mod = @import("conn/RttEstimator.zig");
+pub const RttEstimator = @import("conn/RttEstimator.zig");
 pub const flow_control_mod = @import("conn/flow_control.zig");
 pub const event_queue_mod = @import("conn/event_queue.zig");
-pub const pending_frames_mod = @import("conn/PendingFrameQueues.zig");
+pub const PendingFrameQueues = @import("conn/PendingFrameQueues.zig");
 pub const lifecycle_mod = @import("conn/lifecycle.zig");
 pub const stateless_reset_mod = @import("conn/stateless_reset.zig");
 pub const path_frame_queue = @import("Connection/path_frame_queue.zig");
-pub const pacing_mod = @import("conn/Pacer.zig");
+pub const Pacer = @import("conn/Pacer.zig");
 pub const socket_opts_mod = @import("transport/socket_opts.zig");
 pub const _internal = @import("Connection/_internal.zig");
 const conn_recv_flow_handlers = @import("Connection/recv_flow_handlers.zig");
@@ -690,7 +690,7 @@ recv_stream_bytes_read: u64 = 0,
 /// PATH_CHALLENGE/PATH_RESPONSE pair, multipath draft-21
 /// bookkeeping, and queued DATAGRAMs in both directions. The
 /// hot-path drain in `pollLevel` walks each subqueue in order.
-pending_frames: pending_frames_mod.PendingFrameQueues = .empty,
+pending_frames: PendingFrameQueues.PendingFrameQueues = .empty,
 
 /// Client-side callback fired when a NEW_TOKEN frame arrives at
 /// application encryption level (RFC 9000 §8.1.3). Embedders
@@ -726,10 +726,6 @@ pub const Suite = short_packet_mod.Suite;
 pub const SendStream = send_stream_mod.SendStream;
 /// Receive half of a QUIC stream — owns reassembly buffer and flow-control window.
 pub const RecvStream = recv_stream_mod.RecvStream;
-/// Per-encryption-level packet number space (RFC 9000 §12.3).
-pub const PnSpace = pn_space_mod.PnSpace;
-/// In-flight packet bookkeeping for ACK processing and loss recovery.
-pub const SentPacketTracker = sent_packets_mod.SentPacketTracker;
 /// One network path (4-tuple plus DCID/SCID) — RFC 9000 §9 / multipath draft-21.
 pub const Path = path_mod.Path;
 /// Container holding all paths a connection currently knows about.
@@ -752,8 +748,6 @@ pub const ConnectionId = path_mod.ConnectionId;
 pub const Address = path_mod.Address;
 /// PATH_CHALLENGE / PATH_RESPONSE state machine (RFC 9000 §8.2).
 pub const PathValidator = path_mod.PathValidator;
-/// Smoothed RTT / RTT-variance estimator (RFC 9002 §5).
-pub const RttEstimator = rtt_mod.RttEstimator;
 /// Decoded peer transport parameters from the TLS handshake (RFC 9000 §18).
 pub const TransportParams = transport_params_mod.Params;
 /// Default congestion controller — NewReno from RFC 9002 §7.
@@ -878,12 +872,12 @@ pub const Error = error{
     long_packet_mod.Error ||
     send_stream_mod.Error ||
     recv_stream_mod.Error ||
-    sent_packets_mod.Error ||
+    SentPacketTracker.Error ||
     flow_control_mod.Error ||
     frame_mod.EncodeError ||
     frame_mod.DecodeError ||
     ack_range_mod.Error ||
-    ack_tracker_mod.Error ||
+    AckTracker.Error ||
     transport_params_mod.Error;
 
 /// Per-level secret bookkeeping. The TLS bridge stores the BoringSSL
@@ -1348,14 +1342,14 @@ const StoredCloseEvent = lifecycle_mod.StoredCloseEvent;
 pub const StreamOpenedInfo = event_queue_mod.StreamOpenedInfo;
 
 /// One queued STOP_SENDING frame (RFC 9000 §19.5) with its application error code.
-pub const StopSendingItem = pending_frames_mod.StopSendingItem;
+pub const StopSendingItem = PendingFrameQueues.StopSendingItem;
 
 /// One queued MAX_STREAM_DATA frame (RFC 9000 §19.10) with the new credit value.
-pub const MaxStreamDataItem = pending_frames_mod.MaxStreamDataItem;
+pub const MaxStreamDataItem = PendingFrameQueues.MaxStreamDataItem;
 
 /// One queued NEW_CONNECTION_ID frame (RFC 9000 §19.15) the embedder has handed
 /// to the connection and is awaiting transmission.
-pub const PendingNewConnectionId = pending_frames_mod.PendingNewConnectionId;
+pub const PendingNewConnectionId = PendingFrameQueues.PendingNewConnectionId;
 
 /// Embedder-supplied bundle when calling `provideConnectionId`/`provisionPathConnectionId`
 /// to install a fresh local CID and its stateless reset token.
@@ -1373,7 +1367,7 @@ pub const PathCidsBlockedInfo = struct {
 };
 
 /// One queued PATH_AVAILABLE / PATH_BACKUP frame from draft-ietf-quic-multipath-21.
-pub const PendingPathStatus = pending_frames_mod.PendingPathStatus;
+pub const PendingPathStatus = PendingFrameQueues.PendingPathStatus;
 
 /// Header-only descriptor returned from `pollDatagram` — paired with the bytes
 /// the caller wrote into the supplied buffer.
@@ -1430,8 +1424,8 @@ pub const StreamRecvState = struct {
     terminal: bool,
 };
 
-const PendingRecvDatagram = pending_frames_mod.PendingRecvDatagram;
-const PendingSendDatagram = pending_frames_mod.PendingSendDatagram;
+const PendingRecvDatagram = PendingFrameQueues.PendingRecvDatagram;
+const PendingSendDatagram = PendingFrameQueues.PendingSendDatagram;
 
 /// Distinct timers the Connection drives. The embedder only ever sees one at
 /// a time via `nextTimer` — the earliest pending — but the kind disambiguates
@@ -1488,7 +1482,7 @@ pub const LossStats = struct {
     earliest_ack_eliciting_lost_sent_time_us: ?u64 = null,
     largest_ack_eliciting_lost_sent_time_us: u64 = 0,
 
-    pub fn add(self: *LossStats, packet: sent_packets_mod.SentPacket) void {
+    pub fn add(self: *LossStats, packet: SentPacketTracker.SentPacket) void {
         self.count += 1;
         self.bytes_lost += packet.bytes;
         if (packet.in_flight) self.in_flight_bytes_lost += packet.bytes;
@@ -1658,9 +1652,9 @@ pub fn initClientAt(
     server_name: [:0]const u8,
 ) !void {
     var sent_trackers: [2]SentPacketTracker = undefined;
-    sent_trackers[0] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
+    sent_trackers[0] = try SentPacketTracker.init(allocator, SentPacketTracker.initial_handshake_max_tracked);
     errdefer sent_trackers[0].deinit(allocator);
-    sent_trackers[1] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
+    sent_trackers[1] = try SentPacketTracker.init(allocator, SentPacketTracker.initial_handshake_max_tracked);
     errdefer sent_trackers[1].deinit(allocator);
     conn.* = .{
         .allocator = allocator,
@@ -1700,9 +1694,9 @@ pub fn initServerAt(
     tls_ctx: boringssl.tls.Context,
 ) !void {
     var sent_trackers: [2]SentPacketTracker = undefined;
-    sent_trackers[0] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
+    sent_trackers[0] = try SentPacketTracker.init(allocator, SentPacketTracker.initial_handshake_max_tracked);
     errdefer sent_trackers[0].deinit(allocator);
-    sent_trackers[1] = try SentPacketTracker.init(allocator, sent_packets_mod.initial_handshake_max_tracked);
+    sent_trackers[1] = try SentPacketTracker.init(allocator, SentPacketTracker.initial_handshake_max_tracked);
     errdefer sent_trackers[1].deinit(allocator);
     conn.* = .{
         .allocator = allocator,
@@ -2073,8 +2067,8 @@ pub fn queueNewToken(self: *Connection, token: []const u8) Error!void {
     // server callers fed by `new_token.mint` always emit exactly
     // `new_token.max_token_len = 96`, which fits.
     if (token.len == 0) return Error.ZeroLengthNewToken;
-    if (token.len > pending_frames_mod.NewTokenItem.max_len) return Error.NewTokenTooLong;
-    var item: pending_frames_mod.NewTokenItem = .{};
+    if (token.len > PendingFrameQueues.NewTokenItem.max_len) return Error.NewTokenTooLong;
+    var item: PendingFrameQueues.NewTokenItem = .{};
     @memcpy(item.bytes[0..token.len], token);
     item.len = @intCast(token.len);
     self.pending_frames.new_token = item;
@@ -2814,21 +2808,21 @@ pub fn peerAckDelayExponent(self: *const Connection) u6 {
 }
 
 pub fn peerMaxAckDelayUs(self: *const Connection) u64 {
-    const params = self.cached_peer_transport_params orelse return 25 * rtt_mod.ms;
-    return params.max_ack_delay_ms * rtt_mod.ms;
+    const params = self.cached_peer_transport_params orelse return 25 * RttEstimator.ms;
+    return params.max_ack_delay_ms * RttEstimator.ms;
 }
 
 fn localMaxAckDelayUs(self: *const Connection) u64 {
-    return self.local_transport_params.max_ack_delay_ms * rtt_mod.ms;
+    return self.local_transport_params.max_ack_delay_ms * RttEstimator.ms;
 }
 
 // INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn ackDelayScaled(
     self: *const Connection,
-    tracker: *const ack_tracker_mod.AckTracker,
+    tracker: *const AckTracker.AckTracker,
     now_us: u64,
 ) u64 {
-    const largest_at_us = tracker.largest_at_ms * rtt_mod.ms;
+    const largest_at_us = tracker.largest_at_ms * RttEstimator.ms;
     if (now_us <= largest_at_us) return 0;
     const shift: u6 = @intCast(@min(self.local_transport_params.ack_delay_exponent, 20));
     return (now_us - largest_at_us) >> shift;
@@ -2836,15 +2830,15 @@ pub fn ackDelayScaled(
 
 fn ackDelayDeadlineUs(
     self: *const Connection,
-    tracker: *const ack_tracker_mod.AckTracker,
+    tracker: *const AckTracker.AckTracker,
 ) ?u64 {
     const base_ms = tracker.ackDelayBaseMs() orelse return null;
-    return base_ms * rtt_mod.ms +| self.localMaxAckDelayUs();
+    return base_ms * RttEstimator.ms +| self.localMaxAckDelayUs();
 }
 
-fn promoteDueAckDelay(self: *Connection, tracker: *ack_tracker_mod.AckTracker, now_us: u64) void {
+fn promoteDueAckDelay(self: *Connection, tracker: *AckTracker.AckTracker, now_us: u64) void {
     _ = tracker.promoteDelayedAck(
-        now_us / rtt_mod.ms,
+        now_us / RttEstimator.ms,
         self.local_transport_params.max_ack_delay_ms,
     );
 }
@@ -2861,7 +2855,7 @@ pub fn idleTimeoutUs(self: *const Connection) ?u64 {
     if (local == 0) return null;
     const params = self.cached_peer_transport_params orelse return null;
     if (params.max_idle_timeout_ms == 0) return null;
-    return @min(local, params.max_idle_timeout_ms) * rtt_mod.ms;
+    return @min(local, params.max_idle_timeout_ms) * RttEstimator.ms;
 }
 
 pub const primaryPath = conn_paths.primaryPath;
