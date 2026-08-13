@@ -10,6 +10,8 @@
 // bit-identical across tier-1 targets; no libm). They take and return
 // integers so a fixed-point swap stays a local change.
 
+const Cubic = @This();
+
 const std = @import("std");
 const congestion = @import("congestion.zig");
 const delivery_rate = @import("delivery_rate.zig");
@@ -26,264 +28,262 @@ pub const alpha_num: u64 = 9;
 pub const alpha_den: u64 = 17;
 
 /// RFC 9438 CUBIC controller. One instance per QUIC path.
-pub const Cubic = struct {
-    cfg: congestion.Config,
-    /// Current congestion window in bytes.
-    cwnd: u64,
-    /// Slow-start threshold; null = infinity (initial slow start).
-    ssthresh: ?u64 = null,
-    /// Recovery-period anchor — identical semantics to NewReno
-    /// (RFC 9002 §7.3.1): set on decrease, cleared by an ACK of a
-    /// packet sent after it; re-entry suppressed inside the period.
-    recovery_start_time_us: ?u64 = null,
+cfg: congestion.Config,
+/// Current congestion window in bytes.
+cwnd: u64,
+/// Slow-start threshold; null = infinity (initial slow start).
+ssthresh: ?u64 = null,
+/// Recovery-period anchor — identical semantics to NewReno
+/// (RFC 9002 §7.3.1): set on decrease, cleared by an ACK of a
+/// packet sent after it; re-entry suppressed inside the period.
+recovery_start_time_us: ?u64 = null,
 
-    // -- RFC 9438 state ------------------------------------------------------
-    /// Window size (bytes) just before the last reduction (§4.2's
-    /// W_max, after §4.7 fast convergence has been applied).
-    w_max: u64 = 0,
-    /// Congestion-avoidance epoch anchor; null = epoch not started
-    /// (fresh, post-decrease, or frozen by an app-limited ACK).
-    epoch_start_us: ?u64 = null,
-    /// cwnd at the moment the current epoch started (§4.2's
-    /// cwnd_epoch, input to K).
-    cwnd_epoch: u64 = 0,
-    /// K for the current epoch, microseconds (§4.2): time until the
-    /// cubic curve regains W_max.
-    k_us: u64 = 0,
-    /// Reno-friendly window estimate, bytes (§4.3). CUBIC never lets
-    /// cwnd fall below this while in congestion avoidance.
-    w_est: u64 = 0,
-    /// RFC 9406 HyStart++ slow-start exit state. CUBIC + HyStart++ is
-    /// the pairing Linux and quiche ship; the two are orthogonal
-    /// (HyStart++ governs when slow start ends, CUBIC governs the
-    /// congestion-avoidance curve).
-    hystart: hystart_mod.State = .{},
+// -- RFC 9438 state ------------------------------------------------------
+/// Window size (bytes) just before the last reduction (§4.2's
+/// W_max, after §4.7 fast convergence has been applied).
+w_max: u64 = 0,
+/// Congestion-avoidance epoch anchor; null = epoch not started
+/// (fresh, post-decrease, or frozen by an app-limited ACK).
+epoch_start_us: ?u64 = null,
+/// cwnd at the moment the current epoch started (§4.2's
+/// cwnd_epoch, input to K).
+cwnd_epoch: u64 = 0,
+/// K for the current epoch, microseconds (§4.2): time until the
+/// cubic curve regains W_max.
+k_us: u64 = 0,
+/// Reno-friendly window estimate, bytes (§4.3). CUBIC never lets
+/// cwnd fall below this while in congestion avoidance.
+w_est: u64 = 0,
+/// RFC 9406 HyStart++ slow-start exit state. CUBIC + HyStart++ is
+/// the pairing Linux and quiche ship; the two are orthogonal
+/// (HyStart++ governs when slow start ends, CUBIC governs the
+/// congestion-avoidance curve).
+hystart: hystart_mod.State = .{},
 
-    pub fn init(cfg: congestion.Config) Cubic {
-        return .{
-            .cfg = cfg,
-            .cwnd = cfg.initialWindow(),
-            .hystart = hystart_mod.State.init(cfg.hystart),
-        };
-    }
+pub fn init(cfg: congestion.Config) Cubic {
+    return .{
+        .cfg = cfg,
+        .cwnd = cfg.initialWindow(),
+        .hystart = hystart_mod.State.init(cfg.hystart),
+    };
+}
 
-    pub fn isInRecovery(self: *const Cubic, sent_time_us: u64) bool {
-        return self.recovery_start_time_us != null and
-            sent_time_us <= self.recovery_start_time_us.?;
-    }
+pub fn isInRecovery(self: *const Cubic, sent_time_us: u64) bool {
+    return self.recovery_start_time_us != null and
+        sent_time_us <= self.recovery_start_time_us.?;
+}
 
-    pub fn isSlowStart(self: *const Cubic) bool {
-        return self.ssthresh == null or self.cwnd < self.ssthresh.?;
-    }
+pub fn isSlowStart(self: *const Cubic) bool {
+    return self.ssthresh == null or self.cwnd < self.ssthresh.?;
+}
 
-    /// RFC 9438 §4.1–§4.4 ACK processing. Shares NewReno's recovery
-    /// semantics and the RFC 9002 §7.8 app-limited gate; growth in
-    /// congestion avoidance follows max(W_cubic, W_est).
-    pub fn onPacketAcked(
-        self: *Cubic,
-        bytes_acked: u64,
-        largest_acked_sent_time_us: u64,
-        now_us: u64,
-        srtt_us: u64,
-        bytes_in_flight: u64,
-    ) void {
-        // Recovery-exit maintenance first, exactly like NewReno.
-        if (self.recovery_start_time_us) |rec_start| {
-            if (largest_acked_sent_time_us > rec_start) {
-                self.recovery_start_time_us = null;
-            } else {
-                return;
-            }
-        }
-
-        // RFC 9002 §7.8: no growth off an unfilled pipe. Freeze the
-        // epoch too — idle wall-clock time must not accrue convex
-        // growth (§5.8: CUBIC's t is only meaningful while the window
-        // is being pushed).
-        if (!congestion.ackFillsWindow(self.cwnd, bytes_acked, bytes_in_flight)) {
-            self.epoch_start_us = null;
+/// RFC 9438 §4.1–§4.4 ACK processing. Shares NewReno's recovery
+/// semantics and the RFC 9002 §7.8 app-limited gate; growth in
+/// congestion avoidance follows max(W_cubic, W_est).
+pub fn onPacketAcked(
+    self: *Cubic,
+    bytes_acked: u64,
+    largest_acked_sent_time_us: u64,
+    now_us: u64,
+    srtt_us: u64,
+    bytes_in_flight: u64,
+) void {
+    // Recovery-exit maintenance first, exactly like NewReno.
+    if (self.recovery_start_time_us) |rec_start| {
+        if (largest_acked_sent_time_us > rec_start) {
+            self.recovery_start_time_us = null;
+        } else {
             return;
         }
+    }
 
-        if (self.isSlowStart()) {
-            // HyStart++ throttles growth inside Conservative Slow
-            // Start; outside CSS this is plain `bytes_acked`.
-            self.cwnd += self.hystart.slowStartGrowth(bytes_acked);
-            return;
-        }
+    // RFC 9002 §7.8: no growth off an unfilled pipe. Freeze the
+    // epoch too — idle wall-clock time must not accrue convex
+    // growth (§5.8: CUBIC's t is only meaningful while the window
+    // is being pushed).
+    if (!congestion.ackFillsWindow(self.cwnd, bytes_acked, bytes_in_flight)) {
+        self.epoch_start_us = null;
+        return;
+    }
 
-        // Congestion avoidance. Anchor a new epoch if none is active.
-        if (self.epoch_start_us == null) {
-            self.epoch_start_us = now_us;
-            self.cwnd_epoch = self.cwnd;
-            // §4.2: K = cbrt((W_max − cwnd_epoch)/C); zero when the
-            // window has already regained (or never had) W_max.
-            self.k_us = cubicK(
-                self.w_max -| self.cwnd_epoch,
-                self.cfg.max_datagram_size,
-            );
-            // §4.3: seed the Reno-friendly estimate at epoch start.
-            self.w_est = self.cwnd;
-        }
+    if (self.isSlowStart()) {
+        // HyStart++ throttles growth inside Conservative Slow
+        // Start; outside CSS this is plain `bytes_acked`.
+        self.cwnd += self.hystart.slowStartGrowth(bytes_acked);
+        return;
+    }
 
-        // §4.3: W_est grows by α·MSS per cwnd of acked bytes.
-        self.w_est += @intCast(
-            (@as(u128, alpha_num) * self.cfg.max_datagram_size * bytes_acked) /
-                (@as(u128, alpha_den) * @max(self.cwnd, 1)),
-        );
-
-        // §4.2: target = W_cubic(t + RTT), clamped to at most 1.5x the
-        // current window per §4.4's sanity bound.
-        const t_us = (now_us -| self.epoch_start_us.?) +| srtt_us;
-        const w_cubic = cubicWindowBytes(
-            t_us,
-            self.k_us,
-            self.w_max,
+    // Congestion avoidance. Anchor a new epoch if none is active.
+    if (self.epoch_start_us == null) {
+        self.epoch_start_us = now_us;
+        self.cwnd_epoch = self.cwnd;
+        // §4.2: K = cbrt((W_max − cwnd_epoch)/C); zero when the
+        // window has already regained (or never had) W_max.
+        self.k_us = cubicK(
+            self.w_max -| self.cwnd_epoch,
             self.cfg.max_datagram_size,
         );
-        const target = @min(w_cubic, self.cwnd + self.cwnd / 2);
-
-        if (target > self.cwnd) {
-            // §4.4: cwnd += (target − cwnd)/cwnd per acked cwnd —
-            // scaled here by bytes_acked so pacing of ACKs doesn't
-            // change the curve.
-            const grow = (@as(u128, target - self.cwnd) * bytes_acked) / @max(self.cwnd, 1);
-            self.cwnd += @intCast(grow);
-        }
-
-        // §4.3: in the Reno-friendly region, never fall below W_est.
-        if (self.w_est > self.cwnd) self.cwnd = self.w_est;
+        // §4.3: seed the Reno-friendly estimate at epoch start.
+        self.w_est = self.cwnd;
     }
 
-    /// Post-ACK hook driving RFC 9406 HyStart++ (see `hystart.zig`).
-    /// Only meaningful during slow start; a no-op otherwise.
-    pub fn onAckProcessed(
-        self: *Cubic,
-        largest_acked_pn: u64,
-        latest_rtt_us: ?u64,
-        next_pn_to_send: u64,
-    ) void {
-        if (!self.isSlowStart()) return;
-        if (self.hystart.onAckProcessed(largest_acked_pn, latest_rtt_us, next_pn_to_send)) {
-            // Leave slow start without having driven the path to loss.
-            // The next ACK in congestion avoidance anchors a fresh
-            // CUBIC epoch from here.
-            self.ssthresh = self.cwnd;
-            self.epoch_start_us = null;
-            self.hystart.reset();
-        }
+    // §4.3: W_est grows by α·MSS per cwnd of acked bytes.
+    self.w_est += @intCast(
+        (@as(u128, alpha_num) * self.cfg.max_datagram_size * bytes_acked) /
+            (@as(u128, alpha_den) * @max(self.cwnd, 1)),
+    );
+
+    // §4.2: target = W_cubic(t + RTT), clamped to at most 1.5x the
+    // current window per §4.4's sanity bound.
+    const t_us = (now_us -| self.epoch_start_us.?) +| srtt_us;
+    const w_cubic = cubicWindowBytes(
+        t_us,
+        self.k_us,
+        self.w_max,
+        self.cfg.max_datagram_size,
+    );
+    const target = @min(w_cubic, self.cwnd + self.cwnd / 2);
+
+    if (target > self.cwnd) {
+        // §4.4: cwnd += (target − cwnd)/cwnd per acked cwnd —
+        // scaled here by bytes_acked so pacing of ACKs doesn't
+        // change the curve.
+        const grow = (@as(u128, target - self.cwnd) * bytes_acked) / @max(self.cwnd, 1);
+        self.cwnd += @intCast(grow);
     }
 
-    /// In HyStart++ Conservative Slow Start? (observability)
-    pub fn isInCss(self: *const Cubic) bool {
-        return self.hystart.inCss() and self.isSlowStart();
-    }
+    // §4.3: in the Reno-friendly region, never fall below W_est.
+    if (self.w_est > self.cwnd) self.cwnd = self.w_est;
+}
 
-    /// RFC 9438 §4.6 multiplicative decrease + §4.7 fast convergence.
-    pub fn onPacketLost(
-        self: *Cubic,
-        bytes_lost: u64,
-        lost_largest_sent_time_us: u64,
-    ) void {
-        _ = bytes_lost;
-        if (self.recovery_start_time_us) |rec_start| {
-            if (lost_largest_sent_time_us <= rec_start) return;
-        }
-        self.recovery_start_time_us = lost_largest_sent_time_us;
-        self.reduce();
+/// Post-ACK hook driving RFC 9406 HyStart++ (see `hystart.zig`).
+/// Only meaningful during slow start; a no-op otherwise.
+pub fn onAckProcessed(
+    self: *Cubic,
+    largest_acked_pn: u64,
+    latest_rtt_us: ?u64,
+    next_pn_to_send: u64,
+) void {
+    if (!self.isSlowStart()) return;
+    if (self.hystart.onAckProcessed(largest_acked_pn, latest_rtt_us, next_pn_to_send)) {
+        // Leave slow start without having driven the path to loss.
+        // The next ACK in congestion avoidance anchors a fresh
+        // CUBIC epoch from here.
+        self.ssthresh = self.cwnd;
+        self.epoch_start_us = null;
+        self.hystart.reset();
     }
+}
 
-    /// ECN-CE congestion event — same decrease path as loss
-    /// (RFC 9438 §4.6 treats them identically).
-    pub fn onCongestionEvent(self: *Cubic, ce_packet_sent_time_us: u64) void {
-        if (self.recovery_start_time_us) |rec_start| {
-            if (ce_packet_sent_time_us <= rec_start) return;
-        }
-        self.recovery_start_time_us = ce_packet_sent_time_us;
-        self.reduce();
+/// In HyStart++ Conservative Slow Start? (observability)
+pub fn isInCss(self: *const Cubic) bool {
+    return self.hystart.inCss() and self.isSlowStart();
+}
+
+/// RFC 9438 §4.6 multiplicative decrease + §4.7 fast convergence.
+pub fn onPacketLost(
+    self: *Cubic,
+    bytes_lost: u64,
+    lost_largest_sent_time_us: u64,
+) void {
+    _ = bytes_lost;
+    if (self.recovery_start_time_us) |rec_start| {
+        if (lost_largest_sent_time_us <= rec_start) return;
     }
+    self.recovery_start_time_us = lost_largest_sent_time_us;
+    self.reduce();
+}
 
-    fn reduce(self: *Cubic) void {
-        // §4.7 fast convergence: a reduction below the previous W_max
-        // signals a shrinking pipe — release capacity faster by
-        // remembering a further-reduced ceiling.
-        if (self.cwnd < self.w_max) {
-            self.w_max = @intCast(
-                (@as(u128, self.cwnd) * (beta_num + beta_den)) / (2 * beta_den),
-            );
-        } else {
-            self.w_max = self.cwnd;
-        }
-        // §4.6: cwnd = max(cwnd·β, minimum window).
-        self.ssthresh = @max(
-            @as(u64, @intCast((@as(u128, self.cwnd) * beta_num) / beta_den)),
-            self.cfg.minWindow(),
+/// ECN-CE congestion event — same decrease path as loss
+/// (RFC 9438 §4.6 treats them identically).
+pub fn onCongestionEvent(self: *Cubic, ce_packet_sent_time_us: u64) void {
+    if (self.recovery_start_time_us) |rec_start| {
+        if (ce_packet_sent_time_us <= rec_start) return;
+    }
+    self.recovery_start_time_us = ce_packet_sent_time_us;
+    self.reduce();
+}
+
+fn reduce(self: *Cubic) void {
+    // §4.7 fast convergence: a reduction below the previous W_max
+    // signals a shrinking pipe — release capacity faster by
+    // remembering a further-reduced ceiling.
+    if (self.cwnd < self.w_max) {
+        self.w_max = @intCast(
+            (@as(u128, self.cwnd) * (beta_num + beta_den)) / (2 * beta_den),
         );
-        self.cwnd = self.ssthresh.?;
-        self.epoch_start_us = null;
-        // Loss/CE ends slow start through ssthresh; HyStart++ has
-        // nothing left to track.
-        self.hystart.reset();
+    } else {
+        self.w_max = self.cwnd;
     }
+    // §4.6: cwnd = max(cwnd·β, minimum window).
+    self.ssthresh = @max(
+        @as(u64, @intCast((@as(u128, self.cwnd) * beta_num) / beta_den)),
+        self.cfg.minWindow(),
+    );
+    self.cwnd = self.ssthresh.?;
+    self.epoch_start_us = null;
+    // Loss/CE ends slow start through ssthresh; HyStart++ has
+    // nothing left to track.
+    self.hystart.reset();
+}
 
-    /// RFC 9002 §7.6 persistent congestion: collapse to the minimum
-    /// window. W_max is kept so post-collapse regrowth still remembers
-    /// the old ceiling after the next reduction anchors a fresh epoch;
-    /// ssthresh is kept, mirroring NewReno's field-level choices.
-    pub fn onPersistentCongestion(self: *Cubic) void {
-        self.cwnd = self.cfg.minWindow();
-        self.recovery_start_time_us = null;
-        self.epoch_start_us = null;
-        self.hystart.reset();
-    }
+/// RFC 9002 §7.6 persistent congestion: collapse to the minimum
+/// window. W_max is kept so post-collapse regrowth still remembers
+/// the old ceiling after the next reduction anchors a fresh epoch;
+/// ssthresh is kept, mirroring NewReno's field-level choices.
+pub fn onPersistentCongestion(self: *Cubic) void {
+    self.cwnd = self.cfg.minWindow();
+    self.recovery_start_time_us = null;
+    self.epoch_start_us = null;
+    self.hystart.reset();
+}
 
-    /// cwnd headroom in bytes; 0 means "wait".
-    pub fn sendAllowance(self: *const Cubic, bytes_in_flight: u64) u64 {
-        if (bytes_in_flight >= self.cwnd) return 0;
-        return self.cwnd - bytes_in_flight;
-    }
+/// cwnd headroom in bytes; 0 means "wait".
+pub fn sendAllowance(self: *const Cubic, bytes_in_flight: u64) u64 {
+    if (bytes_in_flight >= self.cwnd) return 0;
+    return self.cwnd - bytes_in_flight;
+}
 
-    /// Delivery-rate samples carry no signal CUBIC acts on (loss and
-    /// RTT drive its curve). Rate-based controllers consume this inlet.
-    pub fn onDeliveryRateSample(
-        self: *Cubic,
-        rs: *const delivery_rate.RateSample,
-        now_us: u64,
-        bytes_in_flight: u64,
-    ) void {
-        _ = self;
-        _ = rs;
-        _ = now_us;
-        _ = bytes_in_flight;
-    }
+/// Delivery-rate samples carry no signal CUBIC acts on (loss and
+/// RTT drive its curve). Rate-based controllers consume this inlet.
+pub fn onDeliveryRateSample(
+    self: *Cubic,
+    rs: *const delivery_rate.RateSample,
+    now_us: u64,
+    bytes_in_flight: u64,
+) void {
+    _ = self;
+    _ = rs;
+    _ = now_us;
+    _ = bytes_in_flight;
+}
 
-    /// Transmit edges carry no signal CUBIC acts on.
-    pub fn onPacketSent(
-        self: *Cubic,
-        now_us: u64,
-        bytes_in_flight_before: u64,
-        bytes: u64,
-        is_app_limited: bool,
-    ) void {
-        _ = self;
-        _ = now_us;
-        _ = bytes_in_flight_before;
-        _ = bytes;
-        _ = is_app_limited;
-    }
+/// Transmit edges carry no signal CUBIC acts on.
+pub fn onPacketSent(
+    self: *Cubic,
+    now_us: u64,
+    bytes_in_flight_before: u64,
+    bytes: u64,
+    is_app_limited: bool,
+) void {
+    _ = self;
+    _ = now_us;
+    _ = bytes_in_flight_before;
+    _ = bytes;
+    _ = is_app_limited;
+}
 
-    /// Per-packet loss detail carries no signal CUBIC acts on (the
-    /// aggregate onPacketLost is its loss input).
-    pub fn onPacketNewlyLost(self: *Cubic, info: *const delivery_rate.LostPacketInfo) void {
-        _ = self;
-        _ = info;
-    }
+/// Per-packet loss detail carries no signal CUBIC acts on (the
+/// aggregate onPacketLost is its loss input).
+pub fn onPacketNewlyLost(self: *Cubic, info: *const delivery_rate.LostPacketInfo) void {
+    _ = self;
+    _ = info;
+}
 
-    /// RFC 9002 §7.7 pacing rate: gain x cwnd / srtt, gain by phase.
-    pub fn pacingRateBps(self: *const Cubic, srtt_us: u64) u64 {
-        return pacing_mod.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
-    }
-};
+/// RFC 9002 §7.7 pacing rate: gain x cwnd / srtt, gain by phase.
+pub fn pacingRateBps(self: *const Cubic, srtt_us: u64) u64 {
+    return pacing_mod.rateBytesPerSecond(self.cwnd, srtt_us, self.isSlowStart());
+}
 
 // -- the two float helpers (all f64 confined here) --------------------------
 

@@ -26,10 +26,10 @@ pub const HyStart = hystart_mod.State;
 pub const HyStartConfig = hystart_mod.Config;
 
 /// RFC 9438 CUBIC controller (re-export; lives in congestion_cubic.zig).
-pub const Cubic = cubic_mod.Cubic;
+pub const Cubic = cubic_mod;
 
 /// BBRv3 controller (re-export; lives in congestion_bbr.zig).
-pub const Bbr = bbr_mod.Bbr;
+pub const Bbr = bbr_mod;
 /// BBR model observability record (`CongestionController.bbrSnapshot`).
 pub const BbrSnapshot = bbr_mod.Snapshot;
 /// CUBIC curve helpers + constants (re-exported for the conformance suite).
