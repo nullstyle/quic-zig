@@ -28,6 +28,7 @@
 pub const SendStream = @This();
 
 const std = @import("std");
+const range_list = @import("range_list.zig");
 
 /// Errors raised by send-side stream operations.
 pub const Error = error{
@@ -59,18 +60,10 @@ pub const State = enum {
     reset_recvd,
 };
 
-/// Half-open interval `[offset, end)` of stream bytes.
-pub const Range = struct {
-    offset: u64,
-    /// One past the last byte (half-open). A 0-length range cannot
-    /// be represented; check `pending.items.len == 0` instead.
-    end: u64,
-
-    /// Length of the range in bytes.
-    pub fn len(self: Range) u64 {
-        return self.end - self.offset;
-    }
-};
+/// Half-open interval `[offset, end)` of stream bytes (shared
+/// `range_list.Range`). A 0-length range cannot be represented;
+/// check `pending.items.len == 0` instead.
+pub const Range = range_list.Range;
 
 /// One in-flight chunk: bytes [offset, offset+length) and a
 /// possible trailing FIN. Length 0 is permitted only when `fin`
@@ -469,14 +462,14 @@ pub fn onResetLost(self: *SendStream) void {
 /// Queue `r` into `pending`, merging with adjacent existing
 /// ranges where possible.
 fn addPending(self: *SendStream, r: Range) Error!void {
-    try insertMerge(&self.pending, self.allocator, r);
+    try range_list.insertMerge(&self.pending, self.allocator, r);
 }
 
 /// Mark `r` as acked. Either advance `base_offset` and drop
 /// covered bytes from `bytes`, or stash into `acked_above`.
 fn markAcked(self: *SendStream, r: Range) Error!void {
     if (r.offset != self.base_offset) {
-        try insertMerge(&self.acked_above, self.allocator, r);
+        try range_list.insertMerge(&self.acked_above, self.allocator, r);
         return;
     }
     // Contiguous with the floor: advance, then absorb anything
@@ -509,40 +502,6 @@ fn maybeAdvanceState(self: *SendStream) void {
     {
         self.state = .data_recvd;
     }
-}
-
-/// Insert `new` into a sorted-disjoint range list, merging with any
-/// adjacent or overlapping existing range. The list grows by at
-/// most one slot.
-fn insertMerge(
-    list: *std.ArrayList(Range),
-    allocator: std.mem.Allocator,
-    new: Range,
-) std.mem.Allocator.Error!void {
-    if (new.offset >= new.end) return;
-
-    // Find the first range whose end >= new.offset (i.e., the first
-    // range that could overlap or touch `new` from below or itself).
-    var i: usize = 0;
-    while (i < list.items.len and list.items[i].end < new.offset) : (i += 1) {}
-
-    // No overlap on either side: pure insert.
-    if (i == list.items.len or list.items[i].offset > new.end) {
-        try list.insert(allocator, i, new);
-        return;
-    }
-
-    // Merge with list.items[i] and any further ranges it now connects to.
-    var merged: Range = .{
-        .offset = @min(list.items[i].offset, new.offset),
-        .end = @max(list.items[i].end, new.end),
-    };
-    var j: usize = i + 1;
-    while (j < list.items.len and list.items[j].offset <= merged.end) : (j += 1) {
-        merged.end = @max(merged.end, list.items[j].end);
-    }
-    // Replace [i, j) with the single merged range.
-    list.replaceRangeAssumeCapacity(i, j - i, &.{merged});
 }
 
 // -- tests ---------------------------------------------------------------

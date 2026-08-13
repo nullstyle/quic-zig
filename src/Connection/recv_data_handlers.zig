@@ -9,6 +9,7 @@
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
 const conn_streams = @import("streams.zig");
+const conn_flow = @import("flow.zig");
 const conn_keys = @import("keys.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
@@ -22,15 +23,11 @@ const transport_error_excessive_load = state_mod.transport_error_excessive_load;
 const max_supported_udp_payload_size = state_mod.max_supported_udp_payload_size;
 const max_pending_datagram_count = state_mod.max_pending_datagram_count;
 const max_crypto_reassembly_gap = state_mod.max_crypto_reassembly_gap;
-const SendStream = state_mod.SendStream;
-const RecvStream = state_mod.RecvStream;
 const max_pending_datagram_bytes = state_mod.max_pending_datagram_bytes;
 const max_pending_crypto_bytes_per_level = state_mod.max_pending_crypto_bytes_per_level;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
-const transport_error_stream_state = state_mod.transport_error_stream_state;
 const transport_error_flow_control = state_mod.transport_error_flow_control;
 const transport_error_final_size = state_mod.transport_error_final_size;
-const transport_error_stream_limit = state_mod.transport_error_stream_limit;
 
 /// Apply a peer-sent DATAGRAM frame (RFC 9221) to the inbound queue.
 /// Public so per-connection hardening tests can drive the
@@ -207,7 +204,17 @@ pub fn cryptoInboxQueued(conn: *const Connection) bool {
     return false;
 }
 
-pub fn drainInboxIntoTls(conn: *Connection) Error!void {
+/// Feed queued peer CRYPTO bytes into the TLS stack level-by-level
+/// (low → high; keys for level N+1 are derived while processing
+/// level N), make one extra handshake call for outgoing-only
+/// progress, cache peer transport parameters once the handshake
+/// completes, and queue HANDSHAKE_DONE if we owe the client one.
+/// The shared pump behind the receive path (`drainInboxIntoTls`,
+/// which appends the RFC 9001 key discards) and the embedder-facing
+/// handshake driver (`Connection.advance`, which appends the
+/// mock-transport shuttle and the alert check). Any fix to the pump
+/// belongs here so both drivers stay in lockstep.
+pub fn pumpTlsInbox(conn: *Connection) Error!void {
     inline for (level_mod.all) |lvl| {
         const idx = lvl.idx();
         if (conn.inbox[idx].len > 0) {
@@ -224,6 +231,12 @@ pub fn drainInboxIntoTls(conn: *Connection) Error!void {
     if (!conn.inner.handshakeDone()) try conn.advanceHandshake();
     if (conn.inner.handshakeDone()) try conn.cachePeerTransportParams();
     conn.queueHandshakeDoneIfReady();
+}
+
+/// Receive-path TLS drain: `pumpTlsInbox` plus the RFC 9001 key
+/// discards that belong to inbound-packet processing.
+pub fn drainInboxIntoTls(conn: *Connection) Error!void {
+    try pumpTlsInbox(conn);
     // RFC 9001 §5.7 ¶3 / ¶4: discard Initial keys once handshake
     // confirms. The strict spec timing is "first Handshake packet
     // sent" (client) / "first Handshake packet processed" (server),
@@ -261,54 +274,16 @@ pub fn handleStream(
     lvl: EncryptionLevel,
     s: frame_types.Stream,
 ) Error!void {
-    if (!conn_streams.peerMaySendOnStream(conn, s.stream_id)) {
-        conn.close(true, transport_error_stream_state, "stream data on receive-only stream");
-        return;
-    }
     const frame_end = std.math.add(u64, s.offset, @as(u64, @intCast(s.data.len))) catch {
         conn.close(true, transport_error_flow_control, "stream offset overflow");
         return;
     };
-    const existing = conn.streams.get(s.stream_id);
-    if (existing == null and conn_streams.streamInitiatedByLocal(conn, s.stream_id)) {
-        conn.close(true, transport_error_stream_state, "peer referenced unopened local stream");
-        return;
-    }
-    // RFC 9000 §3.2: a STREAM frame for a peer stream that already
-    // reached a terminal state and was reaped is post-terminal — drop
-    // it instead of resurrecting the stream with fresh (final-size /
-    // reset) state. Checked before recordPeerStreamOpenOrClose so the
-    // id is neither re-counted nor recreated.
-    if (existing == null and conn_streams.peerStreamAlreadyReaped(conn, s.stream_id)) return;
-    if (existing == null and !conn.recordPeerStreamOpenOrClose(s.stream_id)) return;
-
-    const ptr = existing orelse blk: {
-        const new_ptr = try conn.allocator.create(Stream);
-        errdefer conn.allocator.destroy(new_ptr);
-        new_ptr.* = .{
-            .id = s.stream_id,
-            .send = SendStream.init(conn.allocator),
-            .recv = RecvStream.init(conn.allocator),
-            .recv_max_data = conn.initialRecvStreamLimit(s.stream_id),
-            .send_max_data = conn.initialSendStreamLimit(s.stream_id),
-        };
-        try conn.streams.put(conn.allocator, s.stream_id, new_ptr);
-        break :blk new_ptr;
-    };
+    const ptr = (try conn_streams.ensurePeerStream(conn, s.stream_id, .stream_data)) orelse return;
     if (lvl == .early_data) ptr.arrived_in_early_data = true;
-    const old_highest = ptr.recv.peerHighestOffset();
-    const new_highest = @max(old_highest, frame_end);
-    if (new_highest > ptr.recv_max_data) {
-        conn.close(true, transport_error_flow_control, "peer exceeded stream data limit");
-        return;
-    }
-    const delta = new_highest - old_highest;
-    if (delta > 0 and
-        (delta > conn.local_max_data or conn.peer_sent_stream_data > conn.local_max_data - delta))
-    {
-        conn.close(true, transport_error_flow_control, "peer exceeded connection data limit");
-        return;
-    }
+    const delta = conn_flow.creditPeerStreamHighWater(conn, ptr, frame_end, .{
+        .stream = "peer exceeded stream data limit",
+        .conn = "peer exceeded connection data limit",
+    }) orelse return;
     // Hardening guide §3.5 / §8: snapshot the recv-buffer length
     // around `recv()` and reconcile the global resident-bytes
     // budget. `RecvStream.recv` may grow its internal buffer to

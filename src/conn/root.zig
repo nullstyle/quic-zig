@@ -61,6 +61,9 @@ pub const path_validator = @import("PathValidator.zig");
 pub const send_stream = @import("SendStream.zig");
 /// RFC 9000 §3.2 receive-side stream reassembly and RESET handling.
 pub const recv_stream = @import("RecvStream.zig");
+/// Sorted-disjoint half-open byte ranges shared by `send_stream` /
+/// `recv_stream` (`Range` + merge-on-insert).
+pub const range_list = @import("range_list.zig");
 /// Per-path 4-tuple bundle: CIDs, anti-amp, validation, RTT, congestion.
 pub const path = @import("path.zig");
 /// RFC 9000 §8.1.2 stateless Retry token mint/validate.
@@ -252,6 +255,7 @@ test {
     _ = path_validator;
     _ = send_stream;
     _ = recv_stream;
+    _ = range_list;
     _ = path;
     _ = retry_token;
     _ = new_token;

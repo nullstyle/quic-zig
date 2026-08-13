@@ -103,6 +103,59 @@ fn openStream(conn: *Connection, id: u64) Error!*Stream {
     return ptr;
 }
 
+/// Which inbound frame is asking for the stream. Selects the
+/// CONNECTION_CLOSE reason phrases `ensurePeerStream`'s gates send to
+/// the peer — the error codes are identical, only the wording differs
+/// per frame type.
+pub const PeerStreamFrame = enum { stream_data, reset_stream };
+
+/// Shared STREAM / RESET_STREAM inbound prologue: run the peer-stream
+/// gates in order, then return the stream — the existing one, or a
+/// fresh one materialized through `openStream` (so peer-initiated
+/// streams emit the same `stream_state_updated` `.open` qlog event as
+/// local opens).
+///
+/// Gate order is load-bearing:
+/// 1. `peerMaySendOnStream` — data/reset on our send-only uni stream
+///    closes with STREAM_STATE_ERROR;
+/// 2. an absent stream the *local* side should have opened closes
+///    with STREAM_STATE_ERROR;
+/// 3. RFC 9000 §3.2: an absent peer stream that already reached a
+///    terminal state and was reaped is post-terminal — the frame is
+///    dropped instead of resurrecting the stream with fresh
+///    (final-size / reset) state. Checked before
+///    `recordPeerStreamOpenOrClose` so the id is neither re-counted
+///    nor recreated;
+/// 4. `recordPeerStreamOpenOrClose` — stream-limit accounting; closes
+///    the connection itself when the peer overruns a limit.
+///
+/// Returns null when a gate closed the connection or decided the
+/// frame must be ignored; the caller just returns.
+///
+/// INTERNAL: pub for direct sibling import (recv_data_handlers.zig,
+/// recv_stream_control_handlers.zig).
+pub fn ensurePeerStream(conn: *Connection, id: u64, frame: PeerStreamFrame) Error!?*Stream {
+    if (!peerMaySendOnStream(conn, id)) {
+        conn.close(true, transport_error_stream_state, switch (frame) {
+            .stream_data => "stream data on receive-only stream",
+            .reset_stream => "reset stream on receive-only stream",
+        });
+        return null;
+    }
+    const existing = conn.streams.get(id);
+    if (existing) |ptr| return ptr;
+    if (streamInitiatedByLocal(conn, id)) {
+        conn.close(true, transport_error_stream_state, switch (frame) {
+            .stream_data => "peer referenced unopened local stream",
+            .reset_stream => "peer reset unopened local stream",
+        });
+        return null;
+    }
+    if (peerStreamAlreadyReaped(conn, id)) return null;
+    if (!recordPeerStreamOpenOrClose(conn, id)) return null;
+    return try openStream(conn, id);
+}
+
 pub fn streamIsBidi(id: u64) bool {
     return (id & 0b10) == 0;
 }

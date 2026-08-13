@@ -19,6 +19,7 @@ const FlowBlockedInfo = state_mod.FlowBlockedInfo;
 const min_stream_credit_return_batch = state_mod.min_stream_credit_return_batch;
 const stream_credit_return_divisor = state_mod.stream_credit_return_divisor;
 const max_tracked_stream_data_blocked = state_mod.max_tracked_stream_data_blocked;
+const transport_error_flow_control = state_mod.transport_error_flow_control;
 
 /// If the *local* sender ran out of connection-level send credit
 /// (RFC 9000 §4.1) and we therefore plan to emit a DATA_BLOCKED
@@ -135,6 +136,43 @@ pub fn queueMaxStreams(conn: *Connection, bidi: bool, maximum_streams: u64) void
             conn.pending_frames.max_streams_uni = bounded_maximum_streams;
         }
     }
+}
+
+/// Debit the receive-side flow budgets for a peer frame that raises
+/// `s`'s high-water mark to `new_end`. RFC 9000 §4.1 / §4.5: a
+/// RESET_STREAM final size counts against stream and connection flow
+/// control exactly as delivered STREAM data does, so both inbound
+/// paths share this gate. Checks the stream window, then the
+/// connection window (overflow-safe — never computes
+/// `peer_sent_stream_data + delta` directly). Closes the connection
+/// with FLOW_CONTROL_ERROR and returns null when a limit is exceeded
+/// (the caller just returns); otherwise returns the connection-level
+/// delta, which the caller commits to `conn.peer_sent_stream_data`
+/// only after its recv-side mutation succeeds — an erroring frame
+/// never charges flow control.
+///
+/// INTERNAL: pub for direct sibling import (recv_data_handlers.zig,
+/// recv_stream_control_handlers.zig).
+pub fn creditPeerStreamHighWater(
+    conn: *Connection,
+    s: *const Stream,
+    new_end: u64,
+    reasons: struct { stream: []const u8, conn: []const u8 },
+) ?u64 {
+    const old_highest = s.recv.peerHighestOffset();
+    const new_highest = @max(old_highest, new_end);
+    if (new_highest > s.recv_max_data) {
+        conn.close(true, transport_error_flow_control, reasons.stream);
+        return null;
+    }
+    const delta = new_highest - old_highest;
+    if (delta > 0 and
+        (delta > conn.local_max_data or conn.peer_sent_stream_data > conn.local_max_data - delta))
+    {
+        conn.close(true, transport_error_flow_control, reasons.conn);
+        return null;
+    }
+    return delta;
 }
 
 pub fn maybeReturnPeerStreamCredit(conn: *Connection, s: *Stream) void {

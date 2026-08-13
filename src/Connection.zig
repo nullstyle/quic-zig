@@ -3818,10 +3818,6 @@ pub const handleDatagram = conn_recv_data_handlers.handleDatagram;
 
 pub const handleCrypto = conn_recv_data_handlers.handleCrypto;
 
-const cryptoInboxQueued = conn_recv_data_handlers.cryptoInboxQueued;
-
-const drainInboxIntoTls = conn_recv_data_handlers.drainInboxIntoTls;
-
 pub const handleStream = conn_recv_data_handlers.handleStream;
 
 pub const handleResetStream = conn_recv_stream_control_handlers.handleResetStream;
@@ -3955,22 +3951,7 @@ pub fn tick(self: *Connection, now_us: u64) Error!void {
 ///    are pending (post-handshake messages such as
 ///    NewSessionTicket), call `processQuicPostHandshake`.
 pub fn advance(self: *Connection) Error!void {
-    inline for (level_mod.all) |lvl| {
-        const idx = lvl.idx();
-        if (self.inbox[idx].len > 0) {
-            const bytes = self.inbox[idx].drain();
-            try self.inner.provideQuicData(lvl.toBoringssl(), bytes);
-            if (self.inner.handshakeDone()) {
-                try self.cachePeerTransportParams();
-                try self.inner.processQuicPostHandshake();
-            } else {
-                try self.advanceHandshake();
-            }
-        }
-    }
-    if (!self.inner.handshakeDone()) try self.advanceHandshake();
-    if (self.inner.handshakeDone()) try self.cachePeerTransportParams();
-    self.queueHandshakeDoneIfReady();
+    try conn_recv_data_handlers.pumpTlsInbox(self);
     try self.refreshEarlyDataStatus();
     // In-process test shim: shuttle outbox→peer.inbox so mock-
     // transport handshake tests can run without a UDP socket.

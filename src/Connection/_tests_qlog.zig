@@ -285,6 +285,59 @@ test "qlog: loss_detected fires from packet-threshold loss detection" {
     try std.testing.expect(conn.qlog_packets_lost >= 1);
 }
 
+test "qlog: peer-initiated streams emit stream_state_updated open before their terminal event" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    try conn.setTransportParams(.{
+        .initial_max_data = 65536,
+        .initial_max_stream_data_uni = 65536,
+        .initial_max_streams_uni = 4,
+    });
+
+    var recorder: TestQlogRecorder = .{};
+    conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
+
+    // A stream materialized by an inbound STREAM frame must emit the
+    // same `.open` event a local open does — historically only local
+    // opens did, so gcClosedStreams later emitted `closed`/`reset` for
+    // streams no qlog consumer ever saw open.
+    try conn.handleStream(.application, .{
+        .stream_id = 2, // client uni index 0 (peer stream for a server)
+        .offset = 0,
+        .data = "hi",
+        .has_length = true,
+        .fin = true,
+    });
+    try std.testing.expectEqual(@as(usize, 1), recorder.countOf(.stream_state_updated));
+    const opened = recorder.first(.stream_state_updated).?;
+    try std.testing.expectEqual(@as(?u64, 2), opened.stream_id);
+    try std.testing.expectEqual(@as(?state.QlogStreamState, .open), opened.stream_state);
+
+    // RESET_STREAM materializes a fresh peer stream through the same
+    // prologue and must open it in the log too.
+    try conn.handleResetStream(.{ .stream_id = 6, .application_error_code = 0, .final_size = 0 });
+    try std.testing.expectEqual(@as(usize, 2), recorder.countOf(.stream_state_updated));
+
+    // Drain stream 2 and reap: the log now closes what it opened.
+    var buf: [8]u8 = undefined;
+    _ = try conn.streamRead(2, &buf);
+    try conn.tick(1_000_000);
+    var saw_closed_2 = false;
+    for (recorder.events[0..recorder.count]) |event| {
+        if (event.name == .stream_state_updated and
+            event.stream_id == @as(?u64, 2) and
+            event.stream_state == @as(?state.QlogStreamState, .closed))
+        {
+            saw_closed_2 = true;
+        }
+    }
+    try std.testing.expect(saw_closed_2);
+}
+
 test "qlog: pathStats exposes the new connection-level counters" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});

@@ -22,6 +22,7 @@
 pub const RecvStream = @This();
 
 const std = @import("std");
+const range_list = @import("range_list.zig");
 
 /// Errors raised by `recv` and `resetStream`.
 pub const Error = error{
@@ -60,16 +61,9 @@ pub const State = enum {
     reset_read,
 };
 
-/// Half-open interval `[offset, end)` of received stream bytes.
-pub const Range = struct {
-    offset: u64,
-    end: u64,
-
-    /// Length of the range in bytes.
-    pub fn len(self: Range) u64 {
-        return self.end - self.offset;
-    }
-};
+/// Half-open interval `[offset, end)` of received stream bytes
+/// (shared `range_list.Range`).
+pub const Range = range_list.Range;
 
 /// State recorded when the peer sends RESET_STREAM (RFC 9000 §19.4).
 pub const ResetInfo = struct {
@@ -266,7 +260,7 @@ pub fn recv(
 
     // Now insert the original [clip_offset, new_end) into the
     // range list, merging neighbors.
-    try insertMerge(&self.ranges, self.allocator, .{
+    try range_list.insertMerge(&self.ranges, self.allocator, .{
         .offset = clip_offset,
         .end = clip_end,
     });
@@ -398,32 +392,6 @@ fn maybeAdvanceState(self: *RecvStream) void {
             self.state = .size_known;
         }
     }
-}
-
-fn insertMerge(
-    list: *std.ArrayList(Range),
-    allocator: std.mem.Allocator,
-    new: Range,
-) std.mem.Allocator.Error!void {
-    if (new.offset >= new.end) return;
-
-    var i: usize = 0;
-    while (i < list.items.len and list.items[i].end < new.offset) : (i += 1) {}
-
-    if (i == list.items.len or list.items[i].offset > new.end) {
-        try list.insert(allocator, i, new);
-        return;
-    }
-
-    var merged: Range = .{
-        .offset = @min(list.items[i].offset, new.offset),
-        .end = @max(list.items[i].end, new.end),
-    };
-    var j: usize = i + 1;
-    while (j < list.items.len and list.items[j].offset <= merged.end) : (j += 1) {
-        merged.end = @max(merged.end, list.items[j].end);
-    }
-    list.replaceRangeAssumeCapacity(i, j - i, &.{merged});
 }
 
 // -- tests ---------------------------------------------------------------

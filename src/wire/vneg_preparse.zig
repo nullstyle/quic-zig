@@ -291,6 +291,12 @@ pub const ChReassembler = struct {
     /// any neighbours it overlaps or abuts. Returns `error.Invalid`
     /// if the merge would exceed `max_segments` (deeply pathological
     /// reordering — fall back to no upgrade).
+    ///
+    /// Same merge algorithm as `conn/range_list.insertMerge`, kept
+    /// hand-rolled over the fixed `segs` array because this module
+    /// never allocates; a fix to either copy's boundary predicates
+    /// (`end < off` scan / `offset <= end` swallow) likely applies
+    /// to both.
     fn insertSegment(self: *ChReassembler, off: usize, end: usize) Error!void {
         // Find the first segment whose end >= off (potential merge
         // candidate); everything strictly to its left stays untouched.
