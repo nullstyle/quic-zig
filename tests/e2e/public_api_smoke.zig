@@ -143,6 +143,9 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
 
 test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
     comptime {
+        // The fieldInfo walks below share one comptime branch budget;
+        // the default 1000 ran out when the event union grew.
+        @setEvalBranchQuota(10_000);
         const Event = quic.ConnectionEvent;
         _ = quic.DatagramSendEvent;
         _ = quic.FlowBlockedInfo;
@@ -165,6 +168,10 @@ test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
         }
         // `handshake_established` is a void one-shot; pin its presence.
         _ = std.meta.fieldInfo(Event, .handshake_established);
+        // `early_data` carries the Stable EarlyDataStatus enum.
+        if (std.meta.fieldInfo(Event, .early_data).type != quic.EarlyDataStatus) {
+            @compileError("ConnectionEvent.early_data payload alias drifted");
+        }
     }
 }
 

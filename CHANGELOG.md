@@ -9,6 +9,14 @@ changes.
 
 ### Added
 
+- **`ConnectionEvent.early_data`** — one-shot event carrying the
+  `EarlyDataStatus` when the 0-RTT outcome resolves (`.accepted` /
+  `.rejected`; connections that never attempt 0-RTT get no event).
+  Rejection is surfaced only after the verbatim 1-RTT requeue has
+  run, so reactors observe post-requeue state. Replaces per-drain
+  `earlyDataStatus()` polling. Additive variant under the
+  `ConnectionEvent` forward-compatibility contract: exhaustive
+  switches gain a compile error, which is the documented signal.
 - **Send-window introspection** — `Connection.sendWindow()`
   (connection-level flow credit remaining) and
   `Connection.streamSendWindow(id) ?SendWindow`, a per-stream snapshot

@@ -118,6 +118,15 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
         try std.testing.expect(sink.captured != null);
         try std.testing.expect(sink.calls >= 1);
 
+        // No 0-RTT was attempted on this connection, so the one-shot
+        // `early_data` event must never fire.
+        var saw_early_event = false;
+        while (cli.conn.pollEvent()) |ev| switch (ev) {
+            .early_data => saw_early_event = true,
+            else => {},
+        };
+        try std.testing.expect(!saw_early_event);
+
         // Close connection 1 and let the server reap it so the
         // resumption below runs against a clean slot table.
         cli.conn.close(false, 0, "done");
@@ -188,6 +197,18 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     try std.testing.expect(read_before_handshake_done);
     try std.testing.expectEqual(quic.EarlyDataStatus.accepted, cli2.conn.earlyDataStatus());
 
+    // The one-shot event mirrors the accepted status, exactly once.
+    var accepted_events: u32 = 0;
+    while (cli2.conn.pollEvent()) |ev| switch (ev) {
+        .early_data => |st| {
+            try std.testing.expectEqual(quic.EarlyDataStatus.accepted, st);
+            accepted_events += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(u32, 1), accepted_events);
+    try std.testing.expect(cli2.conn.pollEvent() == null);
+
     // ---- Connection 3: rejection recovery. A fresh Server has fresh
     // session-ticket keys, so the resumed ticket cannot be decrypted
     // and 0-RTT is rejected — the routine restart scenario. The client
@@ -248,4 +269,19 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     try std.testing.expect(cli3.conn.handshakeDone());
     try std.testing.expectEqual(early_payload.len, late_read);
     try std.testing.expectEqualStrings(early_payload, rbuf3[0..late_read]);
+
+    // The one-shot event surfaces the rejection, exactly once, and by
+    // the variant's ordering promise the verbatim 1-RTT requeue has
+    // already run when it does (the data assertions above are the
+    // observable proof: everything staged as 0-RTT arrived at 1-RTT).
+    var rejected_events: u32 = 0;
+    while (cli3.conn.pollEvent()) |ev| switch (ev) {
+        .early_data => |st| {
+            try std.testing.expectEqual(quic.EarlyDataStatus.rejected, st);
+            rejected_events += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(u32, 1), rejected_events);
+    try std.testing.expect(cli3.conn.pollEvent() == null);
 }

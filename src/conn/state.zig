@@ -659,6 +659,19 @@ pub const ConnectionEvent = union(enum) {
     /// `pollEvent` after completion. Note a server accepting 0-RTT can
     /// surface `stream_opened` events *before* this one.
     handshake_established,
+    /// The 0-RTT outcome resolved: emitted exactly once, lazily on
+    /// `pollEvent`, carrying `.accepted` or `.rejected` — connections
+    /// that never attempt 0-RTT get no event. `.rejected` is
+    /// deliberately withheld until the rejected early-data packets
+    /// have been requeued verbatim for 1-RTT (the CONTRACT in
+    /// `requeueRejectedEarlyData`), so a reactor observes the
+    /// post-requeue state; note that by then the client-side
+    /// `earlyDataStatus()` may already read `.not_offered` again (the
+    /// rejection handler restarts the TLS handshake), which is why
+    /// this event, not that poll, is the reliable rejection signal.
+    /// Replaces per-drain status polling for embedders driving
+    /// remembered-settings replay.
+    early_data: EarlyDataStatus,
     /// A peer-initiated stream was opened, explicitly or implicitly
     /// (RFC 9000 §3.2). Delivery is lossless and in per-type index order
     /// — see `StreamOpenedInfo` for the watermark semantics and the
@@ -1464,6 +1477,12 @@ pub const Connection = struct {
     surfaced_peer_streams_uni: u64 = 0,
     /// One-shot latch for `ConnectionEvent.handshake_established`.
     handshake_established_surfaced: bool = false,
+    /// Latch for the one-shot `ConnectionEvent.early_data`: set once
+    /// the 0-RTT outcome has been surfaced (or, for connections that
+    /// never attempted 0-RTT, once the handshake finishes with
+    /// `.not_offered` — after which the status can never change and
+    /// `pollEvent` stops consulting BoringSSL).
+    early_data_surfaced: bool = false,
     /// Rotating cursor for the RFC 9218 send scheduler's round-robin among
     /// equal-urgency *incremental* streams: each application packet advances it
     /// past the incremental stream that led, so a different one leads next
@@ -4116,6 +4135,42 @@ pub const Connection = struct {
         if (!self.handshake_established_surfaced and self.inner.handshakeDone()) {
             self.handshake_established_surfaced = true;
             return .handshake_established;
+        }
+        // 0-RTT outcome, one-shot. Gated so connections that never
+        // participate in early data pay no per-poll TLS query: clients
+        // after opting in via setEarlyDataEnabled (or after a
+        // processed rejection — the rejection handler deliberately
+        // clears the opt-in flag), servers always (they cannot know a
+        // 0-RTT attempt is coming). A `.not_offered` read after
+        // handshake completion is terminal and latches the watch off
+        // without emitting.
+        if (!self.early_data_surfaced and
+            (self.early_data_send_enabled or
+                self.early_data_rejection_processed or
+                self.role == .server))
+        {
+            if (self.early_data_rejection_processed) {
+                // quic's own latch is authoritative for rejection: it
+                // is set in the same breath as the verbatim requeue
+                // (the variant's ordering promise), and the TLS-side
+                // reason is wiped when resetEarlyDataReject restarts
+                // the handshake, so the inner status cannot be
+                // consulted for this case.
+                self.early_data_surfaced = true;
+                return .{ .early_data = .rejected };
+            }
+            switch (self.inner.earlyDataStatus()) {
+                .accepted => {
+                    self.early_data_surfaced = true;
+                    return .{ .early_data = .accepted };
+                },
+                // A raw `.rejected` read before the latch means the
+                // requeue has not run yet — hold the event for it.
+                .rejected => {},
+                .not_offered => if (self.inner.handshakeDone()) {
+                    self.early_data_surfaced = true;
+                },
+            }
         }
         if (self.surfaced_peer_streams_bidi < self.peer_opened_streams_bidi) {
             const stream_type: StreamType = if (self.role == .client) .server_bidi else .client_bidi;
