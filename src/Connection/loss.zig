@@ -742,89 +742,102 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
     } }, now_us);
 }
 
-fn firePtoAtLevel(
-    conn: *Connection,
-    lvl: EncryptionLevel,
-) Error!bool {
-    const sent = conn.sentForLevel(lvl);
-    const path: *PathState = conn.primaryPath();
+/// Expire the oldest live ack-eliciting packet on `target` as a PTO
+/// probe loss. Returns true if one was found (and consumed), false if
+/// the tracker held nothing eligible.
+///
+/// Shares the emit / probe-gate / requeue / delivery-inlet /
+/// emitLossDetected / onPacketsLost spine with `sweepLosses`, but is
+/// deliberately its own function: it removes a SINGLE packet via
+/// removeAt rather than a span, and drives no PMTUD black-hole
+/// accounting. The pending_ping / pto_count bookkeeping stays in the
+/// two callers, which is where the families legitimately differ.
+const PtoOutcome = union(enum) {
+    /// The tracker held no live ack-eliciting packet — nothing fired,
+    /// and the caller must not touch its PTO bookkeeping.
+    nothing_eligible,
+    /// The expired packet was a DPLPMTUD probe: no ping is armed and
+    /// no CC / loss accounting ran (RFC 8899 §4.4).
+    probe,
+    /// A regular packet expired; `requeued` says whether its frames
+    /// went back into a queue (if not, the caller arms a PING so the
+    /// probe still elicits an ACK).
+    regular: struct { requeued: bool },
+};
+
+fn firePtoOn(conn: *Connection, target: LossTarget) Error!PtoOutcome {
     var i: u32 = 0;
-    while (i < sent.count) : (i += 1) {
-        const p = sent.packets[i];
+    while (i < target.sent.count) : (i += 1) {
+        const p = target.sent.packets[i];
         if (p.dead) continue;
         if (!p.ack_eliciting) continue;
 
-        var lost = sent.removeAt(i);
+        var lost = target.sent.removeAt(i);
         defer lost.deinit(conn.allocator);
-        conn_qlog.emitPacketLost(conn, lvl, lost.pn, @intCast(lost.bytes), .pto_probe);
+        conn_qlog.emitPacketLost(conn, target.lvl, lost.pn, @intCast(lost.bytes), .pto_probe);
         // RFC 8899 §4.4: a probe expired by PTO counts as a probe
-        // loss, NOT a regular loss; CC stays unaffected. The
-        // requeue path still runs so coalesced control / stream
-        // frames go back into the queue.
-        const is_probe = lvl == .application and
-            pmtudHandleProbeLossIfMatches(conn, path, &lost);
-        const requeued = try requeueLostPacket(conn, lvl, &lost);
-        if (is_probe) {
-            conn.pendingPingForLevel(lvl).* = false;
-            conn.ptoCountForLevel(lvl).* +|= 1;
-            return true;
-        }
+        // loss, NOT a regular loss; CC stays unaffected. The requeue
+        // path still runs so coalesced control / stream frames go back
+        // into the queue.
+        const is_probe = target.isApplication() and
+            pmtudHandleProbeLossIfMatches(conn, target.path, &lost);
+        const requeued = switch (target.scope) {
+            .level => try requeueLostPacket(conn, target.lvl, &lost),
+            .path => try requeueLostPacketOnPath(conn, target.lvl, &lost, target.path.id),
+        };
+        if (is_probe) return .probe;
+
         var stats: LossStats = .{};
         stats.add(lost);
         // Delivery-rate sampler C.lost: PTO-expired packets are real
         // losses to the estimator too (probe losses returned above).
-        if (lvl == .application and lost.in_flight) {
-            const info = path.path.delivery.onPacketLost(&lost);
-            path.path.cc.onPacketNewlyLost(&info);
+        if (target.isApplication() and lost.in_flight) {
+            const info = target.path.path.delivery.onPacketLost(&lost);
+            target.path.path.cc.onPacketNewlyLost(&info);
         }
         conn.qlog_packets_lost +|= stats.count;
-        conn_qlog.emitLossDetected(conn, lvl, stats, .pto_probe);
-        onPacketsLostAtLevel(conn, lvl, stats);
-
-        conn.pendingPingForLevel(lvl).* = !requeued;
-        conn.ptoCountForLevel(lvl).* +|= 1;
-        return true;
+        conn_qlog.emitLossDetected(conn, target.lvl, stats, .pto_probe);
+        switch (target.scope) {
+            .level => onPacketsLostAtLevel(conn, target.lvl, stats),
+            .path => onApplicationPathPacketsLost(conn, target.path, stats),
+        }
+        return .{ .regular = .{ .requeued = requeued } };
     }
-    return false;
+    return .nothing_eligible;
+}
+
+fn firePtoAtLevel(
+    conn: *Connection,
+    lvl: EncryptionLevel,
+) Error!bool {
+    switch (try firePtoOn(conn, levelTarget(conn, lvl))) {
+        .nothing_eligible => return false,
+        .probe => conn.pendingPingForLevel(lvl).* = false,
+        .regular => |r| conn.pendingPingForLevel(lvl).* = !r.requeued,
+    }
+    conn.ptoCountForLevel(lvl).* +|= 1;
+    return true;
 }
 
 fn firePtoOnApplicationPath(
     conn: *Connection,
     path: *PathState,
 ) Error!bool {
-    var i: u32 = 0;
-    while (i < path.sent.count) : (i += 1) {
-        const p = path.sent.packets[i];
-        if (p.dead) continue;
-        if (!p.ack_eliciting) continue;
-
-        var lost = path.sent.removeAt(i);
-        defer lost.deinit(conn.allocator);
-        conn_qlog.emitPacketLost(conn, .application, lost.pn, @intCast(lost.bytes), .pto_probe);
-        const is_probe = pmtudHandleProbeLossIfMatches(conn, path, &lost);
-        const requeued = try requeueLostPacketOnPath(conn, .application, &lost, path.id);
-        if (is_probe) {
-            path.pending_ping = false;
-            path.pto_count +|= 1;
-            return true;
-        }
-        var stats: LossStats = .{};
-        stats.add(lost);
-        // Delivery-rate sampler C.lost + per-packet inlet, per-path PTO twin.
-        if (lost.in_flight) {
-            const info = path.path.delivery.onPacketLost(&lost);
-            path.path.cc.onPacketNewlyLost(&info);
-        }
-        conn.qlog_packets_lost +|= stats.count;
-        conn_qlog.emitLossDetected(conn, .application, stats, .pto_probe);
-        onApplicationPathPacketsLost(conn, path, stats);
-
-        path.pending_ping = !requeued;
-        if (requeued and path.pto_probe_count < 2) path.pto_probe_count += 1;
-        path.pto_count +|= 1;
-        return true;
+    switch (try firePtoOn(conn, pathTarget(path))) {
+        .nothing_eligible => return false,
+        .probe => path.pending_ping = false,
+        .regular => |r| {
+            path.pending_ping = !r.requeued;
+            // Per-path only: a bounded probe counter feeding the
+            // multipath send scheduler. send.zig consumes it for
+            // .application / .early_data only, which firePtoAtLevel
+            // never sees — so the missing counterpart there is
+            // correct, not drift.
+            if (r.requeued and path.pto_probe_count < 2) path.pto_probe_count += 1;
+        },
     }
-    return false;
+    path.pto_count +|= 1;
+    return true;
 }
 
 pub fn fireDuePtoAtLevel(
