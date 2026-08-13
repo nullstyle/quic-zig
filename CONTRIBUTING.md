@@ -69,7 +69,7 @@ modes:
   `$ITERS` and let it run.
 - **Pre-release gate (~10 minutes).** Before a release is tagged, a
   completed green run of `.github/workflows/rc-fuzz.yml` must exist for
-  the release commit. Default budget is `50000` per target (38 targets
+  the release commit. Default budget is `50000` per target (39 targets
   as of 2026-08-13 — count them with `grep -rc 'std.testing.fuzz('
   src --include='*.zig'` rather than trusting this sentence — so
   ~1.9M executions). Unlike the weekly fuzz job, this gate is

@@ -5,6 +5,53 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+The deduplication series: a repo-wide audit found 50 verified
+copy-paste families (41 worth extracting), and this series collapses
+them onto shared implementations. Internal-only in behavior except for
+the fixes noted below, all of which were latent defects the duplication
+had been hiding. Deterministic impairment cells stay byte-identical
+throughout.
+
+### Fixed
+
+- **Per-source rate limiting reset unrelated budgets.** On Initial
+  window rollover, `acceptSourceRate` assigned a whole fresh
+  `SourceRateEntry` instead of just its own (count, window_start) pair,
+  silently zeroing the VN, log, and bandwidth axes that were added to
+  the struct later. One Initial per window handed a peer a fresh
+  Version-Negotiation budget (2× the configured VN amplification cap)
+  and a full token bucket (up to 2× the configured per-source byte
+  rate). Both consequences now have regression tests.
+- **qlog congestion-state events were stamped `at_us = 0`.** The
+  packet-threshold loss sweeps passed `0` where the time-threshold
+  sweeps passed `now_us`; that forced the `.recovery` branch whenever a
+  recovery period had ever started, and — because the event latches
+  before the ACK handler's correctly-timestamped call — suppressed the
+  good event and produced a spurious recovery→congestion_avoidance flap
+  on lossless ACKs. `now_us` is now a required parameter.
+- **Inbound ACK side effects ran in opposite orders** on the per-level
+  and per-path paths (key-epoch confirmation vs stream dispatch). The
+  two are independent, so this was observable only on the error path;
+  it is now one order, with a comment recording that the order is free.
+
+### Changed
+
+- Internal: ~1,600 lines of verified duplication collapsed onto shared
+  implementations across loss detection (four sweeps → one
+  `sweepLosses` over a `LossTarget`), inbound ACK application (two
+  handlers → one applier over an `AckTarget`), the 1-RTT control drain
+  (ten hand-rolled length computations → the file's existing
+  `encodeFrameIfFits`), the NEW_TOKEN/Retry AEAD codecs (→ one
+  `token_envelope.Envelope`), the Server rate limiters, transport-param
+  encode/encodedLen, the frame codecs, the wire long-header walk, the
+  UDP loops, CID registries, migration checks, flow control, Feistel,
+  and more. Public API and Internal-tier paths unchanged.
+- Both token wire formats are now pinned by known-answer `validate`
+  tests, so a refactor can no longer silently invalidate tokens already
+  issued in the field.
+
 ## [0.13.1] - 2026-08-13
 
 The restyle release: internal-only. The whole codebase now reads like
