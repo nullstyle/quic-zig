@@ -10,12 +10,12 @@ const std = @import("std");
 const ack_range = @import("../frame/ack_range.zig");
 const frame_types = @import("../frame/types.zig");
 
-const PnSpace = @import("pn_space.zig").PnSpace;
+const PnSpace = @import("PnSpace.zig").PnSpace;
 const SentPacketTracker = @import("sent_packets.zig").SentPacketTracker;
 const SentPacket = @import("sent_packets.zig").SentPacket;
 const sent_packets_max_tracked = @import("sent_packets.zig").max_tracked;
-const RttEstimator = @import("rtt.zig").RttEstimator;
-const granularity_us = @import("rtt.zig").granularity_us;
+const RttEstimator = @import("RttEstimator.zig").RttEstimator;
+const granularity_us = @import("RttEstimator.zig").granularity_us;
 
 /// kPacketThreshold from RFC 9002 §6.1.1: 3.
 pub const packet_threshold: u64 = 3;
@@ -204,7 +204,7 @@ fn testLivePns(tr: *const SentPacketTracker, buf: []u64) []const u64 {
     return buf[0..n];
 }
 
-const ack_tracker_mod = @import("ack_tracker.zig");
+const ack_tracker_mod = @import("AckTracker.zig");
 
 fn buildAck(largest: u64, first_range: u64) frame_types.Ack {
     return .{

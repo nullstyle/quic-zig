@@ -11,7 +11,7 @@
 pub const PnSpace = @This();
 
 const std = @import("std");
-const ack_tracker_mod = @import("ack_tracker.zig");
+const ack_tracker_mod = @import("AckTracker.zig");
 const socket_opts = @import("../transport/socket_opts.zig");
 
 /// Re-export of the underlying received-PN tracker.

@@ -35,11 +35,11 @@ pub const pending_frames = @import("pending_frames.zig");
 /// (RFC 9000 §10).
 pub const lifecycle = @import("lifecycle.zig");
 /// RFC 9000 §13.2 received-PN range bookkeeping for ACK frame generation.
-pub const ack_tracker = @import("ack_tracker.zig");
+pub const ack_tracker = @import("AckTracker.zig");
 /// QUIC packet number spaces (RFC 9000 §12.3): Initial / Handshake / Application.
-pub const pn_space = @import("pn_space.zig");
+pub const pn_space = @import("PnSpace.zig");
 /// RFC 9002 §5 round-trip-time estimator.
-pub const rtt = @import("rtt.zig");
+pub const rtt = @import("RttEstimator.zig");
 /// RFC 9002 §A.1 per-PN-space sent-packet tracker.
 pub const sent_packets = @import("sent_packets.zig");
 /// RFC 9002 §7 + Appendix B NewReno congestion control.
@@ -56,7 +56,7 @@ pub const hystart = @import("hystart.zig");
 /// RFC 9000 §4 connection-, stream-, and stream-count flow control.
 pub const flow_control = @import("flow_control.zig");
 /// RFC 9000 §8.2 PATH_CHALLENGE/PATH_RESPONSE state machine.
-pub const path_validator = @import("path_validator.zig");
+pub const path_validator = @import("PathValidator.zig");
 /// RFC 9000 §3.1 send-side stream buffer and FIN/RESET handling.
 pub const send_stream = @import("send_stream.zig");
 /// RFC 9000 §3.2 receive-side stream reassembly and RESET handling.
