@@ -79,8 +79,8 @@ pub fn encode(dst: []u8, frame: Frame) Error!usize {
         .max_path_id => |f| encodePathIdOnly(dst, frame_type_max_path_id, f.maximum_path_id),
         .paths_blocked => |f| encodePathIdOnly(dst, frame_type_paths_blocked, f.maximum_path_id),
         .path_cids_blocked => |f| encodePathCidsBlocked(dst, f),
-        .alternative_v4_address => |f| encodeAlternativeV4Address(dst, f),
-        .alternative_v6_address => |f| encodeAlternativeV6Address(dst, f),
+        .alternative_v4_address => |f| encodeAltAddress(dst, frame_type_alternative_v4_address, f),
+        .alternative_v6_address => |f| encodeAltAddress(dst, frame_type_alternative_v6_address, f),
     };
 }
 
@@ -90,20 +90,14 @@ pub fn encodedLen(frame: Frame) usize {
     return switch (frame) {
         .padding => |f| @intCast(f.count),
         .ping => 1,
-        .ack => |f| blk: {
-            var len: usize = 1 +
-                varint.encodedLen(f.largest_acked) +
-                varint.encodedLen(f.ack_delay) +
-                varint.encodedLen(f.range_count) +
-                varint.encodedLen(f.first_range) +
-                f.ranges_bytes.len;
-            if (f.ecn_counts) |e| {
-                len += varint.encodedLen(e.ect0);
-                len += varint.encodedLen(e.ect1);
-                len += varint.encodedLen(e.ecn_ce);
-            }
-            break :blk len;
-        },
+        .ack => |f| 1 + ackBodyLen(
+            f.largest_acked,
+            f.ack_delay,
+            f.range_count,
+            f.first_range,
+            f.ranges_bytes,
+            f.ecn_counts,
+        ),
         .reset_stream => |f| 1 +
             varint.encodedLen(f.stream_id) +
             varint.encodedLen(f.application_error_code) +
@@ -136,9 +130,7 @@ pub fn encodedLen(frame: Frame) usize {
         .new_connection_id => |f| 1 +
             varint.encodedLen(f.sequence_number) +
             varint.encodedLen(f.retire_prior_to) +
-            1 +
-            f.connection_id.len +
-            16,
+            cidAndResetTokenLen(f.connection_id),
         .retire_connection_id => |f| 1 + varint.encodedLen(f.sequence_number),
         .path_challenge => 1 + 8,
         .path_response => 1 + 8,
@@ -156,21 +148,16 @@ pub fn encodedLen(frame: Frame) usize {
             len += f.data.len;
             break :blk len;
         },
-        .path_ack => |f| blk: {
-            var len: usize = varint.encodedLen(if (f.ecn_counts == null) frame_type_path_ack else frame_type_path_ack_ecn) +
-                varint.encodedLen(f.path_id) +
-                varint.encodedLen(f.largest_acked) +
-                varint.encodedLen(f.ack_delay) +
-                varint.encodedLen(f.range_count) +
-                varint.encodedLen(f.first_range) +
-                f.ranges_bytes.len;
-            if (f.ecn_counts) |e| {
-                len += varint.encodedLen(e.ect0);
-                len += varint.encodedLen(e.ect1);
-                len += varint.encodedLen(e.ecn_ce);
-            }
-            break :blk len;
-        },
+        .path_ack => |f| varint.encodedLen(if (f.ecn_counts == null) frame_type_path_ack else frame_type_path_ack_ecn) +
+            varint.encodedLen(f.path_id) +
+            ackBodyLen(
+                f.largest_acked,
+                f.ack_delay,
+                f.range_count,
+                f.first_range,
+                f.ranges_bytes,
+                f.ecn_counts,
+            ),
         .path_abandon => |f| varint.encodedLen(frame_type_path_abandon) +
             varint.encodedLen(f.path_id) +
             varint.encodedLen(f.error_code),
@@ -180,9 +167,7 @@ pub fn encodedLen(frame: Frame) usize {
             varint.encodedLen(f.path_id) +
             varint.encodedLen(f.sequence_number) +
             varint.encodedLen(f.retire_prior_to) +
-            1 +
-            f.connection_id.len +
-            16,
+            cidAndResetTokenLen(f.connection_id),
         .path_retire_connection_id => |f| varint.encodedLen(frame_type_path_retire_connection_id) +
             varint.encodedLen(f.path_id) +
             varint.encodedLen(f.sequence_number),
@@ -191,16 +176,8 @@ pub fn encodedLen(frame: Frame) usize {
         .path_cids_blocked => |f| varint.encodedLen(frame_type_path_cids_blocked) +
             varint.encodedLen(f.path_id) +
             varint.encodedLen(f.next_sequence_number),
-        .alternative_v4_address => |f| varint.encodedLen(frame_type_alternative_v4_address) +
-            1 +
-            varint.encodedLen(f.status_sequence_number) +
-            4 +
-            2,
-        .alternative_v6_address => |f| varint.encodedLen(frame_type_alternative_v6_address) +
-            1 +
-            varint.encodedLen(f.status_sequence_number) +
-            16 +
-            2,
+        .alternative_v4_address => |f| encodedAltAddressLen(frame_type_alternative_v4_address, f),
+        .alternative_v6_address => |f| encodedAltAddressLen(frame_type_alternative_v6_address, f),
     };
 }
 
@@ -281,20 +258,37 @@ fn encodeStreamDataBlocked(dst: []u8, f: types.StreamDataBlocked) Error!usize {
     return pos;
 }
 
+/// Write the tail shared by NEW_CONNECTION_ID (0x18) and
+/// PATH_NEW_CONNECTION_ID (0x3e78) starting at `start`: the 1-byte CID
+/// length, the CID bytes, and the 16-byte stateless reset token (RFC
+/// 9000 §19.15 layout, reused verbatim by draft-ietf-quic-multipath-21).
+/// Returns the offset one past the written tail.
+fn writeCidAndResetToken(dst: []u8, start: usize, cid: types.ConnId, token: [16]u8) Error!usize {
+    var pos = start;
+    if (dst.len < pos + 1) return Error.BufferTooSmall;
+    dst[pos] = cid.len;
+    pos += 1;
+    if (dst.len < pos + cid.len) return Error.BufferTooSmall;
+    @memcpy(dst[pos .. pos + cid.len], cid.bytes[0..cid.len]);
+    pos += cid.len;
+    if (dst.len < pos + 16) return Error.BufferTooSmall;
+    @memcpy(dst[pos .. pos + 16], &token);
+    pos += 16;
+    return pos;
+}
+
+/// Byte length `writeCidAndResetToken` will write for `cid`. Kept
+/// adjacent to `writeCidAndResetToken` so the encode/encodedLen
+/// agreement stays a local, checkable property.
+fn cidAndResetTokenLen(cid: types.ConnId) usize {
+    return 1 + @as(usize, cid.len) + 16;
+}
+
 fn encodeNewConnectionId(dst: []u8, f: types.NewConnectionId) Error!usize {
     var pos = try writeTypeOnly(dst, 0x18);
     pos += try varint.encode(dst[pos..], f.sequence_number);
     pos += try varint.encode(dst[pos..], f.retire_prior_to);
-    if (dst.len < pos + 1) return Error.BufferTooSmall;
-    dst[pos] = f.connection_id.len;
-    pos += 1;
-    if (dst.len < pos + f.connection_id.len) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + f.connection_id.len], f.connection_id.bytes[0..f.connection_id.len]);
-    pos += f.connection_id.len;
-    if (dst.len < pos + 16) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + 16], &f.stateless_reset_token);
-    pos += 16;
-    return pos;
+    return writeCidAndResetToken(dst, pos, f.connection_id, f.stateless_reset_token);
 }
 
 fn encodeFixed8(dst: []u8, type_byte: u8, data: [8]u8) Error!usize {
@@ -304,22 +298,75 @@ fn encodeFixed8(dst: []u8, type_byte: u8, data: [8]u8) Error!usize {
     return 9;
 }
 
-fn encodeAck(dst: []u8, f: types.Ack) Error!usize {
-    const type_byte: u8 = if (f.ecn_counts == null) 0x02 else 0x03;
-    var pos = try writeTypeOnly(dst, type_byte);
-    pos += try varint.encode(dst[pos..], f.largest_acked);
-    pos += try varint.encode(dst[pos..], f.ack_delay);
-    pos += try varint.encode(dst[pos..], f.range_count);
-    pos += try varint.encode(dst[pos..], f.first_range);
-    if (dst.len < pos + f.ranges_bytes.len) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + f.ranges_bytes.len], f.ranges_bytes);
-    pos += f.ranges_bytes.len;
-    if (f.ecn_counts) |e| {
+/// Write the body shared by ACK (0x02/0x03) and PATH_ACK (0x3e/0x3f)
+/// starting at `start`: the largest_acked / ack_delay / range_count /
+/// first_range varints (wire order per RFC 9000 §19.3), the pre-built
+/// range bytes, and the optional 3-varint ECN block. Returns the
+/// offset one past the written body. The `ranges_bytes` bounds check
+/// lives here so both frame types keep the BufferTooSmall guard.
+fn encodeAckBody(
+    dst: []u8,
+    start: usize,
+    largest_acked: u64,
+    ack_delay: u64,
+    range_count: u64,
+    first_range: u64,
+    ranges_bytes: []const u8,
+    ecn: ?types.EcnCounts,
+) Error!usize {
+    var pos = start;
+    pos += try varint.encode(dst[pos..], largest_acked);
+    pos += try varint.encode(dst[pos..], ack_delay);
+    pos += try varint.encode(dst[pos..], range_count);
+    pos += try varint.encode(dst[pos..], first_range);
+    if (dst.len < pos + ranges_bytes.len) return Error.BufferTooSmall;
+    @memcpy(dst[pos .. pos + ranges_bytes.len], ranges_bytes);
+    pos += ranges_bytes.len;
+    if (ecn) |e| {
         pos += try varint.encode(dst[pos..], e.ect0);
         pos += try varint.encode(dst[pos..], e.ect1);
         pos += try varint.encode(dst[pos..], e.ecn_ce);
     }
     return pos;
+}
+
+/// Byte length `encodeAckBody` will write for these values. Kept
+/// adjacent to `encodeAckBody` so the encode/encodedLen agreement
+/// stays a local, checkable property.
+fn ackBodyLen(
+    largest_acked: u64,
+    ack_delay: u64,
+    range_count: u64,
+    first_range: u64,
+    ranges_bytes: []const u8,
+    ecn: ?types.EcnCounts,
+) usize {
+    var len: usize = varint.encodedLen(largest_acked) +
+        varint.encodedLen(ack_delay) +
+        varint.encodedLen(range_count) +
+        varint.encodedLen(first_range) +
+        ranges_bytes.len;
+    if (ecn) |e| {
+        len += varint.encodedLen(e.ect0);
+        len += varint.encodedLen(e.ect1);
+        len += varint.encodedLen(e.ecn_ce);
+    }
+    return len;
+}
+
+fn encodeAck(dst: []u8, f: types.Ack) Error!usize {
+    const type_byte: u8 = if (f.ecn_counts == null) 0x02 else 0x03;
+    const pos = try writeTypeOnly(dst, type_byte);
+    return encodeAckBody(
+        dst,
+        pos,
+        f.largest_acked,
+        f.ack_delay,
+        f.range_count,
+        f.first_range,
+        f.ranges_bytes,
+        f.ecn_counts,
+    );
 }
 
 fn encodeStream(dst: []u8, f: types.Stream) Error!usize {
@@ -365,19 +412,16 @@ fn encodePathAck(dst: []u8, f: types.PathAck) Error!usize {
     const frame_type = if (f.ecn_counts == null) frame_type_path_ack else frame_type_path_ack_ecn;
     var pos = try writeFrameType(dst, frame_type);
     pos += try varint.encode(dst[pos..], f.path_id);
-    pos += try varint.encode(dst[pos..], f.largest_acked);
-    pos += try varint.encode(dst[pos..], f.ack_delay);
-    pos += try varint.encode(dst[pos..], f.range_count);
-    pos += try varint.encode(dst[pos..], f.first_range);
-    if (dst.len < pos + f.ranges_bytes.len) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + f.ranges_bytes.len], f.ranges_bytes);
-    pos += f.ranges_bytes.len;
-    if (f.ecn_counts) |e| {
-        pos += try varint.encode(dst[pos..], e.ect0);
-        pos += try varint.encode(dst[pos..], e.ect1);
-        pos += try varint.encode(dst[pos..], e.ecn_ce);
-    }
-    return pos;
+    return encodeAckBody(
+        dst,
+        pos,
+        f.largest_acked,
+        f.ack_delay,
+        f.range_count,
+        f.first_range,
+        f.ranges_bytes,
+        f.ecn_counts,
+    );
 }
 
 fn encodePathAbandon(dst: []u8, f: types.PathAbandon) Error!usize {
@@ -399,16 +443,7 @@ fn encodePathNewConnectionId(dst: []u8, f: types.PathNewConnectionId) Error!usiz
     pos += try varint.encode(dst[pos..], f.path_id);
     pos += try varint.encode(dst[pos..], f.sequence_number);
     pos += try varint.encode(dst[pos..], f.retire_prior_to);
-    if (dst.len < pos + 1) return Error.BufferTooSmall;
-    dst[pos] = f.connection_id.len;
-    pos += 1;
-    if (dst.len < pos + f.connection_id.len) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + f.connection_id.len], f.connection_id.bytes[0..f.connection_id.len]);
-    pos += f.connection_id.len;
-    if (dst.len < pos + 16) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + 16], &f.stateless_reset_token);
-    pos += 16;
-    return pos;
+    return writeCidAndResetToken(dst, pos, f.connection_id, f.stateless_reset_token);
 }
 
 fn encodePathRetireConnectionId(dst: []u8, f: types.PathRetireConnectionId) Error!usize {
@@ -440,34 +475,37 @@ fn altAddressFlags(preferred: bool, retire: bool) u8 {
     return flags;
 }
 
-fn encodeAlternativeV4Address(dst: []u8, f: types.AlternativeV4Address) Error!usize {
-    var pos = try writeFrameType(dst, frame_type_alternative_v4_address);
+/// Encode the ALTERNATIVE_*_ADDRESS body shared by the V4 and V6
+/// frames (§6): the flag byte from `altAddressFlags`, the
+/// status_sequence_number varint, the address bytes, and the
+/// big-endian port. `f` is `types.AlternativeV4Address` or
+/// `types.AlternativeV6Address`, which differ only in the width of
+/// their `address` field (4 vs 16 bytes; the width comes from
+/// `f.address.len`).
+fn encodeAltAddress(dst: []u8, frame_type: u64, f: anytype) Error!usize {
+    var pos = try writeFrameType(dst, frame_type);
     if (dst.len < pos + 1) return Error.BufferTooSmall;
     dst[pos] = altAddressFlags(f.preferred, f.retire);
     pos += 1;
     pos += try varint.encode(dst[pos..], f.status_sequence_number);
-    if (dst.len < pos + 4) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + 4], &f.address);
-    pos += 4;
+    if (dst.len < pos + f.address.len) return Error.BufferTooSmall;
+    @memcpy(dst[pos .. pos + f.address.len], &f.address);
+    pos += f.address.len;
     if (dst.len < pos + 2) return Error.BufferTooSmall;
     std.mem.writeInt(u16, dst[pos..][0..2], f.port, .big);
     pos += 2;
     return pos;
 }
 
-fn encodeAlternativeV6Address(dst: []u8, f: types.AlternativeV6Address) Error!usize {
-    var pos = try writeFrameType(dst, frame_type_alternative_v6_address);
-    if (dst.len < pos + 1) return Error.BufferTooSmall;
-    dst[pos] = altAddressFlags(f.preferred, f.retire);
-    pos += 1;
-    pos += try varint.encode(dst[pos..], f.status_sequence_number);
-    if (dst.len < pos + 16) return Error.BufferTooSmall;
-    @memcpy(dst[pos .. pos + 16], &f.address);
-    pos += 16;
-    if (dst.len < pos + 2) return Error.BufferTooSmall;
-    std.mem.writeInt(u16, dst[pos..][0..2], f.port, .big);
-    pos += 2;
-    return pos;
+/// Byte length `encodeAltAddress(dst, frame_type, f)` will write. Kept
+/// adjacent to `encodeAltAddress` so the encode/encodedLen agreement
+/// stays a local, checkable property.
+fn encodedAltAddressLen(frame_type: u64, f: anytype) usize {
+    return varint.encodedLen(frame_type) +
+        1 +
+        varint.encodedLen(f.status_sequence_number) +
+        f.address.len +
+        2;
 }
 
 // -- tests ---------------------------------------------------------------

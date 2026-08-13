@@ -136,7 +136,29 @@ pub fn decode(src: []const u8) Error!Decoded {
     };
 }
 
-fn decodeAck(src: []const u8, start: usize, with_ecn: bool) Error!Decoded {
+/// Parsed body shared by ACK (0x02/0x03) and PATH_ACK (0x3e/0x3f)
+/// frames — everything after the type varint (and, for PATH_ACK, the
+/// path_id varint). `ranges_bytes` borrows from the input slice.
+/// `end` is the input offset one past the parsed body.
+const AckBody = struct {
+    largest_acked: u64,
+    ack_delay: u64,
+    first_range: u64,
+    range_count: u64,
+    ranges_bytes: []const u8,
+    ecn_counts: ?types.EcnCounts,
+    end: usize,
+};
+
+/// Parse the ACK / PATH_ACK body starting at `start` (RFC 9000
+/// §19.3.1; draft-ietf-quic-multipath-21 reuses the encoding
+/// unchanged): the largest_acked / ack_delay / range_count /
+/// first_range varints (range_count is read *before* first_range, per
+/// §19.3 field order), the gap+length range walk, and the optional
+/// 3-varint ECN block. Both hardening gates live here — the
+/// `max_incoming_ack_ranges` DoS cap and `validateAckRanges` — so ACK
+/// and PATH_ACK cannot drift apart.
+fn decodeAckBody(src: []const u8, start: usize, with_ecn: bool) Error!AckBody {
     var pos = start;
     const largest = try varint.decode(src[pos..]);
     pos += largest.bytes_read;
@@ -172,15 +194,28 @@ fn decodeAck(src: []const u8, start: usize, with_ecn: bool) Error!Decoded {
     }
 
     return .{
+        .largest_acked = largest.value,
+        .ack_delay = ack_delay.value,
+        .first_range = first_range.value,
+        .range_count = range_count.value,
+        .ranges_bytes = ranges_bytes,
+        .ecn_counts = ecn,
+        .end = pos,
+    };
+}
+
+fn decodeAck(src: []const u8, start: usize, with_ecn: bool) Error!Decoded {
+    const body = try decodeAckBody(src, start, with_ecn);
+    return .{
         .frame = .{ .ack = .{
-            .largest_acked = largest.value,
-            .ack_delay = ack_delay.value,
-            .first_range = first_range.value,
-            .range_count = range_count.value,
-            .ranges_bytes = ranges_bytes,
-            .ecn_counts = ecn,
+            .largest_acked = body.largest_acked,
+            .ack_delay = body.ack_delay,
+            .first_range = body.first_range,
+            .range_count = body.range_count,
+            .ranges_bytes = body.ranges_bytes,
+            .ecn_counts = body.ecn_counts,
         } },
-        .bytes_consumed = pos,
+        .bytes_consumed = body.end,
     };
 }
 
@@ -199,50 +234,18 @@ fn decodePathAck(src: []const u8, start: usize, with_ecn: bool) Error!Decoded {
     var pos = start;
     const path_id = try decodePathId(src[pos..]);
     pos += path_id.bytes_read;
-    const largest = try varint.decode(src[pos..]);
-    pos += largest.bytes_read;
-    const ack_delay = try varint.decode(src[pos..]);
-    pos += ack_delay.bytes_read;
-    const range_count = try varint.decode(src[pos..]);
-    pos += range_count.bytes_read;
-    if (range_count.value > max_incoming_ack_ranges) return Error.AckRangeCountTooLarge;
-    const first_range = try varint.decode(src[pos..]);
-    pos += first_range.bytes_read;
-
-    const ranges_start = pos;
-    var i: u64 = 0;
-    while (i < range_count.value) : (i += 1) {
-        const gap = try varint.decode(src[pos..]);
-        pos += gap.bytes_read;
-        const length = try varint.decode(src[pos..]);
-        pos += length.bytes_read;
-    }
-    const ranges_bytes = src[ranges_start..pos];
-
-    try validateAckRanges(largest.value, first_range.value, range_count.value, ranges_bytes);
-
-    var ecn: ?types.EcnCounts = null;
-    if (with_ecn) {
-        const ect0 = try varint.decode(src[pos..]);
-        pos += ect0.bytes_read;
-        const ect1 = try varint.decode(src[pos..]);
-        pos += ect1.bytes_read;
-        const ce = try varint.decode(src[pos..]);
-        pos += ce.bytes_read;
-        ecn = .{ .ect0 = ect0.value, .ect1 = ect1.value, .ecn_ce = ce.value };
-    }
-
+    const body = try decodeAckBody(src, pos, with_ecn);
     return .{
         .frame = .{ .path_ack = .{
             .path_id = path_id.value,
-            .largest_acked = largest.value,
-            .ack_delay = ack_delay.value,
-            .first_range = first_range.value,
-            .range_count = range_count.value,
-            .ranges_bytes = ranges_bytes,
-            .ecn_counts = ecn,
+            .largest_acked = body.largest_acked,
+            .ack_delay = body.ack_delay,
+            .first_range = body.first_range,
+            .range_count = body.range_count,
+            .ranges_bytes = body.ranges_bytes,
+            .ecn_counts = body.ecn_counts,
         } },
-        .bytes_consumed = pos,
+        .bytes_consumed = body.end,
     };
 }
 
@@ -464,12 +467,23 @@ fn decodeStreamsBlocked(src: []const u8, start: usize, bidi: bool) Error!Decoded
     };
 }
 
-fn decodeNewConnectionId(src: []const u8, start: usize) Error!Decoded {
+/// Result of `readCidAndResetToken`: the CID and token are copied out
+/// of the input (no borrowing); `pos` is the offset one past the
+/// 16-byte token.
+const CidAndResetToken = struct {
+    cid: types.ConnId,
+    token: [16]u8,
+    pos: usize,
+};
+
+/// Read the tail shared by NEW_CONNECTION_ID (0x18) and
+/// PATH_NEW_CONNECTION_ID (0x3e78): the 1-byte CID length, the CID
+/// bytes, and the 16-byte stateless reset token (RFC 9000 §19.15
+/// layout, reused verbatim by draft-ietf-quic-multipath-21). The
+/// `ConnIdTooLong` gate fires on the declared length *before* any CID
+/// byte is read.
+fn readCidAndResetToken(src: []const u8, start: usize) Error!CidAndResetToken {
     var pos = start;
-    const seq = try varint.decode(src[pos..]);
-    pos += seq.bytes_read;
-    const ret = try varint.decode(src[pos..]);
-    pos += ret.bytes_read;
     if (src.len < pos + 1) return Error.InsufficientBytes;
     const cid_len = src[pos];
     pos += 1;
@@ -481,14 +495,24 @@ fn decodeNewConnectionId(src: []const u8, start: usize) Error!Decoded {
     var token: [16]u8 = undefined;
     @memcpy(&token, src[pos .. pos + 16]);
     pos += 16;
+    return .{ .cid = cid, .token = token, .pos = pos };
+}
+
+fn decodeNewConnectionId(src: []const u8, start: usize) Error!Decoded {
+    var pos = start;
+    const seq = try varint.decode(src[pos..]);
+    pos += seq.bytes_read;
+    const ret = try varint.decode(src[pos..]);
+    pos += ret.bytes_read;
+    const tail = try readCidAndResetToken(src, pos);
     return .{
         .frame = .{ .new_connection_id = .{
             .sequence_number = seq.value,
             .retire_prior_to = ret.value,
-            .connection_id = cid,
-            .stateless_reset_token = token,
+            .connection_id = tail.cid,
+            .stateless_reset_token = tail.token,
         } },
-        .bytes_consumed = pos,
+        .bytes_consumed = tail.pos,
     };
 }
 
@@ -606,26 +630,16 @@ fn decodePathNewConnectionId(src: []const u8, start: usize) Error!Decoded {
     pos += seq.bytes_read;
     const ret = try varint.decode(src[pos..]);
     pos += ret.bytes_read;
-    if (src.len < pos + 1) return Error.InsufficientBytes;
-    const cid_len = src[pos];
-    pos += 1;
-    if (cid_len > wire_header.max_cid_len) return Error.ConnIdTooLong;
-    if (src.len < pos + cid_len) return Error.InsufficientBytes;
-    const cid = try types.ConnId.fromSlice(src[pos .. pos + cid_len]);
-    pos += cid_len;
-    if (src.len < pos + 16) return Error.InsufficientBytes;
-    var token: [16]u8 = undefined;
-    @memcpy(&token, src[pos .. pos + 16]);
-    pos += 16;
+    const tail = try readCidAndResetToken(src, pos);
     return .{
         .frame = .{ .path_new_connection_id = .{
             .path_id = path_id.value,
             .sequence_number = seq.value,
             .retire_prior_to = ret.value,
-            .connection_id = cid,
-            .stateless_reset_token = token,
+            .connection_id = tail.cid,
+            .stateless_reset_token = tail.token,
         } },
-        .bytes_consumed = pos,
+        .bytes_consumed = tail.pos,
     };
 }
 
@@ -675,7 +689,16 @@ fn decodePathCidsBlocked(src: []const u8, start: usize) Error!Decoded {
     };
 }
 
-fn decodeAlternativeV4Address(src: []const u8, start: usize) Error!Decoded {
+/// Decode the ALTERNATIVE_*_ADDRESS body shared by the V4 and V6
+/// frames (draft-munizaga-quic-alternative-server-address-00 §6) into
+/// `T` — `types.AlternativeV4Address` or `types.AlternativeV6Address`,
+/// which differ only in the width of their `address` field (4 vs 16
+/// bytes; the width is derived from `T`). Layout: flag byte (bit 7 =
+/// Preferred, bit 6 = Retire; bits 5..0 are ignored on decode), the
+/// status_sequence_number varint, the address bytes, and the
+/// big-endian port.
+fn decodeAltAddress(comptime T: type, src: []const u8, start: usize) Error!struct { value: T, pos: usize } {
+    const addr_len = @typeInfo(@FieldType(T, "address")).array.len;
     var pos = start;
     if (src.len < pos + 1) return Error.InsufficientBytes;
     const flags = src[pos];
@@ -684,50 +707,38 @@ fn decodeAlternativeV4Address(src: []const u8, start: usize) Error!Decoded {
     const retire = (flags & 0b0100_0000) != 0;
     const seq = try varint.decode(src[pos..]);
     pos += seq.bytes_read;
-    if (src.len < pos + 4) return Error.InsufficientBytes;
-    var address: [4]u8 = undefined;
-    @memcpy(&address, src[pos .. pos + 4]);
-    pos += 4;
+    if (src.len < pos + addr_len) return Error.InsufficientBytes;
+    var address: [addr_len]u8 = undefined;
+    @memcpy(&address, src[pos .. pos + addr_len]);
+    pos += addr_len;
     if (src.len < pos + 2) return Error.InsufficientBytes;
     const port = std.mem.readInt(u16, src[pos..][0..2], .big);
     pos += 2;
     return .{
-        .frame = .{ .alternative_v4_address = .{
+        .value = .{
             .preferred = preferred,
             .retire = retire,
             .status_sequence_number = seq.value,
             .address = address,
             .port = port,
-        } },
-        .bytes_consumed = pos,
+        },
+        .pos = pos,
+    };
+}
+
+fn decodeAlternativeV4Address(src: []const u8, start: usize) Error!Decoded {
+    const r = try decodeAltAddress(types.AlternativeV4Address, src, start);
+    return .{
+        .frame = .{ .alternative_v4_address = r.value },
+        .bytes_consumed = r.pos,
     };
 }
 
 fn decodeAlternativeV6Address(src: []const u8, start: usize) Error!Decoded {
-    var pos = start;
-    if (src.len < pos + 1) return Error.InsufficientBytes;
-    const flags = src[pos];
-    pos += 1;
-    const preferred = (flags & 0b1000_0000) != 0;
-    const retire = (flags & 0b0100_0000) != 0;
-    const seq = try varint.decode(src[pos..]);
-    pos += seq.bytes_read;
-    if (src.len < pos + 16) return Error.InsufficientBytes;
-    var address: [16]u8 = undefined;
-    @memcpy(&address, src[pos .. pos + 16]);
-    pos += 16;
-    if (src.len < pos + 2) return Error.InsufficientBytes;
-    const port = std.mem.readInt(u16, src[pos..][0..2], .big);
-    pos += 2;
+    const r = try decodeAltAddress(types.AlternativeV6Address, src, start);
     return .{
-        .frame = .{ .alternative_v6_address = .{
-            .preferred = preferred,
-            .retire = retire,
-            .status_sequence_number = seq.value,
-            .address = address,
-            .port = port,
-        } },
-        .bytes_consumed = pos,
+        .frame = .{ .alternative_v6_address = r.value },
+        .bytes_consumed = r.pos,
     };
 }
 
@@ -807,6 +818,41 @@ test "decode rejects PATH_ACK frames whose range_count exceeds max_incoming_ack_
         0x00, // first_range = 0
     };
     try std.testing.expectError(Error.AckRangeCountTooLarge, decode(&bytes));
+}
+
+test "decode rejects PATH_ACK with overlapping ranges" {
+    // PATH_ACK with ECN = 0x3f. The overlap gate must fire on the
+    // multipath twin exactly as it does on ACK: the first range
+    // covers [0..5], so gap=10 underflows the descending PN cursor.
+    // Range validation runs before the ECN block is parsed, so no
+    // ECN varints are needed to reach the reject.
+    const bytes = [_]u8{
+        0x3f, // PATH_ACK type (with ECN)
+        0x00, // path_id = 0
+        0x05, // largest_acked = 5
+        0x00, // ack_delay = 0
+        0x01, // range_count = 1
+        0x05, // first_range = 5 → covers [0..5]
+        0x0a, // gap = 10 → would underflow
+        0x00, // length = 0
+    };
+    try std.testing.expectError(Error.OverlappingAckRanges, decode(&bytes));
+}
+
+test "decode rejects PATH_NEW_CONNECTION_ID whose CID length exceeds the maximum" {
+    // Multipath twin of the RFC 9000 §19.15 gate: a declared CID
+    // length of 21 must be rejected with ConnIdTooLong before the CID
+    // body is read — all 21 + 16 body bytes are present here, so a
+    // decoder that read the body first would succeed instead.
+    var bytes: [6 + 21 + 16]u8 = undefined;
+    @memset(&bytes, 0);
+    bytes[0] = 0x7e; // PATH_NEW_CONNECTION_ID type 0x3e78 (2-byte varint)
+    bytes[1] = 0x78;
+    bytes[2] = 0x00; // path_id = 0
+    bytes[3] = 0x00; // sequence_number = 0
+    bytes[4] = 0x00; // retire_prior_to = 0
+    bytes[5] = 21; // CID length — one past the 20-byte maximum
+    try std.testing.expectError(Error.ConnIdTooLong, decode(&bytes));
 }
 
 test "decode rejects ACK with overlapping ranges" {
