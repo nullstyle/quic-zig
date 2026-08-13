@@ -177,7 +177,7 @@ const CidKey = server_wire_peek.CidKey;
 const peekLongHeaderIds = server_wire_peek.peekLongHeaderIds;
 const isInitialLongHeader = server_wire_peek.isInitialLongHeader;
 
-const server_config = @import("Server/config.zig");
+const server_config = @import("Server/Config.zig");
 /// Alt-address advertisement config for `Config.preferred_address`;
 /// declared in server/config.zig.
 pub const PreferredAddressConfig = server_config.PreferredAddressConfig;
