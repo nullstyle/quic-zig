@@ -285,3 +285,157 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     try std.testing.expectEqual(@as(u32, 1), rejected_events);
     try std.testing.expect(cli3.conn.pollEvent() == null);
 }
+
+test "replayed 0-RTT DATAGRAM packet is delivered only once (L1)" {
+    // 0-RTT analogue of the 1-RTT dedup regression in
+    // `unknown_frames_smoke.zig`. 0-RTT and 1-RTT share ONE
+    // application PN space (RFC 9000 §12.3), and DATAGRAM is legal in
+    // early data — so a replayed authenticated 0-RTT packet must be
+    // acknowledged (the peer may have missed our ACK) but its frames
+    // MUST NOT be re-processed (§12.3 / §13.1): no second DATAGRAM
+    // delivery, no second resident-bytes charge.
+    const allocator = std.testing.allocator;
+
+    // DATAGRAM-capable transport params on both ends. The server's
+    // params from connection 1 become the client's *remembered*
+    // params for the 0-RTT attempt (RFC 9001 §7.4.1), so the server
+    // must advertise `max_datagram_frame_size` from the very first
+    // connection.
+    var tp = common.defaultParams();
+    tp.max_datagram_frame_size = 1200;
+
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = tp,
+        .early_data = .without_replay_protection,
+    });
+    defer srv.deinit();
+
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+
+    var rx: [4096]u8 = undefined;
+    const addr1: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x44), .port = 4444 } };
+
+    // ---- Connection 1: earn a resumption envelope. ----
+    {
+        var cli = try quic.Client.connect(.{
+            .insecure_skip_verify = true, // self-signed test cert
+            .allocator = allocator,
+            .server_name = "localhost",
+            .alpn_protocols = &protos,
+            .transport_params = tp,
+            .new_session_callback = EnvelopeSink.cb,
+            .new_session_user_data = &sink,
+        });
+        defer cli.deinit();
+
+        try cli.conn.advance();
+        var now_us: u64 = 1_000;
+        var step: u32 = 0;
+        while (step < 48 and sink.captured == null) : (step += 1) {
+            try pumpClientToServer(&cli, &srv, &rx, addr1, now_us);
+            while (srv.drainStatelessResponse()) |_| {}
+            try pumpServerToClient(&srv, &cli, &rx, now_us);
+            try srv.tick(now_us);
+            try cli.conn.tick(now_us);
+            now_us += 1_000;
+        }
+        try std.testing.expect(sink.captured != null);
+
+        cli.conn.close(false, 0, "done");
+        var close_steps: u32 = 0;
+        while (close_steps < 32 and srv.connectionCount() > 0) : (close_steps += 1) {
+            try pumpClientToServer(&cli, &srv, &rx, addr1, now_us);
+            try pumpServerToClient(&srv, &cli, &rx, now_us);
+            try srv.tick(now_us);
+            try cli.conn.tick(now_us);
+            _ = srv.reap();
+            now_us += 500_000;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
+
+    // ---- Connection 2: resume with 0-RTT staged pre-advance, then
+    // stop after the FIRST client flight so the server sits mid-
+    // handshake with live early-data read keys. ----
+    const addr2: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x55), .port = 5555 } };
+    var cli2 = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = tp,
+        .resumption_state = sink.captured.?,
+    });
+    defer cli2.deinit();
+
+    cli2.conn.setEarlyDataEnabled(true);
+    _ = try cli2.conn.openBidi(0);
+    _ = try cli2.conn.streamWrite(0, "warmup");
+    try cli2.conn.streamFinish(0);
+    try cli2.conn.advance();
+
+    const now_us: u64 = 60_000_000;
+    try pumpClientToServer(&cli2, &srv, &rx, addr2, now_us);
+    while (srv.drainStatelessResponse()) |_| {}
+    try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
+    const slot = srv.iterator()[0];
+    try std.testing.expect(!slot.conn.handshakeDone());
+    // Early read keys must be live: the server installed them while
+    // processing the ClientHello, which is how the coalesced 0-RTT in
+    // that same first flight decrypted (the acceptance path the
+    // wrapper test above proves end-to-end).
+    try std.testing.expect((try slot.conn.packetKeys(.early_data, .read)) != null);
+
+    // Hand-seal a 0-RTT packet whose payload is exactly one DATAGRAM
+    // frame (type 0x30 = no LEN field; data runs to the end of the
+    // packet — legal as the last frame).
+    const dg_data = "replay-me-0rtt";
+    var payload_buf: [64]u8 = undefined;
+    payload_buf[0] = 0x30;
+    @memcpy(payload_buf[1 .. 1 + dg_data.len], dg_data);
+    const payload = payload_buf[0 .. 1 + dg_data.len];
+
+    const keys = (try cli2.conn.packetKeys(.early_data, .write)) orelse
+        return error.NoEarlyDataWriteKeys;
+    const client_path = cli2.conn.paths.get(0) orelse return error.NoClientPath;
+    const pn = client_path.app_pn_space.nextPn() orelse return error.PnSpaceExhausted;
+
+    var packet_buf: [1500]u8 = undefined;
+    const packet_len = try quic.wire.long_packet.sealZeroRtt(&packet_buf, .{
+        .dcid = cli2.conn.initial_dcid.slice(),
+        .scid = cli2.conn.local_scid.slice(),
+        .pn = pn,
+        .largest_acked = null,
+        .payload = payload,
+        .keys = &keys,
+    });
+
+    // Long-header open strips header protection IN PLACE on the
+    // receive buffer (`openLongHeader` unmasks `src` directly), so a
+    // handled buffer no longer holds the on-the-wire bytes. A real
+    // network replay delivers a pristine copy of the ciphertext each
+    // time — model that with a fresh copy per `handle` call.
+    const before = slot.conn.pendingDatagrams();
+
+    // First delivery: the DATAGRAM is accepted and queued once.
+    var wire_first: [1500]u8 = undefined;
+    @memcpy(wire_first[0..packet_len], packet_buf[0..packet_len]);
+    try slot.conn.handle(wire_first[0..packet_len], null, now_us + 1_000);
+    try std.testing.expectEqual(before + 1, slot.conn.pendingDatagrams());
+    const resident_after_first = slot.conn.bytes_resident;
+
+    // Replay the identical sealed packet (same PN). It re-decrypts
+    // fine, and the ACK tracker still credits it, but the
+    // duplicate-PN guard must skip frame dispatch: no second DATAGRAM
+    // delivery, no second resident-bytes charge.
+    var wire_replay: [1500]u8 = undefined;
+    @memcpy(wire_replay[0..packet_len], packet_buf[0..packet_len]);
+    try slot.conn.handle(wire_replay[0..packet_len], null, now_us + 2_000);
+    try std.testing.expectEqual(before + 1, slot.conn.pendingDatagrams());
+    try std.testing.expectEqual(resident_after_first, slot.conn.bytes_resident);
+}

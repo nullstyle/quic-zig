@@ -10,6 +10,14 @@
 //! `Connection.handleOnePacket` (the long-header type dispatcher) stays
 //! in Connection.zig — it's the orchestrator that picks which of these six
 //! handlers to invoke based on the first byte / version field.
+//!
+//! The per-level tails that the RFCs specify identically at every
+//! level live in two private helpers at the bottom of this file:
+//! `openLongOrDrop` (AEAD-auth drop + §17.2.1 ¶17 reserved-bits gate)
+//! and `finishOpenedPacket` (§10.2.1 ¶3 closing attribution,
+//! duplicate-PN dispatch guard, ACK-tracker recording, qlog, frame
+//! dispatch). What genuinely differs per level — ACK timing, return
+//! length, level-specific preludes — stays in the handlers.
 
 const std = @import("std");
 const boringssl = @import("boringssl");
@@ -21,6 +29,9 @@ const conn_recv_dispatch = @import("recv_dispatch.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const ConnectionId = state_mod.ConnectionId;
+const EncryptionLevel = state_mod.EncryptionLevel;
+const PacketKeys = state_mod.PacketKeys;
+const PnSpace = state_mod.PnSpace;
 const wire_header = state_mod.wire_header;
 const long_packet_mod = state_mod.long_packet_mod;
 const path_mod = state_mod.path_mod;
@@ -121,42 +132,25 @@ pub fn handleShort(
     // RFC 9000 §17.3 ¶3: short-header Reserved Bits MUST be 0 after
     // header protection is removed. AEAD just authenticated the
     // post-HP first byte (it's mixed into the AAD), so a non-zero
-    // value is a peer protocol violation.
+    // value is a peer protocol violation. (Same rule as the
+    // long-header gate inside `openLongOrDrop`, but the bits sit at
+    // different positions in the wire layout and the cite differs —
+    // this copy is deliberately the short-header variant.)
     if (opened.reserved_bits != 0) {
         conn.close(true, transport_error_protocol_violation, "non-zero short-header reserved bits");
         return bytes.len;
     }
 
-    conn.last_authenticated_path_id = app_path.id;
-    if (conn_recv_dispatch.closingAttributionOnly(
+    return finishOpenedPacket(
         conn,
-    )) {
-        // RFC 9000 §10.2.1 ¶3 attribution path. Decrypt has
-        // succeeded; mark the observation, scan for a peer CC,
-        // and skip everything else (no ACK tracker update, no
-        // dispatchFrames). The outer `handle` re-arms a CC
-        // retransmit subject to the SHOULD-rate-limit.
-        conn.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
-        return bytes.len;
-    }
-    // Detect a duplicate application PN *before* recording it. A
-    // replayed authenticated 1-RTT packet is still acknowledged (the
-    // peer may have missed our ACK) but its frames MUST NOT be
-    // re-processed (RFC 9000 §12.3 / §13.1). Re-dispatch would
-    // re-deliver a non-idempotent DATAGRAM frame and double-charge the
-    // resident-bytes budget; CRYPTO/STREAM dedup by offset and ACK is
-    // idempotent, so only DATAGRAM is actually harmed — but skipping the
-    // whole dispatch on a duplicate is both correct and cheaper.
-    const duplicate_pn = app_pn_space.received.contains(opened.pn);
-    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, conn.delayed_ack_packet_threshold);
-    app_pn_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
-    conn.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(conn, .application, opened.pn, @intCast(bytes.len), conn_recv_dispatch.countFrames(opened.payload));
-    if (!duplicate_pn) {
-        try conn.dispatchFrames(.application, opened.payload, now_us);
-    }
-    return bytes.len;
+        .application,
+        app_path.id,
+        opened.pn,
+        opened.payload,
+        app_pn_space,
+        bytes.len,
+        now_us,
+    );
 }
 
 /// Handle an Initial packet (RFC 9000 §17.2.2 / RFC 9001 §5.2). Server
@@ -220,25 +214,14 @@ pub fn handleInitial(
     };
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
-    const opened = long_packet_mod.openInitial(&pt_buf, bytes, .{
-        .keys = &r_keys,
-        .largest_received = if (conn.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
-    }) catch |e| switch (e) {
-        boringssl.crypto.aead.Error.Auth => {
-            conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .decryption_failure);
-            return bytes.len;
-        },
-        else => return e,
-    };
-
-    // RFC 9000 §17.2.1 ¶17: long-header Reserved Bits MUST be 0
-    // after header protection is removed. AEAD has authenticated
-    // the post-HP first byte by now, so a non-zero value is a
-    // peer protocol violation.
-    if (opened.reserved_bits != 0) {
-        conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
-        return bytes.len;
-    }
+    const opened = (try openLongOrDrop(
+        conn,
+        &pt_buf,
+        bytes,
+        .initial,
+        &r_keys,
+        if (conn.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
+    )) orelse return bytes.len;
 
     // Server side: discover peer's CIDs from the very first Initial.
     if (conn.role == .server) {
@@ -264,24 +247,16 @@ pub fn handleInitial(
         }
     }
 
-    conn.last_authenticated_path_id = conn.current_incoming_path_id;
-    if (conn_recv_dispatch.closingAttributionOnly(
+    return finishOpenedPacket(
         conn,
-    )) {
-        // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
-        conn.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
-        return opened.bytes_consumed;
-    }
-    {
-        const initial_space = conn.pnSpaceForLevel(.initial);
-        initial_space.recordReceivedPacket(opened.pn, now_us / 1000, Connection.packetPayloadAckEliciting(opened.payload));
-        initial_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
-    }
-    conn.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(conn, .initial, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
-    try conn.dispatchFrames(.initial, opened.payload, now_us);
-    return opened.bytes_consumed;
+        .initial,
+        conn_paths.pathForId(conn, conn.current_incoming_path_id).id,
+        opened.pn,
+        opened.payload,
+        conn.pnSpaceForLevel(.initial),
+        opened.bytes_consumed,
+        now_us,
+    );
 }
 
 /// Handle a Retry packet (RFC 9000 §17.2.5). Client-only: validates
@@ -362,38 +337,25 @@ pub fn handleZeroRtt(
     const largest_received = if (app_pn_space.received.largest) |l| l else 0;
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
-    const opened = long_packet_mod.openZeroRtt(&pt_buf, bytes, .{
-        .keys = &r_keys,
-        .largest_received = largest_received,
-    }) catch |e| switch (e) {
-        boringssl.crypto.aead.Error.Auth => {
-            conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .decryption_failure);
-            return bytes.len;
-        },
-        else => return e,
-    };
-
-    // RFC 9000 §17.2.1 ¶17 long-header Reserved Bits gate.
-    if (opened.reserved_bits != 0) {
-        conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
-        return bytes.len;
-    }
-
-    conn.last_authenticated_path_id = app_path.id;
-    if (conn_recv_dispatch.closingAttributionOnly(
+    const opened = (try openLongOrDrop(
         conn,
-    )) {
-        // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
-        conn.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
-        return opened.bytes_consumed;
-    }
-    conn_recv_dispatch.recordApplicationReceivedPacket(app_pn_space, opened.pn, now_us, opened.payload, conn.delayed_ack_packet_threshold);
-    app_pn_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
-    conn.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(conn, .early_data, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
-    try conn.dispatchFrames(.early_data, opened.payload, now_us);
-    return opened.bytes_consumed;
+        &pt_buf,
+        bytes,
+        .early_data,
+        &r_keys,
+        largest_received,
+    )) orelse return bytes.len;
+
+    return finishOpenedPacket(
+        conn,
+        .early_data,
+        app_path.id,
+        opened.pn,
+        opened.payload,
+        app_pn_space,
+        opened.bytes_consumed,
+        now_us,
+    );
 }
 
 /// Handle a Handshake packet (RFC 9000 §17.2.4 / RFC 9001 §5.2).
@@ -411,47 +373,149 @@ pub fn handleHandshake(
     };
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
-    const opened = long_packet_mod.openHandshake(&pt_buf, bytes, .{
-        .keys = &r_keys,
-        .largest_received = if (conn.pnSpaceForLevel(.handshake).received.largest) |l| l else 0,
-    }) catch |e| switch (e) {
-        boringssl.crypto.aead.Error.Auth => {
-            conn_qlog.emitPacketDropped(conn, .handshake, @intCast(bytes.len), .decryption_failure);
-            return bytes.len;
-        },
-        else => return e,
-    };
+    const opened = (try openLongOrDrop(
+        conn,
+        &pt_buf,
+        bytes,
+        .handshake,
+        &r_keys,
+        if (conn.pnSpaceForLevel(.handshake).received.largest) |l| l else 0,
+    )) orelse return bytes.len;
 
-    // RFC 9000 §17.2.1 ¶17 long-header Reserved Bits gate.
-    if (opened.reserved_bits != 0) {
-        conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
-        return bytes.len;
-    }
-
-    conn.last_authenticated_path_id = conn.current_incoming_path_id;
+    const incoming_path = conn_paths.pathForId(conn, conn.current_incoming_path_id);
     // RFC 9000 §8.1: a successfully decrypted Handshake packet from the
     // peer authenticates the source address (only the genuine peer holds
     // Handshake-level keys). For servers, this lifts the 3x
     // anti-amplification cap on the path. Idempotent if already
     // validated (e.g. via PATH_RESPONSE during migration).
     if (conn.role == .server) {
-        conn_paths.pathForId(conn, conn.current_incoming_path_id).path.markValidated();
+        incoming_path.path.markValidated();
     }
+    return finishOpenedPacket(
+        conn,
+        .handshake,
+        incoming_path.id,
+        opened.pn,
+        opened.payload,
+        conn.pnSpaceForLevel(.handshake),
+        opened.bytes_consumed,
+        now_us,
+    );
+}
+
+/// Open one long-header packet at `lvl` — `.initial`, `.early_data`,
+/// or `.handshake`, the three levels whose wire-open functions share
+/// `InitialOpenOptions`/`LongOpenResult` — owning the two tails every
+/// long-header handler used to repeat:
+///
+///   * AEAD Auth failure → qlog `.decryption_failure` drop;
+///   * RFC 9000 §17.2.1 ¶17: long-header Reserved Bits MUST be 0
+///     after header protection is removed, else the connection closes
+///     with PROTOCOL_VIOLATION. The gate deliberately runs *after*
+///     the AEAD open — only a successful open authenticates the
+///     post-HP first byte the bits live in.
+///
+/// Returns null when the packet was dropped or the violation close
+/// fired; the caller responds by consuming the rest of the datagram
+/// (`return bytes.len`).
+fn openLongOrDrop(
+    conn: *Connection,
+    pt_buf: *[max_recv_plaintext]u8,
+    bytes: []u8,
+    lvl: EncryptionLevel,
+    keys: *const PacketKeys,
+    largest_received: u64,
+) Error!?long_packet_mod.LongOpenResult {
+    const opts: long_packet_mod.InitialOpenOptions = .{
+        .keys = keys,
+        .largest_received = largest_received,
+    };
+    const opened = (switch (lvl) {
+        .initial => long_packet_mod.openInitial(pt_buf, bytes, opts),
+        .early_data => long_packet_mod.openZeroRtt(pt_buf, bytes, opts),
+        .handshake => long_packet_mod.openHandshake(pt_buf, bytes, opts),
+        // Short-header packets take `openApplicationPacket` instead.
+        .application => unreachable,
+    }) catch |e| switch (e) {
+        boringssl.crypto.aead.Error.Auth => {
+            conn_qlog.emitPacketDropped(conn, lvl, @intCast(bytes.len), .decryption_failure);
+            return null;
+        },
+        else => return e,
+    };
+    if (opened.reserved_bits != 0) {
+        conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");
+        return null;
+    }
+    return opened;
+}
+
+/// Shared tail for every successfully-opened-and-gated packet: path
+/// attribution, the RFC 9000 §10.2.1 ¶3 closing-state short-circuit,
+/// the duplicate-PN dispatch guard, ACK-tracker recording, ECN + qlog
+/// accounting, and the frame dispatch itself.
+///
+/// The recording branch is deliberate, not incidental: application-
+/// space packets (0-RTT and 1-RTT share one PN space, RFC 9000 §12.3)
+/// take the delayed-ACK path, while RFC 9000 §13.2.1 forbids delaying
+/// Initial/Handshake ACKs. `ret_len` is what the enclosing handler
+/// returns — `bytes.len` for short headers (they consume the datagram
+/// tail), `bytes_consumed` for coalesced long headers.
+fn finishOpenedPacket(
+    conn: *Connection,
+    lvl: EncryptionLevel,
+    path_id: u32,
+    pn: u64,
+    payload: []const u8,
+    pn_space: *PnSpace,
+    ret_len: usize,
+    now_us: u64,
+) Error!usize {
+    conn.last_authenticated_path_id = path_id;
     if (conn_recv_dispatch.closingAttributionOnly(
         conn,
     )) {
-        // RFC 9000 §10.2.1 ¶3 attribution path. See `handleShort`.
+        // RFC 9000 §10.2.1 ¶3 attribution path. Decrypt has
+        // succeeded; mark the observation, scan for a peer CC,
+        // and skip everything else (no ACK tracker update, no
+        // dispatchFrames). The outer `handle` re-arms a CC
+        // retransmit subject to the SHOULD-rate-limit.
         conn.closing_state_attribution_observed = true;
-        conn_recv_dispatch.scanForPeerCloseFrame(conn, opened.payload, now_us);
-        return opened.bytes_consumed;
+        conn_recv_dispatch.scanForPeerCloseFrame(conn, payload, now_us);
+        return ret_len;
     }
-    {
-        const handshake_space = conn.pnSpaceForLevel(.handshake);
-        handshake_space.recordReceivedPacket(opened.pn, now_us / 1000, Connection.packetPayloadAckEliciting(opened.payload));
-        handshake_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
+    // Detect a duplicate PN *before* recording it. A replayed
+    // authenticated packet is still acknowledged (the peer may have
+    // missed our ACK) but its frames MUST NOT be re-processed
+    // (RFC 9000 §12.3 / §13.1). Re-dispatch would re-deliver a
+    // non-idempotent DATAGRAM frame and double-charge the
+    // resident-bytes budget; that bites at 1-RTT *and* 0-RTT (both
+    // feed the same application PN space, and DATAGRAM is legal in
+    // early data). At Initial/Handshake every legal frame is
+    // idempotent, so skipping the dispatch there is a no-op that is
+    // also cheaper.
+    const duplicate_pn = pn_space.received.contains(pn);
+    switch (lvl) {
+        .early_data, .application => conn_recv_dispatch.recordApplicationReceivedPacket(
+            pn_space,
+            pn,
+            now_us,
+            payload,
+            conn.delayed_ack_packet_threshold,
+        ),
+        // RFC 9000 §13.2.1: Initial and Handshake packets MUST NOT
+        // have their acknowledgements delayed.
+        .initial, .handshake => pn_space.recordReceivedPacket(
+            pn,
+            now_us / 1000,
+            conn_recv_dispatch.packetPayloadAckEliciting(payload),
+        ),
     }
+    pn_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
     conn.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(conn, .handshake, opened.pn, @intCast(opened.bytes_consumed), conn_recv_dispatch.countFrames(opened.payload));
-    try conn.dispatchFrames(.handshake, opened.payload, now_us);
-    return opened.bytes_consumed;
+    conn_qlog.emitPacketReceived(conn, lvl, pn, @intCast(ret_len), conn_recv_dispatch.countFrames(payload));
+    if (!duplicate_pn) {
+        try conn_recv_dispatch.dispatchFrames(conn, lvl, payload, now_us);
+    }
+    return ret_len;
 }
