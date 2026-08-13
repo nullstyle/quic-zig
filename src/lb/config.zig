@@ -22,6 +22,8 @@
 //! Validation is centralised in `LbConfig.validate` so the same rule set
 //! gates both `Server.init` and standalone `Factory.init` callers.
 
+const LbConfig = @This();
+
 const std = @import("std");
 
 /// 3-bit configuration rotation identifier. Values 0..6 select an
@@ -93,52 +95,50 @@ pub const ServerId = struct {
 /// One QUIC-LB configuration the server uses to encode CIDs. This is
 /// the immutable shape; runtime mint state (counters, draining
 /// configurations) lives on the `Factory`.
-pub const LbConfig = struct {
-    /// Active configuration id, 0..6. `7` is rejected by `validate`.
-    config_id: ConfigId,
-    /// Routing identity the load balancer will recover from minted
-    /// CIDs.
-    server_id: ServerId,
-    /// Number of nonce bytes, `min_nonce_len..max_nonce_len`.
-    nonce_len: u8,
-    /// AES-128 key that selects an encrypted mode, or null for the
-    /// plaintext mode of draft §5.2. Single-pass and four-pass
-    /// encrypted modes are both implemented.
-    key: ?Key = null,
-    /// When true, the low 5 bits of the first octet hold `cid_len - 1`
-    /// so the LB can self-describe the CID length on short headers.
-    /// When false, those bits are filled from the CSPRNG (draft §3).
-    encode_length: bool = true,
+/// Active configuration id, 0..6. `7` is rejected by `validate`.
+config_id: ConfigId,
+/// Routing identity the load balancer will recover from minted
+/// CIDs.
+server_id: ServerId,
+/// Number of nonce bytes, `min_nonce_len..max_nonce_len`.
+nonce_len: u8,
+/// AES-128 key that selects an encrypted mode, or null for the
+/// plaintext mode of draft §5.2. Single-pass and four-pass
+/// encrypted modes are both implemented.
+key: ?Key = null,
+/// When true, the low 5 bits of the first octet hold `cid_len - 1`
+/// so the LB can self-describe the CID length on short headers.
+/// When false, those bits are filled from the CSPRNG (draft §3).
+encode_length: bool = true,
 
-    /// Validate every per-field bound and the cross-field combined
-    /// length cap. Cheap; callers `try config.validate()` before doing
-    /// anything else with the value.
-    pub fn validate(self: *const LbConfig) Error!void {
-        // u3 already enforces 0..7; reject only the reserved 7.
-        if (@as(u8, self.config_id) > 6) return Error.InvalidLbConfig;
-        if (self.server_id.len < 1 or self.server_id.len > max_server_id_len) {
-            return Error.InvalidLbConfig;
-        }
-        if (self.nonce_len < min_nonce_len or self.nonce_len > max_nonce_len) {
-            return Error.InvalidLbConfig;
-        }
-        const combined: usize = @as(usize, self.server_id.len) + @as(usize, self.nonce_len);
-        if (combined > max_combined_len) return Error.InvalidLbConfig;
+/// Validate every per-field bound and the cross-field combined
+/// length cap. Cheap; callers `try config.validate()` before doing
+/// anything else with the value.
+pub fn validate(self: *const LbConfig) Error!void {
+    // u3 already enforces 0..7; reject only the reserved 7.
+    if (@as(u8, self.config_id) > 6) return Error.InvalidLbConfig;
+    if (self.server_id.len < 1 or self.server_id.len > max_server_id_len) {
+        return Error.InvalidLbConfig;
     }
+    if (self.nonce_len < min_nonce_len or self.nonce_len > max_nonce_len) {
+        return Error.InvalidLbConfig;
+    }
+    const combined: usize = @as(usize, self.server_id.len) + @as(usize, self.nonce_len);
+    if (combined > max_combined_len) return Error.InvalidLbConfig;
+}
 
-    /// Total CID byte count this configuration mints: 1 first octet +
-    /// `server_id_len` + `nonce_len`. Inside 1..20 by construction
-    /// (`validate` enforces the per-field and combined bounds).
-    pub fn cidLength(self: *const LbConfig) u8 {
-        return 1 + self.server_id.len + self.nonce_len;
-    }
+/// Total CID byte count this configuration mints: 1 first octet +
+/// `server_id_len` + `nonce_len`. Inside 1..20 by construction
+/// (`validate` enforces the per-field and combined bounds).
+pub fn cidLength(self: *const LbConfig) u8 {
+    return 1 + self.server_id.len + self.nonce_len;
+}
 
-    /// True iff `key` is null — selects the draft §5.2 plaintext mode,
-    /// which writes `server_id || nonce` directly into the CID body.
-    pub fn isPlaintext(self: *const LbConfig) bool {
-        return self.key == null;
-    }
-};
+/// True iff `key` is null — selects the draft §5.2 plaintext mode,
+/// which writes `server_id || nonce` directly into the CID body.
+pub fn isPlaintext(self: *const LbConfig) bool {
+    return self.key == null;
+}
 
 // -- tests ---------------------------------------------------------------
 

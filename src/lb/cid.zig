@@ -48,10 +48,10 @@ const config_mod = @import("config.zig");
 const nonce_mod = @import("nonce.zig");
 const feistel_mod = @import("feistel.zig");
 
-pub const LbConfig = config_mod.LbConfig;
+pub const LbConfig = config_mod;
 pub const ServerId = config_mod.ServerId;
 pub const ConfigId = config_mod.ConfigId;
-pub const NonceCounter = nonce_mod.NonceCounter;
+pub const NonceCounter = nonce_mod;
 
 const Aes128 = boringssl.crypto.aes.Aes128;
 const aes_block_size: usize = 16;

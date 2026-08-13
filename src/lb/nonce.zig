@@ -24,6 +24,8 @@
 //! nonces have "no observable correlation" (the draft's normative
 //! requirement when no key is configured).
 
+const NonceCounter = @This();
+
 const std = @import("std");
 const boringssl = @import("boringssl");
 
@@ -43,74 +45,72 @@ pub const Error = error{
 /// internal 18-byte buffer (the maximum permitted nonce length per
 /// draft §3). Not internally synchronised — concurrent callers must
 /// serialise externally, the same as `lb.Factory`.
-pub const NonceCounter = struct {
-    /// Live nonce length in octets (`min_nonce_len..max_nonce_len`).
-    nonce_len: u8,
-    /// Counter storage. Bytes `0..nonce_len` hold the current
-    /// big-endian counter value; bytes past that are unused but kept
-    /// in the struct so the caller can pass `bytes[0..nonce_len]` to
-    /// `@memcpy`.
-    bytes: [config_mod.max_nonce_len]u8 = @splat(0),
-    /// Sticky exhaustion flag. Set the first time `next` increments
-    /// the counter past its maximum representable value. Once true,
-    /// every subsequent `next` returns `error.NonceExhausted`.
-    exhausted: bool = false,
+/// Live nonce length in octets (`min_nonce_len..max_nonce_len`).
+nonce_len: u8,
+/// Counter storage. Bytes `0..nonce_len` hold the current
+/// big-endian counter value; bytes past that are unused but kept
+/// in the struct so the caller can pass `bytes[0..nonce_len]` to
+/// `@memcpy`.
+bytes: [config_mod.max_nonce_len]u8 = @splat(0),
+/// Sticky exhaustion flag. Set the first time `next` increments
+/// the counter past its maximum representable value. Once true,
+/// every subsequent `next` returns `error.NonceExhausted`.
+exhausted: bool = false,
 
-    /// Build a counter with a CSPRNG-drawn starting value. Per the
-    /// draft "Servers SHOULD start with a random nonce to maximize
-    /// entropy before exhaustion" — a counter that always started at
-    /// zero would correlate the first CIDs minted across server
-    /// restarts.
-    pub fn initRandom(nonce_len: u8) Error!NonceCounter {
-        var nc: NonceCounter = .{ .nonce_len = nonce_len };
-        boringssl.crypto.rand.fillBytes(nc.bytes[0..nonce_len]) catch return Error.RandFailure;
-        return nc;
+/// Build a counter with a CSPRNG-drawn starting value. Per the
+/// draft "Servers SHOULD start with a random nonce to maximize
+/// entropy before exhaustion" — a counter that always started at
+/// zero would correlate the first CIDs minted across server
+/// restarts.
+pub fn initRandom(nonce_len: u8) Error!NonceCounter {
+    var nc: NonceCounter = .{ .nonce_len = nonce_len };
+    boringssl.crypto.rand.fillBytes(nc.bytes[0..nonce_len]) catch return Error.RandFailure;
+    return nc;
+}
+
+/// Build a counter with a caller-supplied starting value. **Test
+/// fixtures and KATs only** — production code uses `initRandom`.
+/// Reusing a starting value across server restarts under the same
+/// key reuses nonces and breaks the encryption guarantees.
+pub fn initFromBytes(start: []const u8) NonceCounter {
+    std.debug.assert(start.len >= config_mod.min_nonce_len);
+    std.debug.assert(start.len <= config_mod.max_nonce_len);
+    var nc: NonceCounter = .{ .nonce_len = @intCast(start.len) };
+    @memcpy(nc.bytes[0..start.len], start);
+    return nc;
+}
+
+/// Copy the current counter value into `out` (which must be
+/// exactly `nonce_len` bytes), then increment. Marks the counter
+/// `exhausted` if the increment wraps the top byte. Returns
+/// `error.NonceExhausted` if the counter was already exhausted
+/// going in.
+pub fn next(self: *NonceCounter, out: []u8) Error!void {
+    if (self.exhausted) return Error.NonceExhausted;
+    std.debug.assert(out.len == self.nonce_len);
+    @memcpy(out, self.bytes[0..self.nonce_len]);
+
+    // Big-endian counter increment with carry. Iterate from the
+    // least-significant byte (last in the slice) to the most
+    // significant; the first non-0xff byte stops the propagation.
+    var carry: u1 = 1;
+    var i: usize = self.nonce_len;
+    while (i > 0 and carry == 1) {
+        i -= 1;
+        const sum: u9 = @as(u9, self.bytes[i]) + @as(u9, carry);
+        self.bytes[i] = @truncate(sum);
+        carry = if (sum > 0xff) 1 else 0;
     }
+    if (carry == 1) self.exhausted = true;
+}
 
-    /// Build a counter with a caller-supplied starting value. **Test
-    /// fixtures and KATs only** — production code uses `initRandom`.
-    /// Reusing a starting value across server restarts under the same
-    /// key reuses nonces and breaks the encryption guarantees.
-    pub fn initFromBytes(start: []const u8) NonceCounter {
-        std.debug.assert(start.len >= config_mod.min_nonce_len);
-        std.debug.assert(start.len <= config_mod.max_nonce_len);
-        var nc: NonceCounter = .{ .nonce_len = @intCast(start.len) };
-        @memcpy(nc.bytes[0..start.len], start);
-        return nc;
-    }
-
-    /// Copy the current counter value into `out` (which must be
-    /// exactly `nonce_len` bytes), then increment. Marks the counter
-    /// `exhausted` if the increment wraps the top byte. Returns
-    /// `error.NonceExhausted` if the counter was already exhausted
-    /// going in.
-    pub fn next(self: *NonceCounter, out: []u8) Error!void {
-        if (self.exhausted) return Error.NonceExhausted;
-        std.debug.assert(out.len == self.nonce_len);
-        @memcpy(out, self.bytes[0..self.nonce_len]);
-
-        // Big-endian counter increment with carry. Iterate from the
-        // least-significant byte (last in the slice) to the most
-        // significant; the first non-0xff byte stops the propagation.
-        var carry: u1 = 1;
-        var i: usize = self.nonce_len;
-        while (i > 0 and carry == 1) {
-            i -= 1;
-            const sum: u9 = @as(u9, self.bytes[i]) + @as(u9, carry);
-            self.bytes[i] = @truncate(sum);
-            carry = if (sum > 0xff) 1 else 0;
-        }
-        if (carry == 1) self.exhausted = true;
-    }
-
-    /// Has the counter wrapped past its maximum representable value?
-    /// Once true, never resets — the embedder must construct a fresh
-    /// `NonceCounter` (typically as part of a configuration rotation
-    /// in LB-4) to keep minting.
-    pub fn isExhausted(self: *const NonceCounter) bool {
-        return self.exhausted;
-    }
-};
+/// Has the counter wrapped past its maximum representable value?
+/// Once true, never resets — the embedder must construct a fresh
+/// `NonceCounter` (typically as part of a configuration rotation
+/// in LB-4) to keep minting.
+pub fn isExhausted(self: *const NonceCounter) bool {
+    return self.exhausted;
+}
 
 // -- tests ---------------------------------------------------------------
 

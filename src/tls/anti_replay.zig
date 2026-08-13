@@ -75,6 +75,10 @@
 //!    pair, which the tracker would correctly mark `.replay`. Good
 //!    enough for many threat models.
 
+// Consumers spell `anti_replay.AntiReplayTracker`; the pub self-alias
+// keeps that path resolving now that the file IS the type.
+pub const AntiReplayTracker = @This();
+
 const std = @import("std");
 
 /// Opaque single-use identifier. Embedders pick the construction
@@ -140,259 +144,257 @@ const Entry = struct {
 /// Bounded single-use cache. Not thread-safe — callers serialize on
 /// their own (typical: the same thread that runs the QUIC server
 /// loop also calls `consume`).
-pub const AntiReplayTracker = struct {
+allocator: std.mem.Allocator,
+options: Options,
+/// Insertion-ordered ring of entries. Index 0 = oldest, last =
+/// newest. Used for FIFO eviction and bulk pruning.
+entries: std.ArrayList(Entry) = .empty,
+/// Membership index. Maps Id → insertion timestamp; we track the
+/// timestamp here too so `consume` can verify a hit isn't stale
+/// without scanning `entries`.
+seen: std.AutoHashMapUnmanaged(Id, u64) = .empty,
+/// Monotonic-non-decreasing clock cache, set via `bumpClock`.
+/// Used by `consumeUsingInternalClock` so callers without an
+/// explicit `now_us` (such as the BoringSSL `allow_early_data`
+/// callback hook) can still drive the tracker. The application-
+/// layer `consume(id, now_us)` API is unchanged and ignores this
+/// field.
+last_observed_now_us: u64 = 0,
+
+pub fn init(allocator: std.mem.Allocator, options: Options) !AntiReplayTracker {
+    if (options.max_entries == 0) return error.InvalidOptions;
+    if (options.max_age_us == 0) return error.InvalidOptions;
+    var tracker: AntiReplayTracker = .{
+        .allocator = allocator,
+        .options = options,
+    };
+    try tracker.entries.ensureTotalCapacity(allocator, @min(options.max_entries, 64));
+    try tracker.seen.ensureTotalCapacity(allocator, @intCast(@min(options.max_entries, 64)));
+    return tracker;
+}
+
+pub fn deinit(self: *AntiReplayTracker) void {
+    self.entries.deinit(self.allocator);
+    self.seen.deinit(self.allocator);
+    self.* = undefined;
+}
+
+/// Look up `id`, and if it's not already in the active window,
+/// insert it. Returns `.fresh` on first sight, `.replay` if the
+/// id has been seen within the active window.
+///
+/// `now_us` is a monotonic-clock microsecond timestamp; the
+/// tracker uses it for both insertion bookkeeping and to age out
+/// stale entries on the prune path.
+pub fn consume(self: *AntiReplayTracker, id: Id, now_us: u64) error{OutOfMemory}!Verdict {
+    // Stale-aware membership check. An entry that's older than
+    // `max_age_us` is about to be pruned; treat it as gone for
+    // verdict purposes — the replay window has expired so the
+    // identity is effectively fresh again.
+    if (self.seen.get(id)) |inserted_at_us| {
+        if (now_us -| inserted_at_us < self.options.max_age_us) {
+            return .replay;
+        }
+        // Old hit — fall through to refresh. We'll rewrite the
+        // entry's timestamp below so its slot in the ring stays
+        // correct.
+    }
+
+    // Insertion path. Prune stale entries first (cheap when most
+    // of the cache is fresh — the loop exits on the first
+    // non-stale entry because they're insertion-ordered). Then
+    // evict the oldest if the cap is reached.
+    self.pruneStale(now_us);
+    if (self.entries.items.len >= self.options.max_entries) {
+        self.evictOldest();
+    }
+
+    try self.entries.append(self.allocator, .{ .id = id, .inserted_at_us = now_us });
+    try self.seen.put(self.allocator, id, now_us);
+    return .fresh;
+}
+
+/// Prune all entries older than `max_age_us`. Normally `consume`
+/// does this implicitly; embedders can call it explicitly during
+/// idle ticks if they want to keep memory tighter.
+pub fn prune(self: *AntiReplayTracker, now_us: u64) void {
+    self.pruneStale(now_us);
+}
+
+/// Update the cached internal clock. Called by `Server.feed` so
+/// the BoringSSL `allow_early_data` trampoline (which has no
+/// other path to a monotonic clock) has a sensible `now_us` to
+/// pass into `consumeUsingInternalClock`. Monotonic-non-decreasing
+/// — older `now_us` values are clamped up to the cached value.
+pub fn bumpClock(self: *AntiReplayTracker, now_us: u64) void {
+    if (now_us > self.last_observed_now_us) {
+        self.last_observed_now_us = now_us;
+    }
+}
+
+/// `consume` variant for callers that can't pipe in `now_us`
+/// directly — uses the cached clock from `bumpClock`. Returns
+/// the same `.fresh`/`.replay` verdicts.
+pub fn consumeUsingInternalClock(
+    self: *AntiReplayTracker,
+    id: Id,
+) error{OutOfMemory}!Verdict {
+    return self.consume(id, self.last_observed_now_us);
+}
+
+/// How many entries the tracker currently holds. Useful for
+/// metrics / observability.
+pub fn size(self: *const AntiReplayTracker) usize {
+    return self.entries.items.len;
+}
+
+/// Exact byte length `encode` will emit for this tracker's
+/// versioned persisted state.
+pub fn encodedLen(self: *const AntiReplayTracker) PersistenceError!usize {
+    const entries_bytes = std.math.mul(usize, self.entries.items.len, persistence_entry_len) catch
+        return PersistenceError.ValueTooLarge;
+    return std.math.add(usize, persistence_header_len, entries_bytes) catch
+        return PersistenceError.ValueTooLarge;
+}
+
+/// Serialize the replay cache as a versioned, architecture-neutral
+/// envelope. Entries retain insertion order so FIFO eviction
+/// behavior is preserved after restore.
+pub fn encode(self: *const AntiReplayTracker, dst: []u8) PersistenceError!usize {
+    const needed = try self.encodedLen();
+    if (dst.len < needed) return PersistenceError.BufferTooSmall;
+    const max_entries_u64 = std.math.cast(u64, self.options.max_entries) orelse
+        return PersistenceError.ValueTooLarge;
+    const count_u64 = std.math.cast(u64, self.entries.items.len) orelse
+        return PersistenceError.ValueTooLarge;
+
+    @memcpy(dst[0..4], &persistence_magic);
+    dst[4] = persistence_version;
+    dst[5] = persistence_flags;
+    var pos: usize = 6;
+    writeU64(dst, &pos, max_entries_u64);
+    writeU64(dst, &pos, self.options.max_age_us);
+    writeU64(dst, &pos, self.last_observed_now_us);
+    writeU64(dst, &pos, count_u64);
+    for (self.entries.items) |entry| {
+        @memcpy(dst[pos .. pos + id_len], &entry.id);
+        pos += id_len;
+        writeU64(dst, &pos, entry.inserted_at_us);
+    }
+    std.debug.assert(pos == needed);
+    return needed;
+}
+
+pub fn encodeAlloc(
+    self: *const AntiReplayTracker,
     allocator: std.mem.Allocator,
-    options: Options,
-    /// Insertion-ordered ring of entries. Index 0 = oldest, last =
-    /// newest. Used for FIFO eviction and bulk pruning.
-    entries: std.ArrayList(Entry) = .empty,
-    /// Membership index. Maps Id → insertion timestamp; we track the
-    /// timestamp here too so `consume` can verify a hit isn't stale
-    /// without scanning `entries`.
-    seen: std.AutoHashMapUnmanaged(Id, u64) = .empty,
-    /// Monotonic-non-decreasing clock cache, set via `bumpClock`.
-    /// Used by `consumeUsingInternalClock` so callers without an
-    /// explicit `now_us` (such as the BoringSSL `allow_early_data`
-    /// callback hook) can still drive the tracker. The application-
-    /// layer `consume(id, now_us)` API is unchanged and ignores this
-    /// field.
-    last_observed_now_us: u64 = 0,
+) (std.mem.Allocator.Error || PersistenceError)![]u8 {
+    const len = try self.encodedLen();
+    const out = try allocator.alloc(u8, len);
+    errdefer allocator.free(out);
+    const written = try self.encode(out);
+    std.debug.assert(written == len);
+    return out;
+}
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) !AntiReplayTracker {
-        if (options.max_entries == 0) return error.InvalidOptions;
-        if (options.max_age_us == 0) return error.InvalidOptions;
-        var tracker: AntiReplayTracker = .{
-            .allocator = allocator,
-            .options = options,
-        };
-        try tracker.entries.ensureTotalCapacity(allocator, @min(options.max_entries, 64));
-        try tracker.seen.ensureTotalCapacity(allocator, @intCast(@min(options.max_entries, 64)));
-        return tracker;
+/// Restore a tracker from `encode` bytes.
+pub fn restore(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) (std.mem.Allocator.Error || PersistenceError)!AntiReplayTracker {
+    return decode(allocator, src);
+}
+
+/// Decode a persisted tracker envelope. Unknown versions and
+/// non-zero flags are rejected so future formats can evolve
+/// without silently changing replay semantics.
+pub fn decode(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) (std.mem.Allocator.Error || PersistenceError)!AntiReplayTracker {
+    if (src.len < persistence_header_len) return PersistenceError.InvalidFormat;
+    if (!std.mem.eql(u8, src[0..4], &persistence_magic)) return PersistenceError.InvalidFormat;
+    if (src[4] != persistence_version) return PersistenceError.UnsupportedVersion;
+    if (src[5] != persistence_flags) return PersistenceError.InvalidFlags;
+
+    var pos: usize = 6;
+    const max_entries_u64 = readU64(src, &pos);
+    const max_age_us = readU64(src, &pos);
+    const last_observed_now_us = readU64(src, &pos);
+    const entry_count_u64 = readU64(src, &pos);
+    const max_entries = std.math.cast(usize, max_entries_u64) orelse
+        return PersistenceError.ValueTooLarge;
+    const entry_count = std.math.cast(usize, entry_count_u64) orelse
+        return PersistenceError.ValueTooLarge;
+    if (max_entries == 0 or max_age_us == 0) return PersistenceError.InvalidOptions;
+    if (entry_count > max_entries) return PersistenceError.InvalidFormat;
+    const entries_bytes = std.math.mul(usize, entry_count, persistence_entry_len) catch
+        return PersistenceError.ValueTooLarge;
+    const total = std.math.add(usize, persistence_header_len, entries_bytes) catch
+        return PersistenceError.ValueTooLarge;
+    if (src.len < total) return PersistenceError.InvalidFormat;
+    if (src.len > total) return PersistenceError.TrailingBytes;
+
+    var tracker = AntiReplayTracker.init(allocator, .{
+        .max_entries = max_entries,
+        .max_age_us = max_age_us,
+    }) catch |err| switch (err) {
+        error.InvalidOptions => return PersistenceError.InvalidOptions,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    errdefer tracker.deinit();
+    tracker.last_observed_now_us = last_observed_now_us;
+
+    var i: usize = 0;
+    while (i < entry_count) : (i += 1) {
+        var id: Id = undefined;
+        @memcpy(&id, src[pos .. pos + id_len]);
+        pos += id_len;
+        const inserted_at_us = readU64(src, &pos);
+        if (tracker.seen.get(id) != null) return PersistenceError.DuplicateEntry;
+        try tracker.entries.append(allocator, .{ .id = id, .inserted_at_us = inserted_at_us });
+        try tracker.seen.put(allocator, id, inserted_at_us);
     }
+    std.debug.assert(pos == total);
+    return tracker;
+}
 
-    pub fn deinit(self: *AntiReplayTracker) void {
-        self.entries.deinit(self.allocator);
-        self.seen.deinit(self.allocator);
-        self.* = undefined;
+fn pruneStale(self: *AntiReplayTracker, now_us: u64) void {
+    var drop: usize = 0;
+    while (drop < self.entries.items.len) : (drop += 1) {
+        const e = self.entries.items[drop];
+        if (now_us -| e.inserted_at_us < self.options.max_age_us) break;
     }
+    if (drop == 0) return;
 
-    /// Look up `id`, and if it's not already in the active window,
-    /// insert it. Returns `.fresh` on first sight, `.replay` if the
-    /// id has been seen within the active window.
-    ///
-    /// `now_us` is a monotonic-clock microsecond timestamp; the
-    /// tracker uses it for both insertion bookkeeping and to age out
-    /// stale entries on the prune path.
-    pub fn consume(self: *AntiReplayTracker, id: Id, now_us: u64) error{OutOfMemory}!Verdict {
-        // Stale-aware membership check. An entry that's older than
-        // `max_age_us` is about to be pruned; treat it as gone for
-        // verdict purposes — the replay window has expired so the
-        // identity is effectively fresh again.
-        if (self.seen.get(id)) |inserted_at_us| {
-            if (now_us -| inserted_at_us < self.options.max_age_us) {
-                return .replay;
-            }
-            // Old hit — fall through to refresh. We'll rewrite the
-            // entry's timestamp below so its slot in the ring stays
-            // correct.
+    // Drop the prefix from `entries` and clear matching `seen`
+    // entries. The map removals only fire if the timestamp still
+    // matches — if `consume` re-inserted the same id with a
+    // fresher timestamp before this prune ran, we mustn't drop it
+    // from the membership index.
+    for (self.entries.items[0..drop]) |e| {
+        if (self.seen.get(e.id)) |ts| {
+            if (ts == e.inserted_at_us) _ = self.seen.remove(e.id);
         }
-
-        // Insertion path. Prune stale entries first (cheap when most
-        // of the cache is fresh — the loop exits on the first
-        // non-stale entry because they're insertion-ordered). Then
-        // evict the oldest if the cap is reached.
-        self.pruneStale(now_us);
-        if (self.entries.items.len >= self.options.max_entries) {
-            self.evictOldest();
-        }
-
-        try self.entries.append(self.allocator, .{ .id = id, .inserted_at_us = now_us });
-        try self.seen.put(self.allocator, id, now_us);
-        return .fresh;
     }
+    const remaining = self.entries.items.len - drop;
+    std.mem.copyForwards(Entry, self.entries.items[0..remaining], self.entries.items[drop..]);
+    self.entries.shrinkRetainingCapacity(remaining);
+}
 
-    /// Prune all entries older than `max_age_us`. Normally `consume`
-    /// does this implicitly; embedders can call it explicitly during
-    /// idle ticks if they want to keep memory tighter.
-    pub fn prune(self: *AntiReplayTracker, now_us: u64) void {
-        self.pruneStale(now_us);
+fn evictOldest(self: *AntiReplayTracker) void {
+    if (self.entries.items.len == 0) return;
+    const oldest = self.entries.items[0];
+    if (self.seen.get(oldest.id)) |ts| {
+        if (ts == oldest.inserted_at_us) _ = self.seen.remove(oldest.id);
     }
-
-    /// Update the cached internal clock. Called by `Server.feed` so
-    /// the BoringSSL `allow_early_data` trampoline (which has no
-    /// other path to a monotonic clock) has a sensible `now_us` to
-    /// pass into `consumeUsingInternalClock`. Monotonic-non-decreasing
-    /// — older `now_us` values are clamped up to the cached value.
-    pub fn bumpClock(self: *AntiReplayTracker, now_us: u64) void {
-        if (now_us > self.last_observed_now_us) {
-            self.last_observed_now_us = now_us;
-        }
-    }
-
-    /// `consume` variant for callers that can't pipe in `now_us`
-    /// directly — uses the cached clock from `bumpClock`. Returns
-    /// the same `.fresh`/`.replay` verdicts.
-    pub fn consumeUsingInternalClock(
-        self: *AntiReplayTracker,
-        id: Id,
-    ) error{OutOfMemory}!Verdict {
-        return self.consume(id, self.last_observed_now_us);
-    }
-
-    /// How many entries the tracker currently holds. Useful for
-    /// metrics / observability.
-    pub fn size(self: *const AntiReplayTracker) usize {
-        return self.entries.items.len;
-    }
-
-    /// Exact byte length `encode` will emit for this tracker's
-    /// versioned persisted state.
-    pub fn encodedLen(self: *const AntiReplayTracker) PersistenceError!usize {
-        const entries_bytes = std.math.mul(usize, self.entries.items.len, persistence_entry_len) catch
-            return PersistenceError.ValueTooLarge;
-        return std.math.add(usize, persistence_header_len, entries_bytes) catch
-            return PersistenceError.ValueTooLarge;
-    }
-
-    /// Serialize the replay cache as a versioned, architecture-neutral
-    /// envelope. Entries retain insertion order so FIFO eviction
-    /// behavior is preserved after restore.
-    pub fn encode(self: *const AntiReplayTracker, dst: []u8) PersistenceError!usize {
-        const needed = try self.encodedLen();
-        if (dst.len < needed) return PersistenceError.BufferTooSmall;
-        const max_entries_u64 = std.math.cast(u64, self.options.max_entries) orelse
-            return PersistenceError.ValueTooLarge;
-        const count_u64 = std.math.cast(u64, self.entries.items.len) orelse
-            return PersistenceError.ValueTooLarge;
-
-        @memcpy(dst[0..4], &persistence_magic);
-        dst[4] = persistence_version;
-        dst[5] = persistence_flags;
-        var pos: usize = 6;
-        writeU64(dst, &pos, max_entries_u64);
-        writeU64(dst, &pos, self.options.max_age_us);
-        writeU64(dst, &pos, self.last_observed_now_us);
-        writeU64(dst, &pos, count_u64);
-        for (self.entries.items) |entry| {
-            @memcpy(dst[pos .. pos + id_len], &entry.id);
-            pos += id_len;
-            writeU64(dst, &pos, entry.inserted_at_us);
-        }
-        std.debug.assert(pos == needed);
-        return needed;
-    }
-
-    pub fn encodeAlloc(
-        self: *const AntiReplayTracker,
-        allocator: std.mem.Allocator,
-    ) (std.mem.Allocator.Error || PersistenceError)![]u8 {
-        const len = try self.encodedLen();
-        const out = try allocator.alloc(u8, len);
-        errdefer allocator.free(out);
-        const written = try self.encode(out);
-        std.debug.assert(written == len);
-        return out;
-    }
-
-    /// Restore a tracker from `encode` bytes.
-    pub fn restore(
-        allocator: std.mem.Allocator,
-        src: []const u8,
-    ) (std.mem.Allocator.Error || PersistenceError)!AntiReplayTracker {
-        return decode(allocator, src);
-    }
-
-    /// Decode a persisted tracker envelope. Unknown versions and
-    /// non-zero flags are rejected so future formats can evolve
-    /// without silently changing replay semantics.
-    pub fn decode(
-        allocator: std.mem.Allocator,
-        src: []const u8,
-    ) (std.mem.Allocator.Error || PersistenceError)!AntiReplayTracker {
-        if (src.len < persistence_header_len) return PersistenceError.InvalidFormat;
-        if (!std.mem.eql(u8, src[0..4], &persistence_magic)) return PersistenceError.InvalidFormat;
-        if (src[4] != persistence_version) return PersistenceError.UnsupportedVersion;
-        if (src[5] != persistence_flags) return PersistenceError.InvalidFlags;
-
-        var pos: usize = 6;
-        const max_entries_u64 = readU64(src, &pos);
-        const max_age_us = readU64(src, &pos);
-        const last_observed_now_us = readU64(src, &pos);
-        const entry_count_u64 = readU64(src, &pos);
-        const max_entries = std.math.cast(usize, max_entries_u64) orelse
-            return PersistenceError.ValueTooLarge;
-        const entry_count = std.math.cast(usize, entry_count_u64) orelse
-            return PersistenceError.ValueTooLarge;
-        if (max_entries == 0 or max_age_us == 0) return PersistenceError.InvalidOptions;
-        if (entry_count > max_entries) return PersistenceError.InvalidFormat;
-        const entries_bytes = std.math.mul(usize, entry_count, persistence_entry_len) catch
-            return PersistenceError.ValueTooLarge;
-        const total = std.math.add(usize, persistence_header_len, entries_bytes) catch
-            return PersistenceError.ValueTooLarge;
-        if (src.len < total) return PersistenceError.InvalidFormat;
-        if (src.len > total) return PersistenceError.TrailingBytes;
-
-        var tracker = AntiReplayTracker.init(allocator, .{
-            .max_entries = max_entries,
-            .max_age_us = max_age_us,
-        }) catch |err| switch (err) {
-            error.InvalidOptions => return PersistenceError.InvalidOptions,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        errdefer tracker.deinit();
-        tracker.last_observed_now_us = last_observed_now_us;
-
-        var i: usize = 0;
-        while (i < entry_count) : (i += 1) {
-            var id: Id = undefined;
-            @memcpy(&id, src[pos .. pos + id_len]);
-            pos += id_len;
-            const inserted_at_us = readU64(src, &pos);
-            if (tracker.seen.get(id) != null) return PersistenceError.DuplicateEntry;
-            try tracker.entries.append(allocator, .{ .id = id, .inserted_at_us = inserted_at_us });
-            try tracker.seen.put(allocator, id, inserted_at_us);
-        }
-        std.debug.assert(pos == total);
-        return tracker;
-    }
-
-    fn pruneStale(self: *AntiReplayTracker, now_us: u64) void {
-        var drop: usize = 0;
-        while (drop < self.entries.items.len) : (drop += 1) {
-            const e = self.entries.items[drop];
-            if (now_us -| e.inserted_at_us < self.options.max_age_us) break;
-        }
-        if (drop == 0) return;
-
-        // Drop the prefix from `entries` and clear matching `seen`
-        // entries. The map removals only fire if the timestamp still
-        // matches — if `consume` re-inserted the same id with a
-        // fresher timestamp before this prune ran, we mustn't drop it
-        // from the membership index.
-        for (self.entries.items[0..drop]) |e| {
-            if (self.seen.get(e.id)) |ts| {
-                if (ts == e.inserted_at_us) _ = self.seen.remove(e.id);
-            }
-        }
-        const remaining = self.entries.items.len - drop;
-        std.mem.copyForwards(Entry, self.entries.items[0..remaining], self.entries.items[drop..]);
-        self.entries.shrinkRetainingCapacity(remaining);
-    }
-
-    fn evictOldest(self: *AntiReplayTracker) void {
-        if (self.entries.items.len == 0) return;
-        const oldest = self.entries.items[0];
-        if (self.seen.get(oldest.id)) |ts| {
-            if (ts == oldest.inserted_at_us) _ = self.seen.remove(oldest.id);
-        }
-        std.mem.copyForwards(
-            Entry,
-            self.entries.items[0 .. self.entries.items.len - 1],
-            self.entries.items[1..],
-        );
-        self.entries.shrinkRetainingCapacity(self.entries.items.len - 1);
-    }
-};
+    std.mem.copyForwards(
+        Entry,
+        self.entries.items[0 .. self.entries.items.len - 1],
+        self.entries.items[1..],
+    );
+    self.entries.shrinkRetainingCapacity(self.entries.items.len - 1);
+}
 
 fn writeU64(dst: []u8, pos: *usize, value: u64) void {
     std.mem.writeInt(u64, dst[pos.*..][0..8], value, .big);

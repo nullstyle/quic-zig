@@ -34,13 +34,13 @@ pub const decode_mod = @import("decode.zig");
 
 pub const ConfigId = config.ConfigId;
 pub const ServerId = config.ServerId;
-pub const LbConfig = config.LbConfig;
+pub const LbConfig = config;
 pub const Key = config.Key;
 
 pub const Factory = cid.Factory;
 pub const Mode = cid.Mode;
 pub const Error = cid.Error;
-pub const NonceCounter = nonce.NonceCounter;
+pub const NonceCounter = nonce;
 
 /// Mint an unroutable (`config_id = 0b111`) CID per draft §3.1.
 /// Used when the active LB configuration is unavailable (rotation

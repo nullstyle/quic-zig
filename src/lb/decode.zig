@@ -30,7 +30,7 @@ const config_mod = @import("config.zig");
 const cid_mod = @import("cid.zig");
 const feistel_mod = @import("feistel.zig");
 
-pub const LbConfig = config_mod.LbConfig;
+pub const LbConfig = config_mod;
 pub const ServerId = config_mod.ServerId;
 
 const Aes128 = boringssl.crypto.aes.Aes128;
