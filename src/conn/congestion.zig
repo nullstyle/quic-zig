@@ -15,8 +15,8 @@
 //! tests and direct embedding.
 
 const std = @import("std");
-const bbr_mod = @import("congestion_bbr.zig");
-const cubic_mod = @import("congestion_cubic.zig");
+const bbr_mod = @import("congestion/Bbr.zig");
+const cubic_mod = @import("congestion/Cubic.zig");
 const delivery_rate = @import("delivery_rate.zig");
 const hystart_mod = @import("hystart.zig");
 const pacing_mod = @import("Pacer.zig");

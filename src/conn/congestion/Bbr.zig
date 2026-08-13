@@ -46,8 +46,8 @@
 const Bbr = @This();
 
 const std = @import("std");
-const congestion = @import("congestion.zig");
-const delivery_rate = @import("delivery_rate.zig");
+const congestion = @import("../congestion.zig");
+const delivery_rate = @import("../delivery_rate.zig");
 
 const infinity: u64 = std.math.maxInt(u64);
 const us_per_s: u64 = std.time.us_per_s;
