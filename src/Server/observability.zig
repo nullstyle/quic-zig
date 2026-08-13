@@ -224,62 +224,6 @@ pub const RateLimitSnapshot = struct {
     top_offender_count: usize,
 };
 
-/// Per-source log-emission rate gate. Mirrors `acceptSourceRate`
-/// and `acceptVnRate` but uses the entry's tertiary
-/// `log_count` / `log_window_start_us` pair so log floods don't
-/// burn the Initial / VN budgets and vice versa. Returns `true`
-/// when emission is permitted.
-///
-/// Hardening guide §9.4: a peer that triggers many feed-rate-limit
-/// or table-full or VN-rate-limit events from a single address
-/// would otherwise let the attacker flood the embedder's log
-/// pipeline (disk, stdout, structured-logging dependency, etc.).
-/// On a denial of `false`, the caller drops the LogEvent silently
-/// — there is no nested log about the dropped log.
-fn acceptLogRate(
-    server: *Server,
-    addr: Address,
-    cap: u64,
-    now_us: u64,
-) bool {
-    // Lazy eviction shared with `acceptSourceRate` / `acceptVnRate`.
-    // Direct sibling call: dos.zig owns the source-rate table
-    // maintenance; routing it through a Server method thunk hid the
-    // dependency (the thunks are gone — 95a4472 rule).
-    if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
-        server_dos.pruneSourceRate(server, now_us);
-        if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
-            server_dos.evictOldestSourceRate(server);
-        }
-    }
-
-    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
-        // OOM on the rate table: deny the log rather than risk
-        // unbounded emission. Mirrors `acceptSourceRate`.
-        return false;
-    };
-    if (!gop.found_existing) {
-        gop.value_ptr.* = .{
-            .count = 0,
-            .window_start_us = 0,
-            .log_count = 1,
-            .log_window_start_us = now_us,
-        };
-        return true;
-    }
-
-    const elapsed = now_us -% gop.value_ptr.log_window_start_us;
-    if (elapsed >= server.source_rate_window_us) {
-        gop.value_ptr.log_count = 1;
-        gop.value_ptr.log_window_start_us = now_us;
-        return true;
-    }
-
-    if (gop.value_ptr.log_count >= cap) return false;
-    gop.value_ptr.log_count += 1;
-    return true;
-}
-
 /// Internal helper: invoke `log_callback` if installed. Mediated
 /// by the per-source log rate limit (log-flood DoS defense) when
 /// the event carries a source address — events with `from = null`
@@ -303,7 +247,10 @@ pub fn emitLog(server: *Server, ev: LogEvent) void {
             // `acceptLogRate` an in-feed `now_us` via a ledger
             // captured at feed entry. We do that via
             // `last_feed_now_us`, set at the top of every `feed`.
-            if (!acceptLogRate(server, addr, cap, server.last_feed_now_us)) {
+            // Direct sibling call: dos.zig owns the source-rate
+            // table and the §9.4 log-flood gate lives there with
+            // its Initial / VN / bandwidth siblings.
+            if (!server_dos.acceptLogRate(server, addr, cap, server.last_feed_now_us)) {
                 server.feeds_log_rate_limited += 1;
                 return;
             }

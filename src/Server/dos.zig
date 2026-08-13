@@ -49,86 +49,94 @@ pub fn acceptSourceRate(
     cap: u64,
     now_us: u64,
 ) bool {
-    // Lazy eviction when the table is at capacity. Pruning
-    // every call is wasteful; only pay the O(table) cost when
-    // we're about to add an entry that would overflow.
-    if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
-        pruneSourceRate(server, now_us);
-        // If pruning didn't make room, drop the most stale
-        // entry to guarantee progress.
-        if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
-            evictOldestSourceRate(
-                server,
-            );
-        }
-    }
-
-    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
-        // OOM on the rate table is a cheap soft fail: deny the
-        // accept rather than continue without protection.
-        return false;
-    };
-    if (!gop.found_existing) {
-        gop.value_ptr.* = .{ .count = 1, .window_start_us = now_us };
-        return true;
-    }
-
-    const elapsed = now_us -% gop.value_ptr.window_start_us;
-    if (elapsed >= server.source_rate_window_us) {
-        gop.value_ptr.* = .{ .count = 1, .window_start_us = now_us };
-        return true;
-    }
-
-    if (gop.value_ptr.count >= cap) return false;
-    gop.value_ptr.count += 1;
-    return true;
+    return acceptWindowed(server, addr, cap, now_us, "count", "window_start_us");
 }
 
-/// Per-source VN-emission rate gate. Mirrors `acceptSourceRate`
-/// but uses the entry's secondary `vn_count` / `vn_window_start_us`
-/// pair so VN floods don't burn the per-source Initial budget
-/// (and vice versa). Returns `true` when emission is permitted.
+/// Per-source VN-emission rate gate. Same window mechanics as
+/// `acceptSourceRate` but over the entry's secondary
+/// `vn_count` / `vn_window_start_us` pair so VN floods don't burn
+/// the per-source Initial budget (and vice versa). Returns `true`
+/// when emission is permitted.
 pub fn acceptVnRate(
     server: *Server,
     addr: Address,
     cap: u64,
     now_us: u64,
 ) bool {
-    // Lazy eviction shared with `acceptSourceRate`.
+    return acceptWindowed(server, addr, cap, now_us, "vn_count", "vn_window_start_us");
+}
+
+/// Per-source log-emission rate gate, over the entry's tertiary
+/// `log_count` / `log_window_start_us` pair so log floods don't
+/// burn the Initial / VN budgets and vice versa. Returns `true`
+/// when emission is permitted.
+///
+/// Hardening guide §9.4: a peer that triggers many feed-rate-limit
+/// or table-full or VN-rate-limit events from a single address
+/// would otherwise let the attacker flood the embedder's log
+/// pipeline (disk, stdout, structured-logging dependency, etc.).
+/// On a denial of `false`, the caller drops the LogEvent silently
+/// — there is no nested log about the dropped log.
+pub fn acceptLogRate(
+    server: *Server,
+    addr: Address,
+    cap: u64,
+    now_us: u64,
+) bool {
+    return acceptWindowed(server, addr, cap, now_us, "log_count", "log_window_start_us");
+}
+
+/// Shared sliding-by-reset window counter over one
+/// (count, window_start) axis of `SourceRateEntry`. The three
+/// public gates above are thin bindings of this onto their own
+/// field pair, so a policy change lands in all of them at once.
+///
+/// On window elapse only the two parameterized fields are touched,
+/// never the whole entry — a whole-struct reset here once wiped the
+/// sibling axes, so one Initial per window handed the peer a fresh
+/// VN budget and a full bandwidth bucket.
+fn acceptWindowed(
+    server: *Server,
+    addr: Address,
+    cap: u64,
+    now_us: u64,
+    comptime count_field: []const u8,
+    comptime start_field: []const u8,
+) bool {
+    ensureSourceRateRoom(server, now_us);
+
+    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
+        // OOM on the rate table is a cheap soft fail: deny the
+        // accept rather than continue without protection.
+        return false;
+    };
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+
+    const count = &@field(gop.value_ptr.*, count_field);
+    const start = &@field(gop.value_ptr.*, start_field);
+    if (!gop.found_existing or now_us -% start.* >= server.source_rate_window_us) {
+        count.* = 1;
+        start.* = now_us;
+        return true;
+    }
+
+    if (count.* >= cap) return false;
+    count.* += 1;
+    return true;
+}
+
+/// Lazy eviction when the table is at capacity: prune, and if
+/// pruning didn't make room, drop the stalest entry to guarantee
+/// progress. Pruning every call is wasteful; only pay the O(table)
+/// cost when we're about to add an entry that would overflow.
+/// Shared by every per-source gate over `source_rate_table`.
+fn ensureSourceRateRoom(server: *Server, now_us: u64) void {
     if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
         pruneSourceRate(server, now_us);
         if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
-            evictOldestSourceRate(
-                server,
-            );
+            evictOldestSourceRate(server);
         }
     }
-
-    const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
-        // OOM on the rate table: deny the VN rather than continue
-        // unprotected. Mirrors `acceptSourceRate` policy.
-        return false;
-    };
-    if (!gop.found_existing) {
-        gop.value_ptr.* = .{
-            .count = 0,
-            .window_start_us = 0,
-            .vn_count = 1,
-            .vn_window_start_us = now_us,
-        };
-        return true;
-    }
-
-    const elapsed = now_us -% gop.value_ptr.vn_window_start_us;
-    if (elapsed >= server.source_rate_window_us) {
-        gop.value_ptr.vn_count = 1;
-        gop.value_ptr.vn_window_start_us = now_us;
-        return true;
-    }
-
-    if (gop.value_ptr.vn_count >= cap) return false;
-    gop.value_ptr.vn_count += 1;
-    return true;
 }
 
 /// Per-source bandwidth gate (token-bucket). Returns true when the
@@ -152,14 +160,7 @@ pub fn acceptSourceBandwidth(
     now_us: u64,
 ) bool {
     // Lazy eviction shared with the rest of the per-source helpers.
-    if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
-        pruneSourceRate(server, now_us);
-        if (server.source_rate_table.count() >= server.source_rate_table_capacity) {
-            evictOldestSourceRate(
-                server,
-            );
-        }
-    }
+    ensureSourceRateRoom(server, now_us);
 
     const gop = server.source_rate_table.getOrPut(server.allocator, addr) catch {
         // OOM on the rate table: deny the datagram rather than
@@ -176,12 +177,6 @@ pub fn acceptSourceBandwidth(
         else
             0;
         gop.value_ptr.* = .{
-            .count = 0,
-            .window_start_us = 0,
-            .vn_count = 0,
-            .vn_window_start_us = 0,
-            .log_count = 0,
-            .log_window_start_us = 0,
             .bandwidth_tokens = tokens_after_charge,
             .bandwidth_last_refill_us = now_us,
         };
@@ -202,9 +197,7 @@ pub fn acceptSourceBandwidth(
     return true;
 }
 
-// INTERNAL: pub for direct sibling import (server/observability.zig);
-// not part of the embedder API. The Server method thunk was demoted.
-pub fn pruneSourceRate(server: *Server, now_us: u64) void {
+fn pruneSourceRate(server: *Server, now_us: u64) void {
     var it = server.source_rate_table.iterator();
     while (it.next()) |entry| {
         const init_elapsed = now_us -% entry.value_ptr.window_start_us;
@@ -228,9 +221,7 @@ pub fn pruneSourceRate(server: *Server, now_us: u64) void {
     }
 }
 
-// INTERNAL: pub for direct sibling import (server/observability.zig);
-// not part of the embedder API. The Server method thunk was demoted.
-pub fn evictOldestSourceRate(server: *Server) void {
+fn evictOldestSourceRate(server: *Server) void {
     var it = server.source_rate_table.iterator();
     var oldest_addr: ?Address = null;
     var oldest_start: u64 = std.math.maxInt(u64);
@@ -581,9 +572,9 @@ pub const RetryStateEntry = struct {
 pub const SourceRateEntry = struct {
     /// Initial-driven slot creations attributed to this source
     /// within the current window.
-    count: u32,
+    count: u32 = 0,
     /// Wall-clock microseconds when the current Initial window started.
-    window_start_us: u64,
+    window_start_us: u64 = 0,
     /// Version-Negotiation responses attributed to this source within
     /// the current VN window. Gated by
     /// `Config.vn_source_rate_limit`.

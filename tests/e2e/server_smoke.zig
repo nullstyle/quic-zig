@@ -585,6 +585,122 @@ test "Server VN rate limit and Initial rate limit use independent counters" {
     try std.testing.expectEqual(@as(u64, 1), m.feeds_rate_limited);
 }
 
+test "Server Initial window rollover does not reset a live VN budget" {
+    // Regression: `acceptSourceRate` once reset the WHOLE
+    // `SourceRateEntry` on window elapse instead of just its own
+    // (count, window_start) pair, so one Initial per window handed
+    // the peer a fresh VN budget — doubling the VN amplification
+    // cap for any source that kept sending Initials.
+    const protos = [_][]const u8{"hq-test"};
+
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .initial_source_rate_limit = .{ .limit = 2 },
+        .vn_source_rate_limit = .{ .limit = 2 },
+        .source_rate_window_us = 1_000_000,
+    });
+    defer srv.deinit();
+
+    var vn_probe = [_]u8{
+        0xc0, 0xde, 0xad, 0xbe, 0xef,
+        0x04, 0xa0, 0xa1, 0xa2, 0xa3,
+        0x04, 0xb0, 0xb1, 0xb2, 0xb3,
+        0x00, 0x00, 0x00,
+    };
+    var v1_initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
+    const addr = quic.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x9a), .port = 0 } };
+
+    // t=0: one Initial opens the entry's Initial window.
+    _ = try srv.feed(&v1_initial, addr, 0);
+
+    // t=1.1s: the VN axis rolls its own window (anchor moves off the
+    // bootstrap zero to 1_100_000), then the budget is exhausted
+    // (2 of 2) inside the live window [1.1s, 2.1s).
+    try std.testing.expectEqual(
+        quic.Server.FeedOutcome.version_negotiated,
+        try srv.feed(&vn_probe, addr, 1_100_000),
+    );
+    try std.testing.expectEqual(
+        quic.Server.FeedOutcome.version_negotiated,
+        try srv.feed(&vn_probe, addr, 1_100_001),
+    );
+
+    // t=2s: this Initial's window (started at 0) has long elapsed —
+    // its counter resets. That reset must not touch the VN axis.
+    _ = try srv.feed(&v1_initial, addr, 2_000_000);
+
+    // The VN window started at t=1_100_000 and is still live, with
+    // its budget spent: a VN probe must still be rate-limited. (Under
+    // the regression the wiped vn_window_start_us made this emit a VN.)
+    try std.testing.expectEqual(
+        quic.Server.FeedOutcome.dropped,
+        try srv.feed(&vn_probe, addr, 2_000_001),
+    );
+    const m = srv.metricsSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), m.feeds_version_negotiated);
+    try std.testing.expectEqual(@as(u64, 1), m.feeds_vn_rate_limited);
+}
+
+test "Server Initial window rollover does not refill the bandwidth bucket" {
+    // Regression companion to the VN case above: the whole-struct
+    // reset also zeroed `bandwidth_last_refill_us`, so the next
+    // bandwidth check computed `elapsed = now -% 0` and granted a
+    // near-arbitrary refill — up to 2x the configured per-source
+    // byte rate for a source that kept sending Initials.
+    const protos = [_][]const u8{"hq-test"};
+
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .initial_source_rate_limit = .{ .limit = 100 },
+        .source_rate_window_us = 100_000,
+        .source_byte_rate_limit = .{ .limit = 100_000 },
+    });
+    defer srv.deinit();
+
+    var v1_initial = padInitial(&.{ 0xc0, 0x00, 0x00, 0x00, 0x01, 21, 0 });
+    var junk: [2000]u8 = @splat(0);
+    junk[0] = 0x40;
+    const addr = quic.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x9b), .port = 0 } };
+
+    // t=0: one Initial opens the entry's Initial window (and debits
+    // the bucket).
+    _ = try srv.feed(&v1_initial, addr, 0);
+
+    // Just past the window boundary, drain the bucket to near-empty
+    // with junk datagrams (49 x 2000 bytes against a 100_000-byte
+    // ceiling; intra-burst refill is microseconds and negligible).
+    var i: u64 = 0;
+    while (i < 49) : (i += 1) {
+        _ = try srv.feed(&junk, addr, 100_001 + i);
+    }
+    var m = srv.metricsSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), m.feeds_source_bandwidth_limited);
+
+    // This Initial still fits the drained bucket AND rolls the
+    // Initial window (100_051 >= 100_000 elapsed). The rollover must
+    // not touch the bandwidth axes.
+    _ = try srv.feed(&v1_initial, addr, 100_051);
+
+    // Bucket is now nearly empty (~800 tokens 1 us later); a
+    // 2000-byte datagram must be dropped by the shaper. (Under the
+    // regression the zeroed refill clock granted ~10k fresh tokens
+    // and this passed.)
+    try std.testing.expectEqual(
+        quic.Server.FeedOutcome.dropped,
+        try srv.feed(&junk, addr, 100_052),
+    );
+    m = srv.metricsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), m.feeds_source_bandwidth_limited);
+}
+
 test "Server.feed without `from` drops unsupported-version packets" {
     const protos = [_][]const u8{"hq-test"};
 
