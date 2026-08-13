@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
+const conn_recv_dispatch = @import("recv_dispatch.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const ConnectionId = state_mod.ConnectionId;

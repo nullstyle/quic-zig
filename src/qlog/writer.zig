@@ -5,7 +5,7 @@
 // list; `Writer` owns the amortized buffer and the file plumbing.
 
 const std = @import("std");
-const conn_qlog = @import("../conn/conn_qlog.zig");
+const conn_qlog = @import("../Connection/qlog.zig");
 const root = @import("root.zig");
 
 const QlogEvent = conn_qlog.QlogEvent;

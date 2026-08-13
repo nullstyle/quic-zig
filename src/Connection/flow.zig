@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const conn_streams = @import("conn_streams.zig");
+const conn_streams = @import("streams.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;

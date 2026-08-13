@@ -8,9 +8,9 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const path_mod = @import("path.zig");
-const conn_paths = @import("conn_paths.zig");
-const conn_streams = @import("conn_streams.zig");
+const path_mod = @import("../conn/path.zig");
+const conn_paths = @import("paths.zig");
+const conn_streams = @import("streams.zig");
 
 const Connection = state_mod.Connection;
 

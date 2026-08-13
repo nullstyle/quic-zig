@@ -16,10 +16,10 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const conn_cids = @import("conn_cids.zig");
+const conn_cids = @import("cids.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
-const path_mod = @import("path.zig");
+const path_mod = @import("../conn/path.zig");
 const ConnectionId = path_mod.ConnectionId;
 
 /// Validate that the local endpoint is allowed to issue a path-scoped

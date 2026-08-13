@@ -6,9 +6,9 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const conn_datagram = @import("conn_datagram.zig");
-const conn_qlog = @import("conn_qlog.zig");
-const conn_loss = @import("conn_loss.zig");
+const conn_datagram = @import("datagram.zig");
+const conn_qlog = @import("qlog.zig");
+const conn_loss = @import("loss.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const EncryptionLevel = state_mod.EncryptionLevel;

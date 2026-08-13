@@ -10,10 +10,10 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const conn_paths = @import("conn_paths.zig");
-const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
-const conn_recv_ack_handlers = @import("conn_recv_ack_handlers.zig");
-const conn_cids = @import("conn_cids.zig");
+const conn_paths = @import("paths.zig");
+const conn_recv_dispatch = @import("recv_dispatch.zig");
+const conn_recv_ack_handlers = @import("recv_ack_handlers.zig");
+const conn_cids = @import("cids.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;

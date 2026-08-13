@@ -10,11 +10,11 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const conn_recv_dispatch = @import("conn_recv_dispatch.zig");
-const conn_qlog = @import("conn_qlog.zig");
-const conn_keys = @import("conn_keys.zig");
-const conn_paths = @import("conn_paths.zig");
-const conn_streams = @import("conn_streams.zig");
+const conn_recv_dispatch = @import("recv_dispatch.zig");
+const conn_qlog = @import("qlog.zig");
+const conn_keys = @import("keys.zig");
+const conn_paths = @import("paths.zig");
+const conn_streams = @import("streams.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const EncryptionLevel = state_mod.EncryptionLevel;

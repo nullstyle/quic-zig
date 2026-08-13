@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const state_mod = @import("../Connection.zig");
-const conn_cids = @import("conn_cids.zig");
+const conn_cids = @import("cids.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;
