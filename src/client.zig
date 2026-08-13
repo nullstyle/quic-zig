@@ -27,6 +27,8 @@
 //! flips). See `src/transport/udp_client.zig` for the option
 //! surface.
 
+const Client = @This();
+
 const std = @import("std");
 const boringssl = @import("boringssl");
 
@@ -41,7 +43,7 @@ const QlogCallback = conn_mod.QlogCallback;
 
 /// Configuration handed to `Client.connect`. Re-exported as
 /// `Client.Config`.
-const ConfigImpl = struct {
+pub const Config = struct {
     /// Wall-clock allocator used for the returned `Connection` and
     /// for any transient per-client allocations (the SNI duplicate,
     /// the session-ticket parse). The returned `Connection`
@@ -326,287 +328,284 @@ const ErrorImpl = error{
 ///      `client.conn.handle` on every received datagram.
 ///   3. `client.deinit()` frees the heap `Connection` and (when the
 ///      wrapper built one) the TLS context.
-pub const Client = struct {
-    /// Re-exports of the helper types so `Client.Config` and
-    /// `Client.Error` both resolve from the public API surface.
-    pub const Config = ConfigImpl;
-    pub const Error = ErrorImpl;
+/// Re-exports of the helper types so `Client.Config` and
+/// `Client.Error` both resolve from the public API surface.
+pub const Error = ErrorImpl;
 
-    /// Allocator that backs the heap `Connection` and any per-client
-    /// transient allocations.
-    allocator: std.mem.Allocator,
-    /// BoringSSL TLS context used by the connection. Whether `Client`
-    /// owns it or it was passed in via `tls_context_override` is
-    /// captured by `owns_tls`.
-    tls_ctx: boringssl.tls.Context,
-    /// True if the TLS context was built by `Client.connect` and
-    /// must be torn down on `deinit`. False if the embedder supplied
-    /// `tls_context_override`.
-    owns_tls: bool,
-    /// The owned, freshly-bound `Connection`. Embedders drive the
-    /// handshake and per-stream I/O directly through this pointer
-    /// (`client.conn.advance`, `client.conn.poll`, `client.conn.handle`,
-    /// etc).
-    conn: *Connection,
-    /// Heap holder backing `Config.new_session_callback`, or null when
-    /// the callback is unset. Owned by the Client; freed in `deinit`.
-    new_session_holder: ?*NewSessionHolder = null,
+/// Allocator that backs the heap `Connection` and any per-client
+/// transient allocations.
+allocator: std.mem.Allocator,
+/// BoringSSL TLS context used by the connection. Whether `Client`
+/// owns it or it was passed in via `tls_context_override` is
+/// captured by `owns_tls`.
+tls_ctx: boringssl.tls.Context,
+/// True if the TLS context was built by `Client.connect` and
+/// must be torn down on `deinit`. False if the embedder supplied
+/// `tls_context_override`.
+owns_tls: bool,
+/// The owned, freshly-bound `Connection`. Embedders drive the
+/// handshake and per-stream I/O directly through this pointer
+/// (`client.conn.advance`, `client.conn.poll`, `client.conn.handle`,
+/// etc).
+conn: *Connection,
+/// Heap holder backing `Config.new_session_callback`, or null when
+/// the callback is unset. Owned by the Client; freed in `deinit`.
+new_session_holder: ?*NewSessionHolder = null,
 
-    /// Build the TLS context, mint the random DCID/SCID, and
-    /// initialize the underlying `Connection`. See the type
-    /// docstring for the post-condition shape. The returned `Client`
-    /// owns its allocations until `deinit` is called.
-    ///
-    /// The returned `Client` does not retain a pointer to the
-    /// supplied `config` — copy any fields you need into your own
-    /// state before discarding it.
-    pub fn connect(config: Config) Error!Client {
-        if (config.server_name.len == 0) return Error.InvalidConfig;
-        if (config.alpn_protocols.len == 0) return Error.InvalidConfig;
-        if (config.initial_dcid_len < 8 or config.initial_dcid_len > 20) return Error.InvalidConfig;
-        if (config.local_cid_len == 0 or config.local_cid_len > 20) return Error.InvalidConfig;
-        // TLS credential fields only apply to the auto-built context;
-        // an override context owns its own trust anchors and identity.
-        // Rejecting the combination keeps the old failure mode (a CA
-        // the embedder believes is pinned but is not) impossible.
-        if (config.tls_context_override != null) {
-            if (config.ca_pem != null) return Error.InvalidConfig;
-            if (config.client_cert_pem != null or config.client_key_pem != null) {
-                return Error.InvalidConfig;
-            }
-        }
-        // Pinned roots and no-verification are contradictory postures.
-        if (config.ca_pem != null and config.insecure_skip_verify) {
+/// Build the TLS context, mint the random DCID/SCID, and
+/// initialize the underlying `Connection`. See the type
+/// docstring for the post-condition shape. The returned `Client`
+/// owns its allocations until `deinit` is called.
+///
+/// The returned `Client` does not retain a pointer to the
+/// supplied `config` — copy any fields you need into your own
+/// state before discarding it.
+pub fn connect(config: Config) Error!Client {
+    if (config.server_name.len == 0) return Error.InvalidConfig;
+    if (config.alpn_protocols.len == 0) return Error.InvalidConfig;
+    if (config.initial_dcid_len < 8 or config.initial_dcid_len > 20) return Error.InvalidConfig;
+    if (config.local_cid_len == 0 or config.local_cid_len > 20) return Error.InvalidConfig;
+    // TLS credential fields only apply to the auto-built context;
+    // an override context owns its own trust anchors and identity.
+    // Rejecting the combination keeps the old failure mode (a CA
+    // the embedder believes is pinned but is not) impossible.
+    if (config.tls_context_override != null) {
+        if (config.ca_pem != null) return Error.InvalidConfig;
+        if (config.client_cert_pem != null or config.client_key_pem != null) {
             return Error.InvalidConfig;
         }
+    }
+    // Pinned roots and no-verification are contradictory postures.
+    if (config.ca_pem != null and config.insecure_skip_verify) {
+        return Error.InvalidConfig;
+    }
+    if (config.ca_pem) |pem_bytes| {
+        if (pem_bytes.len == 0) return Error.InvalidConfig;
+    }
+    // The mTLS identity is a pair: a chain without its key (or the
+    // reverse) can never complete a CertificateVerify.
+    if ((config.client_cert_pem == null) != (config.client_key_pem == null)) {
+        return Error.InvalidConfig;
+    }
+    if (config.client_cert_pem) |chain| {
+        if (chain.len == 0 or config.client_key_pem.?.len == 0) {
+            return Error.InvalidConfig;
+        }
+    }
+    // The version drives the Initial-key salt + HKDF labels
+    // (RFC 9001 §5.2 v1 / RFC 9368 §3.3.1 v2) — only the wire
+    // versions this implementation knows how to derive keys for
+    // are accepted here.
+    const wire_initial = @import("wire/initial.zig");
+    // Session-ticket capture rides the auto-built context's
+    // new-session hook; an override context owns that hook itself.
+    if (config.new_session_callback != null and config.tls_context_override != null) {
+        return Error.InvalidConfig;
+    }
+    if (!wire_initial.isSupportedVersion(config.preferred_version)) return Error.InvalidConfig;
+    if (config.compatible_versions.len > 16) return Error.InvalidConfig;
+    for (config.compatible_versions) |v| {
+        if (!wire_initial.isSupportedVersion(v)) return Error.InvalidConfig;
+    }
+
+    // Build (or borrow) the TLS context first — both branches
+    // need to feed `Session.fromBytes` for 0-RTT.
+    var tls_ctx: boringssl.tls.Context = undefined;
+    var owns_tls = false;
+    if (config.tls_context_override) |ctx| {
+        tls_ctx = ctx;
+    } else {
+        // Secure by default: verify against the system trust store
+        // unless the embedder explicitly opts out with
+        // `insecure_skip_verify` (test/interop posture) or pins
+        // private-CA roots via `ca_pem`. The pinned path starts
+        // from `.none` so the system store is never loaded — the
+        // trust anchors installed below are the only roots — and
+        // `installTrustAnchors` flips the context back to
+        // SSL_VERIFY_PEER.
+        const verify: boringssl.tls.VerifyMode = if (config.insecure_skip_verify)
+            .none
+        else if (config.ca_pem != null)
+            .none
+        else
+            .system;
+        // Only enable early-data on the auto-built TLS context
+        // when the embedder actually plans to use it (i.e. they
+        // supplied a 0-RTT session ticket). This is the §5.2 /
+        // §12 secure-default posture: 0-RTT off unless
+        // explicitly opted into. Embedders that want 0-RTT
+        // capability without a ticket on this attempt can pass
+        // their own `tls_context_override` with
+        // `early_data_enabled = true`.
+        tls_ctx = try boringssl.tls.Context.initClient(.{
+            .verify = verify,
+            .min_version = boringssl.raw.TLS1_3_VERSION,
+            .max_version = boringssl.raw.TLS1_3_VERSION,
+            .alpn = config.alpn_protocols,
+            .early_data_enabled = config.resumption_state != null,
+        });
+        owns_tls = true;
+    }
+    errdefer if (owns_tls) tls_ctx.deinit();
+
+    // Install the PEM credentials on the auto-built context (both
+    // are rejected up front when combined with an override). The
+    // errdefer above already owns cleanup for these fallible steps.
+    if (owns_tls) {
         if (config.ca_pem) |pem_bytes| {
-            if (pem_bytes.len == 0) return Error.InvalidConfig;
-        }
-        // The mTLS identity is a pair: a chain without its key (or the
-        // reverse) can never complete a CertificateVerify.
-        if ((config.client_cert_pem == null) != (config.client_key_pem == null)) {
-            return Error.InvalidConfig;
+            try tls_mod.pem.installTrustAnchors(tls_ctx, pem_bytes, .verify_peer);
+            // TLS 1.3 resumption skips the Certificate flight and
+            // would inherit whatever verification the ORIGINAL
+            // session ran under. With pinned roots, force BoringSSL
+            // to re-verify the remembered chain (and hostname, via
+            // the per-connection verify param) on every resumption
+            // so a ticket from a different posture can't bypass
+            // the pin.
+            boringssl.raw.zbssl_SSL_CTX_set_reverify_on_resume(tls_ctx.inner, 1);
         }
         if (config.client_cert_pem) |chain| {
-            if (chain.len == 0 or config.client_key_pem.?.len == 0) {
-                return Error.InvalidConfig;
-            }
+            try tls_mod.pem.installClientIdentity(tls_ctx, chain, config.client_key_pem.?);
         }
-        // The version drives the Initial-key salt + HKDF labels
-        // (RFC 9001 §5.2 v1 / RFC 9368 §3.3.1 v2) — only the wire
-        // versions this implementation knows how to derive keys for
-        // are accepted here.
-        const wire_initial = @import("wire/initial.zig");
-        // Session-ticket capture rides the auto-built context's
-        // new-session hook; an override context owns that hook itself.
-        if (config.new_session_callback != null and config.tls_context_override != null) {
+    }
+
+    // BoringSSL's hostname API needs a sentinel-terminated
+    // string; copy under the caller's allocator. `createClient`
+    // hands it to BoringSSL, which copies — freeing on every exit
+    // from this function is correct.
+    const server_name_z = config.allocator.dupeSentinel(u8, config.server_name, 0) catch
+        return Error.OutOfMemory;
+    defer config.allocator.free(server_name_z);
+
+    const conn_ptr = try Connection.createClient(config.allocator, tls_ctx, server_name_z);
+    errdefer conn_ptr.destroy();
+    conn_ptr.reveal_close_reason_on_wire = config.reveal_close_reason_on_wire;
+    conn_ptr.delayed_ack_packet_threshold = config.delayed_ack_packet_threshold;
+    // RFC 9368 §3 / §5: pick the wire-format version *before*
+    // any Initial keys are derived. `setVersion` is a no-op when
+    // the value is already current, so this works for the v1
+    // default path too.
+    conn_ptr.setVersion(config.preferred_version);
+    conn_ptr.ecn_enabled = config.enable_ecn;
+    // RFC 8899 DPLPMTUD: apply the embedder config and
+    // re-initialise the per-path PMTUD state.
+    conn_ptr.setPmtudConfig(config.pmtud);
+    conn_ptr.setCongestionAlgorithm(config.congestion_control);
+    conn_ptr.pacing_enabled = config.enable_pacing;
+    conn_ptr.setHyStartEnabled(config.enable_hystart);
+
+    if (config.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, config.qlog_user_data);
+
+    // NEW_TOKEN receive callback — wire it before any frame
+    // could be processed. Server-side connections never fire
+    // this; the role check inside `setNewTokenCallback` would
+    // accept it on a server connection too, but `Connection`
+    // is in client mode here.
+    if (config.new_token_callback) |cb| {
+        conn_ptr.setNewTokenCallback(cb, config.new_token_user_data);
+    }
+
+    // NEW_TOKEN replay on the first Initial — RFC 9000 §8.1.3
+    // lets a returning client present a previously-issued
+    // token in the Initial's long-header Token field. quic
+    // reuses the `retry_token` storage on Connection because
+    // the wire mechanism is identical (Token field on
+    // long-header Initial). The Server's gate distinguishes
+    // by trying NEW_TOKEN.validate first.
+    if (config.new_token) |nt_bytes| {
+        try conn_ptr.setInitialToken(nt_bytes);
+    }
+
+    // Attach the resumption session before the first `advance`
+    // kicks off the handshake, so BoringSSL sees it at initiation. `setSession` upref's
+    // the underlying SSL_SESSION, so we can deinit our local
+    // handle immediately.
+    if (config.resumption_state) |state_bytes| {
+        const state = tls_mod.resumption_state.decode(state_bytes) catch
             return Error.InvalidConfig;
-        }
-        if (!wire_initial.isSupportedVersion(config.preferred_version)) return Error.InvalidConfig;
-        if (config.compatible_versions.len > 16) return Error.InvalidConfig;
-        for (config.compatible_versions) |v| {
-            if (!wire_initial.isSupportedVersion(v)) return Error.InvalidConfig;
-        }
+        var session = boringssl.tls.Session.fromBytes(tls_ctx, state.session_ticket) catch
+            return Error.InvalidConfig;
+        defer session.deinit();
+        try conn_ptr.setSession(session);
+        conn_ptr.setEarlyDataEnabled(true);
+        // Bound 0-RTT sends by the resumed session's remembered peer
+        // params (BoringSSL doesn't remember them for us).
+        conn_ptr.setRememberedPeerTransportParams(state.transport_params);
+    }
 
-        // Build (or borrow) the TLS context first — both branches
-        // need to feed `Session.fromBytes` for 0-RTT.
-        var tls_ctx: boringssl.tls.Context = undefined;
-        var owns_tls = false;
-        if (config.tls_context_override) |ctx| {
-            tls_ctx = ctx;
-        } else {
-            // Secure by default: verify against the system trust store
-            // unless the embedder explicitly opts out with
-            // `insecure_skip_verify` (test/interop posture) or pins
-            // private-CA roots via `ca_pem`. The pinned path starts
-            // from `.none` so the system store is never loaded — the
-            // trust anchors installed below are the only roots — and
-            // `installTrustAnchors` flips the context back to
-            // SSL_VERIFY_PEER.
-            const verify: boringssl.tls.VerifyMode = if (config.insecure_skip_verify)
-                .none
-            else if (config.ca_pem != null)
-                .none
-            else
-                .system;
-            // Only enable early-data on the auto-built TLS context
-            // when the embedder actually plans to use it (i.e. they
-            // supplied a 0-RTT session ticket). This is the §5.2 /
-            // §12 secure-default posture: 0-RTT off unless
-            // explicitly opted into. Embedders that want 0-RTT
-            // capability without a ticket on this attempt can pass
-            // their own `tls_context_override` with
-            // `early_data_enabled = true`.
-            tls_ctx = try boringssl.tls.Context.initClient(.{
-                .verify = verify,
-                .min_version = boringssl.raw.TLS1_3_VERSION,
-                .max_version = boringssl.raw.TLS1_3_VERSION,
-                .alpn = config.alpn_protocols,
-                .early_data_enabled = config.resumption_state != null,
-            });
-            owns_tls = true;
-        }
-        errdefer if (owns_tls) tls_ctx.deinit();
+    // RFC 9000 §7.2: the client picks an unpredictable DCID for
+    // its first Initial; that DCID is what the server uses to
+    // derive the Initial-keys salt. The client also picks its
+    // own SCID — peer-side this becomes the DCID on every
+    // server->client packet until NEW_CONNECTION_ID arrives.
+    // BoringSSL's CSPRNG is good enough for both.
+    var initial_dcid_buf: [20]u8 = undefined;
+    var client_scid_buf: [20]u8 = undefined;
+    try boringssl.crypto.rand.fillBytes(initial_dcid_buf[0..config.initial_dcid_len]);
+    try boringssl.crypto.rand.fillBytes(client_scid_buf[0..config.local_cid_len]);
+    const initial_dcid = initial_dcid_buf[0..config.initial_dcid_len];
+    const client_scid = client_scid_buf[0..config.local_cid_len];
 
-        // Install the PEM credentials on the auto-built context (both
-        // are rejected up front when combined with an override). The
-        // errdefer above already owns cleanup for these fallible steps.
-        if (owns_tls) {
-            if (config.ca_pem) |pem_bytes| {
-                try tls_mod.pem.installTrustAnchors(tls_ctx, pem_bytes, .verify_peer);
-                // TLS 1.3 resumption skips the Certificate flight and
-                // would inherit whatever verification the ORIGINAL
-                // session ran under. With pinned roots, force BoringSSL
-                // to re-verify the remembered chain (and hostname, via
-                // the per-connection verify param) on every resumption
-                // so a ticket from a different posture can't bypass
-                // the pin.
-                boringssl.raw.zbssl_SSL_CTX_set_reverify_on_resume(tls_ctx.inner, 1);
-            }
-            if (config.client_cert_pem) |chain| {
-                try tls_mod.pem.installClientIdentity(tls_ctx, chain, config.client_key_pem.?);
-            }
-        }
+    try conn_ptr.setLocalScid(client_scid);
+    try conn_ptr.setInitialDcid(initial_dcid);
+    // Until the server's first Initial arrives, the client uses
+    // its own random initial DCID as the "peer DCID" on outgoing
+    // packets. The server replaces this via its SCID echo on the
+    // first reply.
+    try conn_ptr.setPeerDcid(initial_dcid);
 
-        // BoringSSL's hostname API needs a sentinel-terminated
-        // string; copy under the caller's allocator. `createClient`
-        // hands it to BoringSSL, which copies — freeing on every exit
-        // from this function is correct.
-        const server_name_z = config.allocator.dupeSentinel(u8, config.server_name, 0) catch
-            return Error.OutOfMemory;
-        defer config.allocator.free(server_name_z);
+    var params = config.transport_params;
+    params.initial_source_connection_id = ConnectionId.fromSlice(client_scid);
+    // RFC 9368 §5: advertise the chosen version + compatible
+    // versions so a server that supports a different version
+    // can opt into a compatible upgrade. Empty
+    // `compatible_versions` keeps the parameter absent, which
+    // matches v0.x wire posture for embedders that don't opt in.
+    if (config.compatible_versions.len > 0) {
+        var ordered: [16]u32 = undefined;
+        ordered[0] = config.preferred_version;
+        const cv_count = @min(config.compatible_versions.len, ordered.len - 1);
+        @memcpy(ordered[1..][0..cv_count], config.compatible_versions[0..cv_count]);
+        try params.setCompatibleVersions(ordered[0 .. 1 + cv_count]);
+    }
+    try conn_ptr.setTransportParams(params);
 
-        const conn_ptr = try Connection.createClient(config.allocator, tls_ctx, server_name_z);
-        errdefer conn_ptr.destroy();
-        conn_ptr.reveal_close_reason_on_wire = config.reveal_close_reason_on_wire;
-        conn_ptr.delayed_ack_packet_threshold = config.delayed_ack_packet_threshold;
-        // RFC 9368 §3 / §5: pick the wire-format version *before*
-        // any Initial keys are derived. `setVersion` is a no-op when
-        // the value is already current, so this works for the v1
-        // default path too.
-        conn_ptr.setVersion(config.preferred_version);
-        conn_ptr.ecn_enabled = config.enable_ecn;
-        // RFC 8899 DPLPMTUD: apply the embedder config and
-        // re-initialise the per-path PMTUD state.
-        conn_ptr.setPmtudConfig(config.pmtud);
-        conn_ptr.setCongestionAlgorithm(config.congestion_control);
-        conn_ptr.pacing_enabled = config.enable_pacing;
-        conn_ptr.setHyStartEnabled(config.enable_hystart);
-
-        if (config.qlog_callback) |cb| conn_ptr.setQlogCallback(cb, config.qlog_user_data);
-
-        // NEW_TOKEN receive callback — wire it before any frame
-        // could be processed. Server-side connections never fire
-        // this; the role check inside `setNewTokenCallback` would
-        // accept it on a server connection too, but `Connection`
-        // is in client mode here.
-        if (config.new_token_callback) |cb| {
-            conn_ptr.setNewTokenCallback(cb, config.new_token_user_data);
-        }
-
-        // NEW_TOKEN replay on the first Initial — RFC 9000 §8.1.3
-        // lets a returning client present a previously-issued
-        // token in the Initial's long-header Token field. quic
-        // reuses the `retry_token` storage on Connection because
-        // the wire mechanism is identical (Token field on
-        // long-header Initial). The Server's gate distinguishes
-        // by trying NEW_TOKEN.validate first.
-        if (config.new_token) |nt_bytes| {
-            try conn_ptr.setInitialToken(nt_bytes);
-        }
-
-        // Attach the resumption session before the first `advance`
-        // kicks off the handshake, so BoringSSL sees it at initiation. `setSession` upref's
-        // the underlying SSL_SESSION, so we can deinit our local
-        // handle immediately.
-        if (config.resumption_state) |state_bytes| {
-            const state = tls_mod.resumption_state.decode(state_bytes) catch
-                return Error.InvalidConfig;
-            var session = boringssl.tls.Session.fromBytes(tls_ctx, state.session_ticket) catch
-                return Error.InvalidConfig;
-            defer session.deinit();
-            try conn_ptr.setSession(session);
-            conn_ptr.setEarlyDataEnabled(true);
-            // Bound 0-RTT sends by the resumed session's remembered peer
-            // params (BoringSSL doesn't remember them for us).
-            conn_ptr.setRememberedPeerTransportParams(state.transport_params);
-        }
-
-        // RFC 9000 §7.2: the client picks an unpredictable DCID for
-        // its first Initial; that DCID is what the server uses to
-        // derive the Initial-keys salt. The client also picks its
-        // own SCID — peer-side this becomes the DCID on every
-        // server->client packet until NEW_CONNECTION_ID arrives.
-        // BoringSSL's CSPRNG is good enough for both.
-        var initial_dcid_buf: [20]u8 = undefined;
-        var client_scid_buf: [20]u8 = undefined;
-        try boringssl.crypto.rand.fillBytes(initial_dcid_buf[0..config.initial_dcid_len]);
-        try boringssl.crypto.rand.fillBytes(client_scid_buf[0..config.local_cid_len]);
-        const initial_dcid = initial_dcid_buf[0..config.initial_dcid_len];
-        const client_scid = client_scid_buf[0..config.local_cid_len];
-
-        try conn_ptr.setLocalScid(client_scid);
-        try conn_ptr.setInitialDcid(initial_dcid);
-        // Until the server's first Initial arrives, the client uses
-        // its own random initial DCID as the "peer DCID" on outgoing
-        // packets. The server replaces this via its SCID echo on the
-        // first reply.
-        try conn_ptr.setPeerDcid(initial_dcid);
-
-        var params = config.transport_params;
-        params.initial_source_connection_id = ConnectionId.fromSlice(client_scid);
-        // RFC 9368 §5: advertise the chosen version + compatible
-        // versions so a server that supports a different version
-        // can opt into a compatible upgrade. Empty
-        // `compatible_versions` keeps the parameter absent, which
-        // matches v0.x wire posture for embedders that don't opt in.
-        if (config.compatible_versions.len > 0) {
-            var ordered: [16]u32 = undefined;
-            ordered[0] = config.preferred_version;
-            const cv_count = @min(config.compatible_versions.len, ordered.len - 1);
-            @memcpy(ordered[1..][0..cv_count], config.compatible_versions[0..cv_count]);
-            try params.setCompatibleVersions(ordered[0 .. 1 + cv_count]);
-        }
-        try conn_ptr.setTransportParams(params);
-
-        // Session-ticket capture: register last so the holder's
-        // errdefer does not have to fence earlier failure paths. The
-        // handshake has not started (connect never calls `advance`),
-        // so no ticket can be missed.
-        var new_session_holder: ?*NewSessionHolder = null;
-        if (config.new_session_callback) |cb| {
-            const holder = try config.allocator.create(NewSessionHolder);
-            errdefer config.allocator.destroy(holder);
-            holder.* = .{
-                .allocator = config.allocator,
-                .conn = conn_ptr,
-                .cb = cb,
-                .user_data = config.new_session_user_data,
-            };
-            try tls_ctx.setNewSessionCallback(newSessionEnvelopeTrampoline, holder);
-            new_session_holder = holder;
-        }
-
-        return .{
+    // Session-ticket capture: register last so the holder's
+    // errdefer does not have to fence earlier failure paths. The
+    // handshake has not started (connect never calls `advance`),
+    // so no ticket can be missed.
+    var new_session_holder: ?*NewSessionHolder = null;
+    if (config.new_session_callback) |cb| {
+        const holder = try config.allocator.create(NewSessionHolder);
+        errdefer config.allocator.destroy(holder);
+        holder.* = .{
             .allocator = config.allocator,
-            .tls_ctx = tls_ctx,
-            .owns_tls = owns_tls,
             .conn = conn_ptr,
-            .new_session_holder = new_session_holder,
+            .cb = cb,
+            .user_data = config.new_session_user_data,
         };
+        try tls_ctx.setNewSessionCallback(newSessionEnvelopeTrampoline, holder);
+        new_session_holder = holder;
     }
 
-    /// Tear down the connection and (if owned) the TLS context.
-    /// After this returns, `self` is invalid.
-    pub fn deinit(self: *Client) void {
-        self.conn.destroy();
-        if (self.owns_tls) self.tls_ctx.deinit();
-        // After the context is gone no new-session callback can fire;
-        // only now is the holder safe to release.
-        if (self.new_session_holder) |holder| self.allocator.destroy(holder);
-        self.* = undefined;
-    }
-};
+    return .{
+        .allocator = config.allocator,
+        .tls_ctx = tls_ctx,
+        .owns_tls = owns_tls,
+        .conn = conn_ptr,
+        .new_session_holder = new_session_holder,
+    };
+}
+
+/// Tear down the connection and (if owned) the TLS context.
+/// After this returns, `self` is invalid.
+pub fn deinit(self: *Client) void {
+    self.conn.destroy();
+    if (self.owns_tls) self.tls_ctx.deinit();
+    // After the context is gone no new-session callback can fire;
+    // only now is the holder safe to release.
+    if (self.new_session_holder) |holder| self.allocator.destroy(holder);
+    self.* = undefined;
+}
 
 // -- tests --------------------------------------------------------------
 //

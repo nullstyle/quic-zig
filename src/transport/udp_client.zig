@@ -46,7 +46,7 @@
 
 const std = @import("std");
 
-const Client = @import("../client.zig").Client;
+const Client = @import("../client.zig");
 const conn_state = @import("../conn/state.zig");
 const Connection = conn_state.Connection;
 const path_mod = @import("../conn/path.zig");
