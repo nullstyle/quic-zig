@@ -10,6 +10,10 @@
 //! is responsible for sending the challenge frame, receiving the
 //! response frame, and ticking the timeout.
 
+// Consumers spell `<module>.PathValidator`; the pub self-alias keeps
+// that path resolving now that the file IS the type.
+pub const PathValidator = @This();
+
 const std = @import("std");
 
 /// Lifecycle of a single path's validation attempt.
@@ -32,60 +36,58 @@ pub const Error = error{
 
 /// RFC 9000 §8.2 path-challenge state machine. Owns just the
 /// (token, deadline, status) tuple; the connection drives I/O.
-pub const PathValidator = struct {
-    status: Status = .idle,
-    /// Token from the most recent challenge sent. Valid only when
-    /// status == .pending.
-    pending_token: [8]u8 = @splat(0),
-    /// Wall-clock time (µs) at which the current challenge was
-    /// sent. Used by `tick` to compute timeout.
-    pending_at_us: u64 = 0,
-    /// Per-validator timeout duration in µs. Caller computes
-    /// `3 * pto` (RFC 9000 §8.2.4) and sets this each time a new
-    /// challenge starts.
-    timeout_us: u64 = 0,
+status: Status = .idle,
+/// Token from the most recent challenge sent. Valid only when
+/// status == .pending.
+pending_token: [8]u8 = @splat(0),
+/// Wall-clock time (µs) at which the current challenge was
+/// sent. Used by `tick` to compute timeout.
+pending_at_us: u64 = 0,
+/// Per-validator timeout duration in µs. Caller computes
+/// `3 * pto` (RFC 9000 §8.2.4) and sets this each time a new
+/// challenge starts.
+timeout_us: u64 = 0,
 
-    /// Begin a new challenge with the given random token. Resets
-    /// state from any prior outcome.
-    pub fn beginChallenge(
-        self: *PathValidator,
-        token: [8]u8,
-        now_us: u64,
-        timeout_us_in: u64,
-    ) void {
-        self.status = .pending;
-        self.pending_token = token;
-        self.pending_at_us = now_us;
-        self.timeout_us = timeout_us_in;
-    }
+/// Begin a new challenge with the given random token. Resets
+/// state from any prior outcome.
+pub fn beginChallenge(
+    self: *PathValidator,
+    token: [8]u8,
+    now_us: u64,
+    timeout_us_in: u64,
+) void {
+    self.status = .pending;
+    self.pending_token = token;
+    self.pending_at_us = now_us;
+    self.timeout_us = timeout_us_in;
+}
 
-    /// Process a received PATH_RESPONSE. Returns true if the token
-    /// matched the pending challenge. A non-match leaves the state
-    /// pending (per §8.2.2: a stray PATH_RESPONSE is ignored, not
-    /// fatal).
-    pub fn recordResponse(self: *PathValidator, token: [8]u8) Error!bool {
-        if (self.status != .pending) return Error.NotPending;
-        if (std.mem.eql(u8, &token, &self.pending_token)) {
-            self.status = .validated;
-            return true;
-        }
-        return false;
+/// Process a received PATH_RESPONSE. Returns true if the token
+/// matched the pending challenge. A non-match leaves the state
+/// pending (per §8.2.2: a stray PATH_RESPONSE is ignored, not
+/// fatal).
+pub fn recordResponse(self: *PathValidator, token: [8]u8) Error!bool {
+    if (self.status != .pending) return Error.NotPending;
+    if (std.mem.eql(u8, &token, &self.pending_token)) {
+        self.status = .validated;
+        return true;
     }
+    return false;
+}
 
-    /// Tick the timeout. If `now_us - pending_at_us > timeout_us`,
-    /// transitions the status from `.pending` → `.failed`.
-    pub fn tick(self: *PathValidator, now_us: u64) void {
-        if (self.status != .pending) return;
-        if (now_us > self.pending_at_us and now_us - self.pending_at_us > self.timeout_us) {
-            self.status = .failed;
-        }
+/// Tick the timeout. If `now_us - pending_at_us > timeout_us`,
+/// transitions the status from `.pending` → `.failed`.
+pub fn tick(self: *PathValidator, now_us: u64) void {
+    if (self.status != .pending) return;
+    if (now_us > self.pending_at_us and now_us - self.pending_at_us > self.timeout_us) {
+        self.status = .failed;
     }
+}
 
-    /// True iff this validator is in the `.validated` terminal state.
-    pub fn isValidated(self: *const PathValidator) bool {
-        return self.status == .validated;
-    }
-};
+/// True iff this validator is in the `.validated` terminal state.
+pub fn isValidated(self: *const PathValidator) bool {
+    return self.status == .validated;
+}
 
 // -- tests ---------------------------------------------------------------
 

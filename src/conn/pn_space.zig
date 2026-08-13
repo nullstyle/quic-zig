@@ -6,6 +6,10 @@
 //! monotonically-increasing PN counter and its own ACK tracker for
 //! received PNs.
 
+// Consumers spell `<module>.PnSpace`; the pub self-alias keeps
+// that path resolving now that the file IS the type.
+pub const PnSpace = @This();
+
 const std = @import("std");
 const ack_tracker_mod = @import("ack_tracker.zig");
 const socket_opts = @import("../transport/socket_opts.zig");
@@ -31,108 +35,106 @@ pub const EcnValidationState = enum { testing, failed };
 /// One QUIC packet number space. Tracks the next outgoing PN, the
 /// largest PN we've seen acknowledged, and the received-PN bookkeeping
 /// for ACK generation.
-pub const PnSpace = struct {
-    /// Next packet number to assign on send.
-    next_pn: u64 = 0,
-    /// Largest PN we've sent that has been acknowledged. None
-    /// until the first ACK arrives. Used by loss recovery to
-    /// reason about in-flight packets.
-    largest_acked_sent: ?u64 = null,
-    /// Bookkeeping for received PNs. Populated whenever the
-    /// receiver successfully decrypts a packet at this level.
-    received: AckTracker = .{},
+/// Next packet number to assign on send.
+next_pn: u64 = 0,
+/// Largest PN we've sent that has been acknowledged. None
+/// until the first ACK arrives. Used by loss recovery to
+/// reason about in-flight packets.
+largest_acked_sent: ?u64 = null,
+/// Bookkeeping for received PNs. Populated whenever the
+/// receiver successfully decrypts a packet at this level.
+received: AckTracker = .{},
 
-    /// Cumulative count of received packets with the named IP ECN
-    /// codepoint (RFC 9000 §13.4.1). Emitted in our own outgoing ACK
-    /// frames at type 0x03 / 0x03-PATH so the peer's congestion
-    /// controller can react to CE marks observed on our path.
-    recv_ect0: u64 = 0,
-    recv_ect1: u64 = 0,
-    recv_ce: u64 = 0,
+/// Cumulative count of received packets with the named IP ECN
+/// codepoint (RFC 9000 §13.4.1). Emitted in our own outgoing ACK
+/// frames at type 0x03 / 0x03-PATH so the peer's congestion
+/// controller can react to CE marks observed on our path.
+recv_ect0: u64 = 0,
+recv_ect1: u64 = 0,
+recv_ce: u64 = 0,
 
-    /// Latest peer-reported ECN counts seen in an ACK frame at this
-    /// level. Used by §13.4.2 monotonicity validation: a fresh ACK
-    /// whose ECT0/ECT1/CE total has gone backward (or whose CE
-    /// dropped) indicates a peer or middlebox bug; we react by
-    /// flipping `validation` to `failed`.
-    peer_ack_ect0: u64 = 0,
-    peer_ack_ect1: u64 = 0,
-    peer_ack_ce: u64 = 0,
-    /// True once the first ECN-bearing peer ACK has populated the
-    /// `peer_ack_*` fields. Until then, monotonicity comparisons
-    /// trivially pass.
-    peer_ack_ecn_seen: bool = false,
+/// Latest peer-reported ECN counts seen in an ACK frame at this
+/// level. Used by §13.4.2 monotonicity validation: a fresh ACK
+/// whose ECT0/ECT1/CE total has gone backward (or whose CE
+/// dropped) indicates a peer or middlebox bug; we react by
+/// flipping `validation` to `failed`.
+peer_ack_ect0: u64 = 0,
+peer_ack_ect1: u64 = 0,
+peer_ack_ce: u64 = 0,
+/// True once the first ECN-bearing peer ACK has populated the
+/// `peer_ack_*` fields. Until then, monotonicity comparisons
+/// trivially pass.
+peer_ack_ecn_seen: bool = false,
 
-    /// Per-space ECN validation state. Starts at `testing`; flips to
-    /// `failed` on any §13.4.2 violation and never recovers (the
-    /// path is presumed ECN-bleached for the remainder of the
-    /// connection).
-    validation: EcnValidationState = .testing,
+/// Per-space ECN validation state. Starts at `testing`; flips to
+/// `failed` on any §13.4.2 violation and never recovers (the
+/// path is presumed ECN-bleached for the remainder of the
+/// connection).
+validation: EcnValidationState = .testing,
 
-    /// Allocate the next outgoing PN. Returns null if the space is
-    /// exhausted (a connection-fatal condition per RFC 9000 §12.3).
-    pub fn nextPn(self: *PnSpace) ?u64 {
-        if (self.next_pn > max_pn) return null;
-        const pn = self.next_pn;
-        self.next_pn += 1;
-        return pn;
+/// Allocate the next outgoing PN. Returns null if the space is
+/// exhausted (a connection-fatal condition per RFC 9000 §12.3).
+pub fn nextPn(self: *PnSpace) ?u64 {
+    if (self.next_pn > max_pn) return null;
+    const pn = self.next_pn;
+    self.next_pn += 1;
+    return pn;
+}
+
+/// Record an ACK-eliciting received PN. Convenience wrapper that
+/// always treats the packet as ACK-eliciting.
+pub fn recordReceived(self: *PnSpace, pn: u64, now_ms: u64) void {
+    self.received.add(pn, now_ms);
+}
+
+/// Record a received PN with explicit `ack_eliciting` flag. Used
+/// by Initial/Handshake spaces (no delayed-ACK), or by callers
+/// that have already promoted to `pending_ack`.
+pub fn recordReceivedPacket(self: *PnSpace, pn: u64, now_ms: u64, ack_eliciting: bool) void {
+    self.received.addPacket(pn, now_ms, ack_eliciting);
+}
+
+/// Record a received PN under application-data delayed-ACK rules
+/// (RFC 9000 §13.2.1). `packet_threshold` is the count of
+/// ACK-eliciting packets that forces an immediate ACK (typically 2).
+pub fn recordReceivedPacketDelayed(
+    self: *PnSpace,
+    pn: u64,
+    now_ms: u64,
+    ack_eliciting: bool,
+    packet_threshold: u8,
+) void {
+    self.received.addPacketDelayed(pn, now_ms, ack_eliciting, packet_threshold);
+}
+
+/// Update `largest_acked_sent` from an incoming ACK. Out-of-order
+/// ACKs (smaller `ack_largest_acked` than what we've already seen)
+/// are ignored.
+pub fn onAckReceived(self: *PnSpace, ack_largest_acked: u64) void {
+    if (self.largest_acked_sent == null or ack_largest_acked > self.largest_acked_sent.?) {
+        self.largest_acked_sent = ack_largest_acked;
     }
+}
 
-    /// Record an ACK-eliciting received PN. Convenience wrapper that
-    /// always treats the packet as ACK-eliciting.
-    pub fn recordReceived(self: *PnSpace, pn: u64, now_ms: u64) void {
-        self.received.add(pn, now_ms);
+/// Increment the receive-side ECN counter for the named codepoint
+/// (RFC 9000 §13.4.1). `not_ect` is a no-op — only ECN-marked
+/// packets are counted. Saturates at u64.max so a pathological
+/// long-lived connection doesn't wrap.
+pub fn onPacketReceivedWithEcn(self: *PnSpace, codepoint: EcnCodepoint) void {
+    switch (codepoint) {
+        .not_ect => {},
+        .ect0 => self.recv_ect0 +|= 1,
+        .ect1 => self.recv_ect1 +|= 1,
+        .ce => self.recv_ce +|= 1,
     }
+}
 
-    /// Record a received PN with explicit `ack_eliciting` flag. Used
-    /// by Initial/Handshake spaces (no delayed-ACK), or by callers
-    /// that have already promoted to `pending_ack`.
-    pub fn recordReceivedPacket(self: *PnSpace, pn: u64, now_ms: u64, ack_eliciting: bool) void {
-        self.received.addPacket(pn, now_ms, ack_eliciting);
-    }
-
-    /// Record a received PN under application-data delayed-ACK rules
-    /// (RFC 9000 §13.2.1). `packet_threshold` is the count of
-    /// ACK-eliciting packets that forces an immediate ACK (typically 2).
-    pub fn recordReceivedPacketDelayed(
-        self: *PnSpace,
-        pn: u64,
-        now_ms: u64,
-        ack_eliciting: bool,
-        packet_threshold: u8,
-    ) void {
-        self.received.addPacketDelayed(pn, now_ms, ack_eliciting, packet_threshold);
-    }
-
-    /// Update `largest_acked_sent` from an incoming ACK. Out-of-order
-    /// ACKs (smaller `ack_largest_acked` than what we've already seen)
-    /// are ignored.
-    pub fn onAckReceived(self: *PnSpace, ack_largest_acked: u64) void {
-        if (self.largest_acked_sent == null or ack_largest_acked > self.largest_acked_sent.?) {
-            self.largest_acked_sent = ack_largest_acked;
-        }
-    }
-
-    /// Increment the receive-side ECN counter for the named codepoint
-    /// (RFC 9000 §13.4.1). `not_ect` is a no-op — only ECN-marked
-    /// packets are counted. Saturates at u64.max so a pathological
-    /// long-lived connection doesn't wrap.
-    pub fn onPacketReceivedWithEcn(self: *PnSpace, codepoint: EcnCodepoint) void {
-        switch (codepoint) {
-            .not_ect => {},
-            .ect0 => self.recv_ect0 +|= 1,
-            .ect1 => self.recv_ect1 +|= 1,
-            .ce => self.recv_ce +|= 1,
-        }
-    }
-
-    /// True iff at least one received packet at this level carried a
-    /// non-Not-ECT marking. Drives whether outgoing ACKs at this
-    /// level emit type 0x03 (with ECN counts) or stay at 0x02.
-    pub fn hasObservedEcn(self: *const PnSpace) bool {
-        return self.recv_ect0 != 0 or self.recv_ect1 != 0 or self.recv_ce != 0;
-    }
-};
+/// True iff at least one received packet at this level carried a
+/// non-Not-ECT marking. Drives whether outgoing ACKs at this
+/// level emit type 0x03 (with ECN counts) or stay at 0x02.
+pub fn hasObservedEcn(self: *const PnSpace) bool {
+    return self.recv_ect0 != 0 or self.recv_ect1 != 0 or self.recv_ce != 0;
+}
 
 // -- tests ---------------------------------------------------------------
 
