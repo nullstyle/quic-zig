@@ -183,7 +183,7 @@ const server_config = @import("Server/config.zig");
 pub const PreferredAddressConfig = server_config.PreferredAddressConfig;
 pub const RateLimit = server_config.RateLimit;
 pub const EarlyData = server_config.EarlyData;
-pub const Config = server_config.Config;
+pub const Config = server_config;
 pub const TlsReload = server_config.TlsReload;
 
 /// One slot in the server's per-connection table. The `Connection`
