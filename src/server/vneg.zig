@@ -13,10 +13,10 @@ const conn_mod = @import("../conn/root.zig");
 const wire = @import("../wire/root.zig");
 const Address = conn_mod.path.Address;
 const ConnectionId = conn_mod.path.ConnectionId;
-const queueStatelessResponse = server_mod.queueStatelessResponse;
-const isInitialLongHeader = server_mod.isInitialLongHeader;
+const wire_peek = @import("wire_peek.zig");
+const isInitialLongHeader = wire_peek.isInitialLongHeader;
 const StatelessResponse = server_mod.Server.StatelessResponse;
-const peekLongHeaderIds = server_mod.peekLongHeaderIds;
+const peekLongHeaderIds = wire_peek.peekLongHeaderIds;
 
 /// True if `version` is one of the wire-format versions this
 /// server is configured to accept. Drives the VN gate in `feed`.

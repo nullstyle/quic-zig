@@ -124,6 +124,7 @@ const server_vneg = @import("server/vneg.zig");
 const server_accept = @import("server/accept.zig");
 const server_tls = @import("server/tls_lifecycle.zig");
 const server_routing = @import("server/routing.zig");
+const server_wire_peek = @import("server/wire_peek.zig");
 const RetryStateEntry = server_dos.RetryStateEntry;
 const RetryDecision = server_dos.RetryDecision;
 const RetryEcho = server_dos.RetryEcho;
@@ -178,17 +179,12 @@ pub const max_tracked_cids_per_slot: usize = 32;
 // INTERNAL: pub for server/ sibling access; not part of the embedder API.
 pub const bandwidth_idle_threshold_us: u64 = 5_000_000;
 
-/// Length-prefixed packed CID key used as the `cid_table` HashMap
-/// key. Byte 0 is the CID length (1..20); bytes 1..1+len are the
-/// CID material; bytes past `len` are zeroed so the key compares
-/// by value.
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub const CidKey = [21]u8;
-
-const cidKeyFromSlice = server_routing.cidKeyFromSlice;
-
-// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
-pub const cidKeyFromConnectionId = server_routing.cidKeyFromConnectionId;
+// The packed `cid_table` key format and the pre-decrypt header-peek
+// helpers live in the server/wire_peek.zig leaf; siblings import it
+// directly rather than round-tripping this file.
+const CidKey = server_wire_peek.CidKey;
+const peekLongHeaderIds = server_wire_peek.peekLongHeaderIds;
+const isInitialLongHeader = server_wire_peek.isInitialLongHeader;
 
 const server_config = @import("server/config.zig");
 /// Alt-address advertisement config for `Config.preferred_address`;
@@ -1880,25 +1876,6 @@ pub fn buildPreferredAddressParam(
     return out;
 }
 
-// -- header-peek helpers ------------------------------------------------
-
-// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
-pub const LongHeaderIds = server_routing.LongHeaderIds;
-
-// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
-pub const peekLongHeaderIds = server_routing.peekLongHeaderIds;
-
-// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
-pub const isInitialLongHeader = server_routing.isInitialLongHeader;
-
-// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
-pub const peekDcidForServer = server_routing.peekDcidForServer;
-
-const containsConnectionId = server_routing.containsConnectionId;
-
-// INTERNAL: re-export for server/ siblings; declared in server/routing.zig.
-pub const peekInitialToken = server_routing.peekInitialToken;
-
 // -- tests --------------------------------------------------------------
 //
 // The init/feed end-to-end smoke test lives in
@@ -2150,102 +2127,9 @@ test "buildPreferredAddressParam round-trips through Params codec" {
     try std.testing.expectEqualSlices(u8, &pa.stateless_reset_token, &got.stateless_reset_token);
 }
 
-test "peekLongHeaderIds rejects too-short" {
-    try std.testing.expect(peekLongHeaderIds(&.{}) == null);
-    try std.testing.expect(peekLongHeaderIds(&.{0xc0}) == null);
-}
-
-test "isInitialLongHeader recognizes Initial type bits" {
-    // Long header, type=0b00 (Initial under v1), version=1.
-    const v1_bytes = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x01, 0, 0 };
-    try std.testing.expect(isInitialLongHeader(&v1_bytes, 0x00000001));
-
-    // Long header, type=0b01 (Initial under v2 per RFC 9368 §3.2),
-    // version = 0x6b3343cf. The same bit pattern is 0-RTT under v1
-    // and Initial under v2, so the helper has to consult `version`.
-    const v2_bytes = [_]u8{ 0xd0, 0x6b, 0x33, 0x43, 0xcf, 0, 0 };
-    try std.testing.expect(isInitialLongHeader(&v2_bytes, 0x6b3343cf));
-    try std.testing.expect(!isInitialLongHeader(&v2_bytes, 0x00000001));
-
-    // Version negotiation (version=0) is *not* an Initial under
-    // either version. The caller is expected to pass `version=0`
-    // here (matching the bytes' version field); the helper rejects
-    // outright.
-    const vn = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x00, 0, 0 };
-    try std.testing.expect(!isInitialLongHeader(&vn, 0));
-
-    // Short header.
-    const sh = [_]u8{ 0x40, 0, 0, 0, 0, 0, 0, 0, 0 };
-    try std.testing.expect(!isInitialLongHeader(&sh, 0x00000001));
-}
-
-test "cidKey round-trips identical CIDs" {
-    const a = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    const b = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    const c = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 9 };
-    const d = [_]u8{ 1, 2, 3, 4, 5, 6, 7 }; // different length
-
-    try std.testing.expectEqual(cidKeyFromSlice(&a), cidKeyFromSlice(&b));
-    try std.testing.expect(!std.mem.eql(u8, &cidKeyFromSlice(&a), &cidKeyFromSlice(&c)));
-    try std.testing.expect(!std.mem.eql(u8, &cidKeyFromSlice(&a), &cidKeyFromSlice(&d)));
-}
-
-// -- fuzz harness --------------------------------------------------------
-//
-// `Server.feed` is the entry point an open-internet deployment exposes
-// to arbitrary bytes; the header-peek helpers (`peekLongHeaderIds`,
-// `isInitialLongHeader`, `peekDcidForServer`) gate it. None may panic
-// on hostile input. We stop short of a full `Server` end-to-end fuzz
-// (it would need a TLS context and an allocator-tracked
-// `boringssl.tls.Context`) — the wire-level peek surface is the
-// highest-yield target.
-
-test "fuzz: peekLongHeaderIds never panics" {
-    try std.testing.fuzz({}, fuzzPeekLongHeader, .{});
-}
-
-fn fuzzPeekLongHeader(_: void, smith: *std.testing.Smith) anyerror!void {
-    var input_buf: [256]u8 = undefined;
-    const len = smith.slice(&input_buf);
-    const input = input_buf[0..len];
-
-    const ids = peekLongHeaderIds(input) orelse return;
-    // Returned CID slices must point into `input`.
-    try std.testing.expect(ids.dcid.len <= 20);
-    try std.testing.expect(ids.scid.len <= 20);
-    try std.testing.expect(@intFromPtr(ids.dcid.ptr) >= @intFromPtr(input.ptr));
-    try std.testing.expect(@intFromPtr(ids.dcid.ptr) + ids.dcid.len <= @intFromPtr(input.ptr) + input.len);
-    try std.testing.expect(@intFromPtr(ids.scid.ptr) >= @intFromPtr(input.ptr));
-    try std.testing.expect(@intFromPtr(ids.scid.ptr) + ids.scid.len <= @intFromPtr(input.ptr) + input.len);
-}
-
-test "fuzz: isInitialLongHeader never panics" {
-    try std.testing.fuzz({}, fuzzIsInitialLongHeader, .{});
-}
-
-fn fuzzIsInitialLongHeader(_: void, smith: *std.testing.Smith) anyerror!void {
-    var input_buf: [256]u8 = undefined;
-    const len = smith.slice(&input_buf);
-    const input = input_buf[0..len];
-    // Drive the helper under both versions so the v1 and v2 long-type
-    // rotations are both exercised on the same input bytes.
-    _ = isInitialLongHeader(input, 0x00000001);
-    _ = isInitialLongHeader(input, 0x6b3343cf);
-}
-
-test "fuzz: peekDcidForServer never panics across all CID lengths" {
-    try std.testing.fuzz({}, fuzzPeekDcid, .{});
-}
-
-fn fuzzPeekDcid(_: void, smith: *std.testing.Smith) anyerror!void {
-    var input_buf: [256]u8 = undefined;
-    const len = smith.slice(&input_buf);
-    const input = input_buf[0..len];
-    const local_cid_len = smith.valueRangeAtMost(u8, 0, 20);
-
-    const dcid = peekDcidForServer(input, local_cid_len) orelse return;
-    // The returned slice must lie inside `input`.
-    try std.testing.expect(@intFromPtr(dcid.ptr) >= @intFromPtr(input.ptr));
-    try std.testing.expect(@intFromPtr(dcid.ptr) + dcid.len <= @intFromPtr(input.ptr) + input.len);
-    try std.testing.expect(dcid.len <= 20);
+test {
+    // The wire-peek leaf owns its unit + fuzz tests; reference it so
+    // the test build discovers them (siblings are only file-scope
+    // imports otherwise).
+    _ = server_wire_peek;
 }

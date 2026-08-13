@@ -1,17 +1,20 @@
 // Connection routing: the CID -> slot table (lookup, resync, drop),
-// QUIC-LB CID minting and live-slot rotation, header peek helpers for
-// pre-decrypt routing decisions, and per-slot CID replenishment. Split
-// from server.zig; the pub methods on Server are thin thunks that
-// delegate here.
+// QUIC-LB CID minting and live-slot rotation, and per-slot CID
+// replenishment. Split from server.zig; the pub methods on Server are
+// thin thunks that delegate here. The pure header-peek / CID-key
+// helpers live in the wire_peek.zig leaf.
 
 const std = @import("std");
 const server_mod = @import("../server.zig");
 const Server = server_mod.Server;
 const Slot = server_mod.Server.Slot;
 const Error = server_mod.Server.Error;
-const CidKey = server_mod.CidKey;
+const wire_peek = @import("wire_peek.zig");
+const cidKeyFromSlice = wire_peek.cidKeyFromSlice;
+const cidKeyFromConnectionId = wire_peek.cidKeyFromConnectionId;
+const containsConnectionId = wire_peek.containsConnectionId;
+const peekDcidForServer = wire_peek.peekDcidForServer;
 const conn_mod = @import("../conn/root.zig");
-const wire = @import("../wire/root.zig");
 const lb_mod = @import("../lb/root.zig");
 const ConnectionId = conn_mod.path.ConnectionId;
 const Address = conn_mod.path.Address;
@@ -260,94 +263,4 @@ pub fn maybeReplenishConnectionIds(self: *Server, slot: *Slot) void {
         };
     }
     _ = slot.conn.replenishConnectionIds(provisions[0..n]) catch {};
-}
-
-pub fn cidKeyFromSlice(cid: []const u8) CidKey {
-    // Defensive: callers (peekDcidForServer, ConnectionId.slice, etc.)
-    // already bound CID length to ≤ 20 via header parse and config
-    // validation, but we clamp here so a future caller that forgets
-    // can't reach a buffer overflow on a peer-controlled length.
-    const n = @min(cid.len, 20);
-    var k: CidKey = @splat(0);
-    k[0] = @intCast(n);
-    @memcpy(k[1 .. 1 + n], cid[0..n]);
-    return k;
-}
-
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub fn cidKeyFromConnectionId(cid: ConnectionId) CidKey {
-    return cidKeyFromSlice(cid.bytes[0..cid.len]);
-}
-
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub const LongHeaderIds = struct {
-    version: u32,
-    dcid: []const u8,
-    scid: []const u8,
-};
-
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub fn peekLongHeaderIds(bytes: []const u8) ?LongHeaderIds {
-    if (bytes.len < 6) return null;
-    if ((bytes[0] & 0x80) == 0) return null;
-    const version = std.mem.readInt(u32, bytes[1..5], .big);
-    const dcid_len = bytes[5];
-    if (dcid_len > 20) return null;
-    var pos: usize = 6;
-    if (bytes.len < pos + @as(usize, dcid_len) + 1) return null;
-    const dcid = bytes[pos .. pos + dcid_len];
-    pos += dcid_len;
-
-    const scid_len = bytes[pos];
-    if (scid_len > 20) return null;
-    pos += 1;
-    if (bytes.len < pos + @as(usize, scid_len)) return null;
-    const scid = bytes[pos .. pos + scid_len];
-
-    return .{ .version = version, .dcid = dcid, .scid = scid };
-}
-
-/// True if `bytes` looks like a long-header Initial under the
-/// supplied wire-format version. RFC 9368 §3.2 puts Initial at
-/// 0b01 under v2 vs 0b00 under v1, so the caller has to pre-resolve
-/// the version field — typically via `peekLongHeaderIds`.
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub fn isInitialLongHeader(bytes: []const u8, version: u32) bool {
-    if (bytes.len == 0 or (bytes[0] & 0x80) == 0) return false;
-    if (bytes.len < 5) return false;
-    if (version == 0) return false; // version negotiation
-    const long_type_bits: u2 = @intCast((bytes[0] >> 4) & 0x03);
-    return wire.header.longTypeFromBits(version, long_type_bits) == .initial;
-}
-
-/// Peek the DCID from either header form. Long headers carry an
-/// explicit length; short headers use the server's local-CID length.
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub fn peekDcidForServer(bytes: []const u8, local_cid_len: u8) ?[]const u8 {
-    if (bytes.len == 0) return null;
-    if ((bytes[0] & 0x80) != 0) {
-        const ids = peekLongHeaderIds(bytes) orelse return null;
-        return ids.dcid;
-    }
-    if (bytes.len < 1 + @as(usize, local_cid_len)) return null;
-    return bytes[1 .. 1 + local_cid_len];
-}
-
-pub fn containsConnectionId(haystack: []const ConnectionId, needle: ConnectionId) bool {
-    for (haystack) |cid| {
-        if (ConnectionId.eql(cid, needle)) return true;
-    }
-    return false;
-}
-
-/// Extract the token slice from an Initial header, or null if the
-/// packet didn't parse cleanly as one. The bytes returned are
-/// borrowed from `bytes`.
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub fn peekInitialToken(bytes: []const u8) ?[]const u8 {
-    const parsed = wire.header.parse(bytes, 0) catch return null;
-    return switch (parsed.header) {
-        .initial => |initial| initial.token,
-        else => null,
-    };
 }

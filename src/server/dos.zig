@@ -10,17 +10,17 @@ const Server = server_mod.Server;
 const conn_mod = @import("../conn/root.zig");
 const Address = conn_mod.path.Address;
 const ConnectionId = conn_mod.path.ConnectionId;
-const CidKey = server_mod.CidKey;
 const retry_token_mod = conn_mod.retry_token;
 const new_token_mod = conn_mod.new_token;
-const peekLongHeaderIds = server_mod.peekLongHeaderIds;
-const peekInitialToken = server_mod.peekInitialToken;
+const wire_peek = @import("wire_peek.zig");
+const peekLongHeaderIds = wire_peek.peekLongHeaderIds;
+const peekInitialToken = wire_peek.peekInitialToken;
 const wire = @import("../wire/root.zig");
 const bandwidth_idle_threshold_us = server_mod.bandwidth_idle_threshold_us;
 const StatelessResponse = server_mod.Server.StatelessResponse;
 const RetryTokenKey = conn_mod.RetryTokenKey;
 const Error = server_mod.Server.Error;
-const LongHeaderIds = server_mod.LongHeaderIds;
+const LongHeaderIds = wire_peek.LongHeaderIds;
 const Slot = server_mod.Server.Slot;
 
 /// Token-bucket gate for per-source Initial acceptance. Returns
