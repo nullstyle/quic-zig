@@ -513,7 +513,11 @@ fn pmtudHandleProbeLossIfMatches(
 ) bool {
     const probe_pn = path.pmtu_probe_pn orelse return false;
     if (probe_pn != lost.pn) return false;
-    _ = path.pmtudOnProbeLost(conn.pmtud_config.probe_threshold);
+    _ = path.pmtudOnProbeLost(
+        conn.pmtud_config.probe_threshold,
+        conn.pmtud_config.probe_step,
+        conn.pmtud_config.max_mtu,
+    );
     return true;
 }
 

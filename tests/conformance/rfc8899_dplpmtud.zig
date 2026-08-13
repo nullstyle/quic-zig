@@ -391,7 +391,7 @@ test "MUST record upper bound after probe_threshold consecutive probe losses [RF
         try client.detectLossesByPacketThresholdOnApplicationPath(path, pair.now_us);
     }
     try testing.expectEqual(@as(?u16, 1264), path.pmtu_upper_bound);
-    // Search continues at the floor (1200) but never probes >= 1264.
+    // Search stops at the floor (1200) and never probes >= 1264.
     try testing.expectEqual(@as(usize, 1200), path.pmtu);
     // No further probe size lands at >= 1264 (next probe at 1200+64=1264 = upper bound,
     // which is treated as the closed boundary → search_complete).
@@ -399,6 +399,9 @@ test "MUST record upper bound after probe_threshold consecutive probe losses [RF
     // size strictly less than the bound is fine, equal is not.)
     const next_size = path.pmtudNextProbeSize(64, 1452);
     if (next_size) |sz| try testing.expect(sz < 1264);
+    // With no permissible probe size left, the state machine settles
+    // to search_complete rather than idling in `.search` forever.
+    try testing.expectEqual(path_mod.PmtudState.search_complete, path.pmtu_state);
 }
 
 // ---------------------------------------------------------------- §4.4 black-hole

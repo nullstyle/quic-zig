@@ -337,8 +337,7 @@ fn resetConnectionAckLossDispatch(ctx: *const ConnectionAckLossDispatchCtx) void
     path.path.cc = congestion.CongestionController.init(.{});
     path.pto_count = 3;
     path.pending_ping = false;
-    path.pmtu_probe_pn = null;
-    path.pmtu_probes_in_flight = 0;
+    path.pmtudClearProbeSlot();
     ctx.conn.qlog_packets_lost = 0;
 }
 
