@@ -83,145 +83,109 @@ pub fn expand(out: *[aes_block_size]u8, combined: u8, pass: u8, half: []const u8
 /// `server_id_len + nonce_len` and is NOT 16 (combined==16 selects
 /// the §5.4.1 single-pass code path elsewhere).
 pub fn encrypt(aes: *const Aes128, plaintext: []const u8, ciphertext: []u8) Error!void {
-    try validateLen(plaintext.len);
-    std.debug.assert(ciphertext.len == plaintext.len);
-
-    const combined: u8 = @intCast(plaintext.len);
-    const half_len: usize = (plaintext.len + 1) / 2;
-    const odd: bool = (plaintext.len & 1) == 1;
-
-    // `left_0` and `right_0` overlap by one byte when `combined` is
-    // odd (the split byte). The clears restrict each half to its own
-    // nibble of that byte so the Feistel round XORs don't recombine
-    // them through the boundary.
-    var left_0: [max_half_len]u8 = undefined;
-    var right_0: [max_half_len]u8 = undefined;
-    @memcpy(left_0[0..half_len], plaintext[0..half_len]);
-    @memcpy(right_0[0..half_len], plaintext[plaintext.len - half_len ..]);
-    if (odd) {
-        left_0[half_len - 1] &= 0xf0;
-        right_0[0] &= 0x0f;
-    }
-
-    var ex: [aes_block_size]u8 = undefined;
-    var aes_out: [aes_block_size]u8 = undefined;
-
-    // Pass 1: right_1 = right_0 XOR truncate(AES(expand(combined, 1, left_0)))
-    expand(&ex, combined, 1, left_0[0..half_len]);
-    aes.encryptBlock(&ex, &aes_out);
-    var right_1: [max_half_len]u8 = undefined;
-    xorInto(right_1[0..half_len], right_0[0..half_len], aes_out[0..half_len]);
-    if (odd) right_1[0] &= 0x0f;
-
-    // Pass 2: left_1 = left_0 XOR truncate(AES(expand(combined, 2, right_1)))
-    expand(&ex, combined, 2, right_1[0..half_len]);
-    aes.encryptBlock(&ex, &aes_out);
-    var left_1: [max_half_len]u8 = undefined;
-    xorInto(left_1[0..half_len], left_0[0..half_len], aes_out[0..half_len]);
-    if (odd) left_1[half_len - 1] &= 0xf0;
-
-    // Pass 3: right_2 = right_1 XOR truncate(AES(expand(combined, 3, left_1)))
-    expand(&ex, combined, 3, left_1[0..half_len]);
-    aes.encryptBlock(&ex, &aes_out);
-    var right_2: [max_half_len]u8 = undefined;
-    xorInto(right_2[0..half_len], right_1[0..half_len], aes_out[0..half_len]);
-    if (odd) right_2[0] &= 0x0f;
-
-    // Pass 4: left_2 = left_1 XOR truncate(AES(expand(combined, 4, right_2)))
-    expand(&ex, combined, 4, right_2[0..half_len]);
-    aes.encryptBlock(&ex, &aes_out);
-    var left_2: [max_half_len]u8 = undefined;
-    xorInto(left_2[0..half_len], left_1[0..half_len], aes_out[0..half_len]);
-    if (odd) left_2[half_len - 1] &= 0xf0;
-
-    // Step 12: assemble final ciphertext.
-    // Even: simple concatenation.
-    // Odd:  the last byte of `left_2` holds the high nibble (low
-    //       nibble cleared); the first byte of `right_2` holds the low
-    //       nibble (high nibble cleared); merge them via `or` into a
-    //       single shared byte.
-    if (odd) {
-        @memcpy(ciphertext[0 .. half_len - 1], left_2[0 .. half_len - 1]);
-        ciphertext[half_len - 1] = left_2[half_len - 1] | right_2[0];
-        @memcpy(ciphertext[half_len..plaintext.len], right_2[1..half_len]);
-    } else {
-        @memcpy(ciphertext[0..half_len], left_2[0..half_len]);
-        @memcpy(ciphertext[half_len..plaintext.len], right_2[0..half_len]);
-    }
+    return run(aes, plaintext, ciphertext, .{ 1, 2, 3, 4 });
 }
 
 /// Inverse of `encrypt`. Same constraints on lengths. Test/ops
 /// tooling — production server code never decrypts.
 pub fn decrypt(aes: *const Aes128, ciphertext: []const u8, plaintext: []u8) Error!void {
-    try validateLen(ciphertext.len);
-    std.debug.assert(plaintext.len == ciphertext.len);
+    return run(aes, ciphertext, plaintext, .{ 4, 3, 2, 1 });
+}
 
-    const combined: u8 = @intCast(ciphertext.len);
-    const half_len: usize = (ciphertext.len + 1) / 2;
-    const odd: bool = (ciphertext.len & 1) == 1;
+/// Shared four-pass driver (§5.4.2.3 steps 1..12). Encrypt and
+/// decrypt are the same routine differing only in the pass schedule
+/// — the round function is AES-128-*encrypt* in both directions, so
+/// there is no directional asymmetry beyond the order of `passes`.
+/// `passes` stays comptime so the per-CID-mint `encrypt` path remains
+/// fully unrolled.
+fn run(aes: *const Aes128, in: []const u8, out: []u8, comptime passes: [4]u8) Error!void {
+    try validateLen(in.len);
+    std.debug.assert(out.len == in.len);
 
-    // Recover (left_2, right_2) from the on-wire ciphertext, undoing
-    // the boundary fusion if needed. The cleared nibbles re-appear as
-    // zeros so the Feistel rounds see the same inputs as encrypt did
-    // immediately after step 11.
-    var left_2: [max_half_len]u8 = undefined;
-    var right_2: [max_half_len]u8 = undefined;
-    @memcpy(left_2[0..half_len], ciphertext[0..half_len]);
-    @memcpy(right_2[0..half_len], ciphertext[ciphertext.len - half_len ..]);
-    if (odd) {
-        left_2[half_len - 1] &= 0xf0;
-        right_2[0] &= 0x0f;
+    const combined: u8 = @intCast(in.len);
+    const half_len: usize = (in.len + 1) / 2;
+    const odd: bool = (in.len & 1) == 1;
+
+    var left: [max_half_len]u8 = undefined;
+    var right: [max_half_len]u8 = undefined;
+    splitHalves(in, &left, &right, half_len, odd);
+
+    inline for (passes) |pass| {
+        feistelRound(aes, combined, pass, left[0..half_len], right[0..half_len], odd);
     }
+
+    assembleHalves(out, left[0..half_len], right[0..half_len], odd);
+}
+
+/// Steps 1-2: split `in` into halves of `half_len` bytes. The halves
+/// overlap by one byte when `in.len` is odd (the split byte); the
+/// clears restrict each half to its own nibble of that byte so the
+/// Feistel round XORs don't recombine them through the boundary.
+fn splitHalves(
+    in: []const u8,
+    left: *[max_half_len]u8,
+    right: *[max_half_len]u8,
+    half_len: usize,
+    odd: bool,
+) void {
+    @memcpy(left[0..half_len], in[0..half_len]);
+    @memcpy(right[0..half_len], in[in.len - half_len ..]);
+    if (odd) {
+        left[half_len - 1] &= 0xf0;
+        right[0] &= 0x0f;
+    }
+}
+
+/// Steps 3-11, one pass each: XOR
+/// `truncate(AES(expand(combined, pass, source)))` into the target
+/// half. Source and target are a pure function of pass parity — odd
+/// passes read the left half and write the right, even passes the
+/// reverse — which is what makes the same rounds run correctly in
+/// either schedule order. On odd lengths the target's boundary nibble
+/// is re-cleared after the XOR (right keeps only its low nibble of
+/// the split byte, left only its high nibble).
+fn feistelRound(
+    aes: *const Aes128,
+    combined: u8,
+    pass: u8,
+    left: []u8,
+    right: []u8,
+    odd: bool,
+) void {
+    const pass_is_odd = pass % 2 == 1;
+    const source: []const u8 = if (pass_is_odd) left else right;
+    const target: []u8 = if (pass_is_odd) right else left;
 
     var ex: [aes_block_size]u8 = undefined;
     var aes_out: [aes_block_size]u8 = undefined;
-
-    // Reverse pass 4: left_1 = left_2 XOR truncate(AES(expand(combined, 4, right_2)))
-    expand(&ex, combined, 4, right_2[0..half_len]);
+    expand(&ex, combined, pass, source);
     aes.encryptBlock(&ex, &aes_out);
-    var left_1: [max_half_len]u8 = undefined;
-    xorInto(left_1[0..half_len], left_2[0..half_len], aes_out[0..half_len]);
-    if (odd) left_1[half_len - 1] &= 0xf0;
-
-    // Reverse pass 3: right_1 = right_2 XOR truncate(AES(expand(combined, 3, left_1)))
-    expand(&ex, combined, 3, left_1[0..half_len]);
-    aes.encryptBlock(&ex, &aes_out);
-    var right_1: [max_half_len]u8 = undefined;
-    xorInto(right_1[0..half_len], right_2[0..half_len], aes_out[0..half_len]);
-    if (odd) right_1[0] &= 0x0f;
-
-    // Reverse pass 2: left_0 = left_1 XOR truncate(AES(expand(combined, 2, right_1)))
-    expand(&ex, combined, 2, right_1[0..half_len]);
-    aes.encryptBlock(&ex, &aes_out);
-    var left_0: [max_half_len]u8 = undefined;
-    xorInto(left_0[0..half_len], left_1[0..half_len], aes_out[0..half_len]);
-    if (odd) left_0[half_len - 1] &= 0xf0;
-
-    // Reverse pass 1: right_0 = right_1 XOR truncate(AES(expand(combined, 1, left_0)))
-    expand(&ex, combined, 1, left_0[0..half_len]);
-    aes.encryptBlock(&ex, &aes_out);
-    var right_0: [max_half_len]u8 = undefined;
-    xorInto(right_0[0..half_len], right_1[0..half_len], aes_out[0..half_len]);
-    if (odd) right_0[0] &= 0x0f;
-
+    for (target, aes_out[0..target.len]) |*t, m| t.* ^= m;
     if (odd) {
-        @memcpy(plaintext[0 .. half_len - 1], left_0[0 .. half_len - 1]);
-        plaintext[half_len - 1] = left_0[half_len - 1] | right_0[0];
-        @memcpy(plaintext[half_len..ciphertext.len], right_0[1..half_len]);
+        if (pass_is_odd) target[0] &= 0x0f else target[target.len - 1] &= 0xf0;
+    }
+}
+
+/// Step 12: assemble the final output.
+/// Even: simple concatenation.
+/// Odd:  the last byte of `left` holds the high nibble (low nibble
+///       cleared); the first byte of `right` holds the low nibble
+///       (high nibble cleared); merge them via `or` into a single
+///       shared byte so the output is exactly `out.len` bytes.
+fn assembleHalves(out: []u8, left: []const u8, right: []const u8, odd: bool) void {
+    const half_len = left.len;
+    if (odd) {
+        @memcpy(out[0 .. half_len - 1], left[0 .. half_len - 1]);
+        out[half_len - 1] = left[half_len - 1] | right[0];
+        @memcpy(out[half_len..], right[1..half_len]);
     } else {
-        @memcpy(plaintext[0..half_len], left_0[0..half_len]);
-        @memcpy(plaintext[half_len..ciphertext.len], right_0[0..half_len]);
+        @memcpy(out[0..half_len], left[0..half_len]);
+        @memcpy(out[half_len..], right[0..half_len]);
     }
 }
 
 fn validateLen(len: usize) Error!void {
     if (len < 5 or len > max_plaintext_len or len == 16) return Error.InvalidPlaintextLen;
-}
-
-fn xorInto(dst: []u8, a: []const u8, b: []const u8) void {
-    std.debug.assert(dst.len == a.len);
-    std.debug.assert(dst.len == b.len);
-    for (dst, a, b) |*d, av, bv| d.* = av ^ bv;
 }
 
 // -- tests ---------------------------------------------------------------
@@ -347,4 +311,36 @@ test "encrypt: rejects combined < 5 and > 19" {
     var pt_long: [20]u8 = @splat(0);
     var ct_long: [20]u8 = undefined;
     try testing.expectError(Error.InvalidPlaintextLen, encrypt(&aes, &pt_long, &ct_long));
+}
+
+test "encrypt/decrypt: pinned vectors at an even and the max odd length" {
+    // The draft only publishes an absolute ciphertext vector at
+    // combined=7 (§5.4.2.4, above). Because encrypt and decrypt share
+    // `run`, a symmetric mistake in the boundary-nibble scheme would
+    // round-trip cleanly — these implementation-pinned vectors
+    // (generated from the pre-`run` per-direction bodies) also catch
+    // that, at an even length (which never touches the boundary
+    // nibble) and at the maximum odd length.
+    const key = fromHex("000102030405060708090a0b0c0d0e0f");
+    const aes = try Aes128.init(&key);
+    {
+        const pt = fromHex("a0a1a2a3a4a5");
+        const expected_ct = fromHex("8f7a3b8e4a59");
+        var ct: [6]u8 = undefined;
+        try encrypt(&aes, &pt, &ct);
+        try testing.expectEqualSlices(u8, &expected_ct, &ct);
+        var pt2: [6]u8 = undefined;
+        try decrypt(&aes, &expected_ct, &pt2);
+        try testing.expectEqualSlices(u8, &pt, &pt2);
+    }
+    {
+        const pt = fromHex("b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2");
+        const expected_ct = fromHex("bca5b94692d3197fd5a4293e0a2b08055a8491");
+        var ct: [19]u8 = undefined;
+        try encrypt(&aes, &pt, &ct);
+        try testing.expectEqualSlices(u8, &expected_ct, &ct);
+        var pt2: [19]u8 = undefined;
+        try decrypt(&aes, &expected_ct, &pt2);
+        try testing.expectEqualSlices(u8, &pt, &pt2);
+    }
 }

@@ -23,57 +23,71 @@ pub const Error = error{
     PeerExceededLimit,
 };
 
-/// Connection-level data flow control. One per Connection.
-pub const ConnectionData = struct {
+/// Byte-window accounting shared by both data flow-control scopes.
+///
+/// The connection-level (`MAX_DATA`, RFC 9000 §4.1) and per-stream
+/// (`MAX_STREAM_DATA`, §4.2) windows keep the same four counters and
+/// enforce the same rules — §4.2 ¶6 says the stream-level monotonicity
+/// rule is identical to MAX_DATA's, and both overrun paths map to
+/// FLOW_CONTROL_ERROR. Only the frame that lifts `peer_max` differs,
+/// so `onMaxStreamData` is a decl alias of `onMaxData`. Use the
+/// `ConnectionData` / `StreamData` aliases below to say which window
+/// is meant.
+pub const DataWindow = struct {
     /// Maximum bytes we have advertised the peer can send to us.
-    /// Bumped via outgoing MAX_DATA frames as we consume incoming
-    /// stream bytes.
+    /// Bumped via our outgoing MAX_DATA / MAX_STREAM_DATA frames as
+    /// we consume incoming bytes.
     local_max: u64 = 0,
-    /// Bytes the peer has actually sent to us (sum of new bytes
-    /// across all streams).
+    /// Bytes the peer has actually sent to us.
     peer_sent: u64 = 0,
 
     /// Maximum bytes the peer has advertised we can send to them.
-    /// Bumped on incoming MAX_DATA frames.
+    /// Bumped on incoming MAX_DATA / MAX_STREAM_DATA frames.
     peer_max: u64 = 0,
     /// Bytes we have sent to the peer.
     we_sent: u64 = 0,
 
     /// Construct with the local- and peer-advertised initial limits
-    /// (typically the `initial_max_data` transport parameters).
-    pub fn init(local_initial: u64, peer_initial: u64) ConnectionData {
+    /// (the `initial_max_data` / `initial_max_stream_data_*`
+    /// transport parameters).
+    pub fn init(local_initial: u64, peer_initial: u64) DataWindow {
         return .{ .local_max = local_initial, .peer_max = peer_initial };
     }
 
     /// True iff sending `n` more bytes would still fit under `peer_max`.
-    pub fn weCanSend(self: *const ConnectionData, n: u64) bool {
+    pub fn weCanSend(self: *const DataWindow, n: u64) bool {
         const total = std.math.add(u64, self.we_sent, n) catch return false;
         return total <= self.peer_max;
     }
 
     /// Remaining bytes we may send before hitting the peer's limit.
-    pub fn allowance(self: *const ConnectionData) u64 {
+    pub fn allowance(self: *const DataWindow) u64 {
         if (self.we_sent >= self.peer_max) return 0;
         return self.peer_max - self.we_sent;
     }
 
     /// Record `n` bytes shipped on the wire. Errors with
     /// `FlowControlExceeded` if it would overshoot `peer_max`.
-    pub fn recordSent(self: *ConnectionData, n: u64) Error!void {
+    pub fn recordSent(self: *DataWindow, n: u64) Error!void {
         if (!self.weCanSend(n)) return Error.FlowControlExceeded;
         self.we_sent += n;
     }
 
     /// Apply an incoming MAX_DATA frame (RFC 9000 §19.9). Monotonic:
-    /// stale/retransmitted MAX_DATA values are ignored.
-    pub fn onMaxData(self: *ConnectionData, new_max: u64) void {
+    /// stale/retransmitted values are ignored (§4.1 ¶6).
+    pub fn onMaxData(self: *DataWindow, new_max: u64) void {
         if (new_max > self.peer_max) self.peer_max = new_max;
     }
 
+    /// Apply an incoming MAX_STREAM_DATA frame (RFC 9000 §19.10).
+    /// Monotonic — the §4.2 ¶6 rule is identical to MAX_DATA's, hence
+    /// the decl alias.
+    pub const onMaxStreamData = onMaxData;
+
     /// Charge `n` bytes from the peer against our advertised limit.
     /// Errors with `PeerExceededLimit` if the peer overran our cap
-    /// (FLOW_CONTROL_ERROR per §4.1).
-    pub fn recordPeerSent(self: *ConnectionData, n: u64) Error!void {
+    /// (FLOW_CONTROL_ERROR per §4.1/§4.2).
+    pub fn recordPeerSent(self: *DataWindow, n: u64) Error!void {
         const total = std.math.add(u64, self.peer_sent, n) catch
             return Error.PeerExceededLimit;
         if (total > self.local_max) return Error.PeerExceededLimit;
@@ -81,65 +95,19 @@ pub const ConnectionData = struct {
     }
 
     /// Lift the local advertised limit, e.g. before sending a new
-    /// MAX_DATA frame. Monotonic.
-    pub fn raiseLocalMax(self: *ConnectionData, new_max: u64) void {
+    /// MAX_DATA / MAX_STREAM_DATA frame. Monotonic.
+    pub fn raiseLocalMax(self: *DataWindow, new_max: u64) void {
         if (new_max > self.local_max) self.local_max = new_max;
     }
 };
 
-/// Per-stream data flow control. One per send-or-receive direction.
-pub const StreamData = struct {
-    /// What we've advertised — peer can send up to this.
-    local_max: u64 = 0,
-    /// What the peer has sent.
-    peer_sent: u64 = 0,
-    /// What the peer has advertised — we can send up to this.
-    peer_max: u64 = 0,
-    /// What we have sent.
-    we_sent: u64 = 0,
+/// Connection-level data flow control (`MAX_DATA`, RFC 9000 §4.1).
+/// One per Connection.
+pub const ConnectionData = DataWindow;
 
-    /// Construct with the advertised initial limits for this stream
-    /// (`initial_max_stream_data_*` transport parameters).
-    pub fn init(local_initial: u64, peer_initial: u64) StreamData {
-        return .{ .local_max = local_initial, .peer_max = peer_initial };
-    }
-
-    /// Remaining bytes we may send on this stream before hitting the
-    /// peer's limit.
-    pub fn allowance(self: *const StreamData) u64 {
-        if (self.we_sent >= self.peer_max) return 0;
-        return self.peer_max - self.we_sent;
-    }
-
-    /// Charge `n` bytes against the peer's stream limit. Errors with
-    /// `FlowControlExceeded` on overrun.
-    pub fn recordSent(self: *StreamData, n: u64) Error!void {
-        const total = std.math.add(u64, self.we_sent, n) catch
-            return Error.FlowControlExceeded;
-        if (total > self.peer_max) return Error.FlowControlExceeded;
-        self.we_sent = total;
-    }
-
-    /// Apply an incoming MAX_STREAM_DATA frame (RFC 9000 §19.10).
-    /// Monotonic.
-    pub fn onMaxStreamData(self: *StreamData, new_max: u64) void {
-        if (new_max > self.peer_max) self.peer_max = new_max;
-    }
-
-    /// Charge `n` bytes from the peer against our advertised stream
-    /// limit. Errors with `PeerExceededLimit` on overrun.
-    pub fn recordPeerSent(self: *StreamData, n: u64) Error!void {
-        const total = std.math.add(u64, self.peer_sent, n) catch
-            return Error.PeerExceededLimit;
-        if (total > self.local_max) return Error.PeerExceededLimit;
-        self.peer_sent = total;
-    }
-
-    /// Lift our advertised stream limit. Monotonic.
-    pub fn raiseLocalMax(self: *StreamData, new_max: u64) void {
-        if (new_max > self.local_max) self.local_max = new_max;
-    }
-};
+/// Per-stream data flow control (`MAX_STREAM_DATA`, RFC 9000 §4.2).
+/// One per send-or-receive direction.
+pub const StreamData = DataWindow;
 
 /// Stream-count flow control. One per (bidi, uni) × (we-init, peer-init).
 pub const StreamCount = struct {
@@ -229,6 +197,21 @@ test "StreamData allowance and limit" {
     try s.recordSent(256);
 }
 
+test "StreamData: weCanSend pre-flights the stream window" {
+    // Regression for the pre-DataWindow drift: StreamData had no
+    // weCanSend, so callers could pre-flight a connection-level send
+    // but not a stream-level one.
+    var s = StreamData.init(0, 32);
+    try std.testing.expect(s.weCanSend(32));
+    try std.testing.expect(!s.weCanSend(33));
+    try s.recordSent(32);
+    try std.testing.expect(!s.weCanSend(1));
+    try std.testing.expectError(Error.FlowControlExceeded, s.recordSent(1));
+    // Overflow-guarded, like the fuzzed connection window.
+    s.we_sent = std.math.maxInt(u64);
+    try std.testing.expect(!s.weCanSend(1));
+}
+
 test "StreamCount: open up to peer_max then refuse" {
     var sc = StreamCount.init(0, 3);
     try sc.recordWeOpened();
@@ -248,7 +231,8 @@ test "StreamCount: peer opening enforces local_max" {
 
 // -- fuzz harness --------------------------------------------------------
 //
-// Drive `ConnectionData` with arbitrary (op, n) pairs and assert the
+// Drive `DataWindow` — the shared type behind both `ConnectionData`
+// and `StreamData` — with arbitrary (op, n) pairs and assert the
 // state machine's structural invariants survive. Properties:
 //
 // - No panic, no overflow trap (every internal `+` is guarded).
@@ -261,12 +245,12 @@ test "StreamCount: peer opening enforces local_max" {
 // The fuzzer chooses one of five ops on each step; values are full-
 // width u64s so overflow paths are routinely exercised.
 
-test "fuzz: flow_control ConnectionData state-machine invariants" {
-    try std.testing.fuzz({}, fuzzConnectionData, .{});
+test "fuzz: flow_control DataWindow state-machine invariants" {
+    try std.testing.fuzz({}, fuzzDataWindow, .{});
 }
 
-fn fuzzConnectionData(_: void, smith: *std.testing.Smith) anyerror!void {
-    var c = ConnectionData.init(
+fn fuzzDataWindow(_: void, smith: *std.testing.Smith) anyerror!void {
+    var c = DataWindow.init(
         smith.value(u64),
         smith.value(u64),
     );

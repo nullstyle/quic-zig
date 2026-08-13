@@ -455,11 +455,25 @@ pub fn removeAt(self: *SentPacketTracker, idx: u32) SentPacket {
     const p = self.packets[idx];
     tombstone(&self.packets[idx], p.pn);
     self.dead_count += 1;
-    if (p.in_flight) {
-        self.bytes_in_flight -= p.bytes;
-        if (p.ack_eliciting) self.ack_eliciting_in_flight -= p.bytes;
-    }
+    self.subInFlight(p);
     return p;
+}
+
+/// Credit an in-flight packet's bytes to the tracker's counters, and
+/// its inverse. Every add/remove path goes through this pair so the
+/// two counters can never fall out of step — the accounting block was
+/// open-coded at four sites with two different orderings relative to
+/// the tombstone.
+fn addInFlight(self: *SentPacketTracker, p: SentPacket) void {
+    if (!p.in_flight) return;
+    self.bytes_in_flight += p.bytes;
+    if (p.ack_eliciting) self.ack_eliciting_in_flight += p.bytes;
+}
+
+fn subInFlight(self: *SentPacketTracker, p: SentPacket) void {
+    if (!p.in_flight) return;
+    self.bytes_in_flight -= p.bytes;
+    if (p.ack_eliciting) self.ack_eliciting_in_flight -= p.bytes;
 }
 
 /// Remove every live packet in the half-open index range
@@ -473,22 +487,18 @@ pub fn removeRangeWith(
     context: anytype,
     comptime on_remove: fn (@TypeOf(context), *SentPacket) void,
 ) void {
-    std.debug.assert(start <= end);
-    std.debug.assert(end <= self.count);
-
-    var i = start;
-    while (i < end) : (i += 1) {
-        const packet = &self.packets[i];
-        if (packet.dead) continue;
-        if (packet.in_flight) {
-            self.bytes_in_flight -= packet.bytes;
-            if (packet.ack_eliciting) self.ack_eliciting_in_flight -= packet.bytes;
+    // One walk, shared with the error-aware variant below: adapt the
+    // infallible callback to the fallible signature over an
+    // uninhabited error set, which makes the error branch dead and
+    // the generated code identical to an open-coded infallible loop.
+    // The typed `on_remove` parameter is kept so infallible callers
+    // keep their stricter compile-time signature check.
+    const Infallible = struct {
+        fn call(c: @TypeOf(context), p: *SentPacket) error{}!void {
+            on_remove(c, p);
         }
-        const pn = packet.pn;
-        on_remove(context, packet);
-        tombstone(packet, pn);
-        self.dead_count += 1;
-    }
+    };
+    self.removeRangeWithError(start, end, context, Infallible.call) catch |err| switch (err) {};
 }
 
 /// Error-aware sibling of `removeRangeWith`. If `on_remove` fails,
