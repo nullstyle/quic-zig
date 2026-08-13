@@ -4893,7 +4893,9 @@ const method: boringssl.tls.quic.Method = .{
 // All inline tests for state.zig live in src/conn/_state_tests.zig.
 // The leading underscore signals "internal to conn/". Including the
 // import here ensures the compiler walks the file for `test` blocks
-// when this module is compiled in test mode.
-comptime {
+// when this module is compiled in test mode. A `test` block (not
+// `comptime`) so non-test builds never analyze the test tree —
+// ziglang's std convention for exactly this hook.
+test {
     _ = @import("_state_tests.zig");
 }

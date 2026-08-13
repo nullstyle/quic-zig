@@ -255,4 +255,9 @@ test {
     _ = stateless_reset;
     _ = event_queue;
     _ = pending_frames;
+    // Explicit (previously only reached transitively): discovery of a
+    // submodule's tests must never depend on who happens to use it.
+    _ = pacing;
+    _ = hystart;
+    _ = delivery_rate;
 }
