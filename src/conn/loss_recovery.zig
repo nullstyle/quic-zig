@@ -5,6 +5,19 @@
 //! `PnSpace`, and `RttEstimator`. Connection (Connection.zig) owns the
 //! state and ties these together via `onPacketSent` and
 //! `onAckReceived` orchestration.
+//!
+//! Division of labour with `Connection/loss.zig`: this module owns the
+//! RFC 9002 constants and predicates (`packet_threshold`,
+//! `timeThresholdUs`, `isLost`), which the live sweep calls. It also
+//! carries `detectLosses`, a self-contained reference implementation
+//! of §6.1 that PRODUCTION DOES NOT CALL — the live sweep needs a
+//! per-packet hook that allocates (frame requeue), touches PMTUD
+//! state, and emits qlog, none of which belong in a pure function.
+//! `detectLosses` is kept deliberately, as the auditable
+//! implementation the RFC 9002 conformance corpus
+//! (tests/conformance/rfc9002_loss_recovery.zig) and bench/loss_ack.zig
+//! exercise. Do not "wire it up"; do keep the two in agreement on the
+//! shared predicates above.
 
 const std = @import("std");
 const ack_range = @import("../frame/ack_range.zig");

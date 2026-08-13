@@ -579,6 +579,17 @@ const LossPredicate = union(enum) {
         };
     }
 
+    /// True once `p` is past the eligible range: the tracker is
+    /// ordered by packet number and both clauses require
+    /// `pn <= largest_acked`, so no later entry can match. Lets the
+    /// walk stop at the in-flight tail instead of scanning it.
+    fn exhausted(self: LossPredicate, p: SentPacketTracker.SentPacket) bool {
+        return switch (self) {
+            .packet_threshold => |c| p.pn > c.largest_acked,
+            .time_threshold => |c| if (c.largest_acked) |la| p.pn > la else true,
+        };
+    }
+
     fn qlogReason(self: LossPredicate) conn_qlog.QlogLossReason {
         return switch (self) {
             .packet_threshold => .packet_threshold,
@@ -652,6 +663,7 @@ fn sweepLosses(
             i += 1;
             continue;
         }
+        if (pred.exhausted(target.sent.packets[i])) break;
         if (pred.matches(target.sent.packets[i])) {
             const start = i;
             i += 1;
