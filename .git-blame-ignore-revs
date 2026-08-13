@@ -3,5 +3,5 @@
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 # GitHub's blame UI honors this file automatically.
 cc5aded55f3f10e6c8b603600a568313b04f3e5b  # server.zig file-as-struct de-indent
-455c198  # Server/Config file-as-struct de-indent
-c95899b  # client.zig file-as-struct de-indent
+455c198d0fd1d9194c13226da8d16da0f9d2273f  # Server/Config file-as-struct de-indent
+c95899b5ec6b6fa5e07031a26432a71e6bc978b5  # client.zig file-as-struct de-indent
