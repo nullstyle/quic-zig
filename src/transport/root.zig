@@ -36,6 +36,20 @@ pub const applyServerTuning = socket_opts.applyServerTuning;
 pub const default_server_recv_buffer_bytes = socket_opts.default_server_recv_buffer_bytes;
 /// Re-export of `socket_opts.default_server_send_buffer_bytes` (4 MiB).
 pub const default_server_send_buffer_bytes = socket_opts.default_server_send_buffer_bytes;
+/// Re-export of `udp_server.classifyReceiveError` — the shared
+/// receive-errno policy both bundled loops apply (peer-influenced
+/// errors are tolerated, local faults propagate). The 0.12.0
+/// availability fixes are pinned by this classifier; embedders
+/// running their own loops are encouraged to reuse it.
+pub const classifyReceiveError = udp_server.classifyReceiveError;
+/// Re-export of `udp_server.ReceiveDisposition`.
+pub const ReceiveDisposition = udp_server.ReceiveDisposition;
+/// Re-export of `udp_server.classifySendError` — the send-side twin
+/// (ICMP-provoked errno like `ConnectionRefused` is tolerated; the
+/// datagram is lost and loss recovery owns the retry).
+pub const classifySendError = udp_server.classifySendError;
+/// Re-export of `udp_server.SendDisposition`.
+pub const SendDisposition = udp_server.SendDisposition;
 /// Re-export of `socket_opts.EcnCodepoint` — RFC 3168 §5 codepoints
 /// quic translates between `IP_TOS` / `IPV6_TCLASS` and the QUIC
 /// state machine's per-PN-space ECN counters.
