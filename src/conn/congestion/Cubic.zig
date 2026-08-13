@@ -88,14 +88,10 @@ pub fn onPacketAcked(
     srtt_us: u64,
     bytes_in_flight: u64,
 ) void {
-    // Recovery-exit maintenance first, exactly like NewReno.
-    if (self.recovery_start_time_us) |rec_start| {
-        if (largest_acked_sent_time_us > rec_start) {
-            self.recovery_start_time_us = null;
-        } else {
-            return;
-        }
-    }
+    if (!congestion.exitRecoveryOrStall(
+        &self.recovery_start_time_us,
+        largest_acked_sent_time_us,
+    )) return;
 
     // RFC 9002 §7.8: no growth off an unfilled pipe. Freeze the
     // epoch too — idle wall-clock time must not accrue convex

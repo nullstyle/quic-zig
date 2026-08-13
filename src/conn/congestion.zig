@@ -54,6 +54,23 @@ pub fn ackFillsWindow(cwnd: u64, bytes_acked: u64, bytes_in_flight: u64) bool {
     return bytes_in_flight +| bytes_acked >= cwnd;
 }
 
+/// RFC 9002 §7.3.1: an ACK for a packet sent after the recovery
+/// period began ends the period. Returns false when the ACK is
+/// stale (sent at or before the boundary) and the caller must
+/// stop — a stale ACK justifies no window growth. Recovery exit
+/// is state maintenance and MUST run before the §7.8 gate, so an
+/// app-limited ACK still leaves recovery.
+pub fn exitRecoveryOrStall(rec: *?u64, largest_acked_sent_time_us: u64) bool {
+    if (rec.*) |rec_start| {
+        if (largest_acked_sent_time_us > rec_start) {
+            rec.* = null;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Selectable congestion-control algorithm.
 pub const Algorithm = enum {
     /// RFC 9002 §7 / Appendix B NewReno.
@@ -397,17 +414,10 @@ pub const NewReno = struct {
     ) void {
         _ = now_us;
         _ = srtt_us;
-        // Clear recovery if we've received an ACK for a packet sent
-        // after recovery began. This runs before the app-limited gate:
-        // exiting recovery is state maintenance, not window growth.
-        if (self.recovery_start_time_us) |rec_start| {
-            if (largest_acked_sent_time_us > rec_start) {
-                self.recovery_start_time_us = null;
-            } else {
-                // Still in recovery — don't grow cwnd.
-                return;
-            }
-        }
+        if (!exitRecoveryOrStall(
+            &self.recovery_start_time_us,
+            largest_acked_sent_time_us,
+        )) return;
 
         // RFC 9002 §7.8: SHOULD NOT increase cwnd off ACKs from a pipe
         // the application never filled.
@@ -447,16 +457,7 @@ pub const NewReno = struct {
         }
 
         self.recovery_start_time_us = lost_largest_sent_time_us;
-        // ssthresh = cwnd * 0.5
-        self.ssthresh = @max(
-            self.cwnd * loss_reduction_factor_num / loss_reduction_factor_den,
-            self.cfg.minWindow(),
-        );
-        self.cwnd = self.ssthresh.?;
-        self.bytes_acked_in_ca = 0;
-        // Loss ends slow start through ssthresh; HyStart++ has nothing
-        // left to track.
-        self.hystart.reset();
+        self.reduce();
     }
 
     /// Sent during a "persistent congestion" period (RFC 9002 §7.6).
@@ -482,12 +483,22 @@ pub const NewReno = struct {
             if (ce_packet_sent_time_us <= rec_start) return;
         }
         self.recovery_start_time_us = ce_packet_sent_time_us;
+        self.reduce();
+    }
+
+    /// RFC 9002 §B.5 multiplicative decrease, shared by the loss and
+    /// ECN-CE paths (the RFC defines a single OnCongestionEvent
+    /// procedure invoked from both).
+    fn reduce(self: *NewReno) void {
+        // ssthresh = cwnd * 0.5
         self.ssthresh = @max(
             self.cwnd * loss_reduction_factor_num / loss_reduction_factor_den,
             self.cfg.minWindow(),
         );
         self.cwnd = self.ssthresh.?;
         self.bytes_acked_in_ca = 0;
+        // Loss/CE ends slow start through ssthresh; HyStart++ has
+        // nothing left to track.
         self.hystart.reset();
     }
 
@@ -653,6 +664,15 @@ test "onCongestionEvent halves cwnd to ssthresh and arms recovery" {
     try std.testing.expectEqual(@as(?u64, 1_000_000), nr.recovery_start_time_us);
 }
 
+test "onCongestionEvent can't shrink cwnd below min_window" {
+    // ECN-CE mirror of the loss-path floor test: both entry points
+    // share the same decrease body and must honor the same floor.
+    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
+    nr.cwnd = 2000; // already small
+    nr.onCongestionEvent(1_000_000);
+    try std.testing.expectEqual(nr.cfg.minWindow(), nr.cwnd);
+}
+
 test "onCongestionEvent suppresses re-entry within an existing recovery period" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 12000;
@@ -684,16 +704,22 @@ test "app-limited ACKs never grow cwnd (RFC 9002 §7.8) in either regime" {
 }
 
 test "app-limited ACK still exits recovery (state maintenance precedes the gate)" {
-    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
-    nr.cwnd = 12000;
-    nr.onPacketLost(1200, 1_000_000);
-    try std.testing.expect(nr.recovery_start_time_us != null);
-    const cwnd_in_recovery = nr.cwnd;
-    // Post-recovery ACK with an empty pipe: recovery must clear even
-    // though the window doesn't grow.
-    nr.onPacketAcked(1200, 2_000_000, 0, 0, 0);
-    try std.testing.expectEqual(@as(?u64, null), nr.recovery_start_time_us);
-    try std.testing.expectEqual(cwnd_in_recovery, nr.cwnd);
+    // Parameterized over both loss-based arms: the ordering invariant
+    // (recovery exit BEFORE the §7.8 gate) must hold identically in
+    // NewReno and CUBIC — a reorder on either side would strand an
+    // app-limited sender in recovery forever.
+    inline for ([_]Algorithm{ .new_reno, .cubic }) |algo| {
+        var cc = CongestionController.init(.{ .max_datagram_size = 1200, .algorithm = algo });
+        cc.setCwndForTest(12000);
+        cc.onPacketLost(1200, 1_000_000);
+        try std.testing.expect(cc.recoveryStartTimeUs() != null);
+        const cwnd_in_recovery = cc.cwndBytes();
+        // Post-recovery ACK with an empty pipe: recovery must clear
+        // even though the window doesn't grow.
+        cc.onPacketAcked(1200, 2_000_000, 0, 0, 0);
+        try std.testing.expectEqual(@as(?u64, null), cc.recoveryStartTimeUs());
+        try std.testing.expectEqual(cwnd_in_recovery, cc.cwndBytes());
+    }
 }
 
 test "CongestionController dispatch is observably identical to direct NewReno" {
