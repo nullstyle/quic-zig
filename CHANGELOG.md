@@ -9,11 +9,33 @@ changes.
 
 ### Changed
 
+- **Internal: the codebase adopts the zig compiler's layout
+  conventions** (ziglang file-as-struct). `Connection`, `Server`,
+  `Client`, `Server.Config`, and 14 support types are now TitleCase
+  files that ARE their structs (`src/Connection.zig` with
+  `Connection/` spokes, `src/Server.zig` with `Server/`, Compilation.zig
+  anatomy: @This alias, imports, fields, then types and methods).
+  The 20 `conn_*` method files became `Connection/<x>.zig`; 244 pure
+  pass-through hub thunks became decl-alias re-exports (Sema.zig
+  mechanism, −851 lines); spoke receivers are `conn:`/`server:`; the
+  `*Impl` alias pattern is retired. **Zero embedder-visible change**:
+  every public name and every Internal-tier path
+  (`quic.conn.state.*`, `quic.conn.path.*`, …) resolves exactly as
+  before, enforced per-commit by the new
+  `tests/e2e/internal_surface_smoke.zig`; wire behavior byte-identical
+  (deterministic impairment cells) at every phase boundary. Mechanical
+  commits are listed in `.git-blame-ignore-revs`.
 - Internal: the `src/server/` import seam was cleaned — pure
   header-peek/CID-key helpers moved to a new `wire_peek.zig` leaf,
   siblings now import siblings directly instead of round-tripping
   `server.zig`, and the hub-and-spokes layout rules are codified in
   `CONTRIBUTING.md`. No embedder-visible change.
+
+### Fixed
+
+- Test discovery: `pacing`/`hystart`/`delivery_rate` submodule tests
+  were only reachable transitively; making the discovery block
+  explicit recovered two silently-undiscovered tests.
 
 ## [0.13.0] - 2026-08-13
 
