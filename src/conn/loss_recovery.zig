@@ -24,6 +24,18 @@ pub const time_threshold_num: u64 = 9;
 /// kTimeThreshold denominator from RFC 9002 §6.1.2 (threshold = 9/8 of the RTT).
 pub const time_threshold_den: u64 = 8;
 
+/// RFC 9002 §6.1.2 time threshold: `max(9/8 × max(latest_rtt,
+/// smoothed_rtt), kGranularity)`. The one implementation of the
+/// formula — this module owns both ratio constants and the
+/// granularity floor, and every deadline / sweep site calls here.
+pub fn timeThresholdUs(rtt_est: *const RttEstimator) u64 {
+    const reference_rtt = @max(rtt_est.latest_rtt_us, rtt_est.smoothed_rtt_us);
+    return @max(
+        reference_rtt * time_threshold_num / time_threshold_den,
+        granularity_us,
+    );
+}
+
 /// Outcome of `processAck`. The connection feeds the contained
 /// metadata into the RTT estimator and congestion controller.
 pub const AckProcessing = struct {
@@ -145,11 +157,7 @@ pub fn detectLosses(
     if (largest_acked_opt == null) return .{};
     const largest_acked = largest_acked_opt.?;
 
-    const reference_rtt = @max(rtt_est.latest_rtt_us, rtt_est.smoothed_rtt_us);
-    const time_threshold = @max(
-        reference_rtt * time_threshold_num / time_threshold_den,
-        granularity_us,
-    );
+    const time_threshold = timeThresholdUs(rtt_est);
     const lost_send_time_cutoff: u64 = if (now_us > time_threshold)
         now_us - time_threshold
     else

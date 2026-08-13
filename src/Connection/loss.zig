@@ -78,17 +78,18 @@ pub fn considerDeadline(best: *?TimerDeadline, candidate: TimerDeadline) void {
     }
 }
 
-pub fn lossDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 {
-    const pn_space = conn.pnSpaceForLevelConst(lvl);
-    const sent = conn.sentForLevelConst(lvl);
-    const rtt = conn.rttForLevelConst(lvl);
+/// Earliest time-threshold loss deadline over the tracked packets
+/// below `largest_acked_sent`, or null when nothing is eligible.
+/// Shared by the per-level and per-path deadline queries — the walk
+/// and the RFC 9002 §6.1.2 threshold are identical for both; only
+/// which tracker/space/estimator they read differs.
+fn earliestLossDeadline(
+    sent: *const SentPacketTracker,
+    pn_space: *const state_mod.PnSpace,
+    rtt: *const RttEstimator,
+) ?u64 {
     const largest_acked = pn_space.largest_acked_sent orelse return null;
-    const reference_rtt = @max(rtt.latest_rtt_us, rtt.smoothed_rtt_us);
-    const time_threshold = @max(
-        reference_rtt * loss_recovery_mod.time_threshold_num /
-            loss_recovery_mod.time_threshold_den,
-        RttEstimator.granularity_us,
-    );
+    const time_threshold = loss_recovery_mod.timeThresholdUs(rtt);
 
     var best: ?u64 = null;
     var i: u32 = 0;
@@ -100,54 +101,42 @@ pub fn lossDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 
         if (best == null or at_us < best.?) best = at_us;
     }
     return best;
+}
+
+/// Send time of the oldest live ack-eliciting tracked packet, which
+/// anchors the PTO deadline. Shared by both PTO deadline queries.
+fn oldestAckElicitingSentTime(sent: *const SentPacketTracker) ?u64 {
+    var oldest: ?u64 = null;
+    var i: u32 = 0;
+    while (i < sent.count) : (i += 1) {
+        const p = sent.packets[i];
+        if (p.dead) continue;
+        if (!p.ack_eliciting) continue;
+        if (oldest == null or p.sent_time_us < oldest.?) oldest = p.sent_time_us;
+    }
+    return oldest;
+}
+
+pub fn lossDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 {
+    return earliestLossDeadline(
+        conn.sentForLevelConst(lvl),
+        conn.pnSpaceForLevelConst(lvl),
+        conn.rttForLevelConst(lvl),
+    );
 }
 
 pub fn lossDeadlineForApplicationPath(conn: *const Connection, path: *const PathState) ?u64 {
     _ = conn;
-    const largest_acked = path.app_pn_space.largest_acked_sent orelse return null;
-    const reference_rtt = @max(path.path.rtt.latest_rtt_us, path.path.rtt.smoothed_rtt_us);
-    const time_threshold = @max(
-        reference_rtt * loss_recovery_mod.time_threshold_num /
-            loss_recovery_mod.time_threshold_den,
-        RttEstimator.granularity_us,
-    );
-
-    var best: ?u64 = null;
-    var i: u32 = 0;
-    while (i < path.sent.count) : (i += 1) {
-        const p = path.sent.packets[i];
-        if (p.dead) continue;
-        if (p.pn > largest_acked) continue;
-        const at_us = p.sent_time_us +| time_threshold;
-        if (best == null or at_us < best.?) best = at_us;
-    }
-    return best;
+    return earliestLossDeadline(&path.sent, &path.app_pn_space, &path.path.rtt);
 }
 
 pub fn ptoDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 {
-    const sent = conn.sentForLevelConst(lvl);
-    var oldest: ?u64 = null;
-    var i: u32 = 0;
-    while (i < sent.count) : (i += 1) {
-        const p = sent.packets[i];
-        if (p.dead) continue;
-        if (!p.ack_eliciting) continue;
-        if (oldest == null or p.sent_time_us < oldest.?) oldest = p.sent_time_us;
-    }
-    const sent_at = oldest orelse return null;
+    const sent_at = oldestAckElicitingSentTime(conn.sentForLevelConst(lvl)) orelse return null;
     return sent_at +| ptoDurationForLevel(conn, lvl);
 }
 
 pub fn ptoDeadlineForApplicationPath(conn: *const Connection, path: *const PathState) ?u64 {
-    var oldest: ?u64 = null;
-    var i: u32 = 0;
-    while (i < path.sent.count) : (i += 1) {
-        const p = path.sent.packets[i];
-        if (p.dead) continue;
-        if (!p.ack_eliciting) continue;
-        if (oldest == null or p.sent_time_us < oldest.?) oldest = p.sent_time_us;
-    }
-    const sent_at = oldest orelse return null;
+    const sent_at = oldestAckElicitingSentTime(&path.sent) orelse return null;
     return sent_at +| ptoDurationForApplicationPath(conn, path);
 }
 
@@ -541,151 +530,188 @@ fn pmtudHandleRegularLoss(conn: *Connection, path: *PathState) void {
     );
 }
 
-pub fn detectLossesByPacketThresholdAtLevel(
-    conn: *Connection,
+/// The state one loss sweep operates on, bound by each entry point.
+/// The per-level and per-path families are two views of one
+/// algorithm over one struct: for `lvl == .application` every level
+/// accessor resolves to the primary path's state, and the multipath
+/// dispatcher picks between them purely on path id.
+const LossTarget = struct {
+    sent: *SentPacketTracker,
+    pn_space: *state_mod.PnSpace,
+    /// Owns the delivery sampler, congestion controller, and RFC 8899
+    /// probe state this sweep updates. For Initial / Handshake this is
+    /// the primary path: no probes ride those levels, but the counters
+    /// stay coherent by consulting it.
+    path: *PathState,
     lvl: EncryptionLevel,
+    /// Which family this sweep belongs to. Selects the requeue routing
+    /// (level requeues to the ACTIVE path's id, per-path to its own)
+    /// and the persistent-congestion PTO base (level-wide vs
+    /// per-path). Both are deliberate per-family differences, so they
+    /// stay dispatched rather than merged.
+    scope: enum { level, path },
+
+    fn isApplication(target: LossTarget) bool {
+        return target.lvl == .application;
+    }
+};
+
+/// Which packets a sweep declares lost. RFC 9002 §6.1 specifies
+/// packet-threshold and time-threshold as one loop with a two-clause
+/// predicate; they are split across entry points here only because
+/// they run on different schedules (ACK receipt vs tick).
+const LossPredicate = union(enum) {
+    /// §6.1.1: `largest_acked - pn >= kPacketThreshold`.
+    packet_threshold: struct { largest_acked: u64 },
+    /// §6.1.2: sent before `now - kTimeThreshold`, and at or below
+    /// largest_acked (which may be absent, in which case nothing is
+    /// eligible).
+    time_threshold: struct { largest_acked: ?u64, cutoff: u64 },
+
+    fn matches(self: LossPredicate, p: SentPacketTracker.SentPacket) bool {
+        return switch (self) {
+            .packet_threshold => |c| p.pn <= c.largest_acked and
+                (c.largest_acked - p.pn) >= loss_recovery_mod.packet_threshold,
+            .time_threshold => |c| blk: {
+                const la = c.largest_acked orelse break :blk false;
+                break :blk p.pn <= la and p.sent_time_us < c.cutoff;
+            },
+        };
+    }
+
+    fn qlogReason(self: LossPredicate) conn_qlog.QlogLossReason {
+        return switch (self) {
+            .packet_threshold => .packet_threshold,
+            .time_threshold => .time_threshold,
+        };
+    }
+};
+
+const SweepCtx = struct {
+    conn: *Connection,
+    target: LossTarget,
+    reason: conn_qlog.QlogLossReason,
+    stats: LossStats = .{},
+
+    fn handle(ctx: *SweepCtx, lost: *SentPacketTracker.SentPacket) Error!void {
+        defer lost.deinit(ctx.conn.allocator);
+        const target = ctx.target;
+        conn_qlog.emitPacketLost(ctx.conn, target.lvl, lost.pn, @intCast(lost.bytes), ctx.reason);
+        const is_probe = target.isApplication() and
+            pmtudHandleProbeLossIfMatches(ctx.conn, target.path, lost);
+        // Always requeue stream / control frames so a probe that
+        // coalesced legitimate payload still progresses.
+        _ = switch (target.scope) {
+            .level => try requeueLostPacket(ctx.conn, target.lvl, lost),
+            .path => try requeueLostPacketOnPath(ctx.conn, target.lvl, lost, target.path.id),
+        };
+        if (is_probe) {
+            // RFC 8899 §4.4: probe loss MUST NOT trigger CC
+            // reactions. Skip the LossStats add so neither cwnd nor
+            // persistent-congestion fires for the probe's bytes.
+            return;
+        }
+        ctx.stats.add(lost.*);
+        // Delivery-rate sampler C.lost accounting (in-flight
+        // application bytes only, DPLPMTUD probes excluded above — the
+        // same gate the controller's LossStats ride), then the
+        // per-packet loss inlet, BEFORE the aggregate onPacketLost
+        // fires after the walk.
+        if (target.isApplication()) {
+            if (lost.in_flight) {
+                const info = target.path.path.delivery.onPacketLost(lost);
+                target.path.path.cc.onPacketNewlyLost(&info);
+            }
+            pmtudHandleRegularLoss(ctx.conn, target.path);
+        }
+    }
+};
+
+/// The one loss-detection sweep: walk the tracker, remove contiguous
+/// runs of packets the predicate declares lost, and fold the results
+/// into PMTUD / delivery-rate / congestion state.
+///
+/// Runs are removed as spans rather than per packet, and the walk
+/// re-enters at `start` afterwards — which is why tombstones must be
+/// skipped explicitly, or a dead entry would re-match forever.
+fn sweepLosses(
+    conn: *Connection,
+    target: LossTarget,
+    pred: LossPredicate,
+    now_us: u64,
 ) Error!void {
-    const pn_space = conn.pnSpaceForLevel(lvl);
-    const sent = conn.sentForLevel(lvl);
-    const largest_acked_opt = pn_space.largest_acked_sent;
-    if (largest_acked_opt == null) return;
-    const largest_acked = largest_acked_opt.?;
-    const threshold: u64 = loss_recovery_mod.packet_threshold;
-    // 1-RTT in-flight bookkeeping is owned by the primary path
-    // until the multipath split (per `sentForLevel`). RFC 8899
-    // probes only ride .application, so we only consult the
-    // probe state when this is the application level.
-    const path: *PathState = conn.primaryPath();
+    var ctx: SweepCtx = .{
+        .conn = conn,
+        .target = target,
+        .reason = pred.qlogReason(),
+    };
 
     var i: u32 = 0;
-    var stats: LossStats = .{};
-    const PacketThresholdCtx = struct {
-        conn: *Connection,
-        lvl: EncryptionLevel,
-        path: *PathState,
-        stats: *LossStats,
-
-        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
-            defer lost.deinit(ctx.conn.allocator);
-            conn_qlog.emitPacketLost(ctx.conn, ctx.lvl, lost.pn, @intCast(lost.bytes), .packet_threshold);
-            const is_probe = ctx.lvl == .application and
-                pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
-            // Always requeue stream / control frames so a probe
-            // that coalesced legitimate payload still progresses.
-            _ = try requeueLostPacket(ctx.conn, ctx.lvl, lost);
-            if (is_probe) {
-                // RFC 8899 §4.4: probe loss MUST NOT trigger CC
-                // reactions. Skip the LossStats add so neither
-                // cwnd nor persistent-congestion fires for the
-                // probe's bytes.
-                return;
-            }
-            ctx.stats.add(lost.*);
-            // Delivery-rate sampler C.lost accounting (in-flight
-            // application bytes only, DPLPMTUD probes excluded above
-            // — the same gate the controller's LossStats ride), then
-            // the per-packet loss inlet, BEFORE the aggregate
-            // onPacketLost fires after the walk.
-            if (ctx.lvl == .application and lost.in_flight) {
-                const info = ctx.path.path.delivery.onPacketLost(lost);
-                ctx.path.path.cc.onPacketNewlyLost(&info);
-            }
-            if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.conn, ctx.path);
-        }
-    };
-    var ctx: PacketThresholdCtx = .{
-        .conn = conn,
-        .lvl = lvl,
-        .path = path,
-        .stats = &stats,
-    };
-    while (i < sent.count) {
-        const p = sent.packets[i];
-        // Skip tombstones — a dead entry re-matching after the
-        // `i = start` re-entry below would loop forever.
-        if (p.dead) {
+    while (i < target.sent.count) {
+        if (target.sent.packets[i].dead) {
             i += 1;
             continue;
         }
-        if (p.pn <= largest_acked and (largest_acked - p.pn) >= threshold) {
+        if (pred.matches(target.sent.packets[i])) {
             const start = i;
             i += 1;
-            while (i < sent.count) : (i += 1) {
-                const next = sent.packets[i];
-                if (next.pn > largest_acked or (largest_acked - next.pn) < threshold) break;
+            while (i < target.sent.count) : (i += 1) {
+                if (!pred.matches(target.sent.packets[i])) break;
             }
-            try sent.removeRangeWithError(start, i, &ctx, PacketThresholdCtx.handle);
+            try target.sent.removeRangeWithError(start, i, &ctx, SweepCtx.handle);
             i = start;
             continue;
         }
         i += 1;
     }
-    conn.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(conn, lvl, stats, .packet_threshold);
-    onPacketsLostAtLevel(conn, lvl, stats);
-    conn_qlog.emitCongestionStateIfChanged(conn, 0);
+
+    conn.qlog_packets_lost +|= ctx.stats.count;
+    conn_qlog.emitLossDetected(conn, target.lvl, ctx.stats, ctx.reason);
+    switch (target.scope) {
+        .level => onPacketsLostAtLevel(conn, target.lvl, ctx.stats),
+        .path => onApplicationPathPacketsLost(conn, target.path, ctx.stats),
+    }
+    conn_qlog.emitCongestionStateIfChanged(conn, now_us);
+}
+
+fn levelTarget(conn: *Connection, lvl: EncryptionLevel) LossTarget {
+    return .{
+        .sent = conn.sentForLevel(lvl),
+        .pn_space = conn.pnSpaceForLevel(lvl),
+        .path = conn.primaryPath(),
+        .lvl = lvl,
+        .scope = .level,
+    };
+}
+
+fn pathTarget(path: *PathState) LossTarget {
+    return .{
+        .sent = &path.sent,
+        .pn_space = &path.app_pn_space,
+        .path = path,
+        .lvl = .application,
+        .scope = .path,
+    };
+}
+
+pub fn detectLossesByPacketThresholdAtLevel(
+    conn: *Connection,
+    lvl: EncryptionLevel,
+    now_us: u64,
+) Error!void {
+    const target = levelTarget(conn, lvl);
+    const largest_acked = target.pn_space.largest_acked_sent orelse return;
+    try sweepLosses(conn, target, .{ .packet_threshold = .{ .largest_acked = largest_acked } }, now_us);
 }
 
 pub fn detectLossesByPacketThresholdOnApplicationPath(
     conn: *Connection,
     path: *PathState,
+    now_us: u64,
 ) Error!void {
-    const largest_acked_opt = path.app_pn_space.largest_acked_sent;
-    if (largest_acked_opt == null) return;
-    const largest_acked = largest_acked_opt.?;
-    const threshold: u64 = loss_recovery_mod.packet_threshold;
-
-    var i: u32 = 0;
-    var stats: LossStats = .{};
-    const PathPacketThresholdCtx = struct {
-        conn: *Connection,
-        path: *PathState,
-        stats: *LossStats,
-
-        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
-            defer lost.deinit(ctx.conn.allocator);
-            conn_qlog.emitPacketLost(ctx.conn, .application, lost.pn, @intCast(lost.bytes), .packet_threshold);
-            const is_probe = pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
-            _ = try requeueLostPacketOnPath(ctx.conn, .application, lost, ctx.path.id);
-            if (is_probe) return;
-            ctx.stats.add(lost.*);
-            // Delivery-rate sampler C.lost + per-packet inlet, per-path twin.
-            if (lost.in_flight) {
-                const info = ctx.path.path.delivery.onPacketLost(lost);
-                ctx.path.path.cc.onPacketNewlyLost(&info);
-            }
-            pmtudHandleRegularLoss(ctx.conn, ctx.path);
-        }
-    };
-    var ctx: PathPacketThresholdCtx = .{
-        .conn = conn,
-        .path = path,
-        .stats = &stats,
-    };
-    while (i < path.sent.count) {
-        const p = path.sent.packets[i];
-        // Skip tombstones — see detectLossesByPacketThresholdAtLevel.
-        if (p.dead) {
-            i += 1;
-            continue;
-        }
-        if (p.pn <= largest_acked and (largest_acked - p.pn) >= threshold) {
-            const start = i;
-            i += 1;
-            while (i < path.sent.count) : (i += 1) {
-                const next = path.sent.packets[i];
-                if (next.pn > largest_acked or (largest_acked - next.pn) < threshold) break;
-            }
-            try path.sent.removeRangeWithError(start, i, &ctx, PathPacketThresholdCtx.handle);
-            i = start;
-            continue;
-        }
-        i += 1;
-    }
-    conn.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(conn, .application, stats, .packet_threshold);
-    onApplicationPathPacketsLost(conn, path, stats);
-    conn_qlog.emitCongestionStateIfChanged(conn, 0);
+    const target = pathTarget(path);
+    const largest_acked = target.pn_space.largest_acked_sent orelse return;
+    try sweepLosses(conn, target, .{ .packet_threshold = .{ .largest_acked = largest_acked } }, now_us);
 }
 
 pub fn detectLossesByTimeThresholdAtLevel(
@@ -693,80 +719,13 @@ pub fn detectLossesByTimeThresholdAtLevel(
     lvl: EncryptionLevel,
     now_us: u64,
 ) Error!void {
-    const rtt = conn.rttForLevelConst(lvl);
-    const reference_rtt = @max(rtt.latest_rtt_us, rtt.smoothed_rtt_us);
-    const time_threshold = @max(
-        reference_rtt * loss_recovery_mod.time_threshold_num /
-            loss_recovery_mod.time_threshold_den,
-        RttEstimator.granularity_us,
-    );
+    const time_threshold = loss_recovery_mod.timeThresholdUs(conn.rttForLevelConst(lvl));
     if (now_us <= time_threshold) return;
-    const cutoff = now_us - time_threshold;
-    const pn_space = conn.pnSpaceForLevel(lvl);
-    const sent = conn.sentForLevel(lvl);
-    const largest_acked_opt = pn_space.largest_acked_sent;
-    const path: *PathState = conn.primaryPath();
-
-    var i: u32 = 0;
-    var stats: LossStats = .{};
-    const TimeThresholdCtx = struct {
-        conn: *Connection,
-        lvl: EncryptionLevel,
-        path: *PathState,
-        stats: *LossStats,
-
-        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
-            defer lost.deinit(ctx.conn.allocator);
-            conn_qlog.emitPacketLost(ctx.conn, ctx.lvl, lost.pn, @intCast(lost.bytes), .time_threshold);
-            const is_probe = ctx.lvl == .application and
-                pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
-            _ = try requeueLostPacket(ctx.conn, ctx.lvl, lost);
-            if (is_probe) return;
-            ctx.stats.add(lost.*);
-            // Delivery-rate sampler C.lost accounting (in-flight
-            // application bytes only, DPLPMTUD probes excluded above
-            // — the same gate the controller's LossStats ride), then
-            // the per-packet loss inlet, BEFORE the aggregate
-            // onPacketLost fires after the walk.
-            if (ctx.lvl == .application and lost.in_flight) {
-                const info = ctx.path.path.delivery.onPacketLost(lost);
-                ctx.path.path.cc.onPacketNewlyLost(&info);
-            }
-            if (ctx.lvl == .application) pmtudHandleRegularLoss(ctx.conn, ctx.path);
-        }
-    };
-    var ctx: TimeThresholdCtx = .{
-        .conn = conn,
-        .lvl = lvl,
-        .path = path,
-        .stats = &stats,
-    };
-    while (i < sent.count) {
-        const p = sent.packets[i];
-        // Skip tombstones — see detectLossesByPacketThresholdAtLevel.
-        if (p.dead) {
-            i += 1;
-            continue;
-        }
-        const eligible = if (largest_acked_opt) |la| p.pn <= la else false;
-        if (eligible and p.sent_time_us < cutoff) {
-            const start = i;
-            i += 1;
-            while (i < sent.count) : (i += 1) {
-                const next = sent.packets[i];
-                const next_eligible = if (largest_acked_opt) |la| next.pn <= la else false;
-                if (!next_eligible or next.sent_time_us >= cutoff) break;
-            }
-            try sent.removeRangeWithError(start, i, &ctx, TimeThresholdCtx.handle);
-            i = start;
-            continue;
-        }
-        i += 1;
-    }
-    conn.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(conn, lvl, stats, .time_threshold);
-    onPacketsLostAtLevel(conn, lvl, stats);
-    conn_qlog.emitCongestionStateIfChanged(conn, now_us);
+    const target = levelTarget(conn, lvl);
+    try sweepLosses(conn, target, .{ .time_threshold = .{
+        .largest_acked = target.pn_space.largest_acked_sent,
+        .cutoff = now_us - time_threshold,
+    } }, now_us);
 }
 
 pub fn detectLossesByTimeThresholdOnApplicationPath(
@@ -774,70 +733,13 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
     path: *PathState,
     now_us: u64,
 ) Error!void {
-    const rtt = &path.path.rtt;
-    const reference_rtt = @max(rtt.latest_rtt_us, rtt.smoothed_rtt_us);
-    const time_threshold = @max(
-        reference_rtt * loss_recovery_mod.time_threshold_num /
-            loss_recovery_mod.time_threshold_den,
-        RttEstimator.granularity_us,
-    );
+    const time_threshold = loss_recovery_mod.timeThresholdUs(&path.path.rtt);
     if (now_us <= time_threshold) return;
-    const cutoff = now_us - time_threshold;
-    const largest_acked_opt = path.app_pn_space.largest_acked_sent;
-
-    var i: u32 = 0;
-    var stats: LossStats = .{};
-    const PathTimeThresholdCtx = struct {
-        conn: *Connection,
-        path: *PathState,
-        stats: *LossStats,
-
-        fn handle(ctx: *@This(), lost: *SentPacketTracker.SentPacket) Error!void {
-            defer lost.deinit(ctx.conn.allocator);
-            conn_qlog.emitPacketLost(ctx.conn, .application, lost.pn, @intCast(lost.bytes), .time_threshold);
-            const is_probe = pmtudHandleProbeLossIfMatches(ctx.conn, ctx.path, lost);
-            _ = try requeueLostPacketOnPath(ctx.conn, .application, lost, ctx.path.id);
-            if (is_probe) return;
-            ctx.stats.add(lost.*);
-            // Delivery-rate sampler C.lost + per-packet inlet, per-path twin.
-            if (lost.in_flight) {
-                const info = ctx.path.path.delivery.onPacketLost(lost);
-                ctx.path.path.cc.onPacketNewlyLost(&info);
-            }
-            pmtudHandleRegularLoss(ctx.conn, ctx.path);
-        }
-    };
-    var ctx: PathTimeThresholdCtx = .{
-        .conn = conn,
-        .path = path,
-        .stats = &stats,
-    };
-    while (i < path.sent.count) {
-        const p = path.sent.packets[i];
-        // Skip tombstones — see detectLossesByPacketThresholdAtLevel.
-        if (p.dead) {
-            i += 1;
-            continue;
-        }
-        const eligible = if (largest_acked_opt) |la| p.pn <= la else false;
-        if (eligible and p.sent_time_us < cutoff) {
-            const start = i;
-            i += 1;
-            while (i < path.sent.count) : (i += 1) {
-                const next = path.sent.packets[i];
-                const next_eligible = if (largest_acked_opt) |la| next.pn <= la else false;
-                if (!next_eligible or next.sent_time_us >= cutoff) break;
-            }
-            try path.sent.removeRangeWithError(start, i, &ctx, PathTimeThresholdCtx.handle);
-            i = start;
-            continue;
-        }
-        i += 1;
-    }
-    conn.qlog_packets_lost +|= stats.count;
-    conn_qlog.emitLossDetected(conn, .application, stats, .time_threshold);
-    onApplicationPathPacketsLost(conn, path, stats);
-    conn_qlog.emitCongestionStateIfChanged(conn, now_us);
+    const target = pathTarget(path);
+    try sweepLosses(conn, target, .{ .time_threshold = .{
+        .largest_acked = target.pn_space.largest_acked_sent,
+        .cutoff = now_us - time_threshold,
+    } }, now_us);
 }
 
 fn firePtoAtLevel(

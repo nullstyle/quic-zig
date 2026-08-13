@@ -339,7 +339,7 @@ test "MUST NOT trigger CC reaction when a probe is declared lost [RFC8899 §4.4 
     // largest_acked that's >= probe_pn + 3. We achieve that by
     // bumping the path's `largest_acked_sent` directly.
     path.app_pn_space.largest_acked_sent = probe_pn + 4;
-    try client.detectLossesByPacketThresholdOnApplicationPath(path);
+    try client.detectLossesByPacketThresholdOnApplicationPath(path, pair.now_us);
 
     // Probe-loss accounting fired: probe PN slot is cleared, fail
     // counter incremented (or — at threshold=1 — the upper bound
@@ -388,7 +388,7 @@ test "MUST record upper bound after probe_threshold consecutive probe losses [RF
         const probe_pn = path.pmtu_probe_pn orelse return error.TestProbeNotRecorded;
         // Force loss: bump largest_acked above the probe PN by 4.
         path.app_pn_space.largest_acked_sent = probe_pn + 4;
-        try client.detectLossesByPacketThresholdOnApplicationPath(path);
+        try client.detectLossesByPacketThresholdOnApplicationPath(path, pair.now_us);
     }
     try testing.expectEqual(@as(?u16, 1264), path.pmtu_upper_bound);
     // Search continues at the floor (1200) but never probes >= 1264.

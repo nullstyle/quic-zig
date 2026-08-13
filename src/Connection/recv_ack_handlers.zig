@@ -324,7 +324,7 @@ fn apply(
 
     // Loss detection — packet-threshold only (time-threshold lives
     // in `tick`).
-    try detectLosses(conn, target);
+    try detectLosses(conn, target, now_us);
 
     // Close the delivery-rate sampler's ACK event AFTER loss
     // detection, so `newly_lost` covers everything this ACK declared
@@ -349,10 +349,10 @@ fn apply(
 /// loss sweeps differ in requeue routing (`activePath().id` vs the
 /// target path's id) and in the persistent-congestion PTO base
 /// (level-wide vs per-path), so this dispatches rather than unifies.
-fn detectLosses(conn: *Connection, target: AckTarget) Error!void {
+fn detectLosses(conn: *Connection, target: AckTarget, now_us: u64) Error!void {
     switch (target.loss_scope) {
-        .level => try conn_loss.detectLossesByPacketThresholdAtLevel(conn, target.lvl),
-        .path => try conn.detectLossesByPacketThresholdOnApplicationPath(target.path),
+        .level => try conn_loss.detectLossesByPacketThresholdAtLevel(conn, target.lvl, now_us),
+        .path => try conn.detectLossesByPacketThresholdOnApplicationPath(target.path, now_us),
     }
 }
 
