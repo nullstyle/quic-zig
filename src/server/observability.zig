@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const server_mod = @import("../server.zig");
+const server_dos = @import("dos.zig");
 const Server = server_mod.Server;
 const SlotImpl = server_mod.Server.Slot;
 const StatelessResponseKind = server_mod.StatelessResponseKind;
@@ -243,10 +244,13 @@ fn acceptLogRate(
     now_us: u64,
 ) bool {
     // Lazy eviction shared with `acceptSourceRate` / `acceptVnRate`.
+    // Direct sibling call: dos.zig owns the source-rate table
+    // maintenance; routing it through a Server method thunk hid the
+    // dependency (the thunks are gone — 95a4472 rule).
     if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-        self.pruneSourceRate(now_us);
+        server_dos.pruneSourceRate(self, now_us);
         if (self.source_rate_table.count() >= self.source_rate_table_capacity) {
-            self.evictOldestSourceRate();
+            server_dos.evictOldestSourceRate(self);
         }
     }
 

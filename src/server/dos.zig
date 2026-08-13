@@ -16,7 +16,17 @@ const wire_peek = @import("wire_peek.zig");
 const peekLongHeaderIds = wire_peek.peekLongHeaderIds;
 const peekInitialToken = wire_peek.peekInitialToken;
 const wire = @import("../wire/root.zig");
-const bandwidth_idle_threshold_us = server_mod.bandwidth_idle_threshold_us;
+
+/// Idle threshold (microseconds) past which a `SourceRateEntry`
+/// whose three counter windows have all elapsed is also considered
+/// stale on the bandwidth-bucket axis and may be pruned. Five
+/// seconds is comfortably longer than the default
+/// `source_rate_window_us` (one second), so a source seen recently
+/// enough to keep its bucket warm survives `pruneSourceRate` even
+/// when its Initial / VN / log windows have aged out. Hardening
+/// guide §4.1 token-bucket. Declared here (not on the hub): this
+/// file owns the source-rate table and is the constant's only user.
+pub const bandwidth_idle_threshold_us: u64 = 5_000_000;
 const StatelessResponse = server_mod.Server.StatelessResponse;
 const RetryTokenKey = conn_mod.RetryTokenKey;
 const Error = server_mod.Server.Error;
@@ -193,7 +203,8 @@ pub fn acceptSourceBandwidth(
     return true;
 }
 
-// INTERNAL: pub for server/observability.zig access; not part of the embedder API.
+// INTERNAL: pub for direct sibling import (server/observability.zig);
+// not part of the embedder API. The Server method thunk was demoted.
 pub fn pruneSourceRate(self: *Server, now_us: u64) void {
     var it = self.source_rate_table.iterator();
     while (it.next()) |entry| {
@@ -218,7 +229,8 @@ pub fn pruneSourceRate(self: *Server, now_us: u64) void {
     }
 }
 
-// INTERNAL: pub for server/observability.zig access; not part of the embedder API.
+// INTERNAL: pub for direct sibling import (server/observability.zig);
+// not part of the embedder API. The Server method thunk was demoted.
 pub fn evictOldestSourceRate(self: *Server) void {
     var it = self.source_rate_table.iterator();
     var oldest_addr: ?Address = null;

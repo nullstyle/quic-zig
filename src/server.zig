@@ -168,17 +168,6 @@ const StatelessResponseImpl = struct {
 // INTERNAL: pub for server/ sibling access; not part of the embedder API.
 pub const max_tracked_cids_per_slot: usize = 32;
 
-/// Idle threshold (microseconds) past which a `SourceRateEntry`
-/// whose three counter windows have all elapsed is also considered
-/// stale on the bandwidth-bucket axis and may be pruned. Five
-/// seconds is comfortably longer than the default
-/// `source_rate_window_us` (one second), so a source seen recently
-/// enough to keep its bucket warm survives `pruneSourceRate` even
-/// when its Initial / VN / log windows have aged out. Hardening
-/// guide §4.1 token-bucket.
-// INTERNAL: pub for server/ sibling access; not part of the embedder API.
-pub const bandwidth_idle_threshold_us: u64 = 5_000_000;
-
 // The packed `cid_table` key format and the pre-decrypt header-peek
 // helpers live in the server/wire_peek.zig leaf; siblings import it
 // directly rather than round-tripping this file.
@@ -1717,13 +1706,10 @@ pub const Server = struct {
         return server_dos.acceptSourceBandwidth(self, addr, bytes_charged, cap_per_second, now_us);
     }
 
-    pub fn pruneSourceRate(self: *Server, now_us: u64) void {
-        return server_dos.pruneSourceRate(self, now_us);
-    }
-
-    pub fn evictOldestSourceRate(self: *Server) void {
-        return server_dos.evictOldestSourceRate(self);
-    }
+    // pruneSourceRate / evictOldestSourceRate thunks demoted: their
+    // only method-style caller was server/observability.zig, which
+    // now calls server_dos's free functions directly (95a4472 rule —
+    // sibling-only thunks don't earn a spot in Server's namespace).
 
     fn versionAccepted(self: *const Server, version: u32) bool {
         return server_vneg.versionAccepted(self, version);

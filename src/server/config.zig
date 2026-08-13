@@ -6,13 +6,17 @@
 
 const std = @import("std");
 const boringssl = @import("boringssl");
-const server_mod = @import("../server.zig");
+const server_observability = @import("observability.zig");
 const conn_mod = @import("../conn/root.zig");
 const tls_mod = @import("../tls/root.zig");
 const lb_mod = @import("../lb/root.zig");
 const state = conn_mod.state;
-const LogCallbackImpl = server_mod.Server.LogCallback;
-const ConnectionWillCloseCallbackImpl = server_mod.Server.ConnectionWillCloseCallback;
+// Direct sibling imports: these types are declared in
+// observability.zig; reaching them through server.zig's re-exports
+// would put this file in the hub cycle for no reason. With only
+// sibling imports, config.zig is a leaf.
+const LogCallbackImpl = server_observability.LogCallback;
+const ConnectionWillCloseCallbackImpl = server_observability.ConnectionWillCloseCallback;
 const QlogCallback = conn_mod.QlogCallback;
 const TransportParams = tls_mod.TransportParams;
 const RetryTokenKey = conn_mod.RetryTokenKey;
