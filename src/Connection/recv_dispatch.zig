@@ -27,7 +27,7 @@ const EncryptionLevel = state_mod.EncryptionLevel;
 const ApplicationKeyEpoch = state_mod.ApplicationKeyEpoch;
 const ApplicationReadKeySlot = state_mod.ApplicationReadKeySlot;
 const ApplicationOpenResult = state_mod.ApplicationOpenResult;
-const wire_header = state_mod.wire_header;
+const wire_header_mod = state_mod.wire_header_mod;
 const frame_mod = state_mod.frame_mod;
 const frame_types = state_mod.frame_types;
 const RttEstimator = state_mod.RttEstimator;
@@ -194,7 +194,7 @@ fn shouldDrainTlsAfterPacket(bytes: []const u8) bool {
     // RFC 9368 §3.2: Retry's wire bits depend on the version
     // (v1 = 0b11, v2 = 0b00). Resolve through `longTypeFromBits`
     // so the TLS drain skip on Retry packets covers both layouts.
-    const long_type = wire_header.longTypeFromBits(version, long_type_bits);
+    const long_type = wire_header_mod.longTypeFromBits(version, long_type_bits);
     return long_type != .retry;
 }
 
@@ -312,7 +312,7 @@ pub fn handleOnePacket(
     // default — those packets will fail downstream version /
     // AEAD gates anyway.
     const long_type_bits: u2 = @intCast((first >> 4) & 0x03);
-    const long_type = wire_header.longTypeFromBits(version, long_type_bits);
+    const long_type = wire_header_mod.longTypeFromBits(version, long_type_bits);
     return switch (long_type) {
         .initial => try conn.handleInitial(bytes, now_us),
         .zero_rtt => try conn_recv_packet_handlers.handleZeroRtt(conn, bytes, now_us),
@@ -401,7 +401,7 @@ pub fn recordApplicationReceivedPacket(
     );
 }
 
-pub fn versionListContains(vn: wire_header.VersionNegotiation, version: u32) bool {
+pub fn versionListContains(vn: wire_header_mod.VersionNegotiation, version: u32) bool {
     var i: usize = 0;
     while (i < vn.versionCount()) : (i += 1) {
         if (vn.version(i) == version) return true;

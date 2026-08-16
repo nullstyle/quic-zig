@@ -139,6 +139,16 @@ pub const SentPacket = struct {
     /// Ack-eliciting control frames that need explicit ACK/loss
     /// handling. STREAM frames are tracked by SendStream; DATAGRAM,
     /// ACK, PADDING, and CONNECTION_CLOSE are intentionally absent.
+    ///
+    /// Heap-backed on purpose: an inline [max_retransmit_frames]
+    /// array would put ~16 x @sizeOf(RetransmitFrame) (the union's
+    /// NEW_TOKEN arm alone carries 96 token bytes inline) inside
+    /// every one of the 4096 tracker slots, ballooning SentPacket
+    /// from its pinned 184 bytes to ~2.3 KB and the tracker to
+    /// ~9.5 MB per connection. The array is allocated only for the
+    /// small fraction of packets that actually carry retransmittable
+    /// control frames; bulk-transfer packets (one inline stream_ref)
+    /// pay zero allocations.
     retransmit_frames: std.ArrayList(RetransmitFrame) = .empty,
     /// DATAGRAM frames are not retransmitted by QUIC, but apps need
     /// ack/loss visibility to implement their own retry policy.

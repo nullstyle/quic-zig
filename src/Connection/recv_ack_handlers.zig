@@ -58,6 +58,12 @@ fn validateAndApplyAckEcn(
         if (counts.ect1 < pn_space.peer_ack_ect1) return false;
         if (counts.ecn_ce < pn_space.peer_ack_ce) return false;
     }
+    // RFC 9000 §13.4.2.2 (post-errata) reconciliation: the reported
+    // total cannot exceed the number of packets this endpoint
+    // actually sent with an ECT codepoint in this space. Monotonic
+    // counts alone let a peer fabricate arbitrarily large totals;
+    // the sent-side bound closes that.
+    if ((counts.ect0 +| counts.ect1 +| counts.ecn_ce) > pn_space.ect_marked_sent) return false;
     pn_space.peer_ack_ect0 = counts.ect0;
     pn_space.peer_ack_ect1 = counts.ect1;
     pn_space.peer_ack_ce = counts.ecn_ce;

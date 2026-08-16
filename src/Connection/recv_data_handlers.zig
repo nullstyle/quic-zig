@@ -289,7 +289,11 @@ pub fn handleStream(
     // budget. `RecvStream.recv` may grow its internal buffer to
     // cover [read_offset, frame_end) — the diff captures whatever
     // it actually allocated (overlapping ranges deduplicate, so
-    // the diff can be 0 or smaller than `s.data.len`).
+    // the diff can be 0 or smaller than `s.data.len`). The budget
+    // keys on the PHYSICAL `bytes.items.len`: the sliding-window
+    // consumed prefix keeps its charge until the next compaction
+    // (bounded by the half-buffer policy), which is correct — the
+    // memory is genuinely allocated while the prefix sits in it.
     const recv_before = ptr.recv.bytes.items.len;
     ptr.recv.recv(s.offset, s.data, s.fin) catch |err| switch (err) {
         error.BufferLimitExceeded => {

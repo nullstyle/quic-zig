@@ -18,7 +18,7 @@ const path_mod = state.path_mod;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const transport_error_connection_id_limit = state.transport_error_connection_id_limit;
-const wire_header = state.wire_header;
+const wire_header_mod = state.wire_header_mod;
 const util = @import("_test_util.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
 const installTestApplicationReadSecret = util.installTestApplicationReadSecret;
@@ -407,7 +407,7 @@ test "retiring CID sequence 0 does not change long-header source CID" {
 
     var out: [default_mtu]u8 = undefined;
     const n = (try conn.pollLevel(.initial, &out, 1_000_000)).?;
-    const parsed = try wire_header.parse(out[0..n], 0);
+    const parsed = try wire_header_mod.parse(out[0..n], 0);
     try std.testing.expect(parsed.header == .initial);
     try std.testing.expectEqualSlices(u8, &initial_scid, parsed.header.initial.scid.slice());
 }

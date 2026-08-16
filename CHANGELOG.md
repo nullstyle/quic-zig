@@ -38,6 +38,28 @@ throughout.
 
 ### Changed
 
+- `RecvStream.read` uses a sliding-window consumed prefix with a
+  half-buffer compaction policy (amortized O(1) per read instead of
+  O(n²)-total small-read memmoves); the resident-bytes budget now
+  explicitly keys on the physical buffer, with the consumed prefix
+  keeping its charge until compaction.
+- Peer ECN reports are reconciled against the packets this endpoint
+  actually sent with an ECT codepoint (RFC 9000 §13.4.2.2 post-errata
+  bound) — monotonic-count fabrication is now rejected and flips the
+  space to validation-failed.
+- Breaking (Internal-tier re-exports): `Connection.wire_header` and
+  `Connection.varint` are renamed to `wire_header_mod` and
+  `varint_mod` to match the `_mod` namespace-alias convention
+  (`short_packet_mod`, `frame_mod`, …). Consumers reaching the wire
+  namespace should use `quic.wire` (unchanged); the
+  `quic.conn.state.*` spellings changed.
+- The bundled UDP loops allocate `max_datagrams_per_iteration ×
+  rx_buffer_bytes` for the ingress batch (one jumbo datagram can no
+  longer truncate its batch-mates), fail up front with
+  `error.WindowsBundledLoopUnsupported` on Windows instead of deep
+  inside the first timed receive, and document the tx-buffer clamp
+  failure mode. EMBEDDING.md documents the SO_REUSEPORT multi-core
+  pattern.
 - Security audit follow-ups (full-spectrum repo audit, 2026-08):
   oversized unauthenticated datagrams are now silently discarded
   instead of closing the connection (off-path DoS); ReleaseFast and

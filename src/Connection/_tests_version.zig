@@ -16,7 +16,7 @@ const long_packet_mod = state.long_packet_mod;
 const quic_version_1 = state.quic_version_1;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_transport_parameter = state.transport_error_transport_parameter;
-const wire_header = state.wire_header;
+const wire_header_mod = state.wire_header_mod;
 
 const quic_version_2 = initial_keys_mod.quic_version_2;
 
@@ -38,9 +38,9 @@ test "Version Negotiation with no compatible version closes terminally" {
         0xff, 0x00, 0x00, 0x20,
     };
     var packet: [128]u8 = undefined;
-    const n = try wire_header.encode(&packet, .{ .version_negotiation = .{
-        .dcid = try wire_header.ConnId.fromSlice(&client_scid),
-        .scid = try wire_header.ConnId.fromSlice(&odcid),
+    const n = try wire_header_mod.encode(&packet, .{ .version_negotiation = .{
+        .dcid = try wire_header_mod.ConnId.fromSlice(&client_scid),
+        .scid = try wire_header_mod.ConnId.fromSlice(&odcid),
         .versions_bytes = &versions,
     } });
 
@@ -71,18 +71,18 @@ test "Version Negotiation is ignored when it lists QUIC v1 or has wrong CID echo
         0xff, 0x00, 0x00, 0x20,
     };
     var packet: [128]u8 = undefined;
-    var n = try wire_header.encode(&packet, .{ .version_negotiation = .{
-        .dcid = try wire_header.ConnId.fromSlice(&client_scid),
-        .scid = try wire_header.ConnId.fromSlice(&odcid),
+    var n = try wire_header_mod.encode(&packet, .{ .version_negotiation = .{
+        .dcid = try wire_header_mod.ConnId.fromSlice(&client_scid),
+        .scid = try wire_header_mod.ConnId.fromSlice(&odcid),
         .versions_bytes = &includes_v1,
     } });
     try conn.handle(packet[0..n], null, 4_000_000);
     try std.testing.expectEqual(CloseState.open, conn.closeState());
 
     const other_versions = [_]u8{ 0x6b, 0x33, 0x43, 0xcf };
-    n = try wire_header.encode(&packet, .{ .version_negotiation = .{
-        .dcid = try wire_header.ConnId.fromSlice(&.{ 0xde, 0xad }),
-        .scid = try wire_header.ConnId.fromSlice(&odcid),
+    n = try wire_header_mod.encode(&packet, .{ .version_negotiation = .{
+        .dcid = try wire_header_mod.ConnId.fromSlice(&.{ 0xde, 0xad }),
+        .scid = try wire_header_mod.ConnId.fromSlice(&odcid),
         .versions_bytes = &other_versions,
     } });
     try conn.handle(packet[0..n], null, 4_000_001);
@@ -104,9 +104,9 @@ test "Version Negotiation is ignored with wrong SCID echo or malformed versions"
 
     const other_versions = [_]u8{ 0x6b, 0x33, 0x43, 0xcf };
     var packet: [128]u8 = undefined;
-    const n = try wire_header.encode(&packet, .{ .version_negotiation = .{
-        .dcid = try wire_header.ConnId.fromSlice(&client_scid),
-        .scid = try wire_header.ConnId.fromSlice(&.{ 0xde, 0xad }),
+    const n = try wire_header_mod.encode(&packet, .{ .version_negotiation = .{
+        .dcid = try wire_header_mod.ConnId.fromSlice(&client_scid),
+        .scid = try wire_header_mod.ConnId.fromSlice(&.{ 0xde, 0xad }),
         .versions_bytes = &other_versions,
     } });
     try conn.handle(packet[0..n], null, 4_000_002);
@@ -142,9 +142,9 @@ test "Version Negotiation packets are ignored by servers" {
 
     const other_versions = [_]u8{ 0x6b, 0x33, 0x43, 0xcf };
     var packet: [128]u8 = undefined;
-    const n = try wire_header.encode(&packet, .{ .version_negotiation = .{
-        .dcid = try wire_header.ConnId.fromSlice(&.{ 8, 7, 6, 5 }),
-        .scid = try wire_header.ConnId.fromSlice(&.{ 1, 2, 3, 4 }),
+    const n = try wire_header_mod.encode(&packet, .{ .version_negotiation = .{
+        .dcid = try wire_header_mod.ConnId.fromSlice(&.{ 8, 7, 6, 5 }),
+        .scid = try wire_header_mod.ConnId.fromSlice(&.{ 1, 2, 3, 4 }),
         .versions_bytes = &other_versions,
     } });
 
@@ -204,7 +204,7 @@ test "Retry is accepted once and re-arms Initial crypto with token" {
 
     var out: [1500]u8 = undefined;
     const n = (try conn.pollLevel(.initial, &out, 4_000_001)).?;
-    const parsed = try wire_header.parse(out[0..n], 0);
+    const parsed = try wire_header_mod.parse(out[0..n], 0);
     try std.testing.expect(parsed.header == .initial);
     try std.testing.expectEqualSlices(u8, retry_token, parsed.header.initial.token);
 }
@@ -294,7 +294,7 @@ test "server writeRetry emits a Retry addressed to the client Initial SCID" {
         "server-token",
     );
 
-    const parsed = try wire_header.parse(retry[0..retry_len], 0);
+    const parsed = try wire_header_mod.parse(retry[0..retry_len], 0);
     try std.testing.expect(parsed.header == .retry);
     try std.testing.expectEqualSlices(u8, &client_scid, parsed.header.retry.dcid.slice());
     try std.testing.expectEqualSlices(u8, &retry_scid, parsed.header.retry.scid.slice());
@@ -331,7 +331,7 @@ test "server writeVersionNegotiation echoes client CIDs and versions" {
         &.{quic_version_1},
     );
 
-    const parsed = try wire_header.parse(vn[0..vn_len], 0);
+    const parsed = try wire_header_mod.parse(vn[0..vn_len], 0);
     try std.testing.expect(parsed.header == .version_negotiation);
     try std.testing.expectEqualSlices(u8, &client_scid, parsed.header.version_negotiation.dcid.slice());
     try std.testing.expectEqualSlices(u8, &client_dcid, parsed.header.version_negotiation.scid.slice());

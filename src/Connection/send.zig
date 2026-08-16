@@ -25,7 +25,7 @@ const Stream = state_mod.Stream;
 const level_mod = state_mod.level_mod;
 const frame_mod = state_mod.frame_mod;
 const frame_types = state_mod.frame_types;
-const varint = state_mod.varint;
+const varint_mod = state_mod.varint_mod;
 const long_packet_mod = state_mod.long_packet_mod;
 const short_packet_mod = state_mod.short_packet_mod;
 const send_stream_mod = state_mod.send_stream_mod;
@@ -525,6 +525,7 @@ pub fn pollLevelOnPath(
             .is_early_data = lvl == .early_data,
         };
         if (lvl == .application) conn_keys.recordApplicationPacketProtected(conn, &close_packet);
+        if (conn.ecn_enabled) pn_space.ect_marked_sent +|= 1;
         try sent_tracker.record(close_packet);
         // RFC 9000 §10.2.1 closing state. The first emit arms a
         // 3*PTO closing-state deadline; subsequent §10.2.1 ¶3
@@ -685,7 +686,7 @@ pub fn pollLevelOnPath(
     // we emit at most one per session. Frame layout: type byte
     // (0x07) + varint(token.len) + token bytes.
     if (!app_control_blocked and lvl == .application) if (conn.pending_frames.new_token) |item| {
-        const overhead_nt: usize = 1 + varint.encodedLen(item.len) + item.len;
+        const overhead_nt: usize = 1 + varint_mod.encodedLen(item.len) + item.len;
         if (max_payload >= pl_pos + overhead_nt) {
             const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
                 .new_token = .{ .token = item.slice() },
@@ -982,7 +983,7 @@ pub fn pollLevelOnPath(
     //     have to be the last frame.
     if (!path_response_used_addr_override and !congestion_blocked and (lvl == .application or lvl == .early_data) and conn.pending_frames.send_datagrams.items.len > 0) {
         const dg = conn.pending_frames.send_datagrams.items[0];
-        const dg_overhead: usize = 1 + varint.encodedLen(dg.data.len);
+        const dg_overhead: usize = 1 + varint_mod.encodedLen(dg.data.len);
         if (max_payload >= pl_pos + dg_overhead + dg.data.len) {
             const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
                 .datagram = .{ .data = dg.data, .has_length = true },
@@ -1180,6 +1181,7 @@ pub fn pollLevelOnPath(
         );
     }
     if (sent_packet.ack_eliciting) {
+        if (conn.ecn_enabled) pn_space.ect_marked_sent +|= 1;
         try sent_tracker.record(sent_packet);
         sent_packet_recorded = true;
     } else {

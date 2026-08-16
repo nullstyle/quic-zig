@@ -577,6 +577,16 @@ pub fn streamPriority(conn: *const Connection, id: u64) ?StreamPriority {
 /// fit one packet, the highest-priority `buf.len` are returned and the rest
 /// are served on a later packet. Returns the filled prefix.
 ///
+/// Perf note: this is a full stream-map walk + insertion sort per
+/// packet — O(N) per packet at high stream fan-out. The common case
+/// (one busy stream) is O(1)-ish, and the per-packet cap keeps the
+/// sort tiny. A per-urgency ready-list (or min-heap keyed on
+/// (urgency, stream_id, rr_cursor)) would bound this to the streams
+/// that actually fit the packet, but the RFC 9218 round-robin
+/// cursor and priority mutation semantics make it a dedicated
+/// scheduler refactor — deliberate, measured, and separately
+/// benchmarked — rather than an opportunistic change.
+///
 /// INTERNAL: pub for `_tests.zig` access; not part of the embedder
 /// API (the scheduling it drives is observed through `pollDatagram`).
 pub fn collectSendableStreamsByPriority(conn: *Connection, buf: []*Stream) []*Stream {
@@ -643,11 +653,14 @@ pub fn streamRead(conn: *Connection, id: u64, dst: []u8) Error!usize {
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     const before = s.recv.bytes.items.len;
     const n = s.recv.read(dst);
-    // Hardening guide §3.5 / §8: every byte the app drains is
-    // bytes the connection no longer holds in its recv buffer.
-    // `RecvStream.read` shifts the buffer down and shrinks it to
-    // exactly the live tail, so the delta is the bytes actually
-    // freed.
+    // Hardening guide §3.5 / §8: the budget keys on the PHYSICAL
+    // `bytes.items.len`. `RecvStream.read` advances the sliding
+    // window without shrinking most of the time (consumed bytes
+    // keep their budget charge until the half-buffer compaction or
+    // the full-drain reset), so this release fires only at those
+    // compaction points — the over-charge in between is bounded by
+    // the half-buffer policy and correct (the memory is genuinely
+    // allocated while the prefix sits in it).
     if (s.recv.bytes.items.len < before) {
         conn.releaseResidentBytes(before - s.recv.bytes.items.len);
     }

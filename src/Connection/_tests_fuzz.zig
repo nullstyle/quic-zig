@@ -27,7 +27,7 @@ const transport_error_stream_state = state.transport_error_stream_state;
 const transport_error_connection_id_limit = state.transport_error_connection_id_limit;
 const transport_error_internal = state.transport_error_internal;
 const short_packet_mod = state.short_packet_mod;
-const wire_header = state.wire_header;
+const wire_header_mod = state.wire_header_mod;
 const util = @import("_test_util.zig");
 const TestQlogRecorder = util.TestQlogRecorder;
 
@@ -347,7 +347,7 @@ fn fuzzCidLifecycle(_: void, smith: *std.testing.Smith) anyerror!void {
         const seq = smith.valueRangeAtMost(u64, 0, 16);
         const cid_len = smith.valueRangeAtMost(u8, 0, 20);
         // Bail out of obviously-invalid input the parser would reject
-        // before the handler sees it. `wire_header.ConnId.fromSlice`
+        // before the handler sees it. `wire_header_mod.ConnId.fromSlice`
         // errors on len > 20, but we already cap above; this is
         // belt-and-braces for forward-compat.
         if (cid_len > 20) return;

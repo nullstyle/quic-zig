@@ -10,7 +10,7 @@ const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const ConnectionId = state_mod.ConnectionId;
 const TransportParams = state_mod.TransportParams;
-const wire_header = state_mod.wire_header;
+const wire_header_mod = state_mod.wire_header_mod;
 const long_packet_mod = state_mod.long_packet_mod;
 const initial_keys_mod = state_mod.initial_keys_mod;
 const path_mod = state_mod.path_mod;
@@ -74,7 +74,7 @@ fn longHeaderCids(bytes: []const u8) Error!LongHeaderCids {
     if ((bytes[0] & 0x80) == 0) return Error.NotInitialPacket;
     // Canonical RFC 8999 §5.1 invariant-field walk; remap the wire
     // module's CID-length error onto this module's typed surface.
-    const common = wire_header.peekLongCommon(bytes) catch |err| switch (err) {
+    const common = wire_header_mod.peekLongCommon(bytes) catch |err| switch (err) {
         error.ConnIdTooLong => return Error.DcidTooLong,
         error.InsufficientBytes => return Error.InsufficientBytes,
     };
@@ -89,7 +89,7 @@ fn initialHeaderCids(bytes: []const u8) Error!LongHeaderCids {
     // RFC 9368 §3.2: the v2 long-header type rotation makes the
     // wire-bit value version-specific; resolve through
     // `longTypeFromBits` so v2 Initials don't get rejected here.
-    const long_type = wire_header.longTypeFromBits(cids.version, long_type_bits);
+    const long_type = wire_header_mod.longTypeFromBits(cids.version, long_type_bits);
     if (long_type != .initial) return Error.NotInitialPacket;
     return cids;
 }
@@ -113,9 +113,9 @@ pub fn writeVersionNegotiation(
         std.mem.writeInt(u32, versions_bytes[i * 4 ..][0..4], version, .big);
     }
 
-    return try wire_header.encode(dst, .{ .version_negotiation = .{
-        .dcid = try wire_header.ConnId.fromSlice(cids.scid),
-        .scid = try wire_header.ConnId.fromSlice(cids.dcid),
+    return try wire_header_mod.encode(dst, .{ .version_negotiation = .{
+        .dcid = try wire_header_mod.ConnId.fromSlice(cids.scid),
+        .scid = try wire_header_mod.ConnId.fromSlice(cids.dcid),
         .versions_bytes = versions_bytes[0 .. supported_versions.len * 4],
     } });
 }

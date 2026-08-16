@@ -101,6 +101,20 @@ echo example pair is built on exactly that hook. When your process
 already has an event loop of its own, drive the caller-drives path
 directly instead: see "Foreign Event Loops" below.
 
+### Scaling across cores
+
+There is no built-in multi-worker mode: one `Server` is one
+single-threaded instance. To use more than one core, run N independent
+`Server` instances (each on its own thread or process) sharing the
+same port via `SO_REUSEPORT` — set it on the socket before handing
+control to `runUdpServer` (bind the socket yourself and pass the
+address through `RunUdpOptions.listen` once reuse is enabled), or
+drive each instance caller-drives. No shared state exists between
+instances, so no locks are needed; connection CIDs and stateless-reset
+tokens must be minted from per-instance configurations (QUIC-LB or
+random SCIDs) so peers route to the instance that owns their
+connection.
+
 ## Client Wrapper
 
 `Client.connect` owns the client-side TLS setup and initial connection

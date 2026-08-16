@@ -64,6 +64,15 @@ peer_ack_ce: u64 = 0,
 /// trivially pass.
 peer_ack_ecn_seen: bool = false,
 
+/// Cumulative count of packets we SENT in this space carrying an
+/// ECT codepoint (i.e. every packet emitted while `ecn_enabled` —
+/// the bundled loops mark the whole socket ECT(0)). Incremented by
+/// the send path at record time; the §13.4.2.2 reconciliation check
+/// rejects a peer ACK whose reported ECT0+ECT1+CE total exceeds
+/// this bound (a peer cannot legitimately report more ECN-marked
+/// packets than we put on the wire).
+ect_marked_sent: u64 = 0,
+
 /// Per-space ECN validation state. Starts at `testing`; flips to
 /// `failed` on any §13.4.2 violation and never recovers (the
 /// path is presumed ECN-bleached for the remainder of the

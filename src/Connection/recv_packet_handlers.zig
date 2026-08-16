@@ -32,7 +32,7 @@ const ConnectionId = state_mod.ConnectionId;
 const EncryptionLevel = state_mod.EncryptionLevel;
 const PacketKeys = state_mod.PacketKeys;
 const PnSpace = state_mod.PnSpace;
-const wire_header = state_mod.wire_header;
+const wire_header_mod = state_mod.wire_header_mod;
 const long_packet_mod = state_mod.long_packet_mod;
 const path_mod = state_mod.path_mod;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
@@ -49,7 +49,7 @@ pub fn handleVersionNegotiation(
     now_us: u64,
 ) usize {
     if (conn.role != .client or conn.inner.handshakeDone()) return bytes.len;
-    const parsed = wire_header.parse(bytes, 0) catch return bytes.len;
+    const parsed = wire_header_mod.parse(bytes, 0) catch return bytes.len;
     if (parsed.header != .version_negotiation) return bytes.len;
     const vn = parsed.header.version_negotiation;
     if (!conn.local_scid_set or !conn.initial_dcid_set) return bytes.len;
@@ -273,7 +273,7 @@ pub fn handleRetry(
     if (conn.role != .client or conn.retry_accepted or conn.inner.handshakeDone()) {
         return bytes.len;
     }
-    const parsed = wire_header.parse(bytes, 0) catch return bytes.len;
+    const parsed = wire_header_mod.parse(bytes, 0) catch return bytes.len;
     if (parsed.header != .retry) return bytes.len;
     const retry = parsed.header.retry;
     // Retry's version field MUST match our active version; if a v1

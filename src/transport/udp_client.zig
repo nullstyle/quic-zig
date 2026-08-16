@@ -45,6 +45,7 @@
 //! second thread while the loop runs. Same model as `runUdpServer`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Client = @import("../Client.zig");
 const conn_state = @import("../Connection.zig");
@@ -184,6 +185,11 @@ pub const RunError = error{
     SocketTuningFailed,
     /// `rx_buffer_bytes` or `tx_buffer_bytes` was set to 0.
     InvalidBufferSize,
+    /// The bundled loop cannot run on native Windows at the pinned
+    /// toolchain (std has no overlapped-I/O net_receive, so the timed
+    /// receive the loop needs is unavailable). Drive the connection
+    /// with examples/foreign_loop_embedder.zig instead.
+    WindowsBundledLoopUnsupported,
     OutOfMemory,
     //
     // Inherited from `Net.Socket.ReceiveTimeoutError`:
@@ -219,6 +225,11 @@ pub const RunError = error{
 /// as `runUdpServer`. Embedders that want application logic interleaved
 /// on one thread should use the raw `Connection` cycle in EMBEDDING.md.
 pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void {
+    // Fail up front on Windows instead of deep inside the first timed
+    // receive (see RunError.WindowsBundledLoopUnsupported).
+    if (comptime builtin.os.tag == .windows) {
+        return error.WindowsBundledLoopUnsupported;
+    }
     if (options.rx_buffer_bytes == 0 or options.tx_buffer_bytes == 0) {
         return error.InvalidBufferSize;
     }
@@ -265,7 +276,8 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
     const gro_active = offloads.gro_active;
 
     const allocator = client.allocator;
-    const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
+    const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
+    const rx = try allocator.alloc(u8, options.rx_buffer_bytes * batch_len);
     defer allocator.free(rx);
     var send_batch = try egress.SendBatch.init(
         allocator,
@@ -280,7 +292,6 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
     defer allocator.free(gso_buf);
     const cmsg_buf_len: usize = if (ecn_active or gro_active) options.cmsg_buffer_bytes else 0;
     var empty_cmsg_buf: [0]u8 = undefined;
-    const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
     const cmsg_buf: []u8 = if (cmsg_buf_len > 0)
         try allocator.alloc(u8, cmsg_buf_len * batch_len)
     else

@@ -60,13 +60,13 @@ const boringssl = @import("boringssl");
 const c = boringssl.raw;
 
 pub const level_mod = @import("tls/level.zig");
-pub const wire_header = @import("wire/header.zig");
+pub const wire_header_mod = @import("wire/header.zig");
 pub const short_packet_mod = @import("wire/short_packet.zig");
 pub const long_packet_mod = @import("wire/long_packet.zig");
 pub const initial_keys_mod = @import("wire/initial.zig");
 pub const transport_params_mod = @import("tls/transport_params.zig");
 pub const early_data_context_mod = @import("tls/early_data_context.zig");
-pub const varint = @import("wire/varint.zig");
+pub const varint_mod = @import("wire/varint.zig");
 pub const frame_mod = @import("frame/root.zig");
 pub const frame_types = @import("frame/types.zig");
 pub const ack_range_mod = @import("frame/ack_range.zig");

@@ -80,6 +80,12 @@ bytes: std.ArrayList(u8) = .empty,
 /// Absolute offset of the first byte in `bytes`. Bytes
 /// < read_offset have been read by the app and dropped.
 read_offset: u64 = 0,
+/// Consumed-prefix length inside `bytes.items`: bytes
+/// [0..buf_start) have been read but not yet memmoved out (the
+/// sliding-window policy compacts once the prefix reaches half the
+/// buffer). Live bytes are `bytes.items[buf_start..]`, indexed by
+/// `absolute_offset - read_offset`.
+buf_start: usize = 0,
 /// One past the highest absolute offset anything has touched.
 end_offset: u64 = 0,
 
@@ -134,6 +140,13 @@ pub fn readableBytes(self: *const RecvStream) u64 {
     const r = self.ranges.items[0];
     if (r.offset != self.read_offset) return 0;
     return r.end - r.offset;
+}
+
+/// Live (not yet consumed by the app) bytes physically held in
+/// the reassembly buffer — `bytes.items.len` minus the
+/// consumed-prefix the sliding window has not compacted yet.
+pub fn liveBytes(self: *const RecvStream) usize {
+    return self.bytes.items.len - self.buf_start;
 }
 
 /// Has the app read every byte and seen the FIN?
@@ -207,8 +220,8 @@ pub fn recv(
     const span = clip_end - self.read_offset;
     if (span > self.max_buffered_span) return Error.BufferLimitExceeded;
     const buf_required: usize = @intCast(span);
-    if (self.bytes.items.len < buf_required) {
-        const grow_by = buf_required - self.bytes.items.len;
+    if (self.liveBytes() < buf_required) {
+        const grow_by = (self.buf_start + buf_required) - self.bytes.items.len;
         const slack = try self.bytes.addManyAsSlice(self.allocator, grow_by);
         @memset(slack, 0);
     }
@@ -243,7 +256,7 @@ pub fn recv(
         // Bytes in [pos, covered_start) are new — write them.
         const new_end_pos: u64 = covered_start;
         if (new_end_pos > pos) {
-            const buf_pos: usize = @intCast(pos - self.read_offset);
+            const buf_pos: usize = @as(usize, @intCast(pos - self.read_offset)) + self.buf_start;
             const buf_len: usize = @intCast(new_end_pos - pos);
             @memcpy(
                 self.bytes.items[buf_pos .. buf_pos + buf_len],
@@ -278,18 +291,15 @@ pub fn recv(
 /// are available — call `readableBytes` first if you want to
 /// distinguish "would block" from "stream done".
 ///
-/// Perf note: each read memmoves the remaining live tail down
-/// (O(n) per read; O(n²) total when a large reassembly buffer is
-/// drained in small reads). A sliding-window prefix (the pattern
-/// `SendStream.SendByteBuffer` uses) would fix this, but the
-/// `buffer[i] == byte at read_offset + i` invariant is load-bearing
-/// for the resident-bytes budget reconciliation in
-/// recv_data_handlers.zig — switching to a retained-prefix design
-/// requires redesigning that accounting in the same change (the
-/// budget is keyed on bytes.items.len, which a retained prefix would
-/// keep charged for already-consumed bytes). Left as-is
-/// deliberately; embedders draining large buffers should read in
-/// bulk via readableBytes().
+/// Sliding-window semantics: consumed bytes stay in the physical
+/// buffer as a prefix (`buf_start`) instead of a per-read memmove,
+/// and the tail is compacted once the prefix reaches half the
+/// buffer (or the buffer is fully drained) — amortized O(1) per
+/// read instead of the old O(n²)-total small-read pattern. The
+/// resident-bytes budget keys on the PHYSICAL `bytes.items.len`,
+/// so between compactions the consumed prefix keeps its budget
+/// charge — bounded by the half-buffer policy and correct in the
+/// budget's own terms (the memory is genuinely allocated).
 pub fn read(self: *RecvStream, dst: []u8) usize {
     if (self.ranges.items.len == 0) {
         self.maybeAdvanceState();
@@ -300,13 +310,23 @@ pub fn read(self: *RecvStream, dst: []u8) usize {
 
     const avail: usize = @intCast(r.end - r.offset);
     const take: usize = @min(dst.len, avail);
-    @memcpy(dst[0..take], self.bytes.items[0..take]);
+    @memcpy(dst[0..take], self.bytes.items[self.buf_start..][0..take]);
 
-    // Shift the buffer down.
-    const live_len = self.bytes.items.len - take;
-    std.mem.copyForwards(u8, self.bytes.items[0..live_len], self.bytes.items[take..]);
-    self.bytes.shrinkRetainingCapacity(live_len);
+    // Sliding window: advance the consumed prefix without a memmove.
+    // Compaction is amortized O(1): when the prefix hits half the
+    // buffer (or the buffer is fully drained) the live tail is
+    // memmoved down once and the prefix resets to zero.
+    self.buf_start += take;
     self.read_offset += take;
+    if (self.buf_start == self.bytes.items.len) {
+        self.bytes.clearRetainingCapacity();
+        self.buf_start = 0;
+    } else if (self.buf_start >= self.bytes.items.len / 2) {
+        const live_len = self.bytes.items.len - self.buf_start;
+        std.mem.copyForwards(u8, self.bytes.items[0..live_len], self.bytes.items[self.buf_start..]);
+        self.bytes.shrinkRetainingCapacity(live_len);
+        self.buf_start = 0;
+    }
 
     // Update range head.
     if (take == avail) {
@@ -321,10 +341,11 @@ pub fn read(self: *RecvStream, dst: []u8) usize {
     // the buffer will never grow again — release the backing
     // capacity so a long-lived connection doesn't accumulate
     // peak-sized allocations across short streams. The connection
-    // budget is keyed on `bytes.items.len`, which is already 0
-    // here, so this is purely a physical-allocator return; no
-    // additional budget bookkeeping is required.
-    if (self.state == .data_recvd and self.bytes.items.len == 0) {
+    // budget is keyed on the physical `bytes.items.len` (which the
+    // full-drain reset above already took to 0), so this is purely
+    // a physical-allocator return; no additional budget
+    // bookkeeping is required.
+    if (self.state == .data_recvd and self.liveBytes() == 0) {
         self.compact();
     }
 
@@ -374,6 +395,7 @@ pub fn resetStream(
 pub fn compact(self: *RecvStream) void {
     if (self.bytes.items.len > 0) {
         self.bytes.clearRetainingCapacity();
+        self.buf_start = 0;
     }
     if (self.bytes.capacity > 0) {
         self.bytes.shrinkAndFree(self.allocator, 0);
@@ -718,7 +740,8 @@ test "compact is idempotent and safe when called twice" {
 // - `read_offset` is monotonic (only ever advances).
 // - `read_offset <= end_offset` always.
 // - When `final_size` is set, no range extends beyond it.
-// - `bytes.items.len` matches the buffered span (a function of
+// - `liveBytes()` (physical items.len minus the sliding-window
+//   consumed prefix) matches the buffered span (a function of
 //   `read_offset` and the highest range end).
 // - Range list stays sorted, disjoint, non-empty.
 //
@@ -780,12 +803,12 @@ fn fuzzRecvStream(_: void, smith: *std.testing.Smith) anyerror!void {
         // Buffered span equals end-of-highest-range minus read_offset
         // (or 0 if there are no ranges).
         if (s.ranges.items.len == 0) {
-            try testing.expectEqual(@as(usize, 0), s.bytes.items.len);
+            try testing.expectEqual(@as(usize, 0), s.liveBytes());
         } else {
             const top = s.ranges.items[s.ranges.items.len - 1].end;
             try testing.expect(top >= s.read_offset);
             const expected_buf: u64 = top - s.read_offset;
-            try testing.expectEqual(@as(usize, @intCast(expected_buf)), s.bytes.items.len);
+            try testing.expectEqual(@as(usize, @intCast(expected_buf)), s.liveBytes());
         }
         // Range list invariants: sorted, disjoint, non-empty intervals,
         // bounded by [read_offset, final_size or end_offset].

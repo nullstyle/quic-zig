@@ -34,6 +34,7 @@
 //! See `README.md` for an end-to-end embedder example.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Server = @import("../Server.zig");
 const egress = @import("egress.zig");
@@ -161,13 +162,22 @@ pub const RunUdpOptions = struct {
     /// CONNECTION_CLOSE frames reach peers; without it, the server
     /// would just stop sending and peers would idle out.
     shutdown_grace_us: u64 = 5_000_000,
-    /// Receive scratch buffer size. The loop allocates this on its
-    /// own stack; embedders cannot pass external memory because
-    /// `std.Io` does not surface any zero-copy receive hooks today.
+    /// Per-datagram receive scratch. The loop allocates
+    /// `max_datagrams_per_iteration × rx_buffer_bytes` total: one
+    /// ingress batch shares the buffer and the std backend carves it
+    /// sequentially, so a burst of jumbo datagrams truncates the tail
+    /// if a single rx_buffer_bytes cannot hold one. The 64 KiB default
+    /// holds 16 × 4 KiB datagrams (~1 MiB allocation per socket);
+    /// jumbo-frame deployments should raise this to at least the
+    /// negotiated `max_udp_payload_size`.
     rx_buffer_bytes: usize = default_rx_buffer_bytes,
     /// Send scratch buffer size. Should be at least the connection's
     /// negotiated `max_udp_payload_size` (default 1200 in quic, plus
     /// header overhead — 1500 is safe; bump for jumbo-frame paths).
+    /// NOTE: the loop silently clamps every datagram (and DPLPMTUD
+    /// probes) to this size — there is no per-connection TP check at
+    /// the loop layer, so an undersized tx_buffer_bytes is a quiet
+    /// goodput regression, not an error.
     tx_buffer_bytes: usize = default_tx_buffer_bytes,
     /// How often (in iterations) to call `Server.reap`. Reaping is
     /// cheap, but doing it every iteration when the typical loop is
@@ -217,6 +227,13 @@ pub const RunError = error{
     /// `RunUdpOptions.rx_buffer_bytes` or `tx_buffer_bytes` was set
     /// to 0. Both must be > 0 for the loop to make progress.
     InvalidBufferSize,
+    /// The bundled loop cannot run on native Windows at the pinned
+    /// toolchain: std's Windows backend has no overlapped-I/O path for
+    /// the timed receive the loop needs (receiveManyTimeout →
+    /// Batch.awaitConcurrent → net_receive). The protocol engine is
+    /// fully portable; drive the connection with
+    /// examples/foreign_loop_embedder.zig instead.
+    WindowsBundledLoopUnsupported,
     OutOfMemory,
     //
     // Inherited from `Net.Socket.ReceiveTimeoutError`, and worth
@@ -298,6 +315,11 @@ const max_listeners: usize = 3;
 pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     if (options.rx_buffer_bytes == 0 or options.tx_buffer_bytes == 0) {
         return error.InvalidBufferSize;
+    }
+    // Fail up front on Windows instead of deep inside the first timed
+    // receive (see RunError.WindowsBundledLoopUnsupported).
+    if (comptime builtin.os.tag == .windows) {
+        return error.WindowsBundledLoopUnsupported;
     }
 
     var listeners_storage: [max_listeners]Listener = undefined;
@@ -389,7 +411,8 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     }
 
     const allocator = server.allocator;
-    const rx = try allocator.alloc(u8, options.rx_buffer_bytes);
+    const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
+    const rx = try allocator.alloc(u8, options.rx_buffer_bytes * batch_len);
     defer allocator.free(rx);
     // cmsg buffer is shared across listeners — only one listener is
     // read per inner-loop iteration, so the kernel re-populates the
@@ -402,7 +425,6 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             break;
         }
     }
-    const batch_len: usize = @max(1, options.max_datagrams_per_iteration);
     var any_offload_cmsg = any_ecn_active;
     for (listeners) |l| {
         if (l.gro_active) any_offload_cmsg = true;
