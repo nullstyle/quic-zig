@@ -736,7 +736,12 @@ pub fn init(config: Config) Error!Server {
             error.AesKeyInvalid => return Error.InvalidConfig,
             error.RandFailure => return Error.RandFailed,
             error.InvalidLbConfig => return Error.InvalidConfig,
-            error.BufferTooSmall, error.NonceExhausted => unreachable,
+            // Config-time impossibilities: the validated config pins
+            // the CID length and a fresh factory starts at nonce 0.
+            // Surfaced as InvalidConfig rather than panicking so a
+            // future refactor of Factory's error set can't turn a
+            // latent invariant into a crash.
+            error.BufferTooSmall, error.NonceExhausted, error.InvalidPlaintextLen => return Error.InvalidConfig,
         };
         break :blk f;
     } else null;

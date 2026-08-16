@@ -286,6 +286,191 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     try std.testing.expect(cli3.conn.pollEvent() == null);
 }
 
+test "0-RTT x mTLS: early data denied until the resumed identity is re-verified, and a certless resume is refused" {
+    const allocator = std.testing.allocator;
+
+    // mTLS posture: the server requires and verifies a client
+    // certificate. Per RFC 9001 §4.6.4 that verification only
+    // happens inside the resumed handshake, so early data must be
+    // denied on the wire (the deny hook forces a 1-RTT handshake).
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .client_ca_pem = common.test_cert_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .early_data = .without_replay_protection,
+    });
+    defer srv.deinit();
+
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+
+    var rx: [4096]u8 = undefined;
+    const addr1: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x11), .port = 1111 } };
+
+    // ---- Connection 1: earn a ticket while presenting the client
+    // certificate (the fixture doubles as client identity). ----
+    {
+        var cli = try quic.Client.connect(.{
+            .insecure_skip_verify = true, // self-signed test cert
+            .allocator = allocator,
+            .server_name = "localhost",
+            .alpn_protocols = &protos,
+            .transport_params = common.defaultParams(),
+            .client_cert_pem = common.test_cert_pem,
+            .client_key_pem = common.test_key_pem,
+            .new_session_callback = EnvelopeSink.cb,
+            .new_session_user_data = &sink,
+        });
+        defer cli.deinit();
+
+        try cli.conn.advance();
+        var now_us: u64 = 1_000;
+        var step: u32 = 0;
+        while (step < 48 and sink.captured == null) : (step += 1) {
+            try pumpClientToServer(&cli, &srv, &rx, addr1, now_us);
+            while (srv.drainStatelessResponse()) |_| {}
+            try pumpServerToClient(&srv, &cli, &rx, now_us);
+            try srv.tick(now_us);
+            try cli.conn.tick(now_us);
+            now_us += 1_000;
+        }
+        try std.testing.expect(cli.conn.handshakeDone());
+        try std.testing.expect(sink.captured != null);
+
+        // Tear down connection 1 so the resumption runs against a
+        // clean slot table.
+        cli.conn.close(false, 0, "done");
+        var close_steps: u32 = 0;
+        while (close_steps < 32 and srv.connectionCount() > 0) : (close_steps += 1) {
+            try pumpClientToServer(&cli, &srv, &rx, addr1, now_us);
+            try pumpServerToClient(&srv, &cli, &rx, now_us);
+            try srv.tick(now_us);
+            try cli.conn.tick(now_us);
+            _ = srv.reap();
+            now_us += 500_000;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
+
+    // ---- Connection 2: resume WITH the certificate + staged 0-RTT.
+    // The deny hook forces 1-RTT, so the staged bytes must arrive at
+    // 1-RTT (never readable on the server while the handshake is
+    // incomplete) and the early-data status is rejected. ----
+    const early_payload = "early-hello";
+    const addr2: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x22), .port = 2222 } };
+    var cli2 = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .client_cert_pem = common.test_cert_pem,
+        .client_key_pem = common.test_key_pem,
+        .resumption_state = sink.captured.?,
+    });
+    defer cli2.deinit();
+
+    cli2.conn.setEarlyDataEnabled(true);
+    _ = try cli2.conn.openBidi(0);
+    _ = try cli2.conn.streamWrite(0, early_payload);
+    try cli2.conn.streamFinish(0);
+    try cli2.conn.advance();
+
+    var now_us: u64 = 60_000_000;
+    var rbuf: [256]u8 = undefined;
+    var early_read: usize = 0;
+    var read_before_handshake_done = false;
+    var step: u32 = 0;
+    while (step < 48) : (step += 1) {
+        try pumpClientToServer(&cli2, &srv, &rx, addr2, now_us);
+        while (srv.drainStatelessResponse()) |_| {}
+
+        // The decisive check: with mTLS the server must NOT surface
+        // bytes while its handshake is incomplete.
+        if (srv.iterator().len > 0) {
+            const slot = srv.iterator()[0];
+            while (true) {
+                const got = slot.conn.streamRead(0, rbuf[early_read..]) catch break;
+                if (got == 0) break;
+                if (!slot.conn.handshakeDone()) read_before_handshake_done = true;
+                early_read += got;
+            }
+        }
+
+        try pumpServerToClient(&srv, &cli2, &rx, now_us);
+        try srv.tick(now_us);
+        try cli2.conn.tick(now_us);
+
+        if (cli2.conn.handshakeDone() and early_read >= early_payload.len) break;
+        now_us += 1_000;
+    }
+
+    try std.testing.expect(cli2.conn.handshakeDone());
+    try std.testing.expectEqual(early_payload.len, early_read);
+    try std.testing.expectEqualStrings(early_payload, rbuf[0..early_read]);
+    try std.testing.expect(!read_before_handshake_done);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, cli2.conn.earlyDataStatus());
+
+    // ---- Connection 3: resume WITHOUT re-presenting a certificate.
+    // RFC 8446 §4.6.1 lets the server vouch for the prior client auth
+    // through the ticket, so the resumed handshake legitimately
+    // completes — but the early-data denial must still hold: bytes
+    // arrive only at 1-RTT, never before the handshake finishes. ----
+    const addr3: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x33), .port = 3333 } };
+    var cli3 = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .resumption_state = sink.captured.?,
+    });
+    defer cli3.deinit();
+
+    cli3.conn.setEarlyDataEnabled(true);
+    _ = try cli3.conn.openBidi(0);
+    _ = try cli3.conn.streamWrite(0, early_payload);
+    try cli3.conn.streamFinish(0);
+    try cli3.conn.advance();
+
+    now_us = 120_000_000;
+    var rbuf3: [256]u8 = undefined;
+    var late_read: usize = 0;
+    var late_read_before_handshake_done = false;
+    step = 0;
+    while (step < 48) : (step += 1) {
+        try pumpClientToServer(&cli3, &srv, &rx, addr3, now_us);
+        while (srv.drainStatelessResponse()) |_| {}
+        // Iterate every slot: the connection-2 slot is still live at
+        // index 0, so connection 3's data lands in a later slot.
+        for (srv.iterator()) |slot| {
+            while (true) {
+                const got = slot.conn.streamRead(0, rbuf3[late_read..]) catch break;
+                if (got == 0) break;
+                if (!slot.conn.handshakeDone()) late_read_before_handshake_done = true;
+                late_read += got;
+            }
+        }
+        try pumpServerToClient(&srv, &cli3, &rx, now_us);
+        try srv.tick(now_us);
+        try cli3.conn.tick(now_us);
+        if (cli3.conn.handshakeDone() and late_read >= early_payload.len) break;
+        now_us += 1_000;
+    }
+
+    // Ticket-vouched identity completes the handshake, but early data
+    // is still denied: bytes arrive at 1-RTT only.
+    try std.testing.expect(!cli3.conn.isClosed());
+    try std.testing.expect(cli3.conn.handshakeDone());
+    try std.testing.expectEqual(early_payload.len, late_read);
+    try std.testing.expectEqualStrings(early_payload, rbuf3[0..late_read]);
+    try std.testing.expect(!late_read_before_handshake_done);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, cli3.conn.earlyDataStatus());
+}
+
 test "replayed 0-RTT DATAGRAM packet is delivered only once (L1)" {
     // 0-RTT analogue of the 1-RTT dedup regression in
     // `unknown_frames_smoke.zig`. 0-RTT and 1-RTT share ONE

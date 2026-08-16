@@ -344,7 +344,7 @@ pub const HandshakePair = struct {
     /// (it inspects the parsed Frame tag, not any TLS state). The
     /// in-source test
     /// `"server rejects forbidden frames in 0-RTT"` in
-    /// `src/conn/state.zig` uses the same secret-injection technique
+    /// `src/Connection.zig` uses the same secret-injection technique
     /// against a bare `Connection` to assert the same gate.
     pub fn injectFrameAtServer0Rtt(
         self: *HandshakePair,

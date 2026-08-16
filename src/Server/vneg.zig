@@ -128,7 +128,8 @@ fn decryptInitialPreparse(
     @memcpy(pkt_copy[0..bytes.len], bytes);
 
     const init_keys = wire.initial.deriveInitialKeysFor(wire_version, ids.dcid, false) catch return null;
-    const r_keys = wire.short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret) catch return null;
+    var r_keys = wire.short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret) catch return null;
+    defer r_keys.deinitAead();
 
     const opened = wire.long_packet.openInitial(pt_buf, pkt_copy[0..bytes.len], .{
         .keys = &r_keys,

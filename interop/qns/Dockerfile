@@ -80,7 +80,7 @@ WORKDIR /src/quic-zig
 # Build for the architecture's baseline CPU. Without this, Zig defaults to
 # native and BoringSSL can compile hardware checks as compile-time true on the
 # build host, then SIGILL on a less capable deployment CPU.
-RUN zig build qns-endpoint -Doptimize=ReleaseSafe -Dcpu=baseline
+RUN zig build qns-endpoint -Drelease -Dcpu=baseline
 
 FROM martenseemann/quic-network-simulator-endpoint:latest
 

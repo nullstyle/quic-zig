@@ -552,7 +552,7 @@ test "MUST close with CRYPTO_ERROR + no_application_protocol (0x178) on ALPN mis
     // therefore tests the same wire-code translation that §4.1.1 ¶3
     // requires. We use that for live coverage.
     //
-    // Wiring: `sendAlert` in src/conn/state.zig converts the alert
+    // Wiring: `sendAlert` in src/Connection.zig converts the alert
     // byte to a `close(true, 0x100 + alert, ...)` per RFC 9001 §4.8,
     // so the connection closes with the right wire code regardless of
     // which side raised the alert.
@@ -758,7 +758,7 @@ test "MUST enforce per-key AEAD invocation limits at runtime [RFC9001 §5.5 ¶2]
     // §5.5 ¶2: "If the total number of encrypted packets with the same
     // key exceeds the confidentiality limit for the AEAD, the endpoint
     // MUST stop using those keys." quic enforces this in
-    // `Connection.prepareApplicationWriteKeys` (src/conn/state.zig):
+    // `Connection.prepareApplicationWriteKeys` (src/Connection.zig):
     // when `app_write_current.packets_protected` reaches
     // `app_key_update_limits.confidentiality_limit`, the connection
     // calls `close(true, AEAD_LIMIT_REACHED, ...)` — wire error code
@@ -835,7 +835,7 @@ test "MUST discard Initial keys once Handshake keys are available [RFC9001 §5.7
     // sends a Handshake packet … a server MUST discard Initial keys
     // when it first successfully processes a Handshake packet."
     //
-    // quic's `Connection.discardInitialKeys` (src/conn/state.zig)
+    // quic's `Connection.discardInitialKeys` (src/Connection.zig)
     // fires from the BoringSSL `setSecret` callback when Handshake
     // (or Application) secrets are installed. After
     // `driveToHandshakeConfirmed`, `initialKeysActive(.read)` and
@@ -885,7 +885,7 @@ test "MUST refuse a second key update until the first is acknowledged [RFC9001 �
     // `requestKeyUpdate` succeeds, a second invocation before the
     // matching ACK arrives must reject with
     // `Error.KeyUpdateBlocked`. We don't drive the ACK path here —
-    // that's covered by the in-file unit test in `state.zig` — we
+    // that's covered by the in-file unit test in `Connection.zig` — we
     // only assert the gate fires from a real, handshake-confirmed
     // Connection driven by the fixture.
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
@@ -904,4 +904,24 @@ test "MUST refuse a second key update until the first is acknowledged [RFC9001 �
         quic.conn.state.Error.KeyUpdateBlocked,
         cli.requestKeyUpdate(now_us + 1_000),
     );
+}
+
+// skip_ stubs: prose "Visible debt" converted to machine-visible form (2026-08).
+
+test "skip_MUST close with no_application_protocol when a peer omits ALPN [RFC9001 §4.1.1 ¶3]" {
+    // Visible debt: RFC9001 §4.1.1 ¶3 MUST server closes with
+    // no_application_protocol (crypto_error 0x178) when a peer omits ALPN
+    // entirely — not covered: BoringSSL's client-side
+    // `ext_alpn_add_clienthello` refuses to construct a no-ALPN ClientHello
+    // whenever QUIC is active, so no compliant peer produces this case. (The
+    // ALPN *mismatch* close IS enforced and tested below, asserting
+    // error_code 0x178.)
+    return error.SkipZigTest;
+}
+
+test "skip_SHOULD session ticket includes transport-parameter context [RFC9001 §4.8 ¶2]" {
+    // Visible debt: RFC9001 §4.8 ¶2 SHOULD session ticket includes
+    // transport-parameter context — covered structurally below; full ticket
+    // round-trip is not yet exercised.
+    return error.SkipZigTest;
 }

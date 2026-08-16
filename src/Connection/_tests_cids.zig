@@ -17,6 +17,7 @@ const max_recv_plaintext = state.max_recv_plaintext;
 const path_mod = state.path_mod;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
+const transport_error_connection_id_limit = state.transport_error_connection_id_limit;
 const wire_header = state.wire_header;
 const util = @import("_test_util.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
@@ -623,7 +624,7 @@ test "peer cid registration enforces active cid limit per path" {
         .stateless_reset_token = @splat(2),
     });
     try std.testing.expect(conn.lifecycle.pending_close != null);
-    try std.testing.expectEqual(transport_error_protocol_violation, conn.lifecycle.pending_close.?.error_code);
+    try std.testing.expectEqual(transport_error_connection_id_limit, conn.lifecycle.pending_close.?.error_code);
 }
 
 test "retire_prior_to retires peer cids only on the indicated path" {

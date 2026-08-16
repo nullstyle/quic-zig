@@ -9,7 +9,11 @@ const manifest = @import("build.zig.zon");
 // dependency, from a consumer's point of view. This assert is the
 // enforcement, and it runs for dependency builds too, so downstream
 // projects get the same diagnostic. Floor bumps are recorded as
-// breaking changes in CHANGELOG.md.
+// breaking changes in CHANGELOG.md. NOTE: `SemanticVersion.order`
+// ignores build metadata, so the exact toolchain commit (+5ceec001b
+// etc.) is enforced only for maintainers and CI via mise.toml and the
+// QNS Dockerfile; downstream consumers get the semver floor
+// (0.17.0-dev.1683), not the commit pin.
 comptime {
     const required = std.SemanticVersion.parse(manifest.minimum_zig_version) catch
         @compileError("build.zig.zon minimum_zig_version is not valid semver: " ++
@@ -100,10 +104,11 @@ fn boringsslDependency(
 // `b.standardOptimizeOption` defaults to `Debug` so iterative
 // development (`zig build test`, embedder smoke runs, interop
 // fixtures) is fast and prints useful panic stacks. **Production /
-// internet-facing builds MUST pass `-Doptimize=ReleaseSafe`** to
-// keep Zig's runtime safety checks enabled (integer overflow,
-// out-of-bounds slicing, optional unwrap, `unreachable`,
-// `@setRuntimeSafety` toggles) while optimizing.
+// internet-facing builds MUST pass `-Drelease`**, which resolves to
+// ReleaseSafe (the preferred mode set below) and keeps Zig's runtime
+// safety checks enabled (integer overflow, out-of-bounds slicing,
+// optional unwrap, `unreachable`, `@setRuntimeSafety` toggles) while
+// optimizing.
 //
 // `ReleaseFast` and `ReleaseSmall` are forbidden by default for the
 // network-input parser surface. Both compile out runtime safety,
@@ -117,7 +122,29 @@ fn boringsslDependency(
 // intentionally want unsafe peak-speed measurements.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{
+        // 'zig build --release' selects the preferred mode; point it
+        // at ReleaseSafe so the ordinary "release" spelling cannot
+        // silently disable runtime safety checks on the parser.
+        .preferred_optimize_mode = .safe,
+    });
+    // Enforce the build-mode policy declared above. The prose warning
+    // is not enough: with the current toolchain `-Drelease` is boolean
+    // and resolves to the preferred mode below, but a future toolchain
+    // (or a programmatic caller) could select fast/small directly —
+    // reject both so the network-input parser can never be compiled
+    // with runtime safety off, turning documented non-peer-reachable
+    // invariants into UB on adversarial input. Benchmarks opt into
+    // ReleaseFast separately via -Dbench-unsafe-release-fast, which
+    // does not require (and should not be combined with) a fast/small
+    // main tree.
+    if (optimize == .fast or optimize == .small) {
+        @panic("ReleaseFast/ReleaseSmall are unsupported for quic-zig: " ++
+            "internet-facing builds must use -Drelease, which resolves " ++
+            "to ReleaseSafe (see the build-mode policy comment above). " ++
+            "Benchmarks opt into ReleaseFast via " ++
+            "-Dbench-unsafe-release-fast.");
+    }
     const is_windows = target.result.os.tag == .windows;
     const sanitize_c: ?std.zig.SanitizeC = if (b.option(
         []const u8,

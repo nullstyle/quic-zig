@@ -495,12 +495,16 @@ fn finishOpenedPacket(
     // idempotent, so skipping the dispatch there is a no-op that is
     // also cheaper.
     const duplicate_pn = pn_space.received.contains(pn);
+    // One classification pass serves ACK-eligibility bookkeeping, the
+    // Initial/Handshake immediate-ACK rule, and the qlog frame count
+    // (previously three separate full frame scans per packet).
+    const cls = conn_recv_dispatch.classifyPayload(payload);
     switch (lvl) {
         .early_data, .application => conn_recv_dispatch.recordApplicationReceivedPacket(
             pn_space,
             pn,
             now_us,
-            payload,
+            cls,
             conn.delayed_ack_packet_threshold,
         ),
         // RFC 9000 §13.2.1: Initial and Handshake packets MUST NOT
@@ -508,12 +512,12 @@ fn finishOpenedPacket(
         .initial, .handshake => pn_space.recordReceivedPacket(
             pn,
             now_us / 1000,
-            conn_recv_dispatch.packetPayloadAckEliciting(payload),
+            cls.ack_eliciting,
         ),
     }
     pn_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
     conn.qlog_packets_received +|= 1;
-    conn_qlog.emitPacketReceived(conn, lvl, pn, @intCast(ret_len), conn_recv_dispatch.countFrames(payload));
+    conn_qlog.emitPacketReceived(conn, lvl, pn, @intCast(ret_len), cls.frame_count);
     if (!duplicate_pn) {
         try conn_recv_dispatch.dispatchFrames(conn, lvl, payload, now_us);
     }

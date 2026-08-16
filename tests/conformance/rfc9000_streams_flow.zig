@@ -19,7 +19,7 @@
 //! level (e.g. connection-wide STREAM_LIMIT_ERROR emission as a
 //! CONNECTION_CLOSE frame) are present as `skip_` entries with a TODO
 //! pointing at the existing developer-facing tests in
-//! `src/conn/state.zig`.
+//! `src/Connection.zig`.
 //!
 //! ## Coverage
 //!
@@ -758,7 +758,7 @@ test "MUST switch to a freshly-issued peer CID after migration [RFC9000 §5.1.2 
     //      from `peer_cids` and assigns it to `path.peer_cid`.
     //   6. Observe `peer_dcid` is now different from the snapshot.
     //
-    // The plumbing lives in src/conn/state.zig:
+    // The plumbing lives in src/Connection.zig:
     // `consumeFreshPeerCidForMigration` picks a peer_cid that's not
     // the current one and returns it; `handlePeerAddressChange`
     // assigns it to `path.peer_cid` before `path.beginMigration`.
@@ -1549,4 +1549,12 @@ test "MUST derive distinct stateless reset tokens for distinct CIDs under one ke
     const ta = try stateless_reset.derive(&key, &cid_a);
     const tb = try stateless_reset.derive(&key, &cid_b);
     try std.testing.expect(!std.mem.eql(u8, &ta, &tb));
+}
+
+// skip_ stubs: prose "Visible debt" converted to machine-visible form (2026-08).
+
+test "skip_NORMATIVE path migration switches to a fresh peer-issued CID [RFC9000 §5.1.2]" {
+    // Visible debt: RFC9000 §5.1.2 path migration switches to a fresh
+    // peer-issued CID.
+    return error.SkipZigTest;
 }

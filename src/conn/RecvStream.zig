@@ -151,15 +151,20 @@ pub fn recv(
     fin: bool,
 ) Error!void {
     if (self.reset != null) return; // RESET_STREAM ignores subsequent data
-    if (self.state == .data_recvd or self.state == .data_read) return;
 
     const data_len: u64 = @intCast(data.len);
     const new_end = std.math.add(u64, offset, data_len) catch return Error.BufferLimitExceeded;
 
-    // §4.5: data can never extend past a locked final_size.
+    // §4.5: data can never extend past a locked final_size. Checked
+    // BEFORE the terminal-state early return so a STREAM frame that
+    // reaches past final_size on an already-complete stream still
+    // surfaces BeyondFinalSize (mapped to FINAL_SIZE_ERROR by the
+    // connection) instead of being silently dropped.
     if (self.final_size) |fs| {
         if (new_end > fs) return Error.BeyondFinalSize;
     }
+
+    if (self.state == .data_recvd or self.state == .data_read) return;
 
     // FIN tries to lock final_size = new_end.
     if (fin) {
@@ -272,6 +277,19 @@ pub fn recv(
 /// number of bytes actually written. Returns 0 when no bytes
 /// are available — call `readableBytes` first if you want to
 /// distinguish "would block" from "stream done".
+///
+/// Perf note: each read memmoves the remaining live tail down
+/// (O(n) per read; O(n²) total when a large reassembly buffer is
+/// drained in small reads). A sliding-window prefix (the pattern
+/// `SendStream.SendByteBuffer` uses) would fix this, but the
+/// `buffer[i] == byte at read_offset + i` invariant is load-bearing
+/// for the resident-bytes budget reconciliation in
+/// recv_data_handlers.zig — switching to a retained-prefix design
+/// requires redesigning that accounting in the same change (the
+/// budget is keyed on bytes.items.len, which a retained prefix would
+/// keep charged for already-consumed bytes). Left as-is
+/// deliberately; embedders draining large buffers should read in
+/// bulk via readableBytes().
 pub fn read(self: *RecvStream, dst: []u8) usize {
     if (self.ranges.items.len == 0) {
         self.maybeAdvanceState();

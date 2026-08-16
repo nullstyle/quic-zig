@@ -629,7 +629,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 now_us,
                 options.io,
             ) catch |err| countEgressFault(server, err);
-            slot.conn.tick(now_us) catch {};
+            slot.conn.tick(now_us) catch |err| countEgressFault(server, err);
         }
         // Ship whatever the drain pass accumulated — one syscall per
         // listener for up to max_send_batch_datagrams datagrams across

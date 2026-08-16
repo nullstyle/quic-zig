@@ -7,7 +7,7 @@
 //! (`congestion.NewReno`). The connection-level orchestration that
 //! wires these together — including PTO timer arming and the
 //! §A.3 "ACK of unsent packet" PROTOCOL_VIOLATION — lives in
-//! `src/conn/state.zig`; tests for those flows live with the
+//! `src/Connection.zig`; tests for those flows live with the
 //! end-to-end connection corpus rather than here.
 //!
 //! ## Coverage
@@ -54,7 +54,7 @@
 //!                              losses spanning PC-duration — exercised via the
 //!                              `loss_recovery.detectLosses` + `NewReno.onPersistentCongestion`
 //!                              chain; connection-level orchestration that
-//!                              measures the span lives in `state.zig` and is
+//!                              measures the span lives in `Connection.zig` and is
 //!                              tested in the integration corpus.
 //!
 //! Out of scope here:
@@ -62,7 +62,7 @@
 //!                     bucket, on by default); tested in
 //!                     rfc9002_pacing.zig + _state_tests_pacing.zig.
 //!   RFC9002 §6.3      Probe packets / PTO firing path — driven by
-//!                     `state.zig`'s timer subsystem; tested at the
+//!                     `Connection.zig`'s timer subsystem; tested at the
 //!                     connection level.
 
 const std = @import("std");
@@ -349,7 +349,7 @@ test "MUST double the PTO on each subsequent firing [RFC9002 §6.2.1 ¶?]" {
     // §6.2.1: "When a PTO timer expires, the PTO timer MUST be set
     // to a value larger than its current value." quic implements
     // this via `backoffDuration(base, count) = base << count` in
-    // `state.zig`, observable through `Connection.ptoMicros()`
+    // `Connection.zig`, observable through `Connection.ptoMicros()`
     // (returns base << pto_count) and `Connection.ptoCount()`. Drive
     // a real handshake to confirmed, put two ack-eliciting packets in
     // flight on the client, and verify two consecutive PTO firings
@@ -424,7 +424,7 @@ test "MUST report whether the largest acked packet was ack-eliciting [RFC9002 §
     space.next_pn = 2;
 
     // ACK only PN 0. largest_acked_ack_eliciting must be false →
-    // caller (state.zig) must NOT update the RTT estimator from
+    // caller (Connection.zig) must NOT update the RTT estimator from
     // this ACK.
     const r0 = try loss_recovery.processAck(&tr, &space, buildAck(0, 0));
     try std.testing.expect(r0.largest_acked_newly_acked);
@@ -462,7 +462,7 @@ test "MUST close the connection when an ACK acks an unsent packet [RFC9002 §A.3
     // MUST close the connection with the error code PROTOCOL_VIOLATION."
     // RFC 9000 §13.1 carries the same normative requirement worded
     // differently; both gates resolve to the same check in
-    // `Connection.handleAckAtLevel` (state.zig). The duplicate citation
+    // `Connection.handleAckAtLevel` (Connection.zig). The duplicate citation
     // is intentional — auditors searching either RFC find the same
     // observable behaviour pinned. The §13.1 partner test in
     // rfc9000_frames.zig drives the same fixture.
@@ -633,7 +633,7 @@ test "MUST detect persistent congestion across 2+ ack-eliciting losses spanning 
     // the cwnd reset.
     //
     // quic splits this across primitives + the connection orchestrator:
-    // `loss_recovery.detectLosses` declares the losses, `state.zig`
+    // `loss_recovery.detectLosses` declares the losses, `Connection.zig`
     // measures the span and decides whether persistent congestion
     // applies, and `congestion.NewReno.onPersistentCongestion` does the
     // actual cwnd reset. This test exercises the primitive chain:

@@ -70,6 +70,33 @@ pub const Suite = enum {
         };
     }
 
+    /// RFC 9001 §6.6 AEAD usage limits for this suite.
+    pub const AeadLimits = struct {
+        /// Packets encrypted under one key set before a key update is
+        /// mandatory.
+        confidentiality_limit: u64,
+        /// Failed-authentication packets across the connection
+        /// lifetime (counted across all keys).
+        integrity_limit: u64,
+    };
+    pub fn aeadLimits(self: Suite) AeadLimits {
+        return switch (self) {
+            // §6.6: both AES-GCM suites share 2^23 encrypted packets
+            // and 2^52 invalid packets (Appendix B.1).
+            .aes128_gcm_sha256, .aes256_gcm_sha384 => .{
+                .confidentiality_limit = @as(u64, 1) << 23,
+                .integrity_limit = @as(u64, 1) << 52,
+            },
+            // §6.6: ChaCha's confidentiality limit exceeds the 2^62
+            // packet-number space and can be disregarded; its
+            // integrity limit is 2^36 (Appendix B.1).
+            .chacha20_poly1305_sha256 => .{
+                .confidentiality_limit = std.math.maxInt(u64),
+                .integrity_limit = @as(u64, 1) << 36,
+            },
+        };
+    }
+
     /// TLS 1.3 traffic-secret length in bytes for this suite (matches
     /// the suite's HKDF hash digest length).
     pub fn secretLen(self: Suite) u8 {
@@ -112,6 +139,12 @@ pub const PacketKeys = struct {
     /// reuse the AES key schedule instead of re-running
     /// `AES_set_encrypt_key` per packet.
     hp_cipher: protection.HpCipher = .{ .chacha20 = {} },
+    /// Cached AEAD cipher context. Populated eagerly by
+    /// `derivePacketKeys`; lets every seal/open reuse the EVP_AEAD_CTX
+    /// (key schedule plus GHASH / Poly1305 subkeys) instead of
+    /// re-running `EVP_AEAD_CTX_new` per packet. Owned: callers that
+    /// drop a `PacketKeys` without storing it must call `deinitAead`.
+    aead: AeadCipher = undefined,
 
     /// Borrow the AEAD key slice trimmed to the suite's `keyLen()`.
     pub fn keySlice(self: *const PacketKeys) []const u8 {
@@ -137,6 +170,28 @@ pub const PacketKeys = struct {
         @memset(self.hp[hp_len..], 0);
         self.hp_cipher = try buildHpCipher(self.suite, self.hp[0..hp_len]);
     }
+
+    /// Free the cached AEAD context. Idempotent-ish in the sense that
+    /// it is only valid to call once per `PacketKeys` (matching the
+    /// single-owner lifecycle of every `PacketKeys` value: derived
+    /// once, stored once, discarded once).
+    pub fn deinitAead(self: *PacketKeys) void {
+        switch (self.aead) {
+            .aes128 => |*ctx| ctx.deinit(),
+            .aes256 => |*ctx| ctx.deinit(),
+            .chacha20 => |*ctx| ctx.deinit(),
+        }
+        self.aead = undefined;
+    }
+};
+
+/// Per-suite cached AEAD cipher context (see `PacketKeys.aead`).
+/// Mirrors `protection.HpCipher`'s shape so the suite switch in
+/// seal/open can hand the cached context straight to the AEAD layer.
+pub const AeadCipher = union(enum) {
+    aes128: AesGcm128,
+    aes256: AesGcm256,
+    chacha20: ChaCha20Poly1305,
 };
 
 fn buildHpCipher(suite: Suite, hp: []const u8) protection.Error!protection.HpCipher {
@@ -144,6 +199,14 @@ fn buildHpCipher(suite: Suite, hp: []const u8) protection.Error!protection.HpCip
         .aes128_gcm_sha256 => .{ .aes128 = try boringssl.crypto.aes.Aes128.init(@ptrCast(hp[0..16])) },
         .aes256_gcm_sha384 => .{ .aes256 = try boringssl.crypto.aes.Aes256.init(@ptrCast(hp[0..32])) },
         .chacha20_poly1305_sha256 => .{ .chacha20 = {} },
+    };
+}
+
+fn buildAeadCipher(suite: Suite, key: []const u8) protection.Error!AeadCipher {
+    return switch (suite) {
+        .aes128_gcm_sha256 => .{ .aes128 = try AesGcm128.init(@ptrCast(key[0..16])) },
+        .aes256_gcm_sha384 => .{ .aes256 = try AesGcm256.init(@ptrCast(key[0..32])) },
+        .chacha20_poly1305_sha256 => .{ .chacha20 = try ChaCha20Poly1305.init(@ptrCast(key[0..32])) },
     };
 }
 
@@ -183,6 +246,7 @@ pub fn derivePacketKeys(suite: Suite, secret: []const u8) Error!PacketKeys {
         "",
     );
     keys.hp_cipher = try buildHpCipher(suite, keys.hp[0..suite.hpLen()]);
+    keys.aead = try buildAeadCipher(suite, keys.key[0..suite.keyLen()]);
     return keys;
 }
 
@@ -225,22 +289,10 @@ pub fn sealPayloadWithKeys(
     plaintext: []const u8,
     dst: []u8,
 ) protection.Error!usize {
-    return switch (keys.suite) {
-        .aes128_gcm_sha256 => blk: {
-            var aead = try AesGcm128.init(@ptrCast(keys.key[0..16]));
-            defer aead.deinit();
-            break :blk try sealPayloadWithAead(&aead, keys, multipath_path_id, pn, packet_header, plaintext, dst);
-        },
-        .aes256_gcm_sha384 => blk: {
-            var aead = try AesGcm256.init(@ptrCast(keys.key[0..32]));
-            defer aead.deinit();
-            break :blk try sealPayloadWithAead(&aead, keys, multipath_path_id, pn, packet_header, plaintext, dst);
-        },
-        .chacha20_poly1305_sha256 => blk: {
-            var aead = try ChaCha20Poly1305.init(@ptrCast(keys.key[0..32]));
-            defer aead.deinit();
-            break :blk try sealPayloadWithAead(&aead, keys, multipath_path_id, pn, packet_header, plaintext, dst);
-        },
+    return switch (keys.aead) {
+        .aes128 => |*aead| try sealPayloadWithAead(aead, keys, multipath_path_id, pn, packet_header, plaintext, dst),
+        .aes256 => |*aead| try sealPayloadWithAead(aead, keys, multipath_path_id, pn, packet_header, plaintext, dst),
+        .chacha20 => |*aead| try sealPayloadWithAead(aead, keys, multipath_path_id, pn, packet_header, plaintext, dst),
     };
 }
 
@@ -285,22 +337,10 @@ pub fn openPayloadWithKeys(
     ciphertext: []const u8,
     dst: []u8,
 ) protection.Error!usize {
-    return switch (keys.suite) {
-        .aes128_gcm_sha256 => blk: {
-            var aead = try AesGcm128.init(@ptrCast(keys.key[0..16]));
-            defer aead.deinit();
-            break :blk try openPayloadWithAead(&aead, keys, multipath_path_id, pn, packet_header, ciphertext, dst);
-        },
-        .aes256_gcm_sha384 => blk: {
-            var aead = try AesGcm256.init(@ptrCast(keys.key[0..32]));
-            defer aead.deinit();
-            break :blk try openPayloadWithAead(&aead, keys, multipath_path_id, pn, packet_header, ciphertext, dst);
-        },
-        .chacha20_poly1305_sha256 => blk: {
-            var aead = try ChaCha20Poly1305.init(@ptrCast(keys.key[0..32]));
-            defer aead.deinit();
-            break :blk try openPayloadWithAead(&aead, keys, multipath_path_id, pn, packet_header, ciphertext, dst);
-        },
+    return switch (keys.aead) {
+        .aes128 => |*aead| try openPayloadWithAead(aead, keys, multipath_path_id, pn, packet_header, ciphertext, dst),
+        .aes256 => |*aead| try openPayloadWithAead(aead, keys, multipath_path_id, pn, packet_header, ciphertext, dst),
+        .chacha20 => |*aead| try openPayloadWithAead(aead, keys, multipath_path_id, pn, packet_header, ciphertext, dst),
     };
 }
 
@@ -490,6 +530,12 @@ pub const OpenOptions = struct {
     /// When set, use draft-ietf-quic-multipath-21 §2.4's
     /// path-ID-aware nonce for 1-RTT packet protection.
     multipath_path_id: ?u32 = null,
+    /// Pre-computed header-protection mask. RFC 9001 §6 retains the
+    /// HP key across application key updates, so a caller trying
+    /// multiple key epochs can derive the mask once and pass it in,
+    /// skipping the per-attempt AES block encrypt. When null the mask
+    /// is derived from `keys` as usual.
+    mask: ?[protection.mask_len]u8 = null,
 };
 
 /// Open a protected 1-RTT packet from `src`, writing plaintext into
@@ -508,7 +554,7 @@ pub fn open1Rtt(pt_dst: []u8, src: []u8, opts: OpenOptions) Error!Open1RttResult
     if (src.len < pn_offset + 4 + protection.sample_len) return Error.InsufficientCiphertext;
 
     const sample = try protection.sampleAt(src, pn_offset);
-    const mask = try headerProtectionMask(opts.keys, &sample);
+    const mask = opts.mask orelse try headerProtectionMask(opts.keys, &sample);
 
     // Strip HP into local copies. The source datagram stays intact
     // so callers can retry with updated packet-protection keys.

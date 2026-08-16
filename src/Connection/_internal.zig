@@ -86,7 +86,11 @@ pub fn rememberLocalCid(
 ) Error!void {
     if (cid.len == 0) return;
     if (retire_prior_to > sequence_number) {
-        conn.close(true, state_mod.transport_error_protocol_violation, "invalid retire_prior_to");
+        // RFC 9000 §19.15: FRAME_ENCODING_ERROR (mirrors the
+        // peer-registry check in cids.zig). retire_prior_to is
+        // peer-influenced via RETIRE_CONNECTION_ID processing, so
+        // this defensive invariant check shares the same close code.
+        conn.close(true, state_mod.transport_error_frame_encoding, "invalid retire_prior_to");
         return;
     }
     try ensureLocalCidAvailable(conn, path_id, sequence_number, cid);

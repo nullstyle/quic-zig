@@ -89,6 +89,27 @@ pub const SendBatch = struct {
     }
 };
 
+/// Send-error disposition for the offloaded path. Peer-provoked
+/// failures are tolerable (drop the batch, keep offload active — QUIC
+/// loss recovery owns the retransmit, and one unreachable peer must
+/// not degrade egress for every connection sharing this socket);
+/// everything else clears the offload flag and falls back to plain
+/// sends. Matches the peer-error family `udp_server.classifySendError`
+/// tolerates on the plain path, so the two cannot drift on which
+/// errnos a gone-away peer is allowed to produce.
+pub const SendDisposition = enum { tolerate, disable_offload };
+pub fn classifySendError(err: anyerror) SendDisposition {
+    return switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.HostUnreachable,
+        error.NetworkUnreachable,
+        error.MessageOversize,
+        => .tolerate,
+        else => .disable_offload,
+    };
+}
+
 /// Drain `conn`'s outbox as GSO super-datagrams: pack equal-size
 /// datagrams via `udp_batch.fillGsoBatch` and ship each batch through
 /// one offloaded send (the kernel splits on the `UDP_SEGMENT` stride).
@@ -96,13 +117,15 @@ pub const SendBatch = struct {
 /// happened inside the super-datagram, and immediate sends sidestep
 /// buffer-lifetime coupling with other connections.
 ///
-/// A failed offloaded send clears `gso_active` (kernel/offload
-/// quirk), re-ships the already-built segments individually, finishes
-/// the batch's carry datagram, and ends the drain — the caller falls
-/// back to plain batched sends for whatever is left. The cleared flag
-/// MUST end the loop: a `UDP_SEGMENT` cmsg must never reach a socket
-/// that just rejected offload (`socket_opts.probeUdpGso` documents
-/// the panic hazard).
+/// A failed offloaded send is classified before acting: peer-provoked
+/// errors drop the batch and keep `gso_active` set; everything else
+/// (offload rejection like EIO/EINVAL, transient local faults) clears
+/// `gso_active`, re-ships the already-built segments individually,
+/// finishes the batch's carry datagram, and ends the drain — the
+/// caller falls back to plain batched sends for whatever is left. The
+/// cleared flag MUST end the loop: a `UDP_SEGMENT` cmsg must never
+/// reach a socket that just rejected offload (`socket_opts.probeUdpGso`
+/// documents the panic hazard).
 ///
 /// `ctx` is comptime-duck-typed (zero-cost, no fn-pointer indirection
 /// on the hot path) and supplies the role-specific policies plus the
@@ -143,19 +166,30 @@ pub fn drainGso(
                 .data_len = filled.total_len,
                 .control = cmsg[0..cmsg_len],
             }};
-            ctx.sendMany(&msgs) catch {
-                // Offload rejected at runtime (EIO family): disable
-                // for this socket and re-ship the built segments
-                // plainly — they are already segment-aligned in
-                // gso_buf. The cleared flag ends the drain once this
-                // batch (and its carry) is out.
-                gso_active.* = false;
-                var off: usize = 0;
-                while (off < filled.total_len) {
-                    const end = @min(off + filled.seg_size, filled.total_len);
-                    try ctx.send(&dest, gso_buf[off..end]);
-                    off = end;
-                }
+            ctx.sendMany(&msgs) catch |err| switch (classifySendError(err)) {
+                .tolerate => {
+                    // Peer-provoked failure (ICMP from a gone-away
+                    // peer, MessageOversize): the batch is dropped
+                    // and loss recovery owns the retransmit. Keep
+                    // GSO active — a single unreachable peer must
+                    // not degrade egress for every connection
+                    // sharing this socket.
+                },
+                .disable_offload => {
+                    // Offload rejected at runtime (EIO/EINVAL
+                    // family) or transient local fault: disable for
+                    // this socket and re-ship the built segments
+                    // plainly — they are already segment-aligned in
+                    // gso_buf. The cleared flag ends the drain once
+                    // this batch (and its carry) is out.
+                    gso_active.* = false;
+                    var off: usize = 0;
+                    while (off < filled.total_len) {
+                        const end = @min(off + filled.seg_size, filled.total_len);
+                        try ctx.send(&dest, gso_buf[off..end]);
+                        off = end;
+                    }
+                },
             };
         }
 

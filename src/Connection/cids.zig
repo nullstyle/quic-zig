@@ -22,6 +22,8 @@ const ConnectionIdReplenishInfo = state_mod.ConnectionIdReplenishInfo;
 const ConnectionIdReplenishReason = state_mod.ConnectionIdReplenishReason;
 const max_supported_active_connection_id_limit = state_mod.max_supported_active_connection_id_limit;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
+const transport_error_frame_encoding = state_mod.transport_error_frame_encoding;
+const transport_error_connection_id_limit = state_mod.transport_error_connection_id_limit;
 
 /// Set the DCID we put on outgoing 1-RTT packets. A zero-length
 /// CID is valid (RFC 9000 §5.1) and represents the case where
@@ -681,7 +683,10 @@ pub fn registerPeerCid(
     stateless_reset_token: [16]u8,
 ) Error!void {
     if (retire_prior_to > sequence_number) {
-        conn.close(true, transport_error_protocol_violation, "invalid connection id retire_prior_to");
+        // RFC 9000 §19.15: a NEW_CONNECTION_ID whose Retire Prior To
+        // exceeds its Sequence Number is a FRAME_ENCODING_ERROR, not
+        // a PROTOCOL_VIOLATION.
+        conn.close(true, transport_error_frame_encoding, "invalid connection id retire_prior_to");
         return;
     }
     if (conn.multipathNegotiated() and !conn_recv_dispatch.pathIdAllowedByLocalLimit(conn, path_id)) return;
@@ -709,7 +714,10 @@ pub fn registerPeerCid(
     retirePeerCidsPriorTo(conn, path_id, retire_prior_to);
     const active_limit = conn.local_transport_params.active_connection_id_limit;
     if (@as(u64, @intCast(peerCidActiveCountForPath(conn, path_id))) >= active_limit) {
-        conn.close(true, transport_error_protocol_violation, "active connection id limit exceeded");
+        // RFC 9000 §5.1.1: receiving more connection IDs than the
+        // advertised active_connection_id_limit is a
+        // CONNECTION_ID_LIMIT_ERROR (0x09), not PROTOCOL_VIOLATION.
+        conn.close(true, transport_error_connection_id_limit, "active connection id limit exceeded");
         return;
     }
     try conn.peer_cids.append(conn.allocator, .{

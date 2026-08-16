@@ -545,13 +545,42 @@ test "MUST distinguish transport (0x1c) from application (0x1d) CONNECTION_CLOSE
     }
 }
 
-test "NORMATIVE the implementation's excessive_load extension uses the 0x09 reserved code [RFC9000 §20.1]" {
+test "NORMATIVE transport error codepoints match RFC9000 §20.1" {
     // RFC 9000 §20.1 assigns 0x09 to CONNECTION_ID_LIMIT_ERROR. quic
-    // additionally exposes an `excessive_load = 0x09` constant used
-    // by the §3.5 / §8 hardening backstop (reserves are spent → close
-    // with this code). The numeric collision is intentional: a peer
-    // that doesn't know about the extension still reads it as a valid
-    // RFC-registered code. Document the constant so a future renumber
+    // exposes that code under its own name for the §5.1.1 active-CID
+    // limit close. The hardening backstop (resident-bytes budget
+    // exhausted) has no dedicated RFC code — it aliases the §20.1
+    // catch-all INTERNAL_ERROR (0x01). Pin both so a future renumber
     // shows up here.
-    try std.testing.expectEqual(@as(u64, 0x09), conn.state.transport_error_excessive_load);
+    try std.testing.expectEqual(@as(u64, 0x09), conn.state.transport_error_connection_id_limit);
+    try std.testing.expectEqual(conn.state.transport_error_internal, conn.state.transport_error_excessive_load);
+}
+
+// skip_ stubs: prose "Visible debt" converted to machine-visible form (2026-08).
+
+test "skip_MUST NOT coalesce packets from different connections in one UDP datagram [RFC9000 §12.2]" {
+    // Visible debt: RFC9000 §12.2 MUST NOT coalesce packets from different
+    // connections in one UDP datagram — coalescing dispatch lives behind
+    // crypto, not unit-testable here.
+    return error.SkipZigTest;
+}
+
+test "skip_SHOULD send ACK on every ack-eliciting packet within max_ack_delay [RFC9000 §13.2.1]" {
+    // Visible debt: RFC9000 §13.2.1 SHOULD send ACK on every ack-eliciting
+    // packet within max_ack_delay — covered indirectly by ack_tracker
+    // addPacketDelayed unit tests.
+    return error.SkipZigTest;
+}
+
+test "skip_NORMATIVE max_ack_delay handling [RFC9000 §13.2.2]" {
+    // Visible debt: RFC9000 §13.2.2 NORMATIVE max_ack_delay handling —
+    // covered by transport-params suite.
+    return error.SkipZigTest;
+}
+
+test "skip_NORMATIVE PATH_RESPONSE retransmission policy [RFC9000 §13.3]" {
+    // Visible debt: RFC9000 §13.3 NORMATIVE PATH_RESPONSE retransmission
+    // policy — quic requeues from the sent-packet record (RFC says "send a
+    // new one" in §13.3 ¶8).
+    return error.SkipZigTest;
 }

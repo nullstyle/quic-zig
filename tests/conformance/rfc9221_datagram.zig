@@ -36,7 +36,7 @@
 //!                   verifying it from public frame APIs alone is not
 //!                   meaningful.
 //!   RFC9221 §5      DATAGRAM is ack-eliciting — `packetPayloadAckEliciting`
-//!                   in src/conn/state.zig folds DATAGRAM in with the other
+//!                   in src/Connection.zig folds DATAGRAM in with the other
 //!                   ack-eliciting frames; covered via connection-level
 //!                   suites where a real packet is built.
 //!   RFC9221 §6      Inherits RFC 9000 security considerations — covered
@@ -277,7 +277,7 @@ test "MUST close with PROTOCOL_VIOLATION on a DATAGRAM larger than max_datagram_
     // Drive a real handshake where the SERVER advertises a tight
     // 100-byte cap, then have the CLIENT seal a 1-RTT packet whose
     // DATAGRAM payload (150 bytes) clearly exceeds that cap. After
-    // AEAD passes, `Connection.handleDatagram` (src/conn/state.zig)
+    // AEAD passes, `Connection.handleDatagram` (src/Connection.zig)
     // hits its `dg.data.len > local_max` gate and closes locally
     // with PROTOCOL_VIOLATION (transport error 0x0a).
     var server_p = handshake_fixture.defaultParams();

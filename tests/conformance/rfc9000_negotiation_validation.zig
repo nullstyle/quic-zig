@@ -201,7 +201,7 @@ test "MUST NOT initiate a new connection in response to a Version Negotiation pa
     // CID-swap rule and lists ONLY an unsupported sentinel version,
     // feed it via `Connection.handle`, and assert no fresh outbound
     // packet (i.e. no fresh Initial spawning a new handshake) appears
-    // on the next `poll`. The handler in src/conn/state.zig
+    // on the next `poll`. The handler in src/Connection.zig
     // `handleVersionNegotiation` terminates the connection rather
     // than restarting it; either way, no new connection is initiated.
     const fixture = @import("_handshake_fixture.zig");
@@ -1062,4 +1062,20 @@ test "MUST reject a peer migration attempt before the handshake confirms [RFC900
         @as(?quic.QlogMigrationFailReason, .pre_handshake),
         evt.migration_fail_reason,
     );
+}
+
+// skip_ stubs: prose "Visible debt" converted to machine-visible form (2026-08).
+
+test "skip_SHOULD use a fresh CID after migration (privacy) [RFC9000 §9.5 ¶1]" {
+    // Visible debt (skip_, see TODOs in the body):
+    // §9.5 ¶1 SHOULD use a fresh CID after migration (privacy) (validated by
+    // NEW_CONNECTION_ID issuance suite).
+    return error.SkipZigTest;
+}
+
+test "skip_SHOULD server's preferred address handling [RFC9000 §9.6 ¶1]" {
+    // Visible debt (skip_, see TODOs in the body):
+    // §9.6 ¶1 SHOULD server's preferred address handling (preferred-address
+    // transport param: out of scope here).
+    return error.SkipZigTest;
 }

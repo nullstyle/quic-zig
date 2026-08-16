@@ -7,7 +7,7 @@
 //! §14.4 for the PADDING+PING probe shape). quic implements this
 //! per-`PathState` so each application-data path probes / discovers
 //! its own MTU independently — see `src/conn/path.zig` for the
-//! state-machine primitives and `src/conn/state.zig` for the send /
+//! state-machine primitives and `src/Connection.zig` for the send /
 //! ack / loss wiring.
 //!
 //! ## Coverage

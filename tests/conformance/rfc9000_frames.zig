@@ -7,7 +7,7 @@
 //!
 //! Connection-level requirements (e.g. NEW_TOKEN role-check,
 //! HANDSHAKE_DONE-from-client, RETIRE_CONNECTION_ID for an unissued
-//! sequence) are enforced in `src/conn/state.zig`, not in the frame
+//! sequence) are enforced in `src/Connection.zig`, not in the frame
 //! decoder. Those checks need a Connection to fire — they're driven
 //! here by the shared `_handshake_fixture.zig` harness, which stands
 //! up a real paired Server + Client, drives a TLS handshake to
@@ -46,7 +46,7 @@
 //!   RFC9000 §19.15  ¶?   MUST        NEW_CONNECTION_ID CID length 1..20 bytes inclusive
 //!   RFC9000 §19.15  ¶?   MUST NOT    accept NEW_CONNECTION_ID with CID length > 20
 //!   RFC9000 §19.15  ¶?   MUST        NEW_CONNECTION_ID stateless_reset_token is exactly 16 bytes
-//!   RFC9000 §19.15  ¶?   MUST NOT    accept retire_prior_to > sequence_number (impl emits PROTOCOL_VIOLATION; RFC text says FRAME_ENCODING_ERROR)
+//!   RFC9000 §19.15  ¶?   MUST NOT    accept retire_prior_to > sequence_number (FRAME_ENCODING_ERROR)
 //!   RFC9000 §19.16  ¶1   NORMATIVE   RETIRE_CONNECTION_ID carries a single sequence_number varint
 //!   RFC9000 §19.16  ¶?   MUST NOT    accept RETIRE_CONNECTION_ID for an unissued sequence (PROTOCOL_VIOLATION)
 //!   RFC9000 §19.17  ¶1   MUST        PATH_CHALLENGE Data field is exactly 8 bytes
@@ -62,7 +62,7 @@
 //!   RFC9000 §12.4   ¶?   NORMATIVE   0-RTT level forbids ACK / NEW_TOKEN / HANDSHAKE_DONE
 //!   RFC9000 §16     ¶?   MUST NOT    accept any frame whose body is truncated (varint InsufficientBytes)
 //!
-//! Visible debt (gates not yet implemented in conn/state.zig):
+//! Visible debt (gates not yet implemented in src/Connection.zig):
 //!   RFC9000 §19.16  ¶?   MUST NOT    retire the CID currently in use to receive
 //!                                    → handleRetireConnectionId only checks
 //!                                      "sequence not yet issued"; the
@@ -254,7 +254,7 @@ test "MUST NOT accept an ACK whose range_count exceeds the implementation cap [R
 test "MUST close the connection when an ACK acknowledges a never-sent packet number [RFC9000 §13.1 ¶?]" {
     // §13.1: "A receiver MUST NOT acknowledge a packet that has not
     // been sent." Enforcement requires comparing against the local
-    // next-PN, which lives in conn/state.zig — the wire decoder has
+    // next-PN, which lives in src/Connection.zig — the wire decoder has
     // no notion of "what we sent". RFC 9002 §A.3 ¶1 carries the same
     // requirement; the §A.3 conformance test in
     // rfc9002_loss_recovery.zig exercises the same gate against the
@@ -264,7 +264,7 @@ test "MUST close the connection when an ACK acknowledges a never-sent packet num
     // largest_acked = 100. The server's Initial PN space is empty
     // (next_pn = 0) at the moment it parses this packet, so the
     // largest_acked >= next_pn check in `Connection.handleAckAtLevel`
-    // (state.zig) closes the connection with PROTOCOL_VIOLATION.
+    // (Connection.zig) closes the connection with PROTOCOL_VIOLATION.
     var srv = try fixture.buildServer();
     defer srv.deinit();
 
@@ -398,7 +398,7 @@ test "MUST NOT accept a NEW_TOKEN with a zero-length token [RFC9000 §19.7 ¶?]"
     // The frame parser is shape-only (it accepts zero-length tokens
     // because they're syntactically well-formed varints); the
     // semantic gate fires inside `Connection.handleNewToken`
-    // (src/conn/state.zig). NEW_TOKEN is a server-to-client frame, so
+    // (src/Connection.zig). NEW_TOKEN is a server-to-client frame, so
     // we drive the gate by sealing the malformed frame with the
     // server-side application keys and feeding it to the client.
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
@@ -419,7 +419,7 @@ test "MUST NOT accept a NEW_TOKEN at a server endpoint [RFC9000 §19.7 ¶?]" {
     // §19.7: "A server MUST treat receipt of a NEW_TOKEN frame as a
     // connection error of type PROTOCOL_VIOLATION." Frame decoding
     // alone has no notion of role — the role-check fires inside
-    // `Connection.handleNewToken` (src/conn/state.zig). Drive the
+    // `Connection.handleNewToken` (src/Connection.zig). Drive the
     // gate by sealing a syntactically valid NEW_TOKEN with the
     // client-side application keys and feeding it to the server.
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
@@ -602,7 +602,7 @@ test "MUST NOT accept MAX_STREAMS with value > 2^60 [RFC9000 §19.11 ¶?]" {
     // accepts any value up to 2^62-1 (varint maximum); the §19.11-
     // specific 2^60 cap is enforced at the connection level when the
     // frame is interpreted against the local stream-credit state. The
-    // gate lives in `Connection.handleMaxStreams` (src/conn/state.zig).
+    // gate lives in `Connection.handleMaxStreams` (src/Connection.zig).
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
     defer pair.deinit();
     try pair.driveToHandshakeConfirmed();
@@ -771,15 +771,6 @@ test "MUST NOT accept NEW_CONNECTION_ID with retire_prior_to > sequence_number [
     // Receiving a value in the Retire Prior To field that is
     // greater than that in the Sequence Number field MUST be
     // treated as a connection error of type FRAME_ENCODING_ERROR."
-    //
-    // AUDITOR NOTE: quic's `Connection.registerPeerCid`
-    // (src/conn/state.zig) emits PROTOCOL_VIOLATION (0x0a) here,
-    // not FRAME_ENCODING_ERROR (0x07). The CONNECTION_CLOSE still
-    // signals "this peer is misbehaving and must shut the connection
-    // down", which is the spec's intent — the specific code differs.
-    // We pin the implementation's actual choice; if a future change
-    // narrows it to FRAME_ENCODING_ERROR this assertion is the place
-    // that flags the change for the auditor.
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
     defer pair.deinit();
     try pair.driveToHandshakeConfirmed();
@@ -803,8 +794,7 @@ test "MUST NOT accept NEW_CONNECTION_ID with retire_prior_to > sequence_number [
 
     try std.testing.expectEqual(quic.conn.lifecycle.CloseSource.local, ev.source);
     try std.testing.expectEqual(quic.conn.lifecycle.CloseErrorSpace.transport, ev.error_space);
-    // Implementation choice — see AUDITOR NOTE above.
-    try std.testing.expectEqual(handshake_fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION, ev.error_code);
+    try std.testing.expectEqual(handshake_fixture.TRANSPORT_ERROR_FRAME_ENCODING_ERROR, ev.error_code);
 }
 
 // ---------------------------------------------------------------- §19.16 RETIRE_CONNECTION_ID
@@ -825,7 +815,7 @@ test "MUST NOT accept RETIRE_CONNECTION_ID for an unissued sequence number [RFC9
     // sequence number greater than any previously sent ... MUST be
     // treated as a connection error of type PROTOCOL_VIOLATION."
     // The per-path "next sequence" watermark is consulted in
-    // `Connection.handleRetireConnectionId` (src/conn/state.zig).
+    // `Connection.handleRetireConnectionId` (src/Connection.zig).
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
     defer pair.deinit();
     try pair.driveToHandshakeConfirmed();
@@ -1006,7 +996,7 @@ test "MUST NOT accept HANDSHAKE_DONE from a client peer [RFC9000 §19.20 ¶?]" {
     // as a connection error of type PROTOCOL_VIOLATION." The frame
     // decoder has no notion of role; the gate fires inside the
     // connection state machine — `Connection.dispatchFrames`
-    // (src/conn/state.zig) closes with PROTOCOL_VIOLATION whenever it
+    // (src/Connection.zig) closes with PROTOCOL_VIOLATION whenever it
     // sees `f == .handshake_done and self.role == .server`.
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
     defer pair.deinit();
@@ -1125,7 +1115,7 @@ test "NORMATIVE 0-RTT level forbids ACK [RFC9000 §12.4]" {
     // PATH_CHALLENGE, PADDING, PING, CONNECTION_CLOSE-0x1c — but
     // explicitly NOT ACK, NEW_TOKEN, or HANDSHAKE_DONE. The
     // receiver-side filter is `Connection.frameAllowedInEarlyData`
-    // (src/conn/state.zig), reached from `dispatchFrames(.early_data,
+    // (src/Connection.zig), reached from `dispatchFrames(.early_data,
     // ...)` after AEAD-decrypt of a long-header 0-RTT packet.
     //
     // The fixture's `injectFrameAtServer0Rtt` describes how it lands
@@ -1183,4 +1173,15 @@ test "NORMATIVE 0-RTT level forbids HANDSHAKE_DONE [RFC9000 §12.4]" {
 
     try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
     try std.testing.expectEqual(handshake_fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION, ev.error_code);
+}
+
+// skip_ stubs: prose "Visible debt" converted to machine-visible form (2026-08).
+
+test "skip_MUST NOT retire the CID currently in use to receive [RFC9000 §19.16 ¶?]" {
+    // Visible debt (gates not yet implemented in src/Connection.zig):
+    // RFC9000 §19.16 ¶? MUST NOT retire the CID currently in use to receive
+    // → handleRetireConnectionId only checks "sequence not yet issued"; the
+    //   receive-side DCID-equality gate is missing. Conformance test pins
+    //   the observed (no-close) behavior so a future fix surfaces here.
+    return error.SkipZigTest;
 }

@@ -34,6 +34,7 @@ const RttEstimator = state_mod.RttEstimator;
 const short_packet_mod = state_mod.short_packet_mod;
 const socket_opts_mod = state_mod.socket_opts_mod;
 const stateless_reset_mod = state_mod.stateless_reset_mod;
+const protection = @import("../wire/protection.zig");
 const max_recv_plaintext = state_mod.max_recv_plaintext;
 const Address = state_mod.Address;
 const PathState = state_mod.PathState;
@@ -81,11 +82,14 @@ pub fn handleWithEcn(
     if (bytes.len > localUdpPayloadLimit(
         conn,
     )) {
+        // RFC 9000 §14.1: a datagram larger than the negotiated
+        // max_udp_payload_size MAY be discarded — it must NOT close
+        // the connection. This check runs before any header
+        // protection removal or AEAD open, so the datagram is not
+        // yet authenticated; closing here would hand an off-path
+        // attacker who observed a CID a connection-kill vector (one
+        // spoofed oversized datagram, no key knowledge). Drop it.
         conn_qlog.emitPacketDropped(conn, null, @intCast(bytes.len), .payload_too_large);
-        conn.close(true, transport_error_protocol_violation, "udp payload exceeds local limit");
-        conn_qlog.emitConnectionStateIfChanged(
-            conn,
-        );
         return;
     }
     if (bytes.len > 0) {
@@ -328,44 +332,71 @@ fn frameAckEliciting(f: frame_types.Frame) bool {
     };
 }
 
-pub fn packetPayloadAckEliciting(payload: []const u8) bool {
+/// One-pass classification of a payload's frames: ACK eligibility
+/// (RFC 9000 §13.2.1), immediate-ACK triggering, and the qlog frame
+/// count. Replaces what used to be three separate full frame
+/// iterations per received packet.
+pub const PayloadClassification = struct {
+    ack_eliciting: bool = false,
+    needs_immediate_ack: bool = false,
+    frame_count: u32 = 0,
+};
+
+fn isImmediateAckFrame(f: frame_types.Frame) bool {
+    return switch (f) {
+        .stream => |s| s.fin,
+        .reset_stream,
+        .stop_sending,
+        => true,
+        else => false,
+    };
+}
+
+pub fn classifyPayload(payload: []const u8) PayloadClassification {
+    var cls: PayloadClassification = .{};
     var it = frame_mod.iter(payload);
-    while (it.next() catch return true) |f| {
-        if (frameAckEliciting(f)) return true;
+    while (true) {
+        const f = it.next() catch {
+            // A payload that cannot be parsed cleanly is treated as
+            // ack-eliciting + immediate-ack: the old scanners returned
+            // true on decode error so a malformed-but-authenticated
+            // packet could not slip into delayed-ACK bookkeeping
+            // (dispatchFrames will close with FRAME_ENCODING_ERROR).
+            cls.ack_eliciting = true;
+            cls.needs_immediate_ack = true;
+            return cls;
+        } orelse return cls;
+        cls.frame_count += 1;
+        if (frameAckEliciting(f)) {
+            cls.ack_eliciting = true;
+            if (isImmediateAckFrame(f)) cls.needs_immediate_ack = true;
+        }
     }
-    return false;
+}
+
+pub fn packetPayloadAckEliciting(payload: []const u8) bool {
+    return classifyPayload(payload).ack_eliciting;
 }
 
 pub fn packetPayloadNeedsImmediateAck(payload: []const u8) bool {
-    var it = frame_mod.iter(payload);
-    while (it.next() catch return true) |f| {
-        switch (f) {
-            .stream => |s| if (s.fin) return true,
-            .reset_stream,
-            .stop_sending,
-            => return true,
-            else => {},
-        }
-    }
-    return false;
+    return classifyPayload(payload).needs_immediate_ack;
 }
 
 pub fn recordApplicationReceivedPacket(
     app_pn_space: *PnSpace,
     pn: u64,
     now_us: u64,
-    payload: []const u8,
+    cls: PayloadClassification,
     delayed_ack_threshold: u8,
 ) void {
-    const ack_eliciting = packetPayloadAckEliciting(payload);
-    if (ack_eliciting and packetPayloadNeedsImmediateAck(payload)) {
+    if (cls.ack_eliciting and cls.needs_immediate_ack) {
         app_pn_space.recordReceivedPacket(pn, now_us / RttEstimator.ms, true);
         return;
     }
     app_pn_space.recordReceivedPacketDelayed(
         pn,
         now_us / RttEstimator.ms,
-        ack_eliciting,
+        cls.ack_eliciting,
         delayed_ack_threshold,
     );
 }
@@ -378,15 +409,6 @@ pub fn versionListContains(vn: wire_header.VersionNegotiation, version: u32) boo
     return false;
 }
 
-pub fn countFrames(payload: []const u8) u32 {
-    var count: u32 = 0;
-    var it = frame_mod.iter(payload);
-    while (it.next() catch return count) |_| {
-        count += 1;
-    }
-    return count;
-}
-
 pub fn openApplicationPacket(
     conn: *Connection,
     pt_buf: *[max_recv_plaintext]u8,
@@ -395,6 +417,20 @@ pub fn openApplicationPacket(
     largest_received: u64,
     multipath_path_id: ?u32,
 ) Error!?ApplicationOpenResult {
+    // RFC 9001 §6: the header-protection key is retained across
+    // application key updates, so the HP mask for this packet is
+    // identical for every epoch attempt. Derive it once up front
+    // (using whichever epoch's keys are handy — they all share the
+    // same HP key) and hand it to each open attempt instead of
+    // re-running the AES block encrypt per epoch.
+    const hp_mask = blk: {
+        const keys: ?*const short_packet_mod.PacketKeys = if (conn.app_read_current) |*e| &e.keys else if (conn.app_read_previous) |*e| &e.keys else if (conn.app_read_next) |*e| &e.keys else null;
+        const epoch_keys = keys orelse break :blk null;
+        const pn_offset: usize = 1 + @as(usize, app_path.path.local_cid.len);
+        if (bytes.len < pn_offset + 4 + protection.sample_len) break :blk null;
+        const sample = protection.sampleAt(bytes, pn_offset) catch break :blk null;
+        break :blk short_packet_mod.headerProtectionMask(epoch_keys, &sample) catch null;
+    };
     if (try tryOpenApplicationPacketWithEpoch(
         conn,
         pt_buf,
@@ -402,6 +438,7 @@ pub fn openApplicationPacket(
         app_path,
         largest_received,
         multipath_path_id,
+        hp_mask,
         conn.app_read_current,
         .current,
     )) |result| return result;
@@ -412,6 +449,7 @@ pub fn openApplicationPacket(
         app_path,
         largest_received,
         multipath_path_id,
+        hp_mask,
         conn.app_read_previous,
         .previous,
     )) |result| return result;
@@ -425,6 +463,7 @@ pub fn openApplicationPacket(
         app_path,
         largest_received,
         multipath_path_id,
+        hp_mask,
         conn.app_read_next,
         .next,
     )) |result| return result;
@@ -438,6 +477,7 @@ fn tryOpenApplicationPacketWithEpoch(
     app_path: *const PathState,
     largest_received: u64,
     multipath_path_id: ?u32,
+    hp_mask: ?[protection.mask_len]u8,
     maybe_epoch: ?ApplicationKeyEpoch,
     slot: ApplicationReadKeySlot,
 ) Error!?ApplicationOpenResult {
@@ -448,6 +488,7 @@ fn tryOpenApplicationPacketWithEpoch(
         .keys = &epoch.keys,
         .largest_received = largest_received,
         .multipath_path_id = multipath_path_id,
+        .mask = hp_mask,
     }) catch |e| switch (e) {
         boringssl.crypto.aead.Error.Auth => return null,
         else => return e,
@@ -462,7 +503,7 @@ pub fn dispatchFrames(
     payload: []const u8,
     now_us: u64,
 ) Error!void {
-    if (debugFrames() != null) {
+    if (debugFramesEnabled()) {
         std.debug.print("[frames lvl={s} payload_len={d}] ", .{ @tagName(lvl), payload.len });
     }
     var it = frame_mod.iter(payload);
@@ -481,7 +522,7 @@ pub fn dispatchFrames(
             return;
         };
         const f = maybe_frame orelse break;
-        if (debugFrames() != null) {
+        if (debugFramesEnabled()) {
             switch (f) {
                 .crypto => |cr| std.debug.print("CRYPTO(off={d},len={d}) ", .{ cr.offset, cr.data.len }),
                 .padding => |p| std.debug.print("PADDING(n={d}) ", .{p.count}),
@@ -657,7 +698,7 @@ pub fn dispatchFrames(
             .alternative_v6_address => |a| conn.handleAlternativeAddressV6(a),
         }
     }
-    if (debugFrames() != null) {
+    if (debugFramesEnabled()) {
         std.debug.print("\n", .{});
     }
 }
@@ -692,12 +733,15 @@ fn isAlternativeAddressFrame(f: frame_types.Frame) bool {
 
 fn frameAllowedInEarlyData(f: frame_types.Frame) bool {
     return switch (f) {
+        // RFC 9000 §12.4 / Table 3 marks ACK (IH_1), CRYPTO (IH_1),
+        // HANDSHAKE_DONE (___1), and NEW_TOKEN (___1) as forbidden
+        // in 0-RTT. PATH_RESPONSE and RETIRE_CONNECTION_ID are
+        // __01 (legal in 0-RTT) and therefore fall through to the
+        // allow arm below.
         .ack,
         .crypto,
         .handshake_done,
         .new_token,
-        .path_response,
-        .retire_connection_id,
         // draft-munizaga-quic-alternative-server-address-00 §4 ¶3
         // forbids remembering the `alternative_address` parameter
         // for 0-RTT, so the negotiation cannot have happened by
@@ -786,6 +830,17 @@ fn validateIncomingMultipathFrame(conn: *Connection, f: frame_types.Frame) bool 
 }
 
 extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
-fn debugFrames() ?*const anyopaque {
-    return getenv("QUIC_ZIG_DEBUG_FRAMES");
+
+/// Lazy per-thread cache for the QUIC_ZIG_DEBUG_FRAMES trace toggle.
+/// dispatchFrames consults this once per frame; previously each
+/// consultation was a libc environment scan on the inbound hot path.
+/// The cache reduces that to one getenv call per thread per process
+/// followed by a plain boolean branch. The value is read lazily so
+/// the env var can be set between process start and first packet.
+threadlocal var debug_frames_enabled_cache: ?bool = null;
+fn debugFramesEnabled() bool {
+    if (debug_frames_enabled_cache) |v| return v;
+    const v = getenv("QUIC_ZIG_DEBUG_FRAMES") != null;
+    debug_frames_enabled_cache = v;
+    return v;
 }

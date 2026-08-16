@@ -38,6 +38,22 @@ throughout.
 
 ### Changed
 
+- Security audit follow-ups (full-spectrum repo audit, 2026-08):
+  oversized unauthenticated datagrams are now silently discarded
+  instead of closing the connection (off-path DoS); ReleaseFast and
+  ReleaseSmall are rejected at build time with `--release` defaulting
+  to ReleaseSafe; NEW_CONNECTION_ID receive-path closes use the
+  correct FRAME_ENCODING_ERROR / CONNECTION_ID_LIMIT_ERROR codepoints
+  (and the resource-exhaustion close no longer squats on 0x09);
+  0-RTT now admits PATH_RESPONSE and RETIRE_CONNECTION_ID per RFC 9000
+  §12.4; STREAM data beyond a locked final size surfaces
+  FINAL_SIZE_ERROR even on completed streams; mTLS servers deny early
+  data until the resumed handshake re-verifies identity (RFC 9001
+  §4.6.4); key-update limits follow the negotiated suite's RFC 9001
+  §6.6 values; AEAD contexts are cached per key set; the receive path
+  classifies each payload once; and the CI matrix gained a ReleaseSafe
+  test leg, a format gate, an examples leg, a job timeout, and
+  SHA-pinned actions.
 - Internal: ~1,600 lines of verified duplication collapsed onto shared
   implementations across loss detection (four sweeps → one
   `sweepLosses` over a `LossTarget`), inbound ACK application (two

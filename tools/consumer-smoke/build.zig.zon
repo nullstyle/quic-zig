@@ -11,5 +11,5 @@
     .dependencies = .{
         .quic = .{ .path = "../.." },
     },
-    .paths = .{""},
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

@@ -8,6 +8,7 @@
 const state_mod = @import("../Connection.zig");
 const Connection = state_mod.Connection;
 const EncryptionLevel = state_mod.EncryptionLevel;
+const frame_mod = state_mod.frame_mod;
 const ConnectionId = state_mod.ConnectionId;
 const CloseState = state_mod.CloseState;
 const Role = state_mod.Role;
@@ -339,6 +340,37 @@ pub fn emitPacketSent(
         .packet_size = size,
         .frames_summary = frames_count,
     });
+}
+
+/// Payload-based variant for the hot send path: the frame count is
+/// derived lazily, after the qlog gate, instead of the caller paying
+/// a full frame scan on every packet when qlog is disabled.
+pub fn emitPacketSentWithPayload(
+    conn: *Connection,
+    lvl: EncryptionLevel,
+    pn: u64,
+    size: u32,
+    payload: []const u8,
+) void {
+    if (!conn.qlog_packet_events or conn.qlog_callback == null) return;
+    emitQlog(conn, .{
+        .name = .packet_sent,
+        .level = lvl,
+        .pn_space = qlogPnSpaceFromLevel(lvl),
+        .packet_kind = qlogPacketKindFromLevel(lvl),
+        .packet_number = pn,
+        .packet_size = size,
+        .frames_summary = frameCount(payload),
+    });
+}
+
+/// Count frames in a plaintext payload (used only behind the qlog
+/// gate so disabled qlog costs nothing).
+fn frameCount(payload: []const u8) u32 {
+    var count: u32 = 0;
+    var it = frame_mod.iter(payload);
+    while (it.next() catch return count) |_| count += 1;
+    return count;
 }
 
 pub fn emitPacketReceived(

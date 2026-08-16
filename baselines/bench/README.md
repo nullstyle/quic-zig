@@ -10,9 +10,11 @@ named machine class. Two files per machine class — `<machine>.json`
   same-machine A/B reference for perf commits (captured at 9 samples).
 - `github-ubuntu-x64{,-e2e}.json` — GitHub-hosted `ubuntu-latest`
   runners; what `.github/workflows/benchmark.yml` compares against
-  (advisory). Committed from a benchmark.yml artifact after the first
-  run on a runner; until then the workflow's compare step notes the
-  missing baseline in its summary.
+  (advisory). NOT YET COMMITTED — until it is, the workflow's compare
+  step is a graceful no-op. To commit the first baseline: run
+  benchmark.yml on `main`, download its `benchmark-report-*` artifact,
+  rename `micro.json` → `github-ubuntu-x64.json` and `e2e.json` →
+  `github-ubuntu-x64-e2e.json`, and land them in this directory.
 
 Comparisons are only meaningful within a machine class — never compare a
 laptop run against the CI baseline. (Exception: the `impairment` kind is

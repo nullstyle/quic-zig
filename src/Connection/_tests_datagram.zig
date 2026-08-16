@@ -70,7 +70,7 @@ test "setTransportParams advertises bounded UDP payload limits" {
     try std.testing.expectError(error.InvalidValue, conn.setTransportParams(.{ .max_udp_payload_size = default_mtu - 1 }));
 }
 
-test "handle rejects UDP datagrams above local payload limit before path credit" {
+test "handle silently drops UDP datagrams above local payload limit before path credit" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
@@ -82,8 +82,11 @@ test "handle rejects UDP datagrams above local payload limit before path credit"
     var bytes: [default_mtu + 1]u8 = @splat(0);
     try conn.handle(&bytes, null, 123);
 
-    try std.testing.expect(conn.lifecycle.pending_close != null);
-    try std.testing.expectEqual(transport_error_protocol_violation, conn.lifecycle.pending_close.?.error_code);
+    // RFC 9000 §14.1: an oversized datagram MAY be discarded. It must
+    // NOT close the connection: the check runs before authentication,
+    // and an off-path attacker who observed a CID must not be able to
+    // kill the connection with one spoofed oversized datagram.
+    try std.testing.expect(conn.lifecycle.pending_close == null);
     try std.testing.expectEqual(@as(u64, 0), conn.primaryPath().path.bytes_received);
     try std.testing.expectEqual(@as(u64, 0), conn.last_activity_us);
 }

@@ -269,7 +269,7 @@ test {
     _ = pending_frames;
     // Explicit (previously only reached transitively): discovery of a
     // submodule's tests must never depend on who happens to use it.
+    // (delivery_rate is already covered by the main list above.)
     _ = pacing;
     _ = hystart;
-    _ = delivery_rate;
 }

@@ -97,12 +97,25 @@ test "peer key update promotes next read keys and keeps previous until discard d
     try conn.tick(discard_deadline);
     try std.testing.expect(conn.app_read_previous == null);
 
+    // The peer legitimately still holds the old epoch's keys after
+    // our discard deadline (its clock is its own). Model that side
+    // of the wire by re-deriving an independent key set from the
+    // retained secret material: our stored copy's AEAD context was
+    // freed with the discard, so sealing with it directly would use
+    // a dangling context.
+    var late_old_keys = try short_packet_mod.derivePacketKeys(
+        .aes128_gcm_sha256,
+        old_epoch.material.secret[0..old_epoch.material.secret_len],
+    );
+    defer late_old_keys.deinitAead();
+    try late_old_keys.setHp(old_epoch.keys.hp[0..late_old_keys.suite.hpLen()]);
+
     const late_old_len = try short_packet_mod.seal1Rtt(&packet_buf, .{
         .dcid = &.{},
         .pn = 2,
         .largest_acked = 1,
         .payload = payload[0..payload_len],
-        .keys = &old_epoch.keys,
+        .keys = &late_old_keys,
         .key_phase = old_epoch.key_phase,
     });
     _ = try conn.handleShort(packet_buf[0..late_old_len], discard_deadline + 1);

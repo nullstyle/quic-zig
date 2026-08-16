@@ -77,6 +77,12 @@ pub const Error = error{
     /// unroutable `0b111` CID (LB-5). Encrypted modes only —
     /// plaintext mode never exhausts (every nonce comes from the
     /// CSPRNG, with no counter).
+    /// The Feistel pass rejected the plaintext length. `LbConfig.validate`
+    /// plus the mode dispatch pin every minted length to the 5..19
+    /// (≠16) window, so this is an internal invariant — surfaced as an
+    /// error rather than `unreachable` so a future refactor of the
+    /// length math cannot turn the invariant into a panic.
+    InvalidPlaintextLen,
     NonceExhausted,
 };
 
@@ -288,7 +294,7 @@ pub const Factory = struct {
             plaintext[0..combined],
             dst[1..len],
         ) catch |err| switch (err) {
-            error.InvalidPlaintextLen => unreachable,
+            error.InvalidPlaintextLen => return Error.InvalidPlaintextLen,
         };
         return len;
     }

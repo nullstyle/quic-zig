@@ -33,9 +33,10 @@ fuzz iters="1M":
 # Compile-only check against a tier-1 platform we can't run locally.
 #
 # `zig build -Dtarget=...` alone is NOT this check: it builds the
-# library and examples but never compiles the test binaries, so
-# platform-specific code reachable only from a test is invisible to
-# it. That gap shipped a broken windows-latest leg once already (the
+# library (and the install step's artifacts) but never compiles the
+# test binaries or the `examples` step, so platform-specific code
+# reachable only from a test or an example is invisible to it. That
+# gap shipped a broken windows-latest leg once already (the
 # GSO/GRO cmsg helpers, whose `std.c.cmsghdr` is `void` on Windows).
 # The `run test` steps are expected to fail here — a macOS or Linux
 # host cannot execute a Windows binary — so only compile errors count.

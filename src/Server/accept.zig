@@ -50,6 +50,11 @@ pub fn openSlotFromInitial(
     var server_scid: [20]u8 = undefined;
     var local_scid: []const u8 = undefined;
     if (retry_ctx) |echo| {
+        // Defensive: the retry-token decoder caps retry_scid_len at
+        // max_cid_len, but don't let this stack copy depend on a
+        // decoder-internal bound — an over-long echo would slice
+        // out of `server_scid` and panic.
+        if (echo.retry_scid_len > conn_mod.path.max_cid_len) return error.InvalidInitial;
         local_scid = echo.retry_scid[0..echo.retry_scid_len];
         @memcpy(server_scid[0..echo.retry_scid_len], local_scid);
         local_scid = server_scid[0..echo.retry_scid_len];
@@ -268,14 +273,11 @@ pub fn slotErrorCloseCode(err: anyerror) struct { code: u64, reason: []const u8 
             .reason = "handshake failed",
         },
         // RFC 9000 §20.1 INTERNAL_ERROR (0x01) is the catch-all.
-        // Note this bucket is not purely local-side: peer-driven
-        // resource failures (e.g. a full per-level CRYPTO inbox)
-        // land here too, because they reach this catch without a
-        // more specific code of their own. Routing those to
-        // EXCESSIVE_LOAD (0x09) would be more precise and is
-        // deliberately left for a follow-up — it changes
-        // wire-visible codes for cases this release does not
-        // otherwise touch.
+        // Peer-driven resource failures (e.g. a full per-level CRYPTO
+        // inbox) also land here: RFC 9000 defines no dedicated
+        // transport code for general resource exhaustion, so
+        // transport_error_excessive_load aliases INTERNAL_ERROR and
+        // the reason string + qlog carry the diagnostic distinction.
         else => .{
             .code = conn_mod.state.transport_error_internal,
             .reason = "Server.handle failed",

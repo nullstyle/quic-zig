@@ -718,3 +718,16 @@ test "MUST treat non-zero short-header Reserved Bits as PROTOCOL_VIOLATION on re
     try std.testing.expectEqual(quic.conn.lifecycle.CloseErrorSpace.transport, ev.error_space);
     try std.testing.expectEqual(handshake_fixture.TRANSPORT_ERROR_PROTOCOL_VIOLATION, ev.error_code);
 }
+
+// skip_ stubs: prose "Visible debt" converted to machine-visible form (2026-08).
+
+test "skip_MUST NOT accept a long header whose Length field exceeds the available buffer [RFC9000 §17.2 ¶?]" {
+    // Visible debt: RFC9000 §17.2 ¶? MUST NOT accept a long header whose
+    // Length field exceeds the available buffer — `long_packet.zig` already
+    // enforces this with `Error.DeclaredLengthExceedsInput`, but the bare
+    // `header.parse` (used by Retry and VN) doesn't carry a Length field,
+    // and the Initial/Handshake/0-RTT length-vs-buffer check happens in the
+    // open path rather than on parse alone — captured here as a header-level
+    // encode-side test only.
+    return error.SkipZigTest;
+}

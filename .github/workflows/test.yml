@@ -32,6 +32,9 @@ jobs:
             advisory: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.advisory }}
+    # A deadlocked or pathological test must fail fast instead of
+    # burning the 6-hour GitHub default job cap.
+    timeout-minutes: 45
     # Run every step under bash so the toolchain step's `uname` works on
     # the Windows runner too (Git Bash ships on windows-latest).
     defaults:
@@ -39,16 +42,16 @@ jobs:
         shell: bash
     steps:
       - name: Checkout quic-zig
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up mise (project tools)
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
           install: true
           cache: true
 
       - name: Cache Zig packages
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             .zig-global-cache
@@ -80,6 +83,23 @@ jobs:
 
       - name: zig build test
         run: zig build test --summary all
+
+      # The production mode: ReleaseSafe is the only supported
+      # internet-facing optimize mode (build.zig enforces it), so the
+      # suite must pass under it too — Debug-only gating leaves the
+      # runtime-safety-check interplay untested on the merge gate.
+      - name: zig build test (ReleaseSafe)
+        run: zig build test -Drelease=true --summary all
+
+      # Format gate (excludes the vendored consumer-smoke caches).
+      - name: zig fmt --check
+        run: zig fmt --check build.zig src tests bench examples tools/bench_compare.zig tools/external_interop.zig tools/consumer-smoke/src tools/consumer-smoke/build.zig
+
+      # The canonical echo pair is wired only into the `examples` step;
+      # compile-gate it so the embedder-facing entry points cannot
+      # bit-rot.
+      - name: zig build examples
+        run: zig build examples --summary all
 
       # End-to-end echo example smoke: server loop on a thread, client
       # loop over real loopback UDP, non-zero exit unless the stream +
@@ -113,16 +133,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout quic-zig
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up mise (project tools)
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
           install: true
           cache: true
 
       - name: Cache Zig packages
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             .zig-global-cache

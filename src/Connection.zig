@@ -447,6 +447,9 @@ app_write_update_pending_ack: bool = false,
 app_next_local_update_after_us: ?u64 = null,
 app_failed_auth_packets: u64 = 0,
 app_key_update_limits: ApplicationKeyUpdateLimits = .{},
+/// Set by the test-only limits setter; when false the key-update
+/// consultation sites use the negotiated suite's RFC 9001 §6.6 values.
+key_update_limits_override_active: bool = false,
 qlog_callback: ?QlogCallback = null,
 qlog_user_data: ?*anyopaque = null,
 /// Optional embedder policy that gates peer migrations to a new
@@ -959,8 +962,9 @@ pub const default_mtu: usize = 1200;
 /// which gets RFC 9001 §4.8's CRYPTO_ERROR window instead. Note the
 /// bucket is not purely local-side today: a peer-driven resource
 /// failure that reaches `Server`'s per-connection catch without
-/// having closed itself first lands here too, where EXCESSIVE_LOAD
-/// (0x09) would be more precise.
+/// having closed itself first lands here too; RFC 9000 has no more
+/// specific code for general resource exhaustion (see
+/// `transport_error_excessive_load`).
 pub const transport_error_internal: u64 = 0x01;
 pub const transport_error_protocol_violation: u64 = 0x0a;
 pub const transport_error_flow_control: u64 = 0x03;
@@ -969,12 +973,23 @@ pub const transport_error_stream_state: u64 = 0x05;
 pub const transport_error_final_size: u64 = 0x06;
 pub const transport_error_frame_encoding: u64 = 0x07;
 pub const transport_error_transport_parameter: u64 = 0x08;
-/// RFC 9000 §20.1 / §3.5: a server that runs out of resource budget for
-/// peer-controlled state (CRYPTO reassembly, DATAGRAM queues, stream
-/// buffers) closes the connection with EXCESSIVE_LOAD (0x09) rather
-/// than spilling unbounded peer input into the host allocator. The
-/// This is the connection-wide "memory cap" DoS backstop.
-pub const transport_error_excessive_load: u64 = 0x09;
+/// RFC 9000 §20.1 / §5.1.1: a peer that issues more connection IDs
+/// than our advertised active_connection_id_limit closes with
+/// CONNECTION_ID_LIMIT_ERROR (0x09).
+pub const transport_error_connection_id_limit: u64 = 0x09;
+/// Connection-wide "memory cap" DoS backstop: when a peer-driven
+/// buffer (CRYPTO reassembly, DATAGRAM queues, stream buffers)
+/// exhausts the resident-bytes budget we close rather than spilling
+/// unbounded input into the host allocator. RFC 9000 has no dedicated
+/// transport code for general resource exhaustion, so this aliases
+/// INTERNAL_ERROR (0x01), the §20.1 catch-all ("the endpoint
+/// encountered an internal error and cannot continue with the
+/// connection") — the same bucket quic-go and quiche use for
+/// buffer-limit closes. (Historically this was 0x09, but that
+/// codepoint is CONNECTION_ID_LIMIT_ERROR per §20.1; wire-level
+/// diagnostics live in the redacted reason strings and qlog, not the
+/// code.)
+pub const transport_error_excessive_load: u64 = transport_error_internal;
 pub const transport_error_aead_limit_reached: u64 = 0x0f;
 /// RFC 9000 §20.1 / §10.2.3: the generic transport-error code used when
 /// converting an application-variant CONNECTION_CLOSE (0x1d) to the
@@ -1513,9 +1528,12 @@ pub const LossStats = struct {
 /// rotation point so the connection never has to spend its last legal packet
 /// on CONNECTION_CLOSE.
 pub const ApplicationKeyUpdateLimits = struct {
-    /// RFC 9001 §6.6 gives AES-GCM a 2^23 packet confidentiality limit.
-    /// ChaCha20-Poly1305 does not force a lower update point, so the
-    /// default uses the cross-suite conservative floor.
+    /// Cross-suite conservative floor, used until the negotiated suite
+    /// is known (handshake phase) and as the base for the test-only
+    /// override. Once application keys exist the consultation sites
+    /// switch to `Suite.aeadLimits()`: AES-128/256-GCM get 2^23
+    /// confidentiality / 2^52 integrity, ChaCha20-Poly1305 disregards
+    /// confidentiality and gets 2^36 integrity (RFC 9001 §6.6).
     confidentiality_limit: u64 = @as(u64, 1) << 23,
     /// Update slightly before the hard limit so we don't need to spend
     /// the last legal packet on CONNECTION_CLOSE.
@@ -1663,6 +1681,12 @@ pub fn initClientAt(
         .sent = sent_trackers,
     };
     errdefer conn.inner.deinit();
+    // `ensurePrimary` allocates the PathSet backing buffer before
+    // `installTls` (the last fallible step) runs; the sent trackers
+    // and the SSL context above are covered by their own errdefers,
+    // so cover the path set here too or a failed construction leaks
+    // one path-table allocation per attempt.
+    errdefer conn.paths.deinit(allocator);
     try conn.paths.ensurePrimary(allocator, .{
         .max_datagram_size = default_mtu,
         .algorithm = conn.cc_algorithm,
@@ -1954,6 +1978,9 @@ pub fn deinit(self: *Connection) void {
 /// keys held inside an `ApplicationKeyEpoch` slot.
 fn zeroAppKeyEpoch(slot: *?ApplicationKeyEpoch) void {
     if (slot.*) |*epoch| {
+        // Free the cached EVP_AEAD_CTX before zeroing the key bytes;
+        // it holds key-derived state on the BoringSSL heap.
+        epoch.keys.deinitAead();
         std.crypto.secureZero(u8, &epoch.material.secret);
         std.crypto.secureZero(u8, &epoch.keys.key);
         std.crypto.secureZero(u8, &epoch.keys.iv);

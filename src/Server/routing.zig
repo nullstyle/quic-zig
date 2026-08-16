@@ -15,6 +15,7 @@ const containsConnectionId = wire_peek.containsConnectionId;
 const peekDcidForServer = wire_peek.peekDcidForServer;
 const conn_mod = @import("../conn/root.zig");
 const lb_mod = @import("../lb/root.zig");
+const server_observability = @import("observability.zig");
 const ConnectionId = conn_mod.path.ConnectionId;
 const Address = conn_mod.path.Address;
 const max_tracked_cids_per_slot = Server.max_tracked_cids_per_slot;
@@ -30,7 +31,8 @@ pub fn installLbConfig(server: *Server, new_cfg: lb_mod.LbConfig) Error!void {
         error.AesKeyInvalid => return Error.InvalidConfig,
         error.RandFailure => return Error.RandFailed,
         error.InvalidLbConfig => return Error.InvalidConfig,
-        error.BufferTooSmall, error.NonceExhausted => unreachable,
+        // Config-time impossibilities (see Server.init's twin block).
+        error.BufferTooSmall, error.NonceExhausted, error.InvalidPlaintextLen => return Error.InvalidConfig,
     };
     if (server.lb_factory) |*old| old.deinit();
     server.lb_factory = new_factory;
@@ -118,6 +120,7 @@ pub fn mintLocalScid(server: *Server, dst: []u8) Error!void {
             error.BufferTooSmall,
             error.InvalidLbConfig,
             error.AesKeyInvalid,
+            error.InvalidPlaintextLen,
             => return Error.RandFailed,
         };
         std.debug.assert(n == dst.len);
@@ -261,5 +264,7 @@ pub fn maybeReplenishConnectionIds(server: *Server, slot: *Slot) void {
             .stateless_reset_token = token,
         };
     }
-    _ = slot.conn.replenishConnectionIds(provisions[0..n]) catch {};
+    _ = slot.conn.replenishConnectionIds(provisions[0..n]) catch {
+        server_observability.emitLog(server, .{ .cid_replenish_failed = .{ .slot_id = slot.slot_id } });
+    };
 }

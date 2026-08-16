@@ -62,6 +62,12 @@ pub const LogEvent = union(enum) {
     /// `max_concurrent_connections`. `peer` is the source address (or
     /// null when the embedder didn't pass `from`).
     table_full: struct { peer: ?Address },
+    /// Auto-replenishment minted fresh CIDs but the connection refused
+    /// the provisions (allocation failure or CID-budget exhaustion).
+    /// The slot keeps running on its existing CIDs and the replenish
+    /// latch stays consumed — surfaced so embedders can distinguish
+    /// "silent CID starvation" from the happy path.
+    cid_replenish_failed: struct { slot_id: u64 },
 };
 
 /// Embedder-supplied logging hook. The `user_data` pointer is the
@@ -366,5 +372,6 @@ fn logEventSource(ev: LogEvent) ?Address {
         .version_negotiated => |e| e.peer,
         .stateless_queue_evicted => null,
         .table_full => |e| e.peer,
+        .cid_replenish_failed => null,
     };
 }

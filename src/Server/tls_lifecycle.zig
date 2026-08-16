@@ -64,6 +64,18 @@ pub const DrainingTlsEntry = struct {
 /// resumed-session ticket bytes (`Conn.peerSessionId`) to a 32-byte
 /// tracker `Id` and consults `tracker.consume` for a verdict.
 ///
+/// Identity limitation: the tracker `Id` binds the ticket only, not
+/// the per-attempt ClientHello random. For single-use tickets (the
+/// default posture) that is exact — a byte-identical replay collides
+/// and is rejected. Deployments that issue multi-use tickets (or
+/// reuse a static ticket key across resumptions) will see two
+/// DISTINCT legitimate resumptions of the same ticket map to one Id,
+/// so the second is conservatively downgraded to 1-RTT (a false
+/// positive, never a replay acceptance). Folding the client random
+/// into the Id (AntiReplayTracker's construction #2) is the fix but
+/// requires exposing `SSL_get_client_random` through the pinned
+/// boringssl_zig dependency, which does not bind it today.
+///
 /// Return contract (mirrors `boringssl.tls.AllowEarlyDataCallback`):
 ///   - `true`  → BoringSSL proceeds with 0-RTT for this handshake.
 ///   - `false` → BoringSSL toggles `early_data_enabled = false` on
@@ -73,6 +85,24 @@ pub const DrainingTlsEntry = struct {
 /// failure, OOM in the tracker) returns `false` — denying 0-RTT
 /// rather than risking a replay window where the tracker can't see
 /// the attempt. Hash failures are not peer-reachable in practice.
+/// BoringSSL `allow_early_data` callback for mTLS contexts: RFC 9001
+/// §4.6.4 — a server that requires client authentication cannot
+/// re-verify the resuming identity until the resumed handshake
+/// exchanges the certificate, so it must not grant early data before
+/// that verification. Refusing here forces the full 1-RTT handshake;
+/// the client transparently re-delivers its staged 0-RTT bytes at
+/// 1-RTT once the cert checks pass, and a client that presents no
+/// acceptable certificate is refused before any application bytes
+/// are delivered.
+pub fn denyEarlyDataTrampoline(
+    user_data: ?*anyopaque,
+    ssl: *boringssl.tls.Conn,
+) bool {
+    _ = user_data;
+    _ = ssl;
+    return false;
+}
+
 pub fn antiReplayEarlyDataTrampoline(
     user_data: ?*anyopaque,
     ssl: *boringssl.tls.Conn,
@@ -154,6 +184,12 @@ pub fn buildServerContext(
     // rotation must not silently stop verifying clients.
     if (client_ca_pem) |ca| {
         try tls_mod.pem.installTrustAnchors(ctx, ca, .require_peer_cert);
+        // RFC 9001 §4.6.4: client-identity re-verification happens
+        // inside the resumed handshake, so early data must be denied
+        // up front — accepting it would deliver application bytes
+        // before the certificate checks ran. The deny hook forces a
+        // full 1-RTT handshake on every resumption.
+        try ctx.setAllowEarlyDataCallback(denyEarlyDataTrampoline, null);
     }
     // Hardening §5.2 / RFC 9001 §5.6: when the embedder installs an
     // `AntiReplayTracker`, hook BoringSSL's pre-resumption

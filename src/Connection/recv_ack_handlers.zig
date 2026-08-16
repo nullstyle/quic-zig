@@ -309,16 +309,18 @@ fn apply(
     // §13.4.2 validation AND we have a baseline to diff against
     // (`ceDelta` returns `null` for the very first ECN-bearing ACK
     // — no monotonicity to compute yet, so no congestion event is
-    // implied either). The largest newly-acked sent time anchors
-    // the recovery period boundary; if no in-flight packets were
-    // matched (an empty-range ACK with bumped CE is technically
-    // legal but never useful), we fall back to `now_us`.
+    // implied either). RFC 9002 §B.7 anchors the recovery period on
+    // the largest acknowledged packet's send time — not the newest
+    // in-flight acked send time, which drifts when the largest acked
+    // packet is ACK-only or PADDING. Fall back to `now_us` only when
+    // the largest-acked packet was not newly acknowledged (a pure
+    // duplicate ACK).
     const ce_delta_packets: u64 = if (ecn_ok and target.isApplication())
         ceDelta(prev_ecn_seen, prev_ce, a.ecn_counts) orelse 0
     else
         0;
     if (ce_delta_packets > 0) {
-        const ce_anchor = if (ctx.newest_acked_sent_time_us != 0) ctx.newest_acked_sent_time_us else now_us;
+        const ce_anchor = if (ctx.largest_acked_send_time_us) |t| t else now_us;
         target.path.path.cc.onCongestionEvent(ce_anchor);
     }
 

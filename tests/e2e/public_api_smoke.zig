@@ -212,6 +212,28 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
     _ = alpn;
 }
 
+test "stable observation-point fields stay reachable on Connection" {
+    // API_STABILITY.md's Internal tier names these four fields as
+    // *stable observation points* whose doc comments make them
+    // read/write-able by embedders. Pin their types here so a future
+    // rename/removal fails CI instead of silently breaking the
+    // documented surface.
+    comptime {
+        if (std.meta.fieldInfo(quic.Connection, .last_activity_us).type != u64) {
+            @compileError("Connection.last_activity_us drifted from u64");
+        }
+        if (std.meta.fieldInfo(quic.Connection, .ecn_enabled).type != bool) {
+            @compileError("Connection.ecn_enabled drifted from bool");
+        }
+        if (std.meta.fieldInfo(quic.Connection, .reveal_close_reason_on_wire).type != bool) {
+            @compileError("Connection.reveal_close_reason_on_wire drifted from bool");
+        }
+        if (std.meta.fieldInfo(quic.Connection, .delayed_ack_packet_threshold).type != u8) {
+            @compileError("Connection.delayed_ack_packet_threshold drifted from u8");
+        }
+    }
+}
+
 test "server hostability surface keeps its callable shape" {
     const Server = quic.Server;
     comptime {

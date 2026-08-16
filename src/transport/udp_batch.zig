@@ -47,7 +47,12 @@ pub const GsoBatch = struct {
     carry_to: ?Address = null,
 
     pub fn hasCarry(self: GsoBatch) bool {
-        return self.carry_len != 0;
+        // Keyed on `carry_to` so a zero-length datagram with a
+        // changed destination is still recognized as a carry instead
+        // of being dropped as "no carry". QUIC never emits empty
+        // datagrams today, but the predicate shouldn't silently
+        // discard one if that ever changes.
+        return self.carry_to != null;
     }
 };
 
@@ -233,7 +238,13 @@ pub const IngressIterator = struct {
             // stride.
             if (self.options.gro_active) {
                 if (socket_opts.parseGroSegmentFromControl(msg.control)) |gro_seg| {
-                    if (msg.data.len > gro_seg) {
+                    // A zero stride is a kernel/cmsg anomaly: without
+                    // the guard the message would be swallowed whole
+                    // (seg = 0 trips the in-progress-split drain guard
+                    // below and the next() call skips past the already
+                    // advanced message index). Fall through to the
+                    // single-datagram return instead.
+                    if (gro_seg != 0 and msg.data.len > gro_seg) {
                         self.cur = .{
                             .data = msg.data,
                             .from = from,

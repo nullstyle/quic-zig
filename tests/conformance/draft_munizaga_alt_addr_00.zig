@@ -666,7 +666,7 @@ test "NORMATIVE advertiseAlternativeV4Address rejects calls from a client role [
 
     const cli = pair.clientConn();
     try std.testing.expectError(
-        // Connection.Error.NotServerContext via state.zig — surfaced
+        // Connection.Error.NotServerContext via Connection.zig — surfaced
         // as the embedder-misuse signal "you're calling a server-only
         // API on a client connection".
         error.NotServerContext,

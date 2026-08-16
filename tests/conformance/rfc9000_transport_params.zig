@@ -689,3 +689,25 @@ test "NORMATIVE encode emits an empty blob when every field holds its RFC defaul
     try std.testing.expectEqual(@as(u64, 65527), got.max_udp_payload_size);
     try std.testing.expectEqual(@as(u64, 2), got.active_connection_id_limit);
 }
+
+// skip_ stubs: prose "Visible debt" converted to machine-visible form (2026-08).
+
+test "skip_MUST server sends original_destination_connection_id matching client's first DCID [RFC9000 §7.3]" {
+    // Visible debt: RFC9000 §7.3 MUST server MUST send
+    // original_destination_connection_id matching client's first DCID.
+    return error.SkipZigTest;
+}
+
+test "skip_MUST server sends initial_source_connection_id matching its own SCID [RFC9000 §7.3]" {
+    // Visible debt: RFC9000 §7.3 MUST server MUST send
+    // initial_source_connection_id matching its own SCID (value match, not
+    // just presence).
+    return error.SkipZigTest;
+}
+
+test "skip_MUST client sends initial_source_connection_id matching its own SCID [RFC9000 §7.3]" {
+    // Visible debt: RFC9000 §7.3 MUST client MUST send
+    // initial_source_connection_id matching its own SCID (value match, not
+    // just presence).
+    return error.SkipZigTest;
+}

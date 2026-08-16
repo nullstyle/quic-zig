@@ -285,8 +285,15 @@ pub const Estimator = struct {
         // rather than inflating it (draft-cheng-02 §2.2/§3.3).
         const interval = @max(send_elapsed, ack_elapsed);
         const delivered_in_sample = self.delivered -| self.rs_prior_delivered;
+        // draft-cheng-02 §3.3: intervals shorter than min_rtt are
+        // unreliable. Before the first RTT sample min_rtt_us is 0
+        // (RttEstimator primes it lazily), which would admit every
+        // burst-ACK interval on loopback as reliable and feed a
+        // spuriously high early rate into BBR Startup. Floor the
+        // gate at kGranularity (1 ms) until the estimator primes.
+        const reliability_floor_us = @max(min_rtt_us, 1_000);
         const has_rate = self.rs_prior_time_us != 0 and
-            interval > 0 and interval >= min_rtt_us;
+            interval > 0 and interval >= reliability_floor_us;
 
         return .{
             .delivery_rate_bps = if (has_rate)

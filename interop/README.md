@@ -41,7 +41,7 @@ QNS image from this repository, and writes runner outputs under ignored
 
 ```sh
 mise install
-zig build qns-endpoint -Doptimize=ReleaseSafe
+zig build qns-endpoint -Drelease
 zig build external-interop -- build-image --image quic-zig-qns:local
 ```
 

@@ -14,7 +14,7 @@ and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
 ## What It Includes
 
 - QUIC v1 connection state, packet protection, streams, DATAGRAM,
-  loss recovery, CUBIC congestion control (RFC 9438; NewReno
+  loss recovery, CUBIC congestion control (RFC 9438; NewReno and BBRv3
   selectable) with RFC 9002 packet pacing, ECN, and DPLPMTUD.
 - High-level `Server` and `Client` wrappers for embedders that want
   quic-zig to own TLS context setup and connection state.
@@ -57,7 +57,7 @@ C-module wiring.
 Production or internet-facing builds must use:
 
 ```sh
-zig build -Doptimize=ReleaseSafe
+zig build -Drelease
 ```
 
 `ReleaseFast` and `ReleaseSmall` are intentionally not supported for the
@@ -245,15 +245,19 @@ networks.
 
 Before exposing a server to arbitrary peers:
 
-- Build with `-Doptimize=ReleaseSafe`.
+- Build with `-Drelease` (resolves to ReleaseSafe — build.zig sets
+  it as the preferred release mode and rejects fast/small outright).
 - Set ALPN, certificate chain, private key, stream limits, and
   connection memory budgets explicitly. The idle timeout defaults to a
   safe 30s on the server when left unset (`allow_no_idle_timeout` opts
   out); set it explicitly to match your deployment.
 - The per-source Initial-flood limiter is on by default (32/window) and
   Version Negotiation flood limiting is on; tune the datagram, byte-rate,
-  and logging limits for your deployment. Set the per-source Initial cap
-  to `null` only behind a trusted front-end that polices source rate.
+  and logging limits for your deployment. Set
+  `.initial_source_rate_limit = .disabled` (and
+  `.vn_source_rate_limit = .disabled`) only behind a trusted front-end
+  that polices source rate — the three-state `RateLimit` union makes
+  the dangerous "unset" state unspellable.
 - Use `retry_token_key` and `new_token_key` when clients should prove
   source address ownership before allocation.
 - Persist `stateless_reset_key`, Retry token keys, and NEW_TOKEN keys

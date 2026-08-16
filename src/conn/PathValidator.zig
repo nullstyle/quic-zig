@@ -68,7 +68,12 @@ pub fn beginChallenge(
 /// fatal).
 pub fn recordResponse(self: *PathValidator, token: [8]u8) Error!bool {
     if (self.status != .pending) return Error.NotPending;
-    if (std.mem.eql(u8, &token, &self.pending_token)) {
+    // Constant-time comparison for consistency with the repo's other
+    // token comparisons (stateless-reset). The value is only secret
+    // from parties that cannot inject a PATH_RESPONSE (the
+    // authenticated peer already holds it), so this is
+    // defense-in-depth rather than an exploitable leak.
+    if (std.crypto.timing_safe.eql([8]u8, token, self.pending_token)) {
         self.status = .validated;
         return true;
     }

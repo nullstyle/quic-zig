@@ -1,0 +1,11 @@
+# Tracks the ecosystem drift the SHA-pinned workflows otherwise
+# hide: action pins are updated deliberately (bump the tag comment and
+# the digest together), and the zig package hash surfaces as a PR.
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    commit-message:
+      prefix: 'ci(deps)'

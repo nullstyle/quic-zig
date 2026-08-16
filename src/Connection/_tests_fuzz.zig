@@ -24,6 +24,9 @@ const transport_error_frame_encoding = state.transport_error_frame_encoding;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const transport_error_stream_limit = state.transport_error_stream_limit;
 const transport_error_stream_state = state.transport_error_stream_state;
+const transport_error_connection_id_limit = state.transport_error_connection_id_limit;
+const transport_error_internal = state.transport_error_internal;
+const short_packet_mod = state.short_packet_mod;
 const wire_header = state.wire_header;
 const util = @import("_test_util.zig");
 const TestQlogRecorder = util.TestQlogRecorder;
@@ -977,4 +980,112 @@ test "fuzz: Connection DATA_BLOCKED / STREAM_DATA_BLOCKED / STREAMS_BLOCKED inva
 //   truncated, never beyond.
 test "fuzz: Connection CONNECTION_CLOSE pre-handshake envelope invariants" {
     try std.testing.fuzz({}, fuzzConnCloseAtInitial, .{});
+}
+
+// Assembled-datagram fuzz harness — drives the full receive pipeline
+// that the per-frame harnesses above bypass: handleWithEcn →
+// handleOnePacket → openApplicationPacket (header-protection removal,
+// PN reconstruction, AEAD open against the key epochs) →
+// classifyPayload → dispatchFrames, fed with smith-sealed,
+// coalesced 1-RTT packets under a fixed key set. The wire-layer fuzz
+// targets exercise the parsers in isolation and the per-frame
+// harnesses call dispatchFrames directly; neither reaches the
+// coalesced-packet loop, the duplicate-PN gate, or the
+// closing-state attribution tail.
+//
+// Asserts:
+// - No panic / overflow trap.
+// - Resident bytes never overshoot the (tiny) connection cap.
+// - Once closed, the close code is in the documented transport set.
+fn fuzzConnHandleAssembledPacketImpl(_: void, smith: *std.testing.Smith) anyerror!void {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // Tiny cap so the resident-bytes path (EXCESSIVE_LOAD close) is
+    // reachable from small fuzz inputs.
+    conn.max_connection_memory = 1024;
+    const cap = conn.max_connection_memory;
+
+    // Fixed 1-RTT keys: the read epoch installs from the zero
+    // secret, and testEarlyDataPacketKeys derives the matching peer
+    // write keys from the same material, so smith-sealed packets
+    // authenticate.
+    try util.installTestApplicationReadSecret(conn);
+    var peer_keys = try util.testEarlyDataPacketKeys();
+    defer peer_keys.deinitAead();
+
+    const num_datagrams = smith.valueRangeAtMost(u32, 1, 4);
+    var dg: u32 = 0;
+    while (dg < num_datagrams) : (dg += 1) {
+        var datagram: [2048]u8 = undefined;
+        var pos: usize = 0;
+        const num_packets = smith.valueRangeAtMost(u8, 1, 3);
+        var pk: u8 = 0;
+        while (pk < num_packets) : (pk += 1) {
+            // Smith-built STREAM/PING payload.
+            const num_frames = smith.valueRangeAtMost(u32, 0, 8);
+            var frame_buf: [1024]u8 = undefined;
+            var fpos: usize = 0;
+            var fi: u32 = 0;
+            while (fi < num_frames) : (fi += 1) {
+                const data_len = smith.valueRangeAtMost(u8, 0, 32);
+                var data_buf: [32]u8 = undefined;
+                smith.bytes(data_buf[0..data_len]);
+                const frame: frame_types.Frame = .{ .stream = .{
+                    .stream_id = smith.valueRangeAtMost(u64, 0, 8),
+                    .offset = smith.valueRangeAtMost(u64, 0, 1024),
+                    .data = data_buf[0..data_len],
+                    .fin = smith.valueRangeAtMost(u8, 0, 1) != 0,
+                } };
+                const needed = frame_mod.encodedLen(frame);
+                if (fpos + needed > frame_buf.len) break;
+                fpos += frame_mod.encode(frame_buf[fpos..], frame) catch break;
+            }
+            if (fpos == 0) {
+                fpos = frame_mod.encode(frame_buf[0..], .{ .ping = .{} }) catch return;
+            }
+            const pn = smith.valueRangeAtMost(u64, 0, 1000);
+            const n = short_packet_mod.seal1Rtt(datagram[pos..], .{
+                .dcid = &.{},
+                .pn = pn,
+                .largest_acked = null,
+                .payload = frame_buf[0..fpos],
+                .keys = &peer_keys,
+                .key_phase = false,
+            }) catch break;
+            pos += n;
+        }
+        if (pos == 0) continue;
+
+        const before_resident = conn.bytes_resident;
+        conn.handleWithEcn(datagram[0..pos], null, .not_ect, 1_000_000) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        };
+        try std.testing.expect(conn.bytes_resident <= cap);
+        _ = before_resident;
+
+        if (conn.lifecycle.pending_close) |info| {
+            const code = info.error_code;
+            try std.testing.expect(
+                code == transport_error_protocol_violation or
+                    code == transport_error_frame_encoding or
+                    code == transport_error_excessive_load or
+                    code == transport_error_flow_control or
+                    code == transport_error_stream_limit or
+                    code == transport_error_stream_state or
+                    code == transport_error_final_size or
+                    code == transport_error_connection_id_limit or
+                    code == transport_error_internal,
+            );
+            break;
+        }
+    }
+}
+
+test "fuzz: Connection assembled-packet receive pipeline invariants" {
+    try std.testing.fuzz({}, fuzzConnHandleAssembledPacketImpl, .{});
 }

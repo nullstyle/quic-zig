@@ -132,6 +132,7 @@ fn nextApplicationKeyEpoch(
         suite,
         material.secret[0..material.secret_len],
     );
+    errdefer next_keys.deinitAead();
     // RFC 9001 §6: HP keys don't rotate on a key update; only the
     // AEAD key/IV change. `setHp` keeps the cached HP cipher in
     // sync with the bytes — a bare `next_keys.hp = …` would leave
@@ -156,7 +157,9 @@ pub fn installApplicationSecret(
     switch (dir) {
         .read => {
             conn.levels[app_idx].read = material;
+            if (conn.app_read_previous) |*prev| prev.keys.deinitAead();
             conn.app_read_previous = null;
+            if (conn.app_read_current) |*cur| cur.keys.deinitAead();
             conn.app_read_current = epoch;
             conn.app_read_next = try nextApplicationKeyEpoch(epoch, 0);
             conn.app_failed_auth_packets = 0;
@@ -174,6 +177,7 @@ pub fn installApplicationSecret(
         },
         .write => {
             conn.levels[app_idx].write = material;
+            if (conn.app_write_current) |*cur| cur.keys.deinitAead();
             conn.app_write_current = epoch;
             conn.app_write_update_pending_ack = false;
             conn.app_next_local_update_after_us = null;
@@ -204,6 +208,10 @@ pub fn promoteApplicationReadKeys(conn: *Connection, now_us: u64) Error!void {
     const current = conn.app_read_current orelse return Error.KeyUpdateUnavailable;
     var previous = current;
     previous.discard_deadline_us = now_us +| conn.retiredPathRetentionUs();
+    // `previous` (the retired current epoch) moves into the
+    // app_read_previous slot; any epoch already sitting there is
+    // done and its cached AEAD context must be freed.
+    if (conn.app_read_previous) |*old_prev| old_prev.keys.deinitAead();
     conn.app_read_previous = previous;
     conn.app_read_current = conn.app_read_next orelse
         try nextApplicationKeyEpoch(current, now_us);
@@ -239,7 +247,8 @@ fn installNextApplicationWriteKeys(
     now_us: u64,
     pending_ack: bool,
 ) Error!void {
-    const current = conn.app_write_current orelse return Error.KeyUpdateUnavailable;
+    var current = conn.app_write_current orelse return Error.KeyUpdateUnavailable;
+    current.keys.deinitAead();
     conn.app_write_current = try nextApplicationKeyEpoch(current, now_us);
     conn.app_write_current.?.installed_at_us = now_us;
     conn.app_write_current.?.acked = false;
@@ -319,6 +328,22 @@ pub fn setApplicationKeyUpdateLimitsForTesting(
     limits: ApplicationKeyUpdateLimits,
 ) void {
     conn.app_key_update_limits = limits;
+    conn.key_update_limits_override_active = true;
+}
+
+/// Effective AEAD usage limits. When no test override is active, the
+/// negotiated suite's RFC 9001 §6.6 values apply (once application
+/// keys exist); before that, the cross-suite conservative floor in
+/// the struct defaults covers the handshake phase.
+fn effectiveKeyUpdateLimits(conn: *const Connection) ApplicationKeyUpdateLimits {
+    if (conn.key_update_limits_override_active) return conn.app_key_update_limits;
+    const suite = if (conn.app_write_current) |epoch| epoch.keys.suite else return conn.app_key_update_limits;
+    const l = suite.aeadLimits();
+    return .{
+        .confidentiality_limit = l.confidentiality_limit,
+        .proactive_update_threshold = l.confidentiality_limit -| 1024,
+        .integrity_limit = l.integrity_limit,
+    };
 }
 
 /// Test-only: allocate the next outgoing PN in the application
@@ -344,13 +369,14 @@ pub fn applicationWriteKeyPhase(conn: *const Connection) bool {
 
 pub fn prepareApplicationWriteKeys(conn: *Connection, now_us: u64) Error!void {
     const current = conn.app_write_current orelse return;
-    if (current.packets_protected >= conn.app_key_update_limits.proactive_update_threshold and
+    const limits = effectiveKeyUpdateLimits(conn);
+    if (current.packets_protected >= limits.proactive_update_threshold and
         canInitiateKeyUpdateAt(conn, now_us))
     {
         try requestKeyUpdate(conn, now_us);
         return;
     }
-    if (current.packets_protected >= conn.app_key_update_limits.confidentiality_limit) {
+    if (current.packets_protected >= limits.confidentiality_limit) {
         conn_qlog.emitQlog(conn, .{
             .name = .aead_confidentiality_limit_reached,
             .at_us = now_us,
@@ -399,7 +425,7 @@ pub fn onApplicationPacketAckedForKeys(
 
 pub fn noteApplicationAuthFailure(conn: *Connection) void {
     conn.app_failed_auth_packets +|= 1;
-    if (conn.app_failed_auth_packets >= conn.app_key_update_limits.integrity_limit) {
+    if (conn.app_failed_auth_packets >= effectiveKeyUpdateLimits(conn).integrity_limit) {
         conn_qlog.emitQlog(conn, .{
             .name = .aead_integrity_limit_reached,
             .key_epoch = if (conn.app_read_current) |epoch| epoch.epoch else null,
@@ -420,6 +446,7 @@ pub fn discardExpiredApplicationReadKeys(conn: *Connection, now_us: u64) void {
                     .key_phase = epoch.key_phase,
                     .discard_deadline_us = deadline,
                 });
+                conn.app_read_previous.?.keys.deinitAead();
                 conn.app_read_previous = null;
             }
         }
@@ -438,8 +465,14 @@ pub fn discardExpiredApplicationReadKeys(conn: *Connection, now_us: u64) void {
 /// discarded key material so it can't be recovered from a memory
 /// dump after the discard point.
 pub fn discardInitialKeys(conn: *Connection) void {
-    if (conn.initial_keys_read) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
-    if (conn.initial_keys_write) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
+    if (conn.initial_keys_read) |*k| {
+        k.deinitAead();
+        std.crypto.secureZero(u8, std.mem.asBytes(k));
+    }
+    if (conn.initial_keys_write) |*k| {
+        k.deinitAead();
+        std.crypto.secureZero(u8, std.mem.asBytes(k));
+    }
     conn.initial_keys_read = null;
     conn.initial_keys_write = null;
     conn.initial_keys_discarded = true;

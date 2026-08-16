@@ -1223,7 +1223,7 @@ pub fn pollLevelOnPath(
     // qlog hooks for the outgoing packet.
     conn.qlog_packets_sent +|= 1;
     conn.qlog_bytes_sent +|= n;
-    conn_qlog.emitPacketSent(conn, lvl, pn, @intCast(n), conn_recv_dispatch.countFrames(pl_buf[0..pl_pos]));
+    conn_qlog.emitPacketSentWithPayload(conn, lvl, pn, @intCast(n), pl_buf[0..pl_pos]);
 
     return n;
 }
