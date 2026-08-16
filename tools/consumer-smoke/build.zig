@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     // test: a consumer must be able to name `boringssl.tls.Context`
     // values that type-unify with quic's API (e.g.
     // `Client.Config.tls_context_override` for private-CA pinning)
-    // without declaring its own boringssl-zig dependency.
+    // without declaring its own boringssl dependency.
     exe_mod.addImport("boringssl", quic_dep.module("boringssl"));
 
     const exe = b.addExecutable(.{

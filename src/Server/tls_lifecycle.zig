@@ -60,21 +60,21 @@ pub const DrainingTlsEntry = struct {
 };
 
 /// BoringSSL `allow_early_data` callback installed by `Server.init`
-/// when an `AntiReplayTracker` is supplied via Config. Hashes the
-/// resumed-session ticket bytes (`Conn.peerSessionId`) to a 32-byte
-/// tracker `Id` and consults `tracker.consume` for a verdict.
+/// when an `AntiReplayTracker` is supplied via Config. Hashes
+/// SHA256(ticket || client_random) — the resumed-session ticket
+/// bytes (`Conn.peerSessionId`) bound to the per-attempt ClientHello
+/// random (`Conn.getClientRandom`) — to a 32-byte tracker `Id` and
+/// consults `tracker.consume` for a verdict.
 ///
-/// Identity limitation: the tracker `Id` binds the ticket only, not
-/// the per-attempt ClientHello random. For single-use tickets (the
-/// default posture) that is exact — a byte-identical replay collides
-/// and is rejected. Deployments that issue multi-use tickets (or
-/// reuse a static ticket key across resumptions) will see two
-/// DISTINCT legitimate resumptions of the same ticket map to one Id,
-/// so the second is conservatively downgraded to 1-RTT (a false
-/// positive, never a replay acceptance). Folding the client random
-/// into the Id (AntiReplayTracker's construction #2) is the fix but
-/// requires exposing `SSL_get_client_random` through the pinned
-/// boringssl_zig dependency, which does not bind it today.
+/// Identity: a byte-identical replay carries the same ticket AND the
+/// same client_random, so its Id collides and is rejected. Two
+/// DISTINCT legitimate resumptions of a multi-use ticket (or a static
+/// ticket key reused across resumptions) differ in client_random, so
+/// each maps to its own Id and both are accepted — the previous
+/// ticket-only construction conservatively downgraded the second to
+/// 1-RTT (a false positive, never a replay acceptance). BoringSSL has
+/// already parsed the ClientHello when this callback fires, so the
+/// random is available on the server here.
 ///
 /// Return contract (mirrors `boringssl.tls.AllowEarlyDataCallback`):
 ///   - `true`  → BoringSSL proceeds with 0-RTT for this handshake.
@@ -116,7 +116,16 @@ pub fn antiReplayEarlyDataTrampoline(
     // ticket to bind it to.
     const ticket = ssl.peerSessionId() orelse return true;
 
-    const id_full = boringssl.crypto.hash.Sha256.hash(ticket) catch return false;
+    // Bind the ticket to this specific ClientHello attempt: the
+    // 32-byte client_random is fresh per attempt, so the identity is
+    // stable across byte-replays of one flight and distinct across
+    // legitimate resumptions of a multi-use ticket.
+    const client_random = ssl.getClientRandom() catch return false;
+
+    var hasher = boringssl.crypto.hash.Sha256.init() catch return false;
+    hasher.update(ticket) catch return false;
+    hasher.update(&client_random) catch return false;
+    const id_full = hasher.finalDigest() catch return false;
     var id: tls_mod.anti_replay.Id = undefined;
     @memcpy(&id, id_full[0..tls_mod.anti_replay.id_len]);
 

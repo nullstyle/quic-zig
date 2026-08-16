@@ -63,7 +63,11 @@
 //!
 //! 1. **Session ticket bytes**: SHA-256 of the resumed session's
 //!    ticket bytes. Bound to the ticket exactly. (Requires extracting
-//!    the ticket from BoringSSL's `SSL_SESSION`.)
+//!    the ticket from BoringSSL's `SSL_SESSION`.) `Server`'s built-in
+//!    allow_early_data hook extends this with the per-attempt
+//!    ClientHello random — SHA256(ticket || client_random), see
+//!    `Server/tls_lifecycle.zig` — so two distinct resumptions of a
+//!    multi-use ticket stay distinct.
 //! 2. **Early-data digest + ClientHello random**: SHA-256 over the
 //!    `early_data_context` (already computed for QUIC's
 //!    `quic_early_data_context`) plus the 32-byte client random from

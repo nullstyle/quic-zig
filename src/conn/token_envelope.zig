@@ -137,7 +137,7 @@ pub fn Envelope(comptime cfg: Config) type {
         ) SealError!void {
             // Per-token random nonce. AES-GCM nonce reuse under a
             // fixed key breaks confidentiality and integrity, so the
-            // CSPRNG path is load-bearing; boringssl-zig surfaces
+            // CSPRNG path is load-bearing; the boringssl wrapper surfaces
             // RAND failures as an explicit error — bubble it up
             // rather than silently zeroing.
             var nonce: [nonce_len]u8 = undefined;

@@ -1,16 +1,18 @@
 name: pin-lint
 
 # Cross-repo dependency-pin lint (docs/RELEASE_READINESS.md, "Cross-repo
-# hygiene"). quic-zig and http3-zig must agree on the boringssl-zig pin
+# hygiene"). quic-zig and http3-zig must agree on the boringssl pin
 # byte-for-byte, or `boringssl.tls.Context` type identity breaks for
 # embedders composing both packages.
 #
-# Today the pins deliberately diverge: quic-zig carries unreleased
-# boringssl-zig 0.6.5 (bare SHA 292c70a2..., Windows socket link fix)
-# while http3-zig is on tag v0.6.4. This lint is therefore a RATCHET:
+# During the package-identity repin the pins deliberately diverge:
+# quic-zig carries the renamed `boringssl` package (bare SHA 86af15c...,
+# SSL_get_client_random binding + boringssl_zig -> boringssl rename)
+# while http3-zig still carries the old `boringssl_zig` identity until
+# its repin lands in the same series. This lint is therefore a RATCHET:
 # identical pins pass; the exact known pair below passes with a warning;
-# any other combination fails. When boringssl-zig tags v0.6.5 and both
-# repos repin to it, delete the known-pair branch so the lint enforces
+# any other combination fails. When http3-zig repins to the same
+# `boringssl` entry, delete the known-pair branch so the lint enforces
 # strict identity — and re-check the RELEASE_READINESS box.
 on:
   push:
@@ -68,10 +70,12 @@ jobs:
               exit 1
           }
 
-          # The one tolerated divergence (see header comment). Delete this
-          # pair when boringssl-zig v0.6.5 is tagged and both repos repin.
-          known_ours="boringssl_zig-0.6.5-4iEdPEz1AQDkuuIR0qV6v4sv7Iy9mxOl2-bX2yZW1xCG"
-          known_theirs="boringssl_zig-0.6.4-4iEdPG_EAQAatmfvnEyavDt9y1XW-WF5RpkdoMfQtpor"
+          # The one tolerated divergence (see header comment): quic-zig
+          # is on the renamed `boringssl` package identity (b47af8c,
+          # SSL_get_client_random + rename); http3-zig follows in the
+          # same series. Delete this pair once http3-zig repins.
+          known_ours="boringssl-0.6.5-Vv5DN9v_AQCITtYL9qfS0RS1C4fDzW-293xCm7NmjLRY"
+          known_theirs="boringssl_zig-0.6.5-4iEdPEz1AQDkuuIR0qV6v4sv7Iy9mxOl2-bX2yZW1xCG"
 
           if [ "$ours" = "$theirs" ]; then
               {

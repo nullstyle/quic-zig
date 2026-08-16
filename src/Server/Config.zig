@@ -108,12 +108,17 @@ pub const EarlyData = union(enum) {
     disabled,
     /// Accept 0-RTT with TLS-layer replay protection. The Server
     /// installs a BoringSSL `allow_early_data` callback that hashes
-    /// the resumed-session ticket bytes (`Conn.peerSessionId`) to the
-    /// tracker's 32-byte `Id` and calls `tracker.consume(id, now)`.
-    /// Verdict `.fresh` lets BoringSSL accept 0-RTT; `.replay`
-    /// toggles `early_data_enabled` off for that handshake (the
-    /// connection then completes as 1-RTT). The tracker is owned by
-    /// the embedder and must outlive the `Server`.
+    /// SHA256(ticket || client_random) — the resumed-session ticket
+    /// (`Conn.peerSessionId`) bound to this attempt's ClientHello
+    /// random (`Conn.getClientRandom`) — to the tracker's 32-byte
+    /// `Id` and calls `tracker.consume(id, now)`. Verdict `.fresh`
+    /// lets BoringSSL accept 0-RTT; `.replay` toggles
+    /// `early_data_enabled` off for that handshake (the connection
+    /// then completes as 1-RTT). Two distinct legitimate resumptions
+    /// of a multi-use ticket carry different client randoms, so each
+    /// maps to its own Id; a byte-replay of one flight collides and
+    /// is rejected. The tracker is owned by the embedder and must
+    /// outlive the `Server`.
     with_anti_replay: *tls_mod.anti_replay.AntiReplayTracker,
     /// Accept 0-RTT with NO transport-layer replay protection.
     /// Correct only when every request the application will accept

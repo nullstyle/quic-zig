@@ -2,7 +2,7 @@
 //!
 //! Mirror to `tests/e2e/server_smoke.zig`. These run from the
 //! integration-test module so they can construct real TLS contexts
-//! against the boringssl-zig dependency without polluting the
+//! against the boringssl dependency without polluting the
 //! published `quic` package's test surface.
 //!
 //! Like the server smoke, we don't try to drive a full handshake —

@@ -276,9 +276,9 @@ test "RFC 9001 §A.1 — server Initial keys" {
     );
 }
 
-test "hkdfExpandLabel matches the same shape boringssl-zig already KATs" {
+test "hkdfExpandLabel matches the same shape the boringssl package already KATs" {
     // Spot-check via the canonical client_initial_secret derivation
-    // (boringssl-zig's QUIC v1 initial_secret KAT covers the extract
+    // (boringssl's QUIC v1 initial_secret KAT covers the extract
     // step; we cover the full chain in the §A.1 tests above).
     const dcid = fromHex("8394c8f03e515708");
     const initial_secret = try HkdfSha256.extract(&initial_salt_v1, &dcid);

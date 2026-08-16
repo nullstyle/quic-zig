@@ -4,9 +4,9 @@
     .fingerprint = 0xc0795252bd98740e,
     .minimum_zig_version = "0.17.0-dev.1683+5ceec001b",
     .dependencies = .{
-        .boringssl_zig = .{
-            .url = "https://github.com/nullstyle/boringssl-zig/archive/292c70a2fbe8e48c4efc482c9e5f450e1f22bc6b.tar.gz",
-            .hash = "boringssl_zig-0.6.5-4iEdPEz1AQDkuuIR0qV6v4sv7Iy9mxOl2-bX2yZW1xCG",
+        .boringssl = .{
+            .url = "https://github.com/nullstyle/boringssl-zig/archive/b47af8ce3489016437e0fee48236fa6b8564424f.tar.gz",
+            .hash = "boringssl-0.6.5-Vv5DN9v_AQCITtYL9qfS0RS1C4fDzW-293xCm7NmjLRY",
         },
     },
     // Consumer-facing archive only. The dev trees (bench/, docs/,

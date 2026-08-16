@@ -262,7 +262,7 @@ pub const MigrationDecision = conn.MigrationDecision;
 /// Per-path congestion controller state, exposed via `PathStats`.
 pub const CongestionState = conn.CongestionState;
 
-/// TLS keylog callback re-exported from boringssl-zig for SSLKEYLOGFILE
+/// TLS keylog callback re-exported from the boringssl package for SSLKEYLOGFILE
 /// debugging.
 pub const KeylogCallback = boringssl.tls.KeylogCallback;
 
@@ -347,7 +347,7 @@ test {
     _ = @import("Client.zig");
 }
 
-test "phase 0: builds and links against boringssl-zig" {
+test "phase 0: builds and links against boringssl" {
     // Touch boringssl so the link path is exercised.
     const digest = try boringssl.crypto.hash.Sha256.hash("quic");
     try std.testing.expectEqual(@as(usize, 32), digest.len);

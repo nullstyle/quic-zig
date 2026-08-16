@@ -43,7 +43,7 @@ fn sanitizeCOption(mode: std.zig.SanitizeC) []const u8 {
     };
 }
 
-/// Options forwarded into the boringssl_zig dependency. Each is null
+/// Options forwarded into the boringssl dependency. Each is null
 /// when the user didn't pass it, and an unpassed option is NOT
 /// forwarded: `b.dependency` memoizes on the exact args, so passing a
 /// default explicitly would split boringssl into duplicate compile
@@ -52,7 +52,7 @@ fn sanitizeCOption(mode: std.zig.SanitizeC) []const u8 {
 const BoringsslForward = struct {
     sanitize_c: ?std.zig.SanitizeC,
     /// "zig" builds BoringSSL from source; "cmake" links the
-    /// prebuilt archives under boringssl-zig's vendor tree.
+    /// prebuilt archives under the boringssl package's vendor tree.
     source: ?[]const u8,
     /// With source="cmake": which vendor/boringssl-prebuilt/<dir> to
     /// link. Resolved to "native" when only `source` was passed.
@@ -70,7 +70,7 @@ fn boringsslDependency(
     if (fwd.source) |src| {
         const prebuilt = fwd.prebuilt_target orelse "native";
         if (fwd.sanitize_c) |mode| {
-            return b.dependency("boringssl_zig", .{
+            return b.dependency("boringssl", .{
                 .target = target,
                 .optimize = optimize,
                 .@"sanitize-c" = sanitizeCOption(mode),
@@ -78,7 +78,7 @@ fn boringsslDependency(
                 .@"boringssl-target" = prebuilt,
             });
         }
-        return b.dependency("boringssl_zig", .{
+        return b.dependency("boringssl", .{
             .target = target,
             .optimize = optimize,
             .@"boringssl-source" = src,
@@ -86,13 +86,13 @@ fn boringsslDependency(
         });
     }
     if (fwd.sanitize_c) |mode| {
-        return b.dependency("boringssl_zig", .{
+        return b.dependency("boringssl", .{
             .target = target,
             .optimize = optimize,
             .@"sanitize-c" = sanitizeCOption(mode),
         });
     }
-    return b.dependency("boringssl_zig", .{
+    return b.dependency("boringssl", .{
         .target = target,
         .optimize = optimize,
     });
@@ -149,16 +149,16 @@ pub fn build(b: *std.Build) void {
     const sanitize_c: ?std.zig.SanitizeC = if (b.option(
         []const u8,
         "sanitize-c",
-        "Override C/UB sanitizer mode for quic-zig and boringssl-zig modules: off, trap, or full",
+        "Override C/UB sanitizer mode for quic-zig and boringssl modules: off, trap, or full",
     )) |mode| parseSanitizeC(mode) else null;
 
-    // Pass-throughs for boringssl-zig's own build options, so a
+    // Pass-throughs for boringssl's own build options, so a
     // consumer can reach the prebuilt-BoringSSL escape hatch (283 C++
-    // TUs avoided) without depending on boringssl-zig directly.
+    // TUs avoided) without depending on boringssl directly.
     const bssl_source = b.option(
         []const u8,
         "boringssl-source",
-        "Forwarded to boringssl_zig: 'zig' compiles BoringSSL from source (default), 'cmake' links its vendor/ prebuilt archives",
+        "Forwarded to boringssl: 'zig' compiles BoringSSL from source (default), 'cmake' links its vendor/ prebuilt archives",
     );
     if (bssl_source) |src| {
         if (!std.mem.eql(u8, src, "zig") and !std.mem.eql(u8, src, "cmake")) {
@@ -168,7 +168,7 @@ pub fn build(b: *std.Build) void {
     const bssl_prebuilt_target = b.option(
         []const u8,
         "boringssl-target",
-        "Forwarded to boringssl_zig: with -Dboringssl-source=cmake, selects vendor/boringssl-prebuilt/<dir> (default: native)",
+        "Forwarded to boringssl: with -Dboringssl-source=cmake, selects vendor/boringssl-prebuilt/<dir> (default: native)",
     );
     // Upstream only consults `boringssl-target` in cmake mode, so a
     // target passed without `-Dboringssl-source=cmake` would be
@@ -201,7 +201,7 @@ pub fn build(b: *std.Build) void {
     // API surface — e.g. constructing a `boringssl.tls.Context` for
     // `Client.Config.tls_context_override` (private-CA pinning, custom
     // session-ticket capture). A consumer that declared its own
-    // boringssl-zig dependency would get a *different* module instance
+    // boringssl dependency would get a *different* module instance
     // whose `tls.Context` type does not unify. Mirrors http3-zig's
     // export of the same module; tools/consumer-smoke pins the type
     // identity end-to-end.

@@ -272,7 +272,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
     // identity or the replay cache will silently fail to detect
     // round-tripped replays.
     //
-    // (`boringssl-zig`'s `tls_session.zig` already covers byte-for-byte
+    // (`boringssl`'s `tls_session.zig` already covers byte-for-byte
     // round-trip; this test re-asserts it from the embedder's
     // identity-construction perspective, which is the load-bearing
     // property for the replay cache.)
@@ -331,7 +331,7 @@ test "0-RTT replay rejection: ticket bytes are stable across deserialization (§
     const original_id = ticketIdentity(original_bytes);
 
     // Round-trip the ticket through fromBytes/toBytes. The resulting
-    // bytes are byte-identical (per `boringssl-zig` §0.4.0 contract),
+    // bytes are byte-identical (per `boringssl` §0.4.0 contract),
     // so SHA-256 is too.
     var session = try boringssl.tls.Session.fromBytes(cli.tls_ctx, original_bytes);
     defer session.deinit();

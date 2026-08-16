@@ -36,7 +36,7 @@ pub const Options = struct {
 };
 
 /// Errors raised by the SHA-256 builder. These propagate from the
-/// boringssl-zig crypto wrapper, which surfaces BoringSSL non-success
+/// boringssl crypto wrapper, which surfaces BoringSSL non-success
 /// returns as typed errors instead of panicking.
 pub const Error = boringssl.crypto.hash.Error;
 

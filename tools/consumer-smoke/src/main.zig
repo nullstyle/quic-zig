@@ -17,7 +17,7 @@ comptime {
     // Type identity across the package boundary: the field is
     // `?boringssl.tls.Context`, and "boringssl" here is the module
     // instance exported by quic-zig — a consumer that declared its own
-    // boringssl-zig dependency would get a different instance whose
+    // boringssl dependency would get a different instance whose
     // Context type does NOT unify.
     const OverrideField = std.meta.fieldInfo(quic.Client.Config, .tls_context_override).type;
     std.debug.assert(OverrideField == ?boringssl.tls.Context);

@@ -1628,7 +1628,7 @@ pub const ApplicationOpenResult = struct {
 /// bound to `2 * max_cert_list` when the peer ships a large cert
 /// chain (clients can receive Certificate + CertificateRequest),
 /// which exceeds our fixed buffer. Wiring `SSL_quic_max_handshake_flight_len`
-/// through the boringssl-zig wrapper (it has no method binding today)
+/// through the boringssl wrapper (it has no method binding today)
 /// would let us size per-level dynamically; until then, peers with
 /// >16 KiB Handshake flights surface as `error.InboxOverflow`.
 pub const crypto_buffer_default_len: usize = 16384;
