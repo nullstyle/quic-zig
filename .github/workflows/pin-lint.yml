@@ -45,7 +45,7 @@ jobs:
 
           extract_hash() {
               awk '
-                  index($0, ".boringssl_zig = .{") { in_dep = 1; next }
+                  index($0, ".boringssl = .{") || index($0, ".boringssl_zig = .{") { in_dep = 1; next }
                   in_dep && index($0, ".hash = ") {
                       line = $0
                       sub(/^[^"]*"/, "", line)
@@ -59,14 +59,14 @@ jobs:
           }
 
           ours=$(extract_hash build.zig.zon) || {
-              echo "FAIL: could not extract .boringssl_zig .hash from build.zig.zon" >&2
+              echo "FAIL: could not extract .boringssl .hash from build.zig.zon" >&2
               exit 1
           }
 
           curl -fsSL --retry 3 -o http3-build.zig.zon \
               https://raw.githubusercontent.com/nullstyle/http3-zig/main/build.zig.zon
           theirs=$(extract_hash http3-build.zig.zon) || {
-              echo "FAIL: could not extract .boringssl_zig .hash from http3-zig build.zig.zon" >&2
+              echo "FAIL: could not extract .boringssl .hash from http3-zig build.zig.zon" >&2
               exit 1
           }
 
