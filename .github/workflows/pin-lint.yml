@@ -89,11 +89,11 @@ jobs:
               {
                   echo "### pin-lint: WARNING (known divergence tolerated)"
                   echo ""
-                  echo "- quic-zig: \`$ours\` (unreleased 0.6.5, Windows socket link fix)"
-                  echo "- http3-zig: \`$theirs\` (tag v0.6.4)"
+                  echo "- quic-zig: \`$ours\` (renamed \`boringssl\` identity, SSL_get_client_random)"
+                  echo "- http3-zig: \`$theirs\` (old \`boringssl_zig\` identity, pre-repin)"
                   echo ""
-                  echo "Reconverge when boringssl-zig tags v0.6.5, then delete the"
-                  echo "known pair from pin-lint.yml to restore strict identity."
+                  echo "Reconverge when http3-zig repins to the same \`boringssl\` entry,"
+                  echo "then delete the known pair to restore strict identity."
               } | tee -a "$GITHUB_STEP_SUMMARY"
           else
               {
