@@ -5,15 +5,12 @@ name: pin-lint
 # byte-for-byte, or `boringssl.tls.Context` type identity breaks for
 # embedders composing both packages.
 #
-# During the package-identity repin the pins deliberately diverge:
-# quic-zig carries the renamed `boringssl` package (bare SHA 86af15c...,
-# SSL_get_client_random binding + boringssl_zig -> boringssl rename)
-# while http3-zig still carries the old `boringssl_zig` identity until
-# its repin lands in the same series. This lint is therefore a RATCHET:
-# identical pins pass; the exact known pair below passes with a warning;
-# any other combination fails. When http3-zig repins to the same
-# `boringssl` entry, delete the known-pair branch so the lint enforces
-# strict identity — and re-check the RELEASE_READINESS box.
+# Both repos now carry the renamed `boringssl` package identity
+# (b47af8c, SSL_get_client_random + rename), so the lint enforces
+# STRICT identity: identical pins pass, any other combination fails.
+# The extractor still recognizes the old `.boringssl_zig` key so a
+# one-sided back-pin fails loudly instead of as an unparseable
+# manifest.
 on:
   push:
     branches: [main]
@@ -39,7 +36,7 @@ jobs:
       - name: Checkout quic-zig
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Compare boringssl-zig pins with http3-zig
+      - name: Compare boringssl pins with http3-zig
         run: |
           set -eu
 
@@ -70,41 +67,23 @@ jobs:
               exit 1
           }
 
-          # The one tolerated divergence (see header comment): quic-zig
-          # is on the renamed `boringssl` package identity (b47af8c,
-          # SSL_get_client_random + rename); http3-zig follows in the
-          # same series. Delete this pair once http3-zig repins.
-          known_ours="boringssl-0.6.5-Vv5DN9v_AQCITtYL9qfS0RS1C4fDzW-293xCm7NmjLRY"
-          known_theirs="boringssl_zig-0.6.5-4iEdPEz1AQDkuuIR0qV6v4sv7Iy9mxOl2-bX2yZW1xCG"
-
           if [ "$ours" = "$theirs" ]; then
               {
                   echo "### pin-lint: OK"
                   echo ""
-                  echo "boringssl-zig pins are byte-for-byte identical:"
+                  echo "boringssl pins are byte-for-byte identical:"
                   echo ""
                   echo '`'"$ours"'`'
               } | tee -a "$GITHUB_STEP_SUMMARY"
-          elif [ "$ours" = "$known_ours" ] && [ "$theirs" = "$known_theirs" ]; then
-              {
-                  echo "### pin-lint: WARNING (known divergence tolerated)"
-                  echo ""
-                  echo "- quic-zig: \`$ours\` (renamed \`boringssl\` identity, SSL_get_client_random)"
-                  echo "- http3-zig: \`$theirs\` (old \`boringssl_zig\` identity, pre-repin)"
-                  echo ""
-                  echo "Reconverge when http3-zig repins to the same \`boringssl\` entry,"
-                  echo "then delete the known pair to restore strict identity."
-              } | tee -a "$GITHUB_STEP_SUMMARY"
           else
               {
-                  echo "### pin-lint: FAIL (pins drifted beyond the known pair)"
+                  echo "### pin-lint: FAIL (pins drifted)"
                   echo ""
                   echo "- quic-zig: \`$ours\`"
                   echo "- http3-zig: \`$theirs\`"
                   echo ""
-                  echo "Either repin both repos identically, or (for a deliberate"
-                  echo "temporary divergence) update the known pair in pin-lint.yml"
-                  echo "with a dated justification."
+                  echo "Repin both repos identically — `boringssl.tls.Context` type"
+                  echo "identity across the quic/http3 boundary depends on the dedupe."
               } | tee -a "$GITHUB_STEP_SUMMARY"
               exit 1
           fi
