@@ -112,16 +112,17 @@ is safe to embed in production. The gates:
       envelope and `AntiReplayTracker` persistence uses `QZAR`.
 
 ### Cross-repo hygiene
-- [ ] `boringssl-zig` is pinned to a tag (not a bare SHA) in both quic-zig
+- [ ] `boringssl` is pinned to a tag (not a bare SHA) in both quic-zig
       and http3-zig, byte-for-byte identically (roadmap H1 #3). Current
-      reality (2026-08-11): quic-zig deliberately pins bare SHA
-      `292c70a2…` — unreleased 0.6.5 carrying the Windows socket link
-      fix — while http3-zig pins tag `v0.6.4`. The CI lint half of this
-      gate now exists: `.github/workflows/pin-lint.yml` compares the two
-      pins on push/PR and weekly, tolerating exactly this known pair (with
-      a warning) and failing on any other divergence. Re-check this box
-      when boringssl-zig tags v0.6.5, both repos repin to the tag, and the
-      known pair is deleted from the lint.
+      reality (2026-08): both repos pin bare SHA `b47af8c…` — the
+      renamed `boringssl` package identity (was `boringssl_zig`;
+      package name and module name now align) carrying the
+      `SSL_get_client_random` binding — byte-for-byte identically, and
+      `.github/workflows/pin-lint.yml` enforces STRICT identity (the
+      repin-transition known pair was deleted once http3-zig repinned).
+      Re-check this box when boringssl-zig tags the release, both repos
+      repin to the tag, and http3-zig's `tools/check-boringssl-pin.sh`
+      again lints a tag pin.
 
 - [x] **Toolchain pinning policy is decided.** quic-zig **tracks Zig
       master** during development and will **pin the `0.17.0` tag once
