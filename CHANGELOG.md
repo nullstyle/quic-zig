@@ -35,6 +35,23 @@ throughout.
   and per-path paths (key-epoch confirmation vs stream dispatch). The
   two are independent, so this was observable only on the error path;
   it is now one order, with a comment recording that the order is free.
+- **Three shipped examples ended a receive stream on "empty read + FIN
+  seen", which truncates under reordering.** `streamRead` returns 0
+  whenever the next in-order byte is missing, and `fin_seen` flips as
+  soon as the FIN-carrying frame is accepted at any offset, so the pair
+  is also the state of a stream with a hole below the FIN — a peer that
+  sends `0..99`, then `200..299` with the FIN, with `100..199`
+  reordered behind them, got a third of its stream echoed back and
+  FIN'd, silently. `examples/echo_server.zig`,
+  `examples/foreign_loop_embedder.zig`, and `examples/goodput_smoke.zig`
+  now end on `Connection.streamRecvState(id).terminal` (with `null`,
+  meaning reaped, treated as terminal). Library behavior is unchanged —
+  the transport always reassembled correctly — but embedders who copied
+  the example loop inherited the bug. EMBEDDING.md now states the rule
+  under "Ending a receive stream", and a reordering regression test
+  (one client datagram held back until the server is observed with the
+  FIN seen and the recv half non-terminal) pins it in
+  `examples/foreign_loop_embedder.zig`.
 
 ### Changed
 

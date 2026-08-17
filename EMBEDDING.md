@@ -384,6 +384,51 @@ stream goes terminal — use the connection-level accessors:
 - `streamSendStats(id)` snapshots `written` / `acked` / `buffered` /
   `has_pending` for write backpressure, or `null` for a reaped stream.
 
+### Ending a receive stream
+
+**Use `streamRecvState(id).terminal`, and nothing else.** Every wrong
+version of this test fails *silently*: the application truncates the
+stream, and neither endpoint reports an error.
+
+- A read that returns 0 bytes means "nothing readable **right now**".
+  `streamRead` also returns 0 when the next in-order byte has not arrived
+  yet, so an empty read is not a drained stream.
+- `StreamReadResult.fin` (and `streamRecvState().fin_seen`) means the
+  FIN-carrying frame was accepted, at whatever offset it named. A FIN at a
+  high offset can arrive before a lower chunk does.
+- The two together are therefore **not** an end-of-stream test either.
+  "Empty read + FIN seen" is exactly the state of a stream with a hole in
+  it: a peer that sends `0..99`, then `200..299` with the FIN, with
+  `100..199` reordered behind them, puts the receiver in that state with
+  two thirds of the stream still to come.
+
+`terminal` is true only once the FIN arrived **and** every byte was
+delivered and read, or the peer sent RESET_STREAM — `reset_seen` tells an
+abort apart from a clean EOF. `null` means the stream was already reaped,
+which is terminal too:
+
+```zig
+while (true) {
+    const n = conn.streamRead(id, &buf) catch |err| switch (err) {
+        error.StreamNotFound => break, // already reaped
+        else => return err,
+    };
+    if (n == 0) break;                 // nothing readable RIGHT NOW
+    handle(buf[0..n]);
+}
+const st = conn.streamRecvState(id) orelse return true; // reaped => done
+if (!st.terminal) return false;                         // more coming, or a gap
+if (st.reset_seen) return true;                         // peer aborted
+// clean EOF: every byte arrived and was read
+```
+
+A receiver that knows the message length in advance (a fixed-size reply, a
+length-prefixed frame) may end on the byte count instead — that is what
+`examples/echo_client.zig` does. Everything else ends on `terminal`.
+`examples/echo_server.zig`, `examples/foreign_loop_embedder.zig`, and
+`examples/goodput_smoke.zig` all follow this rule, and the reordering
+regression test that pins it lives in `examples/foreign_loop_embedder.zig`.
+
 RFC 9221 DATAGRAM support is off by default:
 `transport_params.max_datagram_frame_size` defaults to `0`, which
 advertises no DATAGRAM support. Set it to a nonzero value on your own

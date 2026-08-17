@@ -27,17 +27,20 @@
 //!     drains for a grace window before returning.
 //!
 //! Echo semantics: every peer-opened bidi stream is drained and the
-//! bytes written back (FIN'd once the peer's FIN has been *read*, not
-//! merely seen arriving); every RFC 9221 DATAGRAM is echoed verbatim.
-//! One line is printed per connection event so a human can watch the
-//! flow.
+//! bytes written back (FIN'd once the peer's recv half is *terminal*,
+//! not merely once its FIN frame was seen); every RFC 9221 DATAGRAM is
+//! echoed verbatim. One line is printed per connection event so a
+//! human can watch the flow.
 //!
-//! Two stream-API details `echoStream` below exists to get right,
-//! because both fail silently on any payload bigger than one read:
+//! Three stream-API details `echoStream` below exists to get right,
+//! because all three fail silently rather than erroring:
 //! `StreamReadResult.fin` reports that the FIN *frame arrived*, not
-//! that you have drained the stream, and `Connection.streamWrite`
-//! short-writes by design when the send buffer is full. Neither is an
-//! error condition; both need a loop.
+//! that you have drained the stream; a read that returns 0 bytes means
+//! "nothing readable right now", which includes "a chunk below the
+//! read offset has not arrived yet"; and `Connection.streamWrite`
+//! short-writes by design when the send buffer is full. The sound
+//! end-of-stream test is `Connection.streamRecvState(id)` — see
+//! `echoStream`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -78,8 +81,12 @@ const StreamEcho = struct {
     /// The peer's FIN *frame has arrived*. Strictly weaker than "we
     /// have read everything": `StreamReadResult.fin` mirrors
     /// `recv.fin_seen`, which flips when the FIN-carrying frame is
-    /// accepted regardless of how much the application has drained.
-    /// Act on it only after a read comes back empty.
+    /// accepted regardless of how much the application has drained —
+    /// and the FIN can carry a high offset that arrives before a lower
+    /// chunk does. Never a completion signal, not even paired with an
+    /// empty read; it only tells the log line apart from a peer RESET.
+    /// The completion test is `Connection.streamRecvState` — see
+    /// `echoStream`.
     fin_seen: bool = false,
 };
 
@@ -205,13 +212,27 @@ fn echoStreams(slot: *quic.Server.Slot, state: *ConnState) !void {
 }
 
 /// One echo pass over `e`: flush whatever the connection refused last
-/// time, then read and write back until the peer's buffer is dry, then
-/// FIN our half. Returns true when the stream is finished with.
+/// time, then read and write back until nothing more is readable, then
+/// FIN our half once the peer's recv half is terminal. Returns true
+/// when the stream is finished with.
 ///
-/// Both loops here are load-bearing. Stopping at the first `res.fin`
-/// would truncate any stream longer than `stream_chunk_bytes` — the
-/// FIN frame can arrive while chunks are still queued for us — and
-/// stopping at the first short `streamWrite` would drop the tail.
+/// Three things here are load-bearing, and each one truncates the
+/// stream silently — no error — if you get it wrong:
+///
+///  1. Stopping at the first `res.fin` throws away every chunk past
+///     the first: the FIN frame can arrive while more chunks are still
+///     queued for us, so any stream longer than `stream_chunk_bytes`
+///     loses its tail.
+///  2. Stopping at the first short `streamWrite` drops the tail we
+///     already read; see `flushEcho`.
+///  3. Treating an empty read as "the peer is done" truncates under
+///     reordering. A read returns 0 whenever the next in-order byte is
+///     missing, so "empty read + FIN seen" is also the state of a
+///     stream with a hole below the FIN — say chunks 0..99 and 200..299
+///     delivered, 100..199 still in flight. `streamRecvState(id)` is
+///     the sound test: `.terminal` means every byte arrived AND was
+///     read (or the peer RESET the stream), and `null` means the stream
+///     was already reaped, which is terminal too.
 fn echoStream(conn: *quic.Connection, e: *StreamEcho) !bool {
     if (!try flushEcho(conn, e)) return false;
     while (true) {
@@ -220,11 +241,15 @@ fn echoStream(conn: *quic.Connection, e: *StreamEcho) !bool {
         e.off = 0;
         e.len = res.n;
         if (!try flushEcho(conn, e)) return false;
-        // A read that came back empty is the only reliable "drained"
-        // signal; `res.fin` alone is not one.
+        // Nothing readable *right now* — which is not the same as
+        // "nothing more is coming". See point 3 above.
         if (res.n == 0) break;
     }
-    if (!e.fin_seen) return false; // peer hasn't finished sending
+    // `null` means the stream already left the live table, so there is
+    // nothing left to read or to FIN.
+    const st = conn.streamRecvState(e.id) orelse return true;
+    if (!st.terminal) return false; // more to come, or a gap below the FIN
+    if (st.reset_seen) return true; // peer aborted: no clean EOF to mirror
     try conn.streamFinish(e.id);
     return true;
 }

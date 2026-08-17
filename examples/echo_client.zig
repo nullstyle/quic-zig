@@ -29,7 +29,10 @@
 //! worth copying: `Connection.streamWrite` short-writes when the send
 //! buffer is full, and `StreamReadResult.fin` reports that the FIN
 //! *frame arrived* rather than that the stream is drained. Neither is
-//! an error condition.
+//! an error condition. This client knows its reply length, so the byte
+//! count ends the read; a client that does not know it ends on
+//! `Connection.streamRecvState(id).terminal` — never on an empty read,
+//! which is also what a missing chunk looks like.
 
 const std = @import("std");
 const quic = @import("quic");
@@ -122,14 +125,18 @@ pub const EchoFlow = struct {
                 );
             },
             .awaiting_stream_echo => {
-                // Read until the peer's buffer is dry. Note what this
+                // Read until nothing more is readable. Note what this
                 // does NOT key off: `res.fin` reports that the FIN
                 // *frame arrived*, not that the stream is drained, so
                 // for a reply of known length the byte count is the
                 // reliable completion signal. (A protocol whose reply
-                // length is unknown waits for a read that returns zero
-                // bytes with `fin` set — that is what the server side
-                // of this pair does in `echoStream`.)
+                // length is unknown asks `streamRecvState(id)` and
+                // waits for `.terminal`. It must NOT wait for a
+                // zero-byte read with `fin` set: a read returns zero
+                // whenever the next in-order byte is missing, so that
+                // pair is also the state of a stream with a hole in it.
+                // The server side of this pair does it the right way in
+                // `echoStream`.)
                 while (flow.reply_len < flow.reply.len) {
                     const res = client.conn.streamReadFin(
                         flow.stream_id,

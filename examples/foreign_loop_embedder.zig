@@ -68,12 +68,15 @@
 //! `runUdpServer`'s listener fan-out and `noteServerLocalAddressChanged`
 //! transition).
 //!
-//! Three sizing/API traps this file marks explicitly, because all three
+//! Four sizing/API traps this file marks explicitly, because all four
 //! fail *silently* rather than erroring: a socket receive buffer
 //! shorter than 64 KiB (the kernel truncates, the AEAD then fails, and
 //! it all reads as packet loss — see `socket_rx_bytes`);
 //! `StreamReadResult.fin`, which reports that the FIN *frame arrived*,
-//! not that you have drained the stream (see `echoStream`); and
+//! not that you have drained the stream (see `echoStream`); a read that
+//! returns 0 bytes, which means "nothing readable right now" and is
+//! also what a gap below the read offset looks like, so it is not an
+//! end-of-stream signal either (see `echoStream`); and
 //! `Connection.streamWrite`, which short-writes by design under
 //! send-buffer pressure and must never be asserted on (see
 //! `StreamEcho.flush`).
@@ -286,12 +289,12 @@ pub const StreamEcho = struct {
     buf: [echo_chunk_bytes]u8 = undefined,
     off: usize = 0,
     len: usize = 0,
-    /// The peer's FIN *frame has arrived*. That is strictly weaker
-    /// than "we have read everything": `StreamReadResult.fin` mirrors
-    /// `recv.fin_seen`, which flips when the FIN-carrying frame is
-    /// accepted, no matter how much the application has drained. Act
-    /// on it only after a read comes back empty.
-    fin_seen: bool = false,
+    // Note what this struct deliberately does NOT carry: a `fin_seen`
+    // latch. `StreamReadResult.fin` only says the FIN *frame* arrived,
+    // which is true long before the stream is drained and can even be
+    // true while a chunk below the read offset is still in flight, so
+    // latching it here would only tempt a reader to end the stream on
+    // it. `echoStream` asks `Connection.streamRecvState` instead.
 
     /// Hand the staged bytes to `writer`, keeping whatever it refuses.
     /// Returns false when the write short-wrote: that is the
@@ -313,10 +316,13 @@ pub const StreamEcho = struct {
 
 /// What one echo pass over a stream achieved.
 pub const EchoOutcome = enum {
-    /// Still work to do later: the peer has not FIN'd, or our send
-    /// buffer is full and holds a staged remainder.
+    /// Still work to do later: the peer's recv half is not terminal
+    /// yet (more bytes coming, or a gap below a FIN that already
+    /// arrived), or our send buffer is full and holds a staged
+    /// remainder.
     pending,
-    /// Peer's FIN was drained, everything was echoed, our half is FIN'd.
+    /// The peer's recv half went terminal, everything it sent was
+    /// echoed, and our half is FIN'd.
     echoed,
     /// The stream is gone (peer RESET, then the stream GC reaped it).
     abandoned,
@@ -576,11 +582,11 @@ fn echoStreams(slot: *quic.Server.Slot, state: *ConnState) !void {
 }
 
 /// Echo one bidi stream: flush any staged remainder, then read and
-/// write back until the peer's buffer is dry, then FIN our half once
-/// the peer's FIN has actually been *drained*.
+/// write back until nothing more is readable, then FIN our half once
+/// the peer's recv half is *terminal*.
 ///
-/// The two easy ways to get this wrong, both of which silently corrupt
-/// the stream rather than erroring:
+/// The three easy ways to get this wrong, all of which silently
+/// corrupt the stream rather than erroring:
 ///
 ///  1. Treating `StreamReadResult.fin` as "all data read". It means
 ///     the FIN frame arrived. A peer that sends 5000 bytes + FIN in
@@ -588,7 +594,15 @@ fn echoStreams(slot: *quic.Server.Slot, state: *ConnState) !void {
 ///     `n = echo_chunk_bytes, fin = true` — finishing there throws
 ///     away everything past the first chunk. Keep reading until a read
 ///     returns zero bytes.
-///  2. Asserting `streamWrite` accepted everything. It short-writes by
+///  2. Treating a zero-byte read as "the peer is done". It means
+///     nothing is readable *at this instant*, and one reason for that
+///     is a chunk below the read offset still being in flight. Under
+///     reordering, "empty read + FIN seen" is exactly the state of a
+///     stream with a hole in it, so the pair is not an end-of-stream
+///     test either. `streamRecvState(id).terminal` is: it is true only
+///     once every byte arrived AND was read, or the peer RESET the
+///     stream. See the reordering regression test in Group C.
+///  3. Asserting `streamWrite` accepted everything. It short-writes by
 ///     design under send-buffer pressure; see `StreamEcho.flush`.
 fn echoStream(conn: *quic.Connection, e: *StreamEcho) !EchoOutcome {
     const writer = connectionStreamWriter(conn);
@@ -598,7 +612,9 @@ fn echoStream(conn: *quic.Connection, e: *StreamEcho) !EchoOutcome {
     if (!try e.flush(writer)) return .pending;
 
     while (true) {
-        const res = conn.streamReadFin(e.id, &e.buf) catch |err| switch (err) {
+        // `streamRead`, not `streamReadFin`: this loop has no use for
+        // the FIN flag, because it is not what ends the stream.
+        const n = conn.streamRead(e.id, &e.buf) catch |err| switch (err) {
             // The stream left the live table. For an echo server that
             // means the peer RESET it and the GC reaped it: our send
             // half cannot be terminal yet (we only `streamFinish`
@@ -606,16 +622,19 @@ fn echoStream(conn: *quic.Connection, e: *StreamEcho) !EchoOutcome {
             error.StreamNotFound => return .abandoned,
             else => return err,
         };
-        if (res.fin) e.fin_seen = true;
         e.off = 0;
-        e.len = res.n;
+        e.len = n;
         if (!try e.flush(writer)) return .pending;
-        // A read that came back empty is the only reliable "drained"
-        // signal — see the doc comment above.
-        if (res.n == 0) break;
+        // Nothing readable *right now* — not "nothing more is coming".
+        // See point 2 of the doc comment above.
+        if (n == 0) break;
     }
 
-    if (!e.fin_seen) return .pending;
+    // The recv half decides, not the read loop. `null` means the stream
+    // already left the live table (see the `StreamNotFound` arm above).
+    const st = conn.streamRecvState(e.id) orelse return .abandoned;
+    if (!st.terminal) return .pending; // more to come, or a gap below the FIN
+    if (st.reset_seen) return .abandoned; // peer aborted; no clean EOF to mirror
     conn.streamFinish(e.id) catch |err| switch (err) {
         error.StreamNotFound => return .abandoned,
         else => return err,
@@ -1722,11 +1741,40 @@ const MemoryWire = struct {
     to_client: u32 = 0,
     scratch: [max_quic_datagram_bytes]u8 = undefined,
 
+    /// Client -> server reordering impairment, armed by `Reorder`.
+    /// Zero delivers every datagram in order, which is what every test
+    /// but the reordering one wants.
+    hold_nth_post_handshake: u32 = 0,
+    /// Client -> server datagrams counted from the first one sent after
+    /// the client's handshake completed.
+    post_handshake_seq: u32 = 0,
+    /// The datagram currently held back, if any.
+    held_len: ?usize = null,
+    held_buf: [max_quic_datagram_bytes]u8 = undefined,
+    /// Set once the server has been observed with the peer's FIN seen
+    /// and its recv half NOT terminal — a hole below an already-arrived
+    /// FIN. That is the exact state in which "empty read + FIN seen"
+    /// lies, so a reordering test that never reaches it is testing
+    /// nothing and must fail.
+    trap_observed: bool = false,
+
     fn toServer(ctx: ?*anyopaque, dst: quic.Address, bytes: []const u8) anyerror!void {
         _ = dst;
         const self: *MemoryWire = @ptrCast(@alignCast(ctx.?));
-        @memcpy(self.scratch[0..bytes.len], bytes);
         self.to_server += 1;
+        if (self.hold_nth_post_handshake != 0 and self.client.?.client.conn.handshakeDone()) {
+            self.post_handshake_seq += 1;
+            if (self.post_handshake_seq == self.hold_nth_post_handshake) {
+                // Hold this one back so the datagrams behind it reach
+                // the server first. Nothing is lost: `releaseHeld`
+                // delivers it later, which is what a reordered path
+                // does and what QUIC is required to tolerate.
+                @memcpy(self.held_buf[0..bytes.len], bytes);
+                self.held_len = bytes.len;
+                return;
+            }
+        }
+        @memcpy(self.scratch[0..bytes.len], bytes);
         _ = try self.server.?.ingest(self.scratch[0..bytes.len], synthetic_peer, self.now_us);
     }
 
@@ -1737,6 +1785,39 @@ const MemoryWire = struct {
         self.to_client += 1;
         try self.client.?.ingest(self.scratch[0..bytes.len], self.now_us);
     }
+
+    /// Deliver the held-back datagram, closing the gap.
+    fn releaseHeld(self: *MemoryWire) !void {
+        const len = self.held_len orelse return;
+        self.held_len = null;
+        @memcpy(self.scratch[0..len], self.held_buf[0..len]);
+        _ = try self.server.?.ingest(self.scratch[0..len], synthetic_peer, self.now_us);
+    }
+
+    /// Latch `trap_observed` if the server's recv half is sitting in
+    /// the misread state right now.
+    fn noteTrapState(self: *MemoryWire) void {
+        const pump = self.server orelse return;
+        if (pump.server.connectionCount() == 0) return;
+        const slot = pump.server.iterator()[0];
+        const st = slot.conn.streamRecvState(self.client.?.flow.stream_id) orelse return;
+        if (st.fin_seen and !st.terminal) self.trap_observed = true;
+    }
+};
+
+/// Client -> server packet reordering for `runInMemoryEcho`. All-zero
+/// (the default) means an unimpaired wire.
+const Reorder = struct {
+    /// Which client -> server datagram to hold back, counted from the
+    /// first one sent after the client's handshake completed. `1` is
+    /// the flight that carries the client Finished, so the useful
+    /// values start at `2` — the first datagram that is pure
+    /// application data.
+    hold_nth_post_handshake: u32 = 0,
+    /// Hard backstop: let the held datagram through at this loop step
+    /// even if the trap state never appeared, so a run can never stall
+    /// on the impairment itself.
+    release_by_step: u32 = 0,
 };
 
 /// Synthetic client tuple the in-memory server sees every datagram
@@ -1762,12 +1843,17 @@ const MemoryRun = struct {
     streams_echoed: u32,
     datagrams_echoed: u32,
     states_refused: u32,
+    /// See `MemoryWire.trap_observed`. Always false on an unimpaired
+    /// wire, because packets never arrive out of order there.
+    trap_observed: bool,
 };
 
 /// Drive a full `Server` <-> `Client` echo with the two pumps wired
 /// straight into each other — no sockets, no threads, no `std.posix`,
 /// and a fake clock. `max_steps` bounds the run so a stall fails fast.
-fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32) !MemoryRun {
+/// `reorder` optionally holds one client -> server datagram back; pass
+/// `.{}` for an in-order wire.
+fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32, reorder: Reorder) !MemoryRun {
     const allocator = testing.allocator;
     const protos = [_][]const u8{alpn};
 
@@ -1792,7 +1878,7 @@ fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32) !MemoryRun 
     });
     defer client.deinit();
 
-    var wire: MemoryWire = .{};
+    var wire: MemoryWire = .{ .hold_nth_post_handshake = reorder.hold_nth_post_handshake };
     var server_tx: [max_quic_datagram_bytes]u8 = undefined;
     var client_tx: [max_quic_datagram_bytes]u8 = undefined;
 
@@ -1825,6 +1911,17 @@ fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32) !MemoryRun 
         wire.now_us = now_us;
         try client_pump.service(now_us);
         try server_pump.service(now_us);
+        if (wire.held_len != null) {
+            // Sample AFTER the server has had a full service pass with
+            // the gap open, then close the gap. Sampling here is what
+            // makes the impairment a real gate: an echo loop that ends
+            // the stream on "empty read + FIN seen" has already
+            // truncated by this point, so the run stalls and fails.
+            wire.noteTrapState();
+            if (wire.trap_observed or steps + 1 >= reorder.release_by_step) {
+                try wire.releaseHeld();
+            }
+        }
     }
 
     var result: MemoryRun = .{
@@ -1849,6 +1946,7 @@ fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32) !MemoryRun 
         .streams_echoed = 0,
         .datagrams_echoed = 0,
         .states_refused = 0,
+        .trap_observed = wire.trap_observed,
     };
 
     // Teardown: the client's CONNECTION_CLOSE is already on the wire,
@@ -1874,7 +1972,7 @@ fn runInMemoryEcho(payload: []const u8, reply: []u8, max_steps: u32) !MemoryRun 
 
 test "ServerPump/ClientPump: full handshake + stream echo + datagram echo over an in-memory sink" {
     var reply: [stream_message.len]u8 = undefined;
-    const run = try runInMemoryEcho(stream_message, &reply, 128);
+    const run = try runInMemoryEcho(stream_message, &reply, 128, .{});
 
     try testing.expect(run.client_handshake_done);
     try testing.expect(run.server_handshake_done);
@@ -1917,11 +2015,60 @@ test "ServerPump: a stream larger than one echo chunk is echoed whole, not trunc
 
     // More steps than the short-payload case: the echo needs one pass
     // per chunk in each direction.
-    const run = try runInMemoryEcho(&payload, &reply, 256);
+    const run = try runInMemoryEcho(&payload, &reply, 256, .{});
 
     // `ClientPump` compares the echo against the payload and errors on
     // a mismatch, so reaching `.done` at all means every byte came
     // back in order.
+    try testing.expect(run.succeeded);
+    try testing.expectEqual(ClientFlow.Stage.done, run.stage);
+    try testing.expect(run.streams_echoed >= 1);
+    try testing.expectEqual(@as(usize, 0), run.live_states_after_teardown);
+    // An in-order wire never produces a hole, which is exactly why the
+    // test below has to exist.
+    try testing.expect(!run.trap_observed);
+}
+
+test "ServerPump: a FIN that arrives ahead of a missing chunk does not end the stream" {
+    // The trap this pins is one step past the test above, and the two
+    // are NOT the same. There, the FIN arrives while later chunks are
+    // still queued *in order*, and reading until a read comes back
+    // empty is enough. Here a chunk is missing *below* the read offset,
+    // so the read comes back empty with the FIN already seen and bytes
+    // still to come. An echo loop that ends the stream on that pair
+    // echoes a prefix, FINs, and silently truncates — no error, on
+    // either side, ever.
+    //
+    // Loopback and the in-order wire cannot produce this state, so the
+    // wire holds one client datagram back until the server has been
+    // observed in it (`MemoryRun.trap_observed`, asserted below so the
+    // test fails loudly rather than passing vacuously if the impairment
+    // stops biting).
+    //
+    // The payload spans several datagrams so there is a chunk to hold
+    // back and a FIN behind it.
+    const payload_len = echo_chunk_bytes * 6;
+    comptime {
+        std.debug.assert(payload_len > echo_chunk_bytes);
+        std.debug.assert(payload_len <= common.transportParams().initial_max_stream_data_bidi_remote);
+    }
+
+    var payload: [payload_len]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @truncate(i *% 17 +% 3);
+    var reply: [payload_len]u8 = undefined;
+
+    const run = try runInMemoryEcho(&payload, &reply, 512, .{
+        // 1 carries the client Finished; 2 is the first datagram that
+        // is pure stream data, and the FIN rides a later one.
+        .hold_nth_post_handshake = 2,
+        .release_by_step = 128,
+    });
+
+    // The impairment actually produced the misread state...
+    try testing.expect(run.trap_observed);
+    // ...and the echo still came back whole. `ClientPump` compares the
+    // reply against the payload and errors on a mismatch, so reaching
+    // `.done` means every byte returned, in order.
     try testing.expect(run.succeeded);
     try testing.expectEqual(ClientFlow.Stage.done, run.stage);
     try testing.expect(run.streams_echoed >= 1);

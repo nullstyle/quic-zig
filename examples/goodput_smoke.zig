@@ -40,6 +40,12 @@ const SinkState = struct {
     stream_id: u64 = 0,
     have_stream: bool = false,
     consumed: u64 = 0,
+    /// The peer's recv half went terminal: every byte arrived and was
+    /// read (or the stream was reaped after both halves terminated).
+    /// Latched from `Connection.streamRecvState`, never from a read
+    /// that came back empty — an empty read only means nothing is
+    /// readable at that instant, which is also what a gap below the
+    /// read offset looks like.
     fin_drained: bool = false,
 };
 
@@ -65,7 +71,7 @@ const SinkApp = struct {
 
             var buf: [read_chunk_bytes]u8 = undefined;
             while (true) {
-                const res = slot.conn.streamReadFin(state.stream_id, &buf) catch |err| switch (err) {
+                const n = slot.conn.streamRead(state.stream_id, &buf) catch |err| switch (err) {
                     // Reaped after both halves went terminal — everything
                     // was already drained.
                     error.StreamNotFound => {
@@ -74,10 +80,19 @@ const SinkApp = struct {
                     },
                     else => return err,
                 };
-                state.consumed += res.n;
-                if (res.n == 0) {
-                    if (res.fin) state.fin_drained = true;
-                    break;
+                state.consumed += n;
+                // Zero bytes means nothing is readable *right now*. It
+                // does NOT mean the peer is done: a read also returns 0
+                // while a chunk below the read offset is still in
+                // flight, and the FIN can already have arrived at a
+                // higher offset. The recv half is the one that knows.
+                if (n == 0) break;
+            }
+            if (!state.fin_drained) {
+                if (slot.conn.streamRecvState(state.stream_id)) |st| {
+                    state.fin_drained = st.terminal;
+                } else {
+                    state.fin_drained = true; // reaped => terminal
                 }
             }
         }
