@@ -803,6 +803,12 @@ pub const Error = error{
     KeyUpdateBlocked,
     DatagramUnavailable,
     DatagramTooLarge,
+    /// `receiveDatagram` was handed a `dst` smaller than the oldest
+    /// queued DATAGRAM's payload. Nothing was consumed: grow the
+    /// buffer (`nextDatagramSize` reports the required length) and
+    /// retry, or use `receiveDatagramInfo`, whose contract is
+    /// truncate-and-report instead.
+    DatagramBufferTooSmall,
     DatagramQueueFull,
     DatagramIdExhausted,
     InvalidStreamId,
@@ -2696,13 +2702,14 @@ pub const advertiseAlternativeV4Address = conn_migration.advertiseAlternativeV4A
 
 pub const advertiseAlternativeV6Address = conn_migration.advertiseAlternativeV6Address;
 
-/// Pop the oldest received DATAGRAM into `dst`. Returns the
-/// number of bytes written, or null if none pending. The
-/// payload is dropped from the queue regardless of whether it
-/// fit — caller must size `dst` to the peer's advertised
-/// `max_datagram_frame_size` (or `nextDatagramSize`, which peeks).
-/// Prefer `receiveDatagramInfo`, which reports the full payload
-/// length so an undersized buffer is visible instead of silent.
+/// Pop the oldest received DATAGRAM into `dst`. Returns the number
+/// of bytes written, or null if none pending. An undersized `dst`
+/// returns `Error.DatagramBufferTooSmall` and consumes NOTHING —
+/// grow the buffer (`nextDatagramSize` reports the required length)
+/// and retry. (Until 0.16.0 this truncated silently, the last
+/// member of the silent-failure family; `receiveDatagramInfo`
+/// remains the truncate-and-report alternative for callers that
+/// prefer a fixed buffer.)
 pub const receiveDatagram = conn_datagram.receiveDatagram;
 
 /// Pop the oldest received DATAGRAM and include whether it arrived
@@ -2821,6 +2828,11 @@ pub fn cachePeerTransportParams(self: *Connection) Error!void {
         self.emitConnectionStateIfChanged();
         return;
     }
+    self.validateEarlyDataParamReduction();
+    if (self.lifecycle.pending_close != null or self.lifecycle.closed) {
+        self.emitConnectionStateIfChanged();
+        return;
+    }
     try self.installPeerTransportStatelessResetToken();
     try self.installPreferredAddressConnectionId();
     self.validatePeerTransportConnectionIds();
@@ -2852,6 +2864,56 @@ fn installPreferredAddressConnectionId(self: *Connection) Error!void {
         if (ConnectionId.eql(item.cid, pref.connection_id)) return;
     }
     try self.registerPeerCid(0, 1, 0, pref.connection_id, pref.stateless_reset_token);
+}
+
+/// RFC 9000 §7.4.1: which limit did the fresh handshake parameters
+/// REDUCE below the remembered (0-RTT-relied-upon) values? Null =
+/// none. Exactly the seven parameters the section enumerates —
+/// the ones bounding what a client may already have done in early
+/// data. Pure comparison, extracted so the rule is unit-testable
+/// apart from the TLS plumbing.
+// INTERNAL: pub for the _tests files; not part of the embedder API.
+pub fn earlyDataParamReduced(
+    fresh: TransportParams,
+    remembered: TransportParams,
+) ?[]const u8 {
+    if (fresh.active_connection_id_limit < remembered.active_connection_id_limit)
+        return "active_connection_id_limit";
+    if (fresh.initial_max_data < remembered.initial_max_data)
+        return "initial_max_data";
+    if (fresh.initial_max_stream_data_bidi_local < remembered.initial_max_stream_data_bidi_local)
+        return "initial_max_stream_data_bidi_local";
+    if (fresh.initial_max_stream_data_bidi_remote < remembered.initial_max_stream_data_bidi_remote)
+        return "initial_max_stream_data_bidi_remote";
+    if (fresh.initial_max_stream_data_uni < remembered.initial_max_stream_data_uni)
+        return "initial_max_stream_data_uni";
+    if (fresh.initial_max_streams_bidi < remembered.initial_max_streams_bidi)
+        return "initial_max_streams_bidi";
+    if (fresh.initial_max_streams_uni < remembered.initial_max_streams_uni)
+        return "initial_max_streams_uni";
+    return null;
+}
+
+/// RFC 9000 §7.4.1 MUST: a server that accepted 0-RTT cannot reduce
+/// the limits the client relied on when it sent early data; the
+/// client treats a reduction as PROTOCOL_VIOLATION. Without this, a
+/// buggy or hostile server could shrink flow-control limits below
+/// what the client already sent in 0-RTT — retroactively making the
+/// client the flow-control violator, or silently stranding early
+/// streams. Client-only; a no-op unless early data was ACCEPTED and
+/// remembered parameters are installed (the resumption path).
+fn validateEarlyDataParamReduction(self: *Connection) void {
+    if (self.role != .client) return;
+    if (self.inner.earlyDataStatus() != .accepted) return;
+    const remembered = self.remembered_peer_transport_params orelse return;
+    const fresh = self.cached_peer_transport_params orelse return;
+    if (earlyDataParamReduced(fresh, remembered) != null) {
+        self.close(
+            true,
+            transport_error_protocol_violation,
+            "0-RTT transport parameter reduced (RFC 9000 §7.4.1)",
+        );
+    }
 }
 
 pub fn validatePeerTransportLimits(self: *Connection) void {

@@ -645,10 +645,10 @@ fn echoStream(conn: *quic.Connection, e: *StreamEcho) !EchoOutcome {
 /// Echo every queued inbound DATAGRAM verbatim.
 fn echoDatagrams(slot: *quic.Server.Slot, state: *ConnState) !void {
     // Sized to the advertised `max_datagram_frame_size`, not to the
-    // stream chunk: `receiveDatagram` pops the payload whether or not
-    // it fit, so a short buffer loses the tail with no error.
+    // stream chunk; an undersized buffer now fails loudly with
+    // DatagramBufferTooSmall instead of truncating.
     var buf: [max_quic_datagram_bytes]u8 = undefined;
-    while (slot.conn.receiveDatagram(&buf)) |n| {
+    while (try slot.conn.receiveDatagram(&buf)) |n| {
         slot.conn.sendDatagram(buf[0..n]) catch |err| switch (err) {
             // Peer didn't advertise datagram support, or shrank the
             // limit below what it just sent — drop, don't kill the
@@ -846,7 +846,7 @@ pub const ClientPump = struct {
             },
             .awaiting_datagram_echo => {
                 var buf: [max_quic_datagram_bytes]u8 = undefined;
-                const n = conn.receiveDatagram(&buf) orelse return;
+                const n = (try conn.receiveDatagram(&buf)) orelse return;
                 if (!std.mem.eql(u8, buf[0..n], datagram_message)) {
                     return error.ForeignLoopEchoMismatch;
                 }

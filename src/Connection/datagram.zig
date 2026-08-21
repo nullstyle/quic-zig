@@ -84,8 +84,10 @@ pub fn maxDatagramPayload(conn: *const Connection) Error!usize {
 }
 
 // Doc comment lives on the `Connection.receiveDatagram` thunk in Connection.zig.
-pub fn receiveDatagram(conn: *Connection, dst: []u8) ?usize {
-    const item = receiveDatagramInfo(conn, dst) orelse return null;
+pub fn receiveDatagram(conn: *Connection, dst: []u8) Error!?usize {
+    const pending = nextDatagramSize(conn) orelse return null;
+    if (pending > dst.len) return Error.DatagramBufferTooSmall;
+    const item = receiveDatagramInfo(conn, dst).?;
     return item.len;
 }
 

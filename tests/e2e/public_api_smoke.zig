@@ -105,7 +105,9 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
 
     const send_datagram: *const fn (*Conn, []const u8) anyerror!void = Conn.sendDatagram;
     const send_datagram_tracked: *const fn (*Conn, []const u8) anyerror!u64 = Conn.sendDatagramTracked;
-    const receive_datagram: *const fn (*Conn, []u8) ?usize = Conn.receiveDatagram;
+    // Loud-truncation contract as of 0.16.0: an undersized dst errors
+    // (DatagramBufferTooSmall) and consumes nothing.
+    const receive_datagram: *const fn (*Conn, []u8) anyerror!?usize = Conn.receiveDatagram;
     const receive_datagram_info: *const fn (*Conn, []u8) ?quic.IncomingDatagram = Conn.receiveDatagramInfo;
     const next_datagram_size: *const fn (*const Conn) ?usize = Conn.nextDatagramSize;
     const max_datagram_payload: *const fn (*const Conn) anyerror!usize = Conn.maxDatagramPayload;

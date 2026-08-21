@@ -290,7 +290,7 @@ fn flushEcho(conn: *quic.Connection, e: *StreamEcho) !bool {
 /// Echo every queued inbound DATAGRAM verbatim.
 fn echoDatagrams(slot: *quic.Server.Slot, state: *ConnState) !void {
     var buf: [datagram_chunk_bytes]u8 = undefined;
-    while (slot.conn.receiveDatagram(&buf)) |n| {
+    while (try slot.conn.receiveDatagram(&buf)) |n| {
         slot.conn.sendDatagram(buf[0..n]) catch |err| switch (err) {
             // Peer didn't advertise datagram support, or shrank the
             // limit below what it just sent us — drop, don't kill the

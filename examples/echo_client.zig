@@ -170,10 +170,10 @@ pub const EchoFlow = struct {
             },
             .awaiting_datagram_echo => {
                 // At least the `max_datagram_frame_size` we advertise
-                // (1200): `receiveDatagram` pops the payload whether or
-                // not it fit, so a short buffer loses the tail silently.
+                // (1200); an undersized buffer now fails loudly with
+                // DatagramBufferTooSmall instead of truncating.
                 var buf: [2048]u8 = undefined;
-                const n = client.conn.receiveDatagram(&buf) orelse return;
+                const n = (try client.conn.receiveDatagram(&buf)) orelse return;
                 if (!std.mem.eql(u8, buf[0..n], datagram_message)) {
                     return error.EchoMismatch;
                 }

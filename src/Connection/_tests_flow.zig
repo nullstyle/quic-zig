@@ -900,3 +900,46 @@ test "PATHS_BLOCKED below current local limit is ignored" {
     conn.handlePathsBlocked(.{ .maximum_path_id = 2 });
     try std.testing.expectEqual(@as(?u32, 2), conn.peer_paths_blocked_at);
 }
+
+test "RFC 9000 §7.4.1: earlyDataParamReduced flags exactly the seven 0-RTT-load-bearing limits" {
+    const base: state.TransportParams = .{
+        .active_connection_id_limit = 4,
+        .initial_max_data = 1 << 20,
+        .initial_max_stream_data_bidi_local = 1 << 16,
+        .initial_max_stream_data_bidi_remote = 1 << 16,
+        .initial_max_stream_data_uni = 1 << 16,
+        .initial_max_streams_bidi = 8,
+        .initial_max_streams_uni = 4,
+    };
+
+    // Identical and strictly-raised parameters are both fine.
+    try std.testing.expectEqual(@as(?[]const u8, null), state.earlyDataParamReduced(base, base));
+    var raised = base;
+    raised.initial_max_data += 1;
+    raised.initial_max_streams_uni += 1;
+    try std.testing.expectEqual(@as(?[]const u8, null), state.earlyDataParamReduced(raised, base));
+
+    // Each of the seven, reduced alone, is flagged by name.
+    const fields = .{
+        "active_connection_id_limit",
+        "initial_max_data",
+        "initial_max_stream_data_bidi_local",
+        "initial_max_stream_data_bidi_remote",
+        "initial_max_stream_data_uni",
+        "initial_max_streams_bidi",
+        "initial_max_streams_uni",
+    };
+    inline for (fields) |name| {
+        var reduced = base;
+        @field(reduced, name) -= 1;
+        const hit = state.earlyDataParamReduced(reduced, base) orelse
+            return error.ReductionNotFlagged;
+        try std.testing.expectEqualStrings(name, hit);
+    }
+
+    // Parameters OUTSIDE the §7.4.1 set may shrink freely (e.g.
+    // max_idle_timeout is renegotiated, not relied upon by 0-RTT).
+    var other = base;
+    other.max_idle_timeout_ms = 1;
+    try std.testing.expectEqual(@as(?[]const u8, null), state.earlyDataParamReduced(other, base));
+}

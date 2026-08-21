@@ -1792,7 +1792,7 @@ test "Frees release resident bytes so the cap is reusable" {
     // Drain the queued DATAGRAM and confirm the budget drops back
     // toward the floor.
     var sink: [4096]u8 = undefined;
-    const got = conn.receiveDatagram(&sink) orelse return error.TestExpectedDatagram;
+    const got = (try conn.receiveDatagram(&sink)) orelse return error.TestExpectedDatagram;
     try std.testing.expectEqual(@as(usize, 600), got);
     try std.testing.expectEqual(@as(u64, 0), conn.bytes_resident);
 }

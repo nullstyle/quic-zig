@@ -500,9 +500,16 @@ test "DATAGRAM round-trips through the 1-RTT path" {
         now_us += 1000;
     }
 
-    const cn = client.receiveDatagram(&rx_c).?;
+    // Loud-truncation contract: an undersized buffer errors and
+    // consumes NOTHING — the payload survives for a properly-sized
+    // retry (nextDatagramSize reports the requirement).
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectError(error.DatagramBufferTooSmall, client.receiveDatagram(&tiny));
+    try std.testing.expectEqual(@as(?usize, "hello-from-server".len), client.nextDatagramSize());
+
+    const cn = (try client.receiveDatagram(&rx_c)).?;
     try std.testing.expectEqualStrings("hello-from-server", rx_c[0..cn]);
-    const sn = server.receiveDatagram(&rx_s).?;
+    const sn = (try server.receiveDatagram(&rx_s)).?;
     try std.testing.expectEqualStrings("hello-from-client", rx_s[0..sn]);
 }
 
@@ -1222,10 +1229,10 @@ test "multipath concurrent transfer survives reordering loss and path abandon" {
         try net.pollEndpoint(true, client, now_us);
         try net.pollEndpoint(false, server, now_us);
 
-        while (client.receiveDatagram(&dg_buf)) |n| {
+        while (try client.receiveDatagram(&dg_buf)) |n| {
             noteDatagram(dg_buf[0..n], &client_dg_p0, &client_dg_p1);
         }
-        while (server.receiveDatagram(&dg_buf)) |n| {
+        while (try server.receiveDatagram(&dg_buf)) |n| {
             noteDatagram(dg_buf[0..n], &server_dg_p0, &server_dg_p1);
         }
         now_us += 1_000;
