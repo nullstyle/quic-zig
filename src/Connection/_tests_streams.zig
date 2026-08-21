@@ -711,8 +711,19 @@ test "recv-side reads on a local-initiated uni stream fail fast with StreamNotRe
     try std.testing.expectError(Error.StreamNotReadable, conn.streamRead(uni.id, &buf));
     try std.testing.expectError(Error.StreamNotReadable, conn.streamReadFin(uni.id, &buf));
 
+    // streamRecvState on the same send-only stream returns null (not
+    // a fabricated non-terminal state a completion poll would wait on
+    // forever) — the receive-side twin of the StreamNotReadable guard.
+    try std.testing.expectEqual(
+        @as(?@import("../Connection.zig").StreamRecvState, null),
+        conn.streamRecvState(uni.id),
+    );
+
     // Directional, not a blanket read ban: a local bidi stream's
-    // receive half still reads normally (empty right now).
+    // receive half still reads normally (empty right now) and reports
+    // a real (non-terminal) recv state.
     const bidi = try conn.openNextBidi();
     try std.testing.expectEqual(@as(usize, 0), try conn.streamRead(bidi.id, &buf));
+    const st = conn.streamRecvState(bidi.id) orelse return error.MissingRecvState;
+    try std.testing.expect(!st.terminal);
 }

@@ -574,7 +574,10 @@ pub fn lowerBound(self: *const SentPacketTracker, pn: u64) ?u32 {
 
 /// Live PNs in tracker order — the observable "what is tracked" view
 /// the tests assert on (physical slots include tombstones).
-fn livePns(t: *const SentPacketTracker, buf: []u64) []const u64 {
+// INTERNAL test helper: pub so sibling test files (loss_recovery.zig)
+// share one copy instead of maintaining a byte-identical twin. Not
+// part of the embedder API.
+pub fn livePns(t: *const SentPacketTracker, buf: []u64) []const u64 {
     var n: usize = 0;
     var i: u32 = 0;
     while (i < t.count) : (i += 1) {

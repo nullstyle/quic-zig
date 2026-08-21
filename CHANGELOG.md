@@ -49,8 +49,27 @@ changes.
   restore payload to fit the early-data window before staging it
   pre-`advance()` (RFC 9001 §4.5), instead of discovering the limit
   mid-flight.
+- **`Client.Config.defaultTransportParams()`**: the client-side
+  mirror of the server helper — a non-zero flow-control / stream
+  working set so a client dialing with it can receive a response
+  instead of advertising a zero window with `.{}` and stalling.
 
-## [0.14.0] - 2026-08-21
+### Changed
+
+- **`streamRecvState` on a locally-initiated unidirectional stream
+  now returns `null`** (like an unknown stream) instead of a
+  fabricated non-terminal state. Such a stream has no receive half,
+  so a caller polling it for completion would wait forever — the
+  last member of the silent-failure family the 0.14.0 sprint hunted
+  (the twin of `streamRead`'s `StreamNotReadable`). Embedder-side
+  misuse only; peer input can never produce it.
+
+### Fixed
+
+- Four doc comments referenced a `provideConnectionId` method that
+  does not exist (the real API is `replenishConnectionIds`); a
+  downstream integration audit tripped on it. Corrected, including
+  the runnable example in `conn/stateless_reset.zig`.
 
 The application-layer sprint: closing the silent-failure traps and
 adding `quic.app` / `quic.testing`, so a custom server is a

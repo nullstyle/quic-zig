@@ -130,7 +130,7 @@ pub fn queuePathCidsBlocked(
 
 /// Returns the pending peer-side PATH_CIDS_BLOCKED report we have
 /// received, or `null` if the peer is not currently blocked. Drives
-/// proactive CID issuance via `provideConnectionId`.
+/// proactive CID issuance via `replenishConnectionIds`.
 pub fn pendingPathCidsBlocked(conn: *const Connection) ?PathCidsBlockedInfo {
     const path_id = conn.peer_path_cids_blocked_path_id orelse return null;
     return .{

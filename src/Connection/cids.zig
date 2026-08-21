@@ -460,7 +460,7 @@ fn cidPathCanBeManaged(conn: *const Connection, path_id: u32) bool {
 /// Snapshot of how many local CIDs are active on `path_id`, the peer's
 /// limit, and the embedder's remaining issuance budget. Returns `null`
 /// when `path_id` does not name a manageable path. Embedders use this to
-/// drive `provideConnectionId` proactively (RFC 9000 §5.1.1).
+/// drive `replenishConnectionIds` proactively (RFC 9000 §5.1.1).
 pub fn connectionIdReplenishInfo(
     conn: *const Connection,
     path_id: u32,

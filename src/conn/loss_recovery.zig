@@ -214,16 +214,8 @@ pub fn detectLosses(
 
 /// Live (still-tracked) PNs in order — removal tombstones slots in
 /// place, so the physical array includes dead entries.
-fn testLivePns(tr: *const SentPacketTracker, buf: []u64) []const u64 {
-    var n: usize = 0;
-    var i: u32 = 0;
-    while (i < tr.count) : (i += 1) {
-        if (tr.packets[i].dead) continue;
-        buf[n] = tr.packets[i].pn;
-        n += 1;
-    }
-    return buf[0..n];
-}
+// Shares SentPacketTracker.livePns instead of a byte-identical twin.
+const testLivePns = SentPacketTracker.livePns;
 
 const AckTracker = @import("AckTracker.zig");
 

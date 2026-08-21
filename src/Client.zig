@@ -64,6 +64,14 @@ pub const Config = struct {
     /// `initial_source_connection_id` field is filled in
     /// automatically with the freshly-minted client SCID; everything
     /// else is taken verbatim.
+    ///
+    /// The all-zero default (`.{}`) admits no incoming stream or
+    /// connection data — a client that dials with it completes the
+    /// handshake and then stalls the moment the server tries to send
+    /// a response, because it advertised a zero receive window. Use
+    /// `Config.defaultTransportParams()` for a working set, or set
+    /// the flow-control fields explicitly. (Client-side mirror of
+    /// `Server.Config.defaultTransportParams()`.)
     transport_params: TransportParams,
 
     /// Length of the random DCID the client picks for its very first
@@ -304,6 +312,28 @@ pub const Config = struct {
     /// `congestion_control` is selected. `false` restores plain
     /// RFC 9002 slow start.
     enable_hystart: bool = true,
+
+    /// A transport-parameter working set for a client that "just
+    /// works": the same non-zero flow-control / stream-count window
+    /// as `Server.Config.defaultTransportParams()`, so a client
+    /// dialing with it can actually receive a server's response
+    /// instead of advertising a zero receive window and stalling.
+    /// Hand this to `transport_params` instead of `.{}` for a
+    /// quick-start dial; production clients tune the windows to their
+    /// workload. RFC 9221 DATAGRAM stays opt-in
+    /// (`max_datagram_frame_size` left at 0).
+    pub fn defaultTransportParams() TransportParams {
+        return .{
+            .max_idle_timeout_ms = 30_000,
+            .initial_max_data = 16 * 1024 * 1024,
+            .initial_max_stream_data_bidi_local = 1 << 20,
+            .initial_max_stream_data_bidi_remote = 1 << 20,
+            .initial_max_stream_data_uni = 1 << 20,
+            .initial_max_streams_bidi = 1000,
+            .initial_max_streams_uni = 64,
+            .active_connection_id_limit = 4,
+        };
+    }
 };
 
 /// Callback receiving ready-to-persist `tls.resumption_state` envelope
@@ -680,6 +710,19 @@ pub fn deinit(self: *Client) void {
 // `tests/e2e/client_smoke.zig` so it can `@embedFile` test data.
 // The tests below only exercise config validation — they don't need
 // a running TLS context.
+
+test "Client.Config.defaultTransportParams admits streams, bytes, and connections" {
+    const params = Client.Config.defaultTransportParams();
+    // The all-zero default admits nothing; the helper must not.
+    try std.testing.expect(params.initial_max_data > 0);
+    try std.testing.expect(params.initial_max_streams_bidi > 0);
+    try std.testing.expect(params.initial_max_stream_data_bidi_remote > 0);
+    // Matches the server helper's working set so a quick-start
+    // client and server agree out of the box.
+    try std.testing.expectEqual(@as(u64, 16 * 1024 * 1024), params.initial_max_data);
+    // DATAGRAM stays opt-in.
+    try std.testing.expectEqual(@as(u64, 0), params.max_datagram_frame_size);
+}
 
 test "Client.connect rejects empty SNI" {
     const protos = [_][]const u8{"hq-test"};

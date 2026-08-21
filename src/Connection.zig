@@ -1382,7 +1382,7 @@ pub const MaxStreamDataItem = PendingFrameQueues.MaxStreamDataItem;
 /// to the connection and is awaiting transmission.
 pub const PendingNewConnectionId = PendingFrameQueues.PendingNewConnectionId;
 
-/// Embedder-supplied bundle when calling `provideConnectionId`/`provisionPathConnectionId`
+/// Embedder-supplied bundle when calling `replenishConnectionIds`/`provisionPathConnectionId`
 /// to install a fresh local CID and its stateless reset token.
 pub const ConnectionIdProvision = struct {
     connection_id: []const u8,

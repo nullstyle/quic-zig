@@ -612,6 +612,13 @@ pub fn collectSendableStreamsByPriority(conn: *Connection, buf: []*Stream) []*St
 
 // Doc comment lives on the `Connection.streamRecvState` thunk in Connection.zig.
 pub fn streamRecvState(conn: *const Connection, id: u64) ?StreamRecvState {
+    // A locally-initiated unidirectional stream has no receive half:
+    // it can never see a FIN or reach a terminal recv state, so a
+    // caller polling for completion here would wait forever on a
+    // state that cannot change. Null (same as an unknown stream)
+    // says "nothing to observe" — the receive-side twin of
+    // `streamRead`'s `StreamNotReadable` guard.
+    if (!peerMaySendOnStream(conn, id)) return null;
     const s = conn.streams.get(id) orelse return null;
     return .{
         .fin_seen = s.recv.fin_seen,

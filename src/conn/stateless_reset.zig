@@ -21,10 +21,10 @@
 //! ```zig
 //! const key = try quic.conn.stateless_reset.Key.generate();
 //! const token = try quic.conn.stateless_reset.derive(&key, cid_bytes);
-//! try connection.provideConnectionId(.{
+//! _ = try connection.replenishConnectionIds(&.{.{
 //!     .connection_id = cid_bytes,
 //!     .stateless_reset_token = token,
-//! });
+//! }});
 //! ```
 //!
 //! Embedders that want a different scheme (e.g. encrypted tokens
