@@ -152,7 +152,7 @@ test_only_force_handshake_for_migration: bool = false,
 /// detail to the peer (parser fingerprinting, internal state
 /// names). Local introspection is unaffected — `lifecycle.record`
 /// always captures the reason for embedder-side observability,
-/// and `nextEvent` surfaces it via `CloseEvent.reason`.
+/// and `pollEvent` surfaces it via `CloseEvent.reason`.
 ///
 /// Embedders that want the reason on the wire (debug builds,
 /// internal load tests, etc.) can flip this to `true`.
@@ -807,6 +807,22 @@ pub const Error = error{
     DatagramIdExhausted,
     InvalidStreamId,
     StreamLimitExceeded,
+    /// `streamWrite` / `streamFinish` / `streamReset` was called on a
+    /// stream the local endpoint cannot send on: a peer-initiated
+    /// unidirectional stream (RFC 9000 §2.1 — its low bits make it
+    /// receive-only here). Embedder-side misuse — peer input can never
+    /// produce this. Previously these calls were accepted and the bytes
+    /// queued into a send half the scheduler never transmits; they now
+    /// fail fast instead of silently black-holing the data.
+    StreamNotWritable,
+    /// `streamRead` / `streamReadFin` was called on a stream the local
+    /// endpoint cannot receive on: a locally-initiated unidirectional
+    /// stream (RFC 9000 §2.1 — its low bits make it send-only here).
+    /// Embedder-side misuse — peer input can never produce this.
+    /// Previously these calls returned 0 forever, indistinguishable
+    /// from "nothing readable right now"; they now fail fast, the
+    /// receive-side mirror of `StreamNotWritable`.
+    StreamNotReadable,
     /// A local stream open was refused because the connection is in
     /// graceful shutdown (`beginGracefulShutdown`): no new streams are
     /// created while in-flight streams drain. RFC 9000 has no GOAWAY, so
@@ -1164,7 +1180,7 @@ pub const IssuedCid = struct {
 /// Outgoing CONNECTION_CLOSE intent.
 pub const ConnectionCloseInfo = lifecycle_mod.ConnectionCloseInfo;
 
-/// Origin of a connection-close event surfaced through `nextEvent`.
+/// Origin of a connection-close event surfaced through `pollEvent`.
 pub const CloseSource = lifecycle_mod.CloseSource;
 
 /// QUIC distinguishes transport-level (RFC 9000 §20.1) from application-level
@@ -1177,7 +1193,7 @@ pub const CloseState = lifecycle_mod.CloseState;
 /// Maximum length of a CONNECTION_CLOSE reason phrase we will record/emit.
 pub const max_close_reason_len: usize = lifecycle_mod.max_close_reason_len;
 
-/// Snapshot of a close event delivered to the embedder via `nextEvent`.
+/// Snapshot of a close event delivered to the embedder via `pollEvent`.
 /// Captures source, error space/code and (optionally) the wire-level frame
 /// type that triggered the close. RFC 9000 §10.
 pub const CloseEvent = lifecycle_mod.CloseEvent;
@@ -1247,7 +1263,7 @@ pub const ConnectionPhase = enum {
     closed,
 };
 
-/// Tagged-union of all connection-level events the embedder polls via `nextEvent`.
+/// Tagged-union of all connection-level events the embedder polls via `pollEvent`.
 /// Each variant carries enough context for the embedder to react without re-querying
 /// Connection state.
 /// Point-in-time send-side flow-control view for one stream
@@ -1322,7 +1338,7 @@ pub const FlowBlockedSource = event_queue_mod.FlowBlockedSource;
 /// Which flow-control axis ran out of credit — connection data, per-stream data,
 /// or stream-count (RFC 9000 §4 / §19.12-§19.14).
 pub const FlowBlockedKind = event_queue_mod.FlowBlockedKind;
-/// One flow-control block event delivered to the embedder via `nextEvent`. Carries
+/// One flow-control block event delivered to the embedder via `pollEvent`. Carries
 /// the limit that was hit and (for stream-data) which stream tripped it.
 pub const FlowBlockedInfo = event_queue_mod.FlowBlockedInfo;
 /// Maximum buffered FlowBlockedInfo events before older entries are dropped.
@@ -1394,8 +1410,15 @@ pub const OutgoingDatagram = struct {
 
 /// Embedder-visible descriptor for a peer datagram received via `handleDatagram`.
 /// `arrived_in_early_data` propagates the 0-RTT-vs-1-RTT distinction up to the app.
+/// `payload_len` is the full on-wire payload length; `len` is what fit in the
+/// caller's buffer. `payload_len > len` means the buffer was too small and the
+/// tail was dropped — a DATAGRAM is delivered whole or not at all, so size read
+/// buffers to the advertised `max_datagram_frame_size` or `nextDatagramSize()`.
 pub const IncomingDatagram = struct {
+    /// Bytes actually copied into the caller's buffer.
     len: usize,
+    /// Full on-wire payload length of this DATAGRAM (equals `len` when it fit).
+    payload_len: usize = 0,
     arrived_in_early_data: bool = false,
 };
 
@@ -1662,7 +1685,7 @@ pub const CryptoBuffer = struct {
 /// loss detector, and timers. Embedders feed peer datagrams in through
 /// `handleDatagram` / `handleClientInitial` / `handleStatelessReset`, drive
 /// time forward with `tick`, pull outgoing datagrams via `pollDatagram`, and
-/// observe lifecycle changes through `nextEvent` / `nextTimer`.
+/// observe lifecycle changes through `pollEvent` / `nextTimer`.
 pub fn initClientAt(
     conn: *Connection,
     allocator: std.mem.Allocator,
@@ -2497,9 +2520,22 @@ pub const collectSendableStreamsByPriority = conn_streams.collectSendableStreams
 pub const streamRecvState = conn_streams.streamRecvState;
 
 /// Convenience: write `data` to the send half of stream `id`.
+///
+/// Returns the number of bytes accepted — which may be fewer than
+/// `data.len` (including 0): `streamWrite` short-writes by design when
+/// the send buffer or flow-control windows are full, and the unwritten
+/// tail must be retried on a later iteration. Returns
+/// `Error.StreamNotWritable` for a peer-initiated unidirectional
+/// stream (no send half exists on this side), and `StreamNotFound`
+/// once the stream has been reaped after reaching a terminal state.
 pub const streamWrite = conn_streams.streamWrite;
 
-/// Convenience: read from the receive half of stream `id`.
+/// Convenience: read from the receive half of stream `id`. A return of
+/// 0 means "nothing readable right now" — including "a chunk below the
+/// read offset has not arrived yet" — and is never an end-of-stream
+/// signal; use `streamRecvState` for that. Returns
+/// `Error.StreamNotReadable` for a locally-initiated unidirectional
+/// stream (no receive half exists on this side).
 pub const streamRead = conn_streams.streamRead;
 
 /// Like `streamRead`, but also reports whether the peer's FIN has been
@@ -2558,12 +2594,15 @@ const requeueStreamsBlocked = conn_flow.requeueStreamsBlocked;
 pub const clearLocalStreamsBlocked = conn_flow.clearLocalStreamsBlocked;
 
 /// Convenience: close the send half of stream `id` (queues FIN).
+/// Returns `Error.StreamNotWritable` for a peer-initiated
+/// unidirectional stream.
 pub const streamFinish = conn_streams.streamFinish;
 
 /// Convenience: abort the send half of stream `id` with
 /// RESET_STREAM (RFC 9000 §19.4). Any queued but unsent STREAM data
 /// is discarded; the final size is the number of bytes already
-/// accepted by `streamWrite`.
+/// accepted by `streamWrite`. Returns `Error.StreamNotWritable` for a
+/// peer-initiated unidirectional stream.
 pub const streamReset = conn_streams.streamReset;
 
 /// Queue an RFC 9221 DATAGRAM payload for transmission. The next
@@ -2618,13 +2657,22 @@ pub const advertiseAlternativeV6Address = conn_migration.advertiseAlternativeV6A
 /// number of bytes written, or null if none pending. The
 /// payload is dropped from the queue regardless of whether it
 /// fit — caller must size `dst` to the peer's advertised
-/// `max_datagram_frame_size`.
+/// `max_datagram_frame_size` (or `nextDatagramSize`, which peeks).
+/// Prefer `receiveDatagramInfo`, which reports the full payload
+/// length so an undersized buffer is visible instead of silent.
 pub const receiveDatagram = conn_datagram.receiveDatagram;
 
 /// Pop the oldest received DATAGRAM and include whether it arrived
 /// in 0-RTT. The payload is dropped from the queue regardless of
-/// whether it fit.
+/// whether it fit; `IncomingDatagram.payload_len > .len` marks the
+/// truncation (tail dropped) so it can never pass unnoticed.
 pub const receiveDatagramInfo = conn_datagram.receiveDatagramInfo;
+
+/// Full payload length of the oldest queued inbound DATAGRAM, without
+/// dequeuing it — size (or grow) a read buffer from this before
+/// `receiveDatagramInfo` and the truncation case is unreachable.
+/// Null when no DATAGRAM is queued.
+pub const nextDatagramSize = conn_datagram.nextDatagramSize;
 
 pub const pendingDatagrams = conn_datagram.pendingDatagrams;
 

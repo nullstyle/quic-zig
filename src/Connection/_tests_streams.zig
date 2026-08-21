@@ -653,3 +653,66 @@ test "initialSendStreamLimit: remembered 0-RTT params bound the pre-params send 
     // Connection-level send window tightened from maxInt to the remembered value.
     try std.testing.expectEqual(@as(u64, 4096), conn.peer_max_data);
 }
+
+test "send-side ops on a peer-initiated uni stream fail fast with StreamNotWritable" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // Plant a peer-initiated (client-initiated) uni stream the way inbound
+    // STREAM frames leave it in the live table, then confirm every send-side
+    // op rejects it instead of queueing into a send half the scheduler
+    // never transmits.
+    conn.local_transport_params.initial_max_streams_uni = 4;
+    conn.local_transport_params.initial_max_stream_data_uni = 1024;
+    const id: u64 = 2;
+    const peer = try allocator.create(Stream);
+    errdefer allocator.destroy(peer);
+    peer.* = .{
+        .id = id,
+        .send = SendStream.init(allocator),
+        .recv = RecvStream.init(allocator),
+        .recv_max_data = conn.initialRecvStreamLimit(id),
+        .send_max_data = 0,
+    };
+    try conn.streams.put(allocator, id, peer);
+
+    try std.testing.expectError(Error.StreamNotWritable, conn.streamWrite(2, "black hole"));
+    try std.testing.expectError(Error.StreamNotWritable, conn.streamFinish(2));
+    try std.testing.expectError(Error.StreamNotWritable, conn.streamReset(2, 0));
+
+    // Nothing landed in the stream's send half.
+    const st = conn.stream(2).?;
+    try std.testing.expectEqual(@as(u64, 0), st.send.writtenBytes());
+    try std.testing.expect(!st.send.hasPendingChunk());
+
+    // The guard is directional, not a blanket write ban: a local bidi
+    // stream still accepts writes normally.
+    const bidi = try conn.openNextBidi();
+    try std.testing.expectEqual(@as(usize, 2), try conn.streamWrite(bidi.id, "ok"));
+}
+
+test "recv-side reads on a local-initiated uni stream fail fast with StreamNotReadable" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // A locally-opened uni stream has no receive half on this side.
+    // Reads used to return 0 forever — indistinguishable from "nothing
+    // readable right now" — the receive-side twin of the send black
+    // hole above. They must fail fast instead.
+    conn.peer_max_streams_uni = 4;
+    const uni = try conn.openNextUni();
+    var buf: [16]u8 = undefined;
+    try std.testing.expectError(Error.StreamNotReadable, conn.streamRead(uni.id, &buf));
+    try std.testing.expectError(Error.StreamNotReadable, conn.streamReadFin(uni.id, &buf));
+
+    // Directional, not a blanket read ban: a local bidi stream's
+    // receive half still reads normally (empty right now).
+    const bidi = try conn.openNextBidi();
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamRead(bidi.id, &buf));
+}

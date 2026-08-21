@@ -153,6 +153,48 @@ pub const default_vn_source_rate_cap: u64 = 8;
 /// `log_source_rate_limit = .default`.
 pub const default_log_source_rate_cap: u64 = 16;
 
+/// A transport-parameter working set for a server that "just
+/// works": every flow-control / stream-count knob the RFC leaves at
+/// its 0 default (meaning "admit nothing") set to the README
+/// quick-start values. Hand this to `Config.transport_params`
+/// instead of `.{}` — the all-zero default handshakes successfully
+/// and then refuses every stream the peer tries to open, which
+/// presents as a server that hangs, not one that errors.
+///
+/// RFC 9221 DATAGRAM support stays opt-in: `max_datagram_frame_size`
+/// is left at 0 (senders get `DatagramUnavailable`); set it
+/// explicitly alongside these if the application uses datagrams.
+/// The idle timeout matches `Server.default_server_idle_timeout_ms`
+/// (30 s), which `Server.init` would substitute anyway.
+pub fn defaultTransportParams() TransportParams {
+    return .{
+        .max_idle_timeout_ms = 30_000,
+        .initial_max_data = 16 * 1024 * 1024,
+        .initial_max_stream_data_bidi_local = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_stream_data_uni = 1 << 20,
+        .initial_max_streams_bidi = 1000,
+        .initial_max_streams_uni = 64,
+        .active_connection_id_limit = 4,
+    };
+}
+
+/// Mint fresh key material for any of the server's 32-byte key
+/// fields — `stateless_reset_key`, `retry_token_key`,
+/// `new_token_key` — from BoringSSL's CSPRNG.
+///
+/// Minting is the easy half; persistence is the load-bearing half.
+/// `stateless_reset_key` MUST survive restarts (a cold start that
+/// forgets it invalidates every previously issued reset token),
+/// `retry_token_key` must be stable across the token lifetime and
+/// shared across a load-balanced pool, and `new_token_key` rotates
+/// on its own (longer) schedule. See each field's doc.
+pub fn mintKey() boringssl.crypto.rand.Error![32]u8 {
+    var key: [32]u8 = undefined;
+    try boringssl.crypto.rand.fillBytes(&key);
+    return key;
+}
+
 /// Wall-clock allocator used for the connection table and any
 /// transient per-server allocations. Each `Connection` allocates
 /// from this allocator as well.

@@ -29,7 +29,7 @@ pub const FlowBlockedKind = enum {
     streams,
 };
 
-/// One flow-control block event delivered to the embedder via `nextEvent`. Carries
+/// One flow-control block event delivered to the embedder via `pollEvent`. Carries
 /// the limit that was hit and (for stream-data) which stream tripped it.
 pub const FlowBlockedInfo = struct {
     source: FlowBlockedSource,

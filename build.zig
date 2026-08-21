@@ -370,6 +370,12 @@ pub fn build(b: *std.Build) void {
     // `examples/echo_common.zig` (shared fixtures) and
     // `examples/support/*.pem` (self-signed test cert) ride along via
     // relative @import/@embedFile inside the examples/ module root.
+    //
+    // The echo server itself is built on `quic.app.Driver`;
+    // `echo_server_raw.zig` is the same server directly against
+    // `Server`/`Connection` (the teaching artifact), and
+    // `request_response_server.zig` is the length-prefixed
+    // request/response pattern real protocols build on.
     const echo_server_mod = b.createModule(.{
         .root_source_file = b.path("examples/echo_server.zig"),
         .target = target,
@@ -383,6 +389,41 @@ pub fn build(b: *std.Build) void {
     });
     const echo_server_install = b.addInstallArtifact(echo_server_exe, .{});
     examples_step.dependOn(&echo_server_install.step);
+
+    const echo_server_raw_mod = b.createModule(.{
+        .root_source_file = b.path("examples/echo_server_raw.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    echo_server_raw_mod.addImport("quic", quic_mod);
+    const echo_server_raw_exe = b.addExecutable(.{
+        .name = "echo-server-raw-example",
+        .root_module = echo_server_raw_mod,
+    });
+    const echo_server_raw_install = b.addInstallArtifact(echo_server_raw_exe, .{});
+    examples_step.dependOn(&echo_server_raw_install.step);
+
+    const request_response_mod = b.createModule(.{
+        .root_source_file = b.path("examples/request_response_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = sanitize_c,
+    });
+    request_response_mod.addImport("quic", quic_mod);
+    const request_response_exe = b.addExecutable(.{
+        .name = "request-response-example",
+        .root_module = request_response_mod,
+    });
+    const request_response_install = b.addInstallArtifact(request_response_exe, .{});
+    examples_step.dependOn(&request_response_install.step);
+
+    // Carries inline tests (the Loopback-driven request/response
+    // smoke), so it is also a test target per the repo pattern:
+    // examples with inline tests ride `zig build test`.
+    const request_response_tests = b.addTest(.{ .root_module = request_response_mod });
+    const run_request_response_tests = b.addRunArtifact(request_response_tests);
+    test_step.dependOn(&run_request_response_tests.step);
 
     const echo_client_mod = b.createModule(.{
         .root_source_file = b.path("examples/echo_client.zig"),

@@ -417,3 +417,37 @@ test "pollDatagram can select a non-zero application path" {
     try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.path_statuses.items.len);
     try std.testing.expectEqual(@as(u32, 1), conn.paths.get(path_id).?.sent.liveCount());
 }
+
+test "receiveDatagramInfo reports truncation; nextDatagramSize peeks without popping" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    conn.local_transport_params.max_datagram_frame_size = max_supported_udp_payload_size;
+    try conn.handleDatagram(.application, .{ .data = "hello datagram", .has_length = true });
+
+    // Peek: full payload size visible before any read, queue undrained.
+    try std.testing.expectEqual(@as(?usize, 14), conn.nextDatagramSize());
+    try std.testing.expectEqual(@as(usize, 1), conn.pendingDatagrams());
+
+    // Short buffer: the datagram is popped and the tail dropped, but the
+    // truncation is reported rather than passing silently.
+    var tiny: [5]u8 = undefined;
+    const truncated = conn.receiveDatagramInfo(&tiny).?;
+    try std.testing.expectEqual(@as(usize, 5), truncated.len);
+    try std.testing.expectEqual(@as(usize, 14), truncated.payload_len);
+    try std.testing.expectEqualSlices(u8, "hello", tiny[0..5]);
+
+    // Fitting buffer: payload_len == len, no truncation signal.
+    try conn.handleDatagram(.application, .{ .data = "hello datagram", .has_length = true });
+    var roomy: [64]u8 = undefined;
+    const whole = conn.receiveDatagramInfo(&roomy).?;
+    try std.testing.expectEqual(@as(usize, 14), whole.len);
+    try std.testing.expectEqual(@as(usize, 14), whole.payload_len);
+    try std.testing.expectEqualSlices(u8, "hello datagram", roomy[0..14]);
+
+    // Empty queue peeks null.
+    try std.testing.expectEqual(@as(?usize, null), conn.nextDatagramSize());
+}

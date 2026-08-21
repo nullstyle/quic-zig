@@ -61,6 +61,18 @@ suite.
   *Draft-extension policy*. Preferred address (RFC 9000 §9.6) and the QUIC v2
   negotiation knobs (RFC 9369) are RFC-anchored on the wire but their
   surface here is still maturing, so they also sit in this tier.
+- **`quic.app`** (added 0.14.0): the application-layer helpers —
+  `app.Driver(App)` with its explicit `Hooks` registration,
+  `app.StreamTable`, `app.Outbox`, `app.StreamEnd`. Sits strictly above
+  the Stable transport surface (no wire behavior of its own), but the
+  callback inventory and hook signatures may see minor refinement as
+  embedders put it to work; expect promotion once it survives a
+  release unchanged. Note the deliberate absence of `@hasDecl`-based
+  callback detection — see `src/app/root.zig`'s hook-table comment for
+  the comptime-quirk rationale.
+- **`quic.testing`** (added 0.14.0): the shipped in-memory loopback
+  harness (`testing.Loopback`, `testing.NullDriver`). Test-only by
+  intent; shape may move freely within a minor.
 - **Newly added surfaces** may see minor signature or naming refinement
   as they are exercised for the first time.
 - **`Connection.stats()` / `ConnectionStats`** (added 0.11.0): the

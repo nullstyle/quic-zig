@@ -18,8 +18,8 @@
 //! What neither leg can gate is a *gap*. Loopback delivers in order,
 //! and both payloads fit one datagram, so a chunk below the read offset
 //! is never missing here — and "empty read + FIN seen" (the other way
-//! to truncate a stream, see `echo_server.echoStream`) needs exactly
-//! that. The reordering regression test for it is the in-memory one in
+//! to truncate a stream, see `echo_server_raw.echoStream`) needs
+//! exactly that. The reordering regression test for it is the in-memory one in
 //! `foreign_loop_embedder.zig`, which holds a datagram back on purpose.
 //!
 //! This is a standalone binary (not a `zig build test` target) so it

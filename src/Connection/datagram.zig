@@ -100,7 +100,21 @@ pub fn receiveDatagramInfo(conn: *Connection, dst: []u8) ?IncomingDatagram {
     defer conn.releaseResidentBytes(item.data.len);
     const n = @min(dst.len, item.data.len);
     @memcpy(dst[0..n], item.data[0..n]);
-    return .{ .len = n, .arrived_in_early_data = item.arrived_in_early_data };
+    return .{
+        .len = n,
+        .payload_len = item.data.len,
+        .arrived_in_early_data = item.arrived_in_early_data,
+    };
+}
+
+/// Full payload length of the oldest queued inbound DATAGRAM, without
+/// dequeuing it. Lets an embedder size (or grow) its read buffer before
+/// calling `receiveDatagramInfo`, making the `payload_len > len`
+/// truncation case unreachable. Null when no DATAGRAM is queued.
+pub fn nextDatagramSize(conn: *const Connection) ?usize {
+    const items = conn.pending_frames.recv_datagrams.items;
+    if (items.len == 0) return null;
+    return items[0].data.len;
 }
 
 /// Number of inbound DATAGRAMs queued for the app to read.

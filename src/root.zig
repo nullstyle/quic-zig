@@ -86,6 +86,21 @@ pub const lb = @import("lb/root.zig");
 /// on `Connection`, and delay / address-book helpers live here.
 pub const alt_addr = @import("alt_addr/root.zig");
 
+/// Opt-in application-layer helpers for server embedders
+/// (Evolving tier): `app.Driver(App)` turns `Connection`'s polled
+/// event/stream surface into typed callbacks and owns the three state
+/// machines every custom server otherwise hand-rolls — per-stream
+/// tracking (`app.StreamTable`), short-write staging (`app.Outbox`),
+/// and sound end-of-stream detection. Strictly above the transport:
+/// no wire-behavior changes, no application-protocol policy.
+pub const app = @import("app/root.zig");
+
+/// In-memory loopback harness shipped in the package so embedders can
+/// write integration tests against a real `Server` / `Client` pair —
+/// real TLS and packet protection, datagrams exchanged in memory.
+/// `testing.Loopback` pumps the `runUdpServer` iteration shape.
+pub const testing = @import("testing/root.zig");
+
 /// High-level convenience wrapper for embedding quic as a QUIC
 /// server. Owns the TLS context and a connection table; the
 /// embedder still owns the UDP socket and the clock.
@@ -343,6 +358,8 @@ test {
     _ = lb;
     _ = alt_addr;
     _ = qlog;
+    _ = app;
+    _ = testing;
     _ = @import("Server.zig");
     _ = @import("Client.zig");
 }

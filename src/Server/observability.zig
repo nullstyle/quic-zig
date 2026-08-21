@@ -68,6 +68,13 @@ pub const LogEvent = union(enum) {
     /// latch stays consumed — surfaced so embedders can distinguish
     /// "silent CID starvation" from the happy path.
     cid_replenish_failed: struct { slot_id: u64 },
+    /// A configuration smell detected at `Server.init` that does not
+    /// rise to `InvalidConfig`: the server runs, but likely not as the
+    /// embedder intends. Emitted once, from `init`, before any traffic.
+    /// Currently fires when `transport_params` admit no streams, no
+    /// stream bytes, and no datagrams (the all-zero `.{}` default) —
+    /// see `Config.defaultTransportParams`.
+    config_warning: struct { message: []const u8 },
 };
 
 /// Embedder-supplied logging hook. The `user_data` pointer is the
@@ -373,5 +380,6 @@ fn logEventSource(ev: LogEvent) ?Address {
         .stateless_queue_evicted => null,
         .table_full => |e| e.peer,
         .cid_replenish_failed => null,
+        .config_warning => null,
     };
 }

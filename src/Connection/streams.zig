@@ -622,6 +622,7 @@ pub fn streamRecvState(conn: *const Connection, id: u64) ?StreamRecvState {
 
 // Doc comment lives on the `Connection.streamWrite` thunk in Connection.zig.
 pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
+    if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     // Hardening guide §3.5 / §8: pre-flight the resident-bytes
     // budget against the bytes we'd accept. The per-stream
@@ -650,6 +651,7 @@ pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
 
 // Doc comment lives on the `Connection.streamRead` thunk in Connection.zig.
 pub fn streamRead(conn: *Connection, id: u64, dst: []u8) Error!usize {
+    if (!peerMaySendOnStream(conn, id)) return Error.StreamNotReadable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     const before = s.recv.bytes.items.len;
     const n = s.recv.read(dst);
@@ -704,6 +706,7 @@ pub fn streamArrivedInEarlyData(conn: *const Connection, id: u64) ?bool {
 
 // Doc comment lives on the `Connection.streamFinish` thunk in Connection.zig.
 pub fn streamFinish(conn: *Connection, id: u64) Error!void {
+    if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     try s.send.finish();
 }
@@ -714,6 +717,7 @@ pub fn streamReset(
     id: u64,
     application_error_code: u64,
 ) Error!void {
+    if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     try s.send.resetStream(application_error_code);
 }

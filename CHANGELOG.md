@@ -7,6 +7,11 @@ changes.
 
 ## [Unreleased]
 
+The application-layer sprint: closing the silent-failure traps and
+adding `quic.app` / `quic.testing`, so a custom server is a
+typed-callback exercise instead of a hand-rolled state-machine
+porting exercise. No wire-protocol behavior changed.
+
 ### Added
 
 - **`Client.Config.initial_dcid` — dictated initial DCID (Stable
@@ -22,15 +27,88 @@ changes.
   end-to-end — including single-use claim semantics,
   nonce-confirmation, and the pinned Retry limitation — in
   `tests/e2e/rendezvous_frontend.zig`.
+- **`quic.app` — opt-in application layer for server embedders.**
+  `app.Driver(App)` walks the server's slots, drains each
+  connection's event queue, tracks peer streams, pumps reads,
+  delivers DATAGRAMs, and flushes staged writes through *typed*
+  callbacks — no `?*anyopaque` contexts, no `@ptrCast` dance, no
+  slot-diffing. Companion pieces usable alone: `app.StreamTable`
+  (typed per-stream registry; overflow answered with STOP_SENDING,
+  never a silent hang), `app.Outbox` (iteration-resumable stream
+  writes that hide `streamWrite`'s short-write backpressure), and
+  `app.StreamEnd` (fin / reset / reaped — the sound completion
+  classification). Hooks are an explicit registration list
+  (`.hooks = .{ .on_stream_data = ... }`); there is no
+  `@hasDecl`-based detection anywhere in the module — comptime
+  callback probing against App types from dependent modules was
+  observed (0.17-dev) to answer false regardless of evaluation
+  site, and a silently-missing callback is precisely the bug class
+  this module exists to prevent. Per-stream state is airtight on
+  every path: entries are default-constructed when first tracked,
+  and connection teardown delivers the `on_stream_end` (`.reaped`)
+  still owed to any mid-request stream before `on_disconnect` — so
+  state freed in `on_stream_end` never leaks on abrupt disconnects.
+- **`quic.testing` — shipped in-memory loopback harness.**
+  `testing.Loopback` pumps a real `Server`/`Client` pair (real TLS,
+  real packet protection) over in-memory datagram exchange in the
+  `runUdpServer` iteration order, so downstream servers get
+  in-process integration tests with no sockets, threads, or ports.
+- **`Server.Config.defaultTransportParams()`**: the blessed
+  non-zero flow-control / stream-count working set.
+  `transport_params = .{}` compiles and handshakes but admits no
+  streams — the classic first-hour footgun; a server whose params
+  admit nothing now also earns a `config_warning` log event at
+  init.
+- **`Server.Config.mintKey()`**: CSPRNG key material for the
+  32-byte key fields (`stateless_reset_key`, `retry_token_key`,
+  `new_token_key`).
+- **`Connection.nextDatagramSize()`**: the queued head DATAGRAM's
+  full size without popping, for sizing read buffers.
+- **`IncomingDatagram.payload_len`**: full on-wire payload length;
+  `payload_len > len` marks truncation. Surfaced by
+  `receiveDatagramInfo` only — plain `receiveDatagram` still
+  truncates silently, so switch to the info variant (or size with
+  `nextDatagramSize`) where truncation matters.
+- Examples: `echo_server.zig` rewritten on `quic.app` (the raw
+  variant preserved as `echo_server_raw.zig`, the teaching
+  artifact); new `request_response_server.zig` (length-prefixed
+  request/response — the pattern most protocols build on).
+- `docs/ERROR_CODES.md`: one-page error reference (meaning + typical
+  cause per error family). The package archive now ships the whole
+  `docs/` directory (error reference, API stability, release
+  readiness, stream-priority notes) — previously GitHub-URL-only,
+  which broke offline consumers.
 
-The deduplication series: a repo-wide audit found 50 verified
-copy-paste families (41 worth extracting), and this series collapses
-them onto shared implementations. Internal-only in behavior except for
-the fixes noted below, all of which were latent defects the duplication
-had been hiding. Deterministic impairment cells stay byte-identical
+### Changed
+
+- **`streamWrite` / `streamFinish` / `streamReset` on a
+  receive-only stream now return `error.StreamNotWritable`** instead
+  of accepting the data into a send half the scheduler never
+  transmits — the silent stream black hole is gone. Peer input can
+  never produce this; it is embedder-misuse-only.
+- **`streamRead` / `streamReadFin` on a send-only stream now return
+  `error.StreamNotReadable`** — the receive-side mirror. Reading a
+  locally-initiated unidirectional stream used to return 0 forever,
+  indistinguishable from "nothing readable right now". Same
+  embedder-misuse-only contract.
+- The raw echo example (`echo_server_raw.zig`) pins its buffer/limit
+  couplings with `comptime` asserts (tracker size ≥ advertised stream
+  limits; DATAGRAM buffer ≥ advertised frame size), mirroring the
+  pattern `foreign_loop_embedder.zig` already enforced; the app-layer
+  examples get the same couplings from Driver options wired to their
+  advertised transport params.
+- Doc drift: prose references to `nextEvent` now name `pollEvent`.
+
+### The deduplication series
+
+A repo-wide audit found 50 verified copy-paste families (41 worth
+extracting), and this series collapses them onto shared
+implementations. Internal-only in behavior except for the fixes
+noted below, all of which were latent defects the duplication had
+been hiding. Deterministic impairment cells stay byte-identical
 throughout.
 
-### Fixed
+#### Fixed
 
 - **Per-source rate limiting reset unrelated budgets.** On Initial
   window rollover, `acceptSourceRate` assigned a whole fresh
@@ -69,7 +147,7 @@ throughout.
   FIN seen and the recv half non-terminal) pins it in
   `examples/foreign_loop_embedder.zig`.
 
-### Changed
+#### Changed
 
 - `RecvStream.read` uses a sliding-window consumed prefix with a
   half-buffer compaction policy (amortized O(1) per read instead of

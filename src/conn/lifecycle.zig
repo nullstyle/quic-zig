@@ -18,7 +18,7 @@ pub const ConnectionCloseInfo = struct {
     reason: []const u8 = &.{},
 };
 
-/// Origin of a connection-close event surfaced through `nextEvent`.
+/// Origin of a connection-close event surfaced through `pollEvent`.
 pub const CloseSource = enum {
     local,
     peer,
@@ -45,7 +45,7 @@ pub const CloseState = enum {
 /// Maximum length of a CONNECTION_CLOSE reason phrase we will record/emit.
 pub const max_close_reason_len: usize = 256;
 
-/// Snapshot of a close event delivered to the embedder via `nextEvent`.
+/// Snapshot of a close event delivered to the embedder via `pollEvent`.
 /// Captures source, error space/code and (optionally) the wire-level frame
 /// type that triggered the close. RFC 9000 §10.
 pub const CloseEvent = struct {

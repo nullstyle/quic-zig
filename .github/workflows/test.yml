@@ -119,7 +119,8 @@ jobs:
       # Out-of-tree consumer smoke: builds a separate package that
       # depends on quic-zig by path and pins the exported quic +
       # boringssl module surface (type identity for
-      # Client.Config.tls_context_override consumers).
+      # Client.Config.tls_context_override consumers), including the
+      # quic.app Driver/StreamTable/Outbox app-layer probe.
       - name: consumer-smoke (out-of-tree package)
         if: matrix.os == 'ubuntu-latest'
         run: |

@@ -718,6 +718,26 @@ pub fn init(config: Config) Error!Server {
     if (resolved_transport_params.max_idle_timeout_ms == 0 and !config.allow_no_idle_timeout) {
         resolved_transport_params.max_idle_timeout_ms = default_server_idle_timeout_ms;
     }
+    // A `transport_params = .{}` server handshakes fine and then
+    // admits zero streams and zero stream bytes — every peer request
+    // stalls forever with no error on either side (a DATAGRAM-only
+    // posture with `max_datagram_frame_size > 0` is legitimate, so
+    // this is a warning, not `InvalidConfig`). Emitted before the
+    // server struct exists, so it goes straight to the embedder's
+    // callback rather than through `emitLog`.
+    if (config.log_callback) |cb| {
+        const tp = &resolved_transport_params;
+        if (tp.initial_max_data == 0 and
+            tp.initial_max_streams_bidi == 0 and
+            tp.initial_max_streams_uni == 0 and
+            tp.max_datagram_frame_size == 0)
+        {
+            cb(config.log_user_data, .{ .config_warning = .{
+                .message = "transport_params admit no streams, bytes, or datagrams; " ++
+                    "use Server.Config.defaultTransportParams() or set flow-control fields",
+            } });
+        }
+    }
     const resolved_local_cid_len: u8 = if (config.quic_lb) |lb_cfg| blk: {
         if (lb_cfg.isPlaintext() and !resolved_transport_params.disable_active_migration) {
             resolved_transport_params.disable_active_migration = true;

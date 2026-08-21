@@ -22,6 +22,9 @@ test {
     _ = @import("e2e/connection_phase.zig");
     _ = @import("e2e/connection_events.zig");
     _ = @import("e2e/server_lifecycle_hooks.zig");
+    _ = @import("e2e/server_config_ergonomics.zig");
+    _ = @import("e2e/app_driver.zig");
+    _ = @import("e2e/testing_loopback.zig");
     _ = @import("e2e/public_api_smoke.zig");
     _ = @import("e2e/internal_surface_smoke.zig");
 }

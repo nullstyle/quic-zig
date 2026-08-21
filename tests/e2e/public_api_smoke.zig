@@ -102,6 +102,7 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
     const send_datagram_tracked: *const fn (*Conn, []const u8) anyerror!u64 = Conn.sendDatagramTracked;
     const receive_datagram: *const fn (*Conn, []u8) ?usize = Conn.receiveDatagram;
     const receive_datagram_info: *const fn (*Conn, []u8) ?quic.IncomingDatagram = Conn.receiveDatagramInfo;
+    const next_datagram_size: *const fn (*const Conn) ?usize = Conn.nextDatagramSize;
     const max_datagram_payload: *const fn (*const Conn) anyerror!usize = Conn.maxDatagramPayload;
 
     _ = .{
@@ -135,6 +136,7 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
         send_datagram_tracked,
         receive_datagram,
         receive_datagram_info,
+        next_datagram_size,
         max_datagram_payload,
     };
 
@@ -210,6 +212,33 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
     }
     const alpn: *const fn (*Conn) ?[]const u8 = Conn.negotiatedAlpn;
     _ = alpn;
+}
+
+test "app helper surface keeps its callable shape" {
+    comptime {
+        const ApiApp = struct {
+            pub const StreamState = void;
+            pub const ConnState = void;
+        };
+        const A = quic.app.Driver(ApiApp);
+        _ = A.Session;
+        _ = A.StreamEntry;
+        _ = A.iterationHook;
+        _ = A.willCloseHook;
+        _ = A.init;
+        _ = A.deinit;
+        _ = A.service;
+
+        // Hook signatures must keep matching the loop + Config fields
+        // they are handed to.
+        const iteration: *const fn (?*anyopaque, *quic.Server, u64) anyerror!void = A.iterationHook;
+        const will_close: *const fn (?*anyopaque, *quic.Server.Slot) void = A.willCloseHook;
+        _ = .{ iteration, will_close };
+
+        _ = quic.app.StreamTable(void);
+        _ = quic.app.Outbox;
+        _ = quic.app.StreamEnd;
+    }
 }
 
 test "stable observation-point fields stay reachable on Connection" {

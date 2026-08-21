@@ -18,6 +18,11 @@ and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
   selectable) with RFC 9002 packet pacing, ECN, and DPLPMTUD.
 - High-level `Server` and `Client` wrappers for embedders that want
   quic-zig to own TLS context setup and connection state.
+- An opt-in application layer (`quic.app`) for server builders:
+  typed callbacks over the polled event/stream surface, per-stream
+  tracking, short-write staging, and reordering-safe end-of-stream
+  detection — plus `quic.testing`, an in-memory loopback harness
+  shipped for embedder integration tests.
 - Basic `std.Io` loop helpers in `quic.transport.runUdpServer`
   and `quic.transport.runUdpClient`, allowing integrators to avoid
   rolling their own UDP loop.
@@ -113,7 +118,8 @@ express — private-CA pinning and mTLS themselves need only
 `ca_pem` / `client_cert_pem` / `client_ca_pem`, no BoringSSL types).
 
 **Toolchain**: quic-zig requires Zig `0.17.0-dev` — it tracks Zig
-master. [`mise.toml`](mise.toml) is the source of truth for the
+master. [`mise.toml`](https://github.com/nullstyle/quic-zig/blob/main/mise.toml)
+is the source of truth for the
 verified toolchain; `minimum_zig_version` in `build.zig.zon` records
 the floor. On macOS, run `zig` commands with `COPYFILE_DISABLE=1` in
 the environment so AppleDouble (`._*`) metadata files stay out of
@@ -142,16 +148,9 @@ pub fn runServer(
         .tls_cert_pem = cert_pem,
         .tls_key_pem = key_pem,
         .alpn_protocols = &protos,
-        .transport_params = .{
-            .max_idle_timeout_ms = 30_000,
-            .initial_max_data = 16 * 1024 * 1024,
-            .initial_max_stream_data_bidi_local = 1 << 20,
-            .initial_max_stream_data_bidi_remote = 1 << 20,
-            .initial_max_stream_data_uni = 1 << 20,
-            .initial_max_streams_bidi = 1000,
-            .initial_max_streams_uni = 64,
-            .active_connection_id_limit = 4,
-        },
+        // The blessed working set — all flow-control / stream-count
+        // knobs nonzero. (`.{}` compiles but admits no streams.)
+        .transport_params = quic.Server.Config.defaultTransportParams(),
     });
     defer server.deinit();
 
@@ -163,8 +162,14 @@ pub fn runServer(
 }
 ```
 
-For custom socket ownership, Retry or Version Negotiation policy,
-batched I/O, qlog rotation, or deterministic CIDs, drive
+Application logic — accepting connections, tracking streams,
+echoing or answering — belongs to `quic.app.Driver(App)`: typed
+callbacks (`onStreamData`, `onStreamEnd`, `onDatagram`, ...) wired
+into the loop's `on_iteration` hook, with short-write staging and
+sound end-of-stream handling owned for you. The examples below are
+built on it; EMBEDDING.md's "Writing Your Application Layer" is the
+guide. For custom socket ownership, Retry or Version Negotiation
+policy, batched I/O, qlog rotation, or deterministic CIDs, drive
 `Server.feed`, `server.drainStatelessResponse`, `slot.conn.pollDatagram`,
 and `slot.conn.tick` directly. See [EMBEDDING.md](EMBEDDING.md) for the
 full event-loop shape.
@@ -277,13 +282,16 @@ The detailed configuration guide is [EMBEDDING.md](EMBEDDING.md).
 
 ## Usage Docs
 
-Links into `docs/`, `interop/`, `tests/`, and `bench/` below are
-absolute because the published package archive ships only the
-consumer-facing files; those trees live in the git repository.
+The published package archive ships this file, `EMBEDDING.md`,
+`docs/`, and `examples/` — links into those are relative. Links into
+`interop/`, `tests/`, and `bench/` are absolute because those trees
+live only in the git repository.
 
-- [EMBEDDING.md](EMBEDDING.md): server, client, raw `Connection`, and
-  production configuration.
-- [docs/API_STABILITY.md](https://github.com/nullstyle/quic-zig/blob/main/docs/API_STABILITY.md):
+- [EMBEDDING.md](EMBEDDING.md): server, client, application layer
+  (`quic.app`), raw `Connection`, and production configuration.
+- [docs/ERROR_CODES.md](docs/ERROR_CODES.md): what each error means
+  and its typical cause.
+- [docs/API_STABILITY.md](docs/API_STABILITY.md):
   which surfaces are stable vs evolving vs internal, the
   `ConnectionEvent` forward-compat contract, and the per-draft
   extension policy (Track-to-RFC vs Experimental) with its sunset
@@ -294,7 +302,7 @@ consumer-facing files; those trees live in the git repository.
   RFC-traceable conformance test style and filters.
 - [bench/README.md](https://github.com/nullstyle/quic-zig/blob/main/bench/README.md):
   microbenchmark scope and command.
-- [examples/foreign_loop_embedder.zig](https://github.com/nullstyle/quic-zig/blob/main/examples/foreign_loop_embedder.zig):
+- [examples/foreign_loop_embedder.zig](examples/foreign_loop_embedder.zig):
   worked integration of the caller-drives (no-I/O) path into a
   hand-rolled `poll` reactor — the supported shape when your runtime
   already owns the wait.
@@ -308,7 +316,7 @@ consumer-facing files; those trees live in the git repository.
 - No FIPS validation.
 - Windows is a **tier-1 CI gate for 1.0**: `windows-latest` is blocking on
   every push / PR. See
-  [docs/RELEASE_READINESS.md](https://github.com/nullstyle/quic-zig/blob/main/docs/RELEASE_READINESS.md)
+  [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md)
   for the platform tiers and graduation checklist.
 - BBRv3 congestion control (draft-ietf-ccwg-bbr-06) is available opt-in
   via `congestion_control = .bbr`; CUBIC remains the default. Large-scale

@@ -41,5 +41,41 @@ fn wireTlsOverride(ctx: boringssl.tls.Context) quic.Client.Config {
 
 pub fn main() void {
     _ = &wireTlsOverride; // force semantic analysis of the identity check
+    _ = &wireAppLayer; // force semantic analysis of the app-layer surface
     std.debug.print("consumer-smoke ok: quic-zig {s}\n", .{quic.version()});
+}
+
+const SmokeApp = struct {
+    pub const StreamState = void;
+    pub const ConnState = void;
+
+    fn onStreamData(_: *SmokeApp, s: *D.Session, e: *D.StreamEntry, chunk: []const u8) anyerror!void {
+        try s.outbox.push(s.conn, e.id, chunk);
+    }
+
+    fn onStreamEnd(_: *SmokeApp, s: *D.Session, e: *D.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
+        if (end == .fin) try s.outbox.finish(s.conn, e.id);
+    }
+};
+
+const D = quic.app.Driver(SmokeApp);
+
+/// The application-layer surface a downstream server builds on must
+/// resolve from the consumer side of the package boundary: the
+/// Driver instantiation with required state decls, explicit hook
+/// registration, the config helpers, and the shipped test harness.
+/// Never called — semantic analysis is the test.
+fn wireAppLayer() void {
+    const hooks: D.Hooks = .{
+        .on_stream_data = SmokeApp.onStreamData,
+        .on_stream_end = SmokeApp.onStreamEnd,
+    };
+    _ = hooks;
+
+    // Config helpers + testing harness resolve.
+    const tp = comptime quic.Server.Config.defaultTransportParams();
+    comptime std.debug.assert(tp.initial_max_streams_bidi > 0);
+    _ = &quic.Server.Config.mintKey;
+    _ = &quic.testing.Loopback.init;
+    _ = quic.testing.NullDriver{};
 }

@@ -37,6 +37,14 @@ const quic = @import("quic");
 validation, Version Negotiation, and the connection table. The embedder
 chooses the socket model and application protocol behavior.
 
+Transport-parameters note: `transport_params = .{}` compiles and
+handshakes, but its all-zero flow-control / stream-count defaults admit
+no streams and no bytes — every peer request then stalls with no error
+on either side. Pass `Server.Config.defaultTransportParams()` for the
+blessed working set (DATAGRAM stays opt-in), or set the fields
+explicitly. A server whose params admit nothing also earns a
+`config_warning` log event at init (see `Server.LogEvent`).
+
 ```zig
 const std = @import("std");
 const quic = @import("quic");
@@ -114,6 +122,132 @@ instances, so no locks are needed; connection CIDs and stateless-reset
 tokens must be minted from per-instance configurations (QUIC-LB or
 random SCIDs) so peers route to the instance that owns their
 connection.
+
+## Writing Your Application Layer
+
+`Server` + `runUdpServer` own the transport; your protocol logic is
+the layer above. There are two supported shapes — start with the
+first, drop to the second when you need the control.
+
+### The `quic.app.Driver` (recommended first pass)
+
+`quic.app.Driver(App)` is an opt-in dispatcher that owns the three
+state machines every custom server otherwise hand-rolls: per-stream
+tracking (`app.StreamTable`), short-write staging (`app.Outbox`), and
+sound end-of-stream detection. It walks the slots, drains each
+connection's event queue, pumps reads, delivers DATAGRAMs, and calls
+*typed* callbacks — no `?*anyopaque` contexts, no `@ptrCast` dance, no
+slot-diffing to discover connections.
+
+```zig
+const D = quic.app.Driver(EchoApp);
+
+const EchoApp = struct {
+    // Required decls (use `void` when unused) — the Driver allocates
+    // and frees this storage per connection / stream:
+    pub const StreamState = void;
+    pub const ConnState = struct { streams_echoed: u32 = 0 };
+
+    fn onStreamData(_: *EchoApp, s: *D.Session, e: *D.StreamEntry, chunk: []const u8) anyerror!void {
+        try s.outbox.push(s.conn, e.id, chunk); // stages short writes
+    }
+
+    fn onStreamEnd(_: *EchoApp, s: *D.Session, e: *D.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
+        // Fires exactly once, only when the stream is really done —
+        // never on "empty read + FIN seen".
+        if (end == .fin) {
+            try s.outbox.finish(s.conn, e.id);
+            s.app.streams_echoed += 1;
+        }
+    }
+
+    fn onDisconnect(_: *EchoApp, s: *D.Session) void { /* free nothing: driver owns it */ }
+};
+```
+
+Wiring — hooks are an explicit registration list (there is no method
+detection, on purpose; see `quic.app`'s docs for the comptime-quirk
+rationale):
+
+```zig
+var app: EchoApp = .{};
+var driver = try D.init(.{
+    .allocator = allocator,
+    .app = &app,
+    .hooks = .{
+        .on_stream_data = EchoApp.onStreamData,
+        .on_stream_end = EchoApp.onStreamEnd,
+        .on_disconnect = EchoApp.onDisconnect,
+    },
+    // Sized to what you advertise, so a conforming peer can never
+    // overflow the table (overflow is refused via STOP_SENDING):
+    .max_tracked_streams = tp.initial_max_streams_bidi + tp.initial_max_streams_uni,
+    .datagram_buf_bytes = tp.max_datagram_frame_size, // if you use DATAGRAM
+});
+defer driver.deinit();
+
+var server = try quic.Server.init(.{
+    ...,
+    .on_connection_will_close = D.willCloseHook,
+    .on_connection_will_close_user_data = &driver,
+});
+try quic.transport.runUdpServer(&server, .{
+    ...,
+    .on_iteration = D.iterationHook,
+    .on_iteration_ctx = &driver,
+});
+```
+
+Ordering guarantees (the traps this removes): events drain before
+data from the same stream is pumped; `onStreamEnd` fires on
+`streamRecvState().terminal` / reset / reaped — never early under
+reordering; `Outbox.push` accepts what the connection takes and
+retries the rest, so short writes disappear; the whole pass runs
+before `Connection.tick`, which is what keeps the stream GC from
+reaping streams with unread bytes. A hand-rolled loop must preserve
+the same order: `driver.service(&server)` before any `conn.tick`.
+
+Teardown is covered too: when a connection goes away, the will-close
+hook first delivers `onStreamEnd` (`.reaped`) for every stream still
+tracked, then `onDisconnect` — so per-stream state freed in
+`onStreamEnd` is freed on abrupt disconnects as well, with no
+app-side sweep. One obligation remains yours: the hook only fires
+from `Server.reap`. Drain connections before `Server.deinit` (close,
+`tick` past the draining period, `reap` — the examples' loops and the
+`Loopback` teardowns show the shape), or the driver's sessions leak.
+
+Worked examples: `examples/echo_server.zig` (streaming echo),
+`examples/request_response_server.zig` (length-prefixed
+request/response — the pattern most protocols build on).
+
+### Raw: the `on_iteration` switch
+
+Everything the Driver does is expressible directly; the callback
+inventory is `Server.Config.on_connection_will_close` plus
+`RunUdpOptions.on_iteration`. The explicit pattern (slot walk,
+`pollEvent` switch with a mandatory `else => {}` arm for
+forward-compat, per-stream state by hand) is documented in
+`examples/echo_server_raw.zig` — the teaching artifact. Use it when
+you want full control over event ordering or per-stream state layout.
+
+### Testing your server in-process
+
+`quic.testing.Loopback` ships in the package for embedder tests: a
+real `Server`/`Client` pair over in-memory datagram exchange — real
+TLS and packet protection, no sockets, no threads, no ports.
+
+```zig
+var lb = try quic.testing.Loopback.init(.{
+    .allocator = allocator, .server = &server, .client = &client,
+});
+defer lb.deinit();
+try lb.handshake(&driver);
+// ... drive streams ...
+try lb.step(&driver); // one runUdpServer-shaped iteration
+```
+
+`tests/e2e/testing_loopback.zig` in the repository is the worked
+example (it is also this harness's own regression test).
 
 ## Client Wrapper
 
@@ -603,7 +737,7 @@ default stays CUBIC.)
 
 One Windows caveat, and it is about the *bundled* loop only: the
 convenience helpers `transport.runUdpServer` / `runUdpClient` fail
-with `error.ConcurrencyUnavailable` on native Windows, because std has
+with `error.WindowsBundledLoopUnsupported` on native Windows, because std has
 no overlapped-I/O `net_receive` there and so cannot perform the timed
 receive those loops use as their heartbeat. This is not a limitation
 of the protocol engine, which is fully supported on Windows. Drive the

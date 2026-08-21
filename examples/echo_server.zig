@@ -1,4 +1,5 @@
-//! Echo server — the canonical first-hour quic hosting example.
+//! Echo server — the canonical first-hour quic hosting example,
+//! built on the `quic.app` application layer.
 //!
 //! One process, one UDP socket, real loopback traffic:
 //!
@@ -8,284 +9,91 @@
 //! ./zig-out/bin/echo-client-example              # round-trips against it
 //! ```
 //!
-//! The shape to copy for your own server:
+//! The whole application is the three callbacks on `EchoApp` below:
+//! stream chunks are pushed back through the session's `Outbox`
+//! (which stages whatever the connection refuses and retries it on a
+//! later pass), the stream's FIN is mirrored only when the peer's
+//! receive half is *terminal* — never when its FIN frame was merely
+//! seen — and DATAGRAMs are echoed verbatim. Everything that used to
+//! be hand-rolled here (connection discovery, per-stream state
+//! arrays, event-queue switches, `@ptrCast` context plumbing,
+//! short-write staging) lives in `quic.app.Driver`.
 //!
-//!  1. `quic.Server.init` owns TLS + the connection table.
-//!  2. `quic.transport.runUdpServer` owns the socket and the
-//!     receive/tick/drain loop.
-//!  3. ALL application logic lives in the `on_iteration` hook — the
-//!     one place where touching a loop-owned `Server` is safe
-//!     (`Server`/`Connection` have no internal locking; the hook runs
-//!     on the loop thread, after ingest and before the outbox drain,
-//!     so replies ship the same iteration).
-//!  4. Per-connection app state hangs off `Slot.user_data` and is
-//!     released in `Config.on_connection_will_close`, which `reap`
-//!     invokes while the slot is still fully valid. The auto-reap
-//!     runs on the loop thread too, so the two hooks never race.
-//!  5. Shutdown is a `std.atomic.Value(bool)` flipped from a SIGINT
-//!     handler; the loop queues CONNECTION_CLOSE on every slot and
-//!     drains for a grace window before returning.
+//! The byte-level mechanics — why `fin` is not EOF, why a short
+//! write is backpressure, and what the Driver's ordering guarantees
+//! are — are documented in `quic.app` and demonstrated the explicit
+//! way in `echo_server_raw.zig`, the same server written directly
+//! against `Server`/`Connection`. Read that one when you need to see
+//! under the abstraction; copy this one when you need a server.
 //!
-//! Echo semantics: every peer-opened bidi stream is drained and the
-//! bytes written back (FIN'd once the peer's recv half is *terminal*,
-//! not merely once its FIN frame was seen); every RFC 9221 DATAGRAM is
-//! echoed verbatim. One line is printed per connection event so a
-//! human can watch the flow.
-//!
-//! Three stream-API details `echoStream` below exists to get right,
-//! because all three fail silently rather than erroring:
-//! `StreamReadResult.fin` reports that the FIN *frame arrived*, not
-//! that you have drained the stream; a read that returns 0 bytes means
-//! "nothing readable right now", which includes "a chunk below the
-//! read offset has not arrived yet"; and `Connection.streamWrite`
-//! short-writes by design when the send buffer is full. The sound
-//! end-of-stream test is `Connection.streamRecvState(id)` — see
-//! `echoStream`.
+//! `echo_smoke.zig` drives this exact `serve` on a background thread.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const quic = @import("quic");
 const common = @import("echo_common.zig");
 
-/// Max concurrently-tracked peer bidi streams per connection. An
-/// echo demo never needs many; a full application would size this
-/// to its `initial_max_streams_bidi`.
-const max_tracked_streams: usize = 16;
+/// Per-stream read chunk the Driver reads into. The smoke test sizes
+/// its large payload from this so the multi-chunk path always runs.
+pub const stream_chunk_bytes: usize = 4096;
 
-/// Bytes of one stream staged per echo pass. Every tracked stream
-/// owns one of these (16 KiB per connection at the numbers here),
-/// because the write-back may not accept everything we just read.
-/// `echo_smoke.zig` reads this to size the payload that forces the
-/// multi-chunk path.
-pub const stream_chunk_bytes: usize = 1024;
+const D = quic.app.Driver(EchoApp);
 
-/// Read buffer for inbound DATAGRAMs. Must be at least the
-/// `max_datagram_frame_size` we advertise (1200, see
-/// `echo_common.transportParams`): `receiveDatagram` pops the payload
-/// from the queue whether or not it fit, so a short buffer loses the
-/// tail with no error.
-const datagram_chunk_bytes: usize = 2048;
+/// The echo application: every peer-opened stream is drained and the
+/// bytes written back; every RFC 9221 DATAGRAM is echoed verbatim.
+/// Counters live on typed per-connection state (`ConnState`) and are
+/// printed at disconnect.
+const EchoApp = struct {
+    pub const StreamState = void;
+    pub const ConnState = struct {
+        streams_echoed: u32 = 0,
+        datagrams_echoed: u32 = 0,
+    };
 
-/// One peer bidi stream mid-echo. `buf[off..len]` is the tail
-/// `streamWrite` has not accepted yet: it clamps to the stream's
-/// remaining send-buffer room and returns what it took, so a short
-/// write is backpressure to resume from — never an error, and never
-/// something to assert on. The tail waits here and ships on a later
-/// iteration, which is what keeps the echo byte-exact and in order.
-const StreamEcho = struct {
-    id: u64 = 0,
-    active: bool = false,
-    buf: [stream_chunk_bytes]u8 = undefined,
-    off: usize = 0,
-    len: usize = 0,
-    /// The peer's FIN *frame has arrived*. Strictly weaker than "we
-    /// have read everything": `StreamReadResult.fin` mirrors
-    /// `recv.fin_seen`, which flips when the FIN-carrying frame is
-    /// accepted regardless of how much the application has drained —
-    /// and the FIN can carry a high offset that arrives before a lower
-    /// chunk does. Never a completion signal, not even paired with an
-    /// empty read; it only tells the log line apart from a peer RESET.
-    /// The completion test is `Connection.streamRecvState` — see
-    /// `echoStream`.
-    fin_seen: bool = false,
-};
-
-/// Per-connection application state, allocated on the first event
-/// from a connection, hung off `Slot.user_data`, and freed in
-/// `onConnectionWillClose`. This is the pattern to copy: quic
-/// never reads or frees `user_data`; the will-close hook is the last
-/// safe place to release it.
-const ConnState = struct {
-    /// Peer bidi streams currently being echoed.
-    streams: [max_tracked_streams]StreamEcho = @splat(.{}),
-    /// Tiny per-connection counters, reported at close.
-    streams_echoed: u32 = 0,
-    datagrams_echoed: u32 = 0,
-
-    fn track(self: *ConnState, id: u64) void {
-        for (&self.streams) |*e| {
-            if (e.active) continue;
-            e.* = .{ .id = id, .active = true };
-            return;
-        }
-        // Demo cap. A real server sizes this to the
-        // `initial_max_streams_bidi` it advertises, so a conforming
-        // peer can never open a stream it will not service.
+    fn onStreamData(_: *EchoApp, s: *D.Session, e: *D.StreamEntry, chunk: []const u8) anyerror!void {
+        // A peer-initiated UNI stream has no send half on this side:
+        // pushing the echo would fail with StreamNotWritable and stop
+        // the server. Drain-only for those; echo the bidi ones.
+        if (!e.bidi) return;
+        try s.outbox.push(s.conn, e.id, chunk);
     }
-};
 
-/// Application context threaded through both hooks as an opaque
-/// pointer.
-pub const EchoApp = struct {
-    allocator: std.mem.Allocator,
-
-    /// `transport.RunUdpOptions.on_iteration` — fires once per loop
-    /// iteration on the loop thread. Drains each slot's event queue,
-    /// then does the actual echo work.
-    pub fn onIteration(ctx: ?*anyopaque, server: *quic.Server, now_us: u64) anyerror!void {
-        _ = now_us;
-        const app: *EchoApp = @ptrCast(@alignCast(ctx.?));
-        for (server.iterator()) |slot| {
-            // 1. Events first: they establish per-connection state.
-            while (slot.conn.pollEvent()) |event| switch (event) {
-                .handshake_established => {
-                    _ = try app.ensureState(slot);
-                    std.debug.print("[server] conn {d}: handshake established\n", .{slot.slot_id});
-                },
-                .stream_opened => |info| {
-                    std.debug.print(
-                        "[server] conn {d}: peer opened stream {d} ({s})\n",
-                        .{ slot.slot_id, info.stream_id, if (info.bidi) "bidi" else "uni" },
-                    );
-                    // Only bidi streams can be echoed; uni streams have
-                    // no return direction.
-                    if (info.bidi) {
-                        const state = try app.ensureState(slot);
-                        state.track(info.stream_id);
-                    }
-                },
-                .close => |close_ev| {
-                    std.debug.print(
-                        "[server] conn {d}: close observed (source={s} code={d})\n",
-                        .{ slot.slot_id, @tagName(close_ev.source), close_ev.error_code },
-                    );
-                },
-                else => {},
-            };
-
-            // 2. Echo work. Slots that never produced state (still
-            // handshaking) are skipped.
-            const state = connState(slot) orelse continue;
-            try echoStreams(slot, state);
-            try echoDatagrams(slot, state);
+    fn onStreamEnd(_: *EchoApp, s: *D.Session, e: *D.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
+        if (!e.bidi) return; // nothing was echoed; nothing to finish
+        switch (end) {
+            // Clean EOF: everything arrived and was drained — mirror
+            // the peer's FIN. A reset (or an already-reaped stream)
+            // has no clean EOF to mirror.
+            .fin => {
+                try s.outbox.finish(s.conn, e.id);
+                s.app.streams_echoed += 1;
+                std.debug.print(
+                    "[server] conn {d}: stream {d} fully echoed (fin)\n",
+                    .{ s.slot.slot_id, e.id },
+                );
+            },
+            .reset, .reaped => {},
         }
     }
 
-    /// `Server.Config.on_connection_will_close` — runs inside `reap`
-    /// for each closed slot while `slot.conn` / `slot.user_data` are
-    /// still valid. Free per-connection state here and nowhere else.
-    pub fn onConnectionWillClose(ctx: ?*anyopaque, slot: *quic.Server.Slot) void {
-        const app: *EchoApp = @ptrCast(@alignCast(ctx.?));
-        const state = connState(slot) orelse return;
-        std.debug.print(
-            "[server] conn {d}: reaped after echoing {d} stream(s), {d} datagram(s)\n",
-            .{ slot.slot_id, state.streams_echoed, state.datagrams_echoed },
-        );
-        app.allocator.destroy(state);
-        slot.user_data = null;
-    }
-
-    fn ensureState(app: *EchoApp, slot: *quic.Server.Slot) !*ConnState {
-        if (connState(slot)) |state| return state;
-        const state = try app.allocator.create(ConnState);
-        state.* = .{};
-        slot.user_data = state;
-        return state;
-    }
-};
-
-fn connState(slot: *quic.Server.Slot) ?*ConnState {
-    const ptr = slot.user_data orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-/// Pump every tracked bidi stream one pass.
-fn echoStreams(slot: *quic.Server.Slot, state: *ConnState) !void {
-    for (&state.streams) |*e| {
-        if (!e.active) continue;
-        const finished = echoStream(slot.conn, e) catch |err| switch (err) {
-            // Peer reset the stream and the GC already reaped it —
-            // nothing left to echo.
-            error.StreamNotFound => true,
-            else => return err,
-        };
-        if (!finished) continue; // more to do on a later iteration
-        if (e.fin_seen) {
-            state.streams_echoed += 1;
-            std.debug.print(
-                "[server] conn {d}: stream {d} fully echoed (fin)\n",
-                .{ slot.slot_id, e.id },
-            );
-        }
-        e.* = .{};
-    }
-}
-
-/// One echo pass over `e`: flush whatever the connection refused last
-/// time, then read and write back until nothing more is readable, then
-/// FIN our half once the peer's recv half is terminal. Returns true
-/// when the stream is finished with.
-///
-/// Three things here are load-bearing, and each one truncates the
-/// stream silently — no error — if you get it wrong:
-///
-///  1. Stopping at the first `res.fin` throws away every chunk past
-///     the first: the FIN frame can arrive while more chunks are still
-///     queued for us, so any stream longer than `stream_chunk_bytes`
-///     loses its tail.
-///  2. Stopping at the first short `streamWrite` drops the tail we
-///     already read; see `flushEcho`.
-///  3. Treating an empty read as "the peer is done" truncates under
-///     reordering. A read returns 0 whenever the next in-order byte is
-///     missing, so "empty read + FIN seen" is also the state of a
-///     stream with a hole below the FIN — say chunks 0..99 and 200..299
-///     delivered, 100..199 still in flight. `streamRecvState(id)` is
-///     the sound test: `.terminal` means every byte arrived AND was
-///     read (or the peer RESET the stream), and `null` means the stream
-///     was already reaped, which is terminal too.
-fn echoStream(conn: *quic.Connection, e: *StreamEcho) !bool {
-    if (!try flushEcho(conn, e)) return false;
-    while (true) {
-        const res = try conn.streamReadFin(e.id, &e.buf);
-        if (res.fin) e.fin_seen = true;
-        e.off = 0;
-        e.len = res.n;
-        if (!try flushEcho(conn, e)) return false;
-        // Nothing readable *right now* — which is not the same as
-        // "nothing more is coming". See point 3 above.
-        if (res.n == 0) break;
-    }
-    // `null` means the stream already left the live table, so there is
-    // nothing left to read or to FIN.
-    const st = conn.streamRecvState(e.id) orelse return true;
-    if (!st.terminal) return false; // more to come, or a gap below the FIN
-    if (st.reset_seen) return true; // peer aborted: no clean EOF to mirror
-    try conn.streamFinish(e.id);
-    return true;
-}
-
-/// Hand `e`'s staged bytes to the connection, keeping whatever it
-/// refuses. False means `streamWrite` short-wrote (the send buffer is
-/// full) and the tail is still staged.
-fn flushEcho(conn: *quic.Connection, e: *StreamEcho) !bool {
-    while (e.off < e.len) {
-        const accepted = try conn.streamWrite(e.id, e.buf[e.off..e.len]);
-        if (accepted == 0) return false;
-        e.off += accepted;
-    }
-    e.off = 0;
-    e.len = 0;
-    return true;
-}
-
-/// Echo every queued inbound DATAGRAM verbatim.
-fn echoDatagrams(slot: *quic.Server.Slot, state: *ConnState) !void {
-    var buf: [datagram_chunk_bytes]u8 = undefined;
-    while (slot.conn.receiveDatagram(&buf)) |n| {
-        slot.conn.sendDatagram(buf[0..n]) catch |err| switch (err) {
+    fn onDatagram(_: *EchoApp, s: *D.Session, data: []const u8) anyerror!void {
+        s.conn.sendDatagram(data) catch |err| switch (err) {
             // Peer didn't advertise datagram support, or shrank the
             // limit below what it just sent us — drop, don't kill the
             // connection.
-            error.DatagramUnavailable, error.DatagramTooLarge => continue,
+            error.DatagramUnavailable, error.DatagramTooLarge => {},
             else => return err,
         };
-        state.datagrams_echoed += 1;
+        s.app.datagrams_echoed += 1;
+    }
+
+    fn onDisconnect(_: *EchoApp, s: *D.Session) void {
         std.debug.print(
-            "[server] conn {d}: echoed {d}-byte datagram\n",
-            .{ slot.slot_id, n },
+            "[server] conn {d}: closed after echoing {d} stream(s), {d} datagram(s)\n",
+            .{ s.slot.slot_id, s.app.streams_echoed, s.app.datagrams_echoed },
         );
     }
-}
+};
 
 /// Run the echo server until `shutdown_flag` flips (or the loop
 /// fails). Factored out of `main` so `echo_smoke.zig` can drive the
@@ -296,17 +104,37 @@ pub fn serve(
     listen: []const u8,
     shutdown_flag: *const std.atomic.Value(bool),
 ) !void {
-    var app: EchoApp = .{ .allocator = allocator };
-    const protos = [_][]const u8{common.alpn};
+    var app: EchoApp = .{};
+    var driver = try D.init(.{
+        .allocator = allocator,
+        .app = &app,
+        .hooks = .{
+            .on_stream_data = EchoApp.onStreamData,
+            .on_stream_end = EchoApp.onStreamEnd,
+            .on_datagram = EchoApp.onDatagram,
+            .on_disconnect = EchoApp.onDisconnect,
+        },
+        // Sized to what we advertise (see echo_common.transportParams)
+        // so a conforming peer can never open a stream the table
+        // cannot track, and the datagram buffer can never truncate.
+        .max_tracked_streams = blk: {
+            const tp = common.transportParams();
+            break :blk tp.initial_max_streams_bidi + tp.initial_max_streams_uni;
+        },
+        .read_chunk_bytes = stream_chunk_bytes,
+        .datagram_buf_bytes = common.transportParams().max_datagram_frame_size,
+    });
+    defer driver.deinit();
 
+    const protos = [_][]const u8{common.alpn};
     var server = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.cert_pem,
         .tls_key_pem = common.key_pem,
         .alpn_protocols = &protos,
         .transport_params = common.transportParams(),
-        .on_connection_will_close = EchoApp.onConnectionWillClose,
-        .on_connection_will_close_user_data = &app,
+        .on_connection_will_close = D.willCloseHook,
+        .on_connection_will_close_user_data = &driver,
     });
     defer server.deinit();
 
@@ -320,8 +148,8 @@ pub fn serve(
         // example runs unprivileged everywhere. Production servers
         // should leave `tune_socket = true` (the default).
         .tune_socket = false,
-        .on_iteration = EchoApp.onIteration,
-        .on_iteration_ctx = &app,
+        .on_iteration = D.iterationHook,
+        .on_iteration_ctx = &driver,
     });
 
     std.debug.print("[server] shut down cleanly\n", .{});

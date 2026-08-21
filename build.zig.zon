@@ -1,6 +1,6 @@
 .{
     .name = .quic,
-    .version = "0.13.1",
+    .version = "0.14.0-dev",
     .fingerprint = 0xc0795252bd98740e,
     .minimum_zig_version = "0.17.0-dev.1683+5ceec001b",
     .dependencies = .{
@@ -9,13 +9,16 @@
             .hash = "boringssl-0.6.5-Vv5DN9v_AQCITtYL9qfS0RS1C4fDzW-293xCm7NmjLRY",
         },
     },
-    // Consumer-facing archive only. The dev trees (bench/, docs/,
+    // Consumer-facing archive only. The dev trees (bench/,
     // interop/, tests/, tools/) never build downstream — build.zig
     // returns early for dependency builds — so shipping them was pure
-    // fetch weight.
+    // fetch weight. docs/ DOES ship: EMBEDDING.md and the README link
+    // into it, and offline consumers lose the absolute-Git-URL targets
+    // otherwise.
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "docs",
         "examples",
         "src",
         "CHANGELOG.md",
