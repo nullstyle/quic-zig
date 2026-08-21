@@ -363,6 +363,10 @@ test "packet-threshold loss reduces congestion window" {
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
+    // Loss-based semantics under test (RFC 9002 §7.6's cwnd cut +
+    // ssthresh arm): pin CUBIC — BBRv3 (the 0.16.0 default) answers
+    // loss through its model, not an immediate window cut.
+    conn.setCongestionAlgorithm(.cubic);
     const initial_cwnd = conn.congestionWindow();
     var pn: u64 = 0;
     while (pn <= 4) : (pn += 1) {

@@ -39,8 +39,9 @@ pub const PairOptions = struct {
     initial_max_stream_data: u64 = 1 << 22,
     initial_max_streams_bidi: u64 = 16,
     /// Congestion controller for both endpoints — the A/B lever the
-    /// CUBIC-default flip gate drives. Follows the library default.
-    congestion_control: quic.CongestionAlgorithm = .cubic,
+    /// default-flip gates drive. Follows the library default
+    /// (benches measure shipped defaults).
+    congestion_control: quic.CongestionAlgorithm = .bbr,
     /// Server-side override; null = same as `congestion_control`.
     /// A diagnosis lever (e.g. isolating which endpoint's controller
     /// causes an interaction), not a benchmark posture.
@@ -134,7 +135,7 @@ pub const Pair = struct {
 pub const GoodputOptions = struct {
     total_bytes: usize = 64 << 20,
     chunk_bytes: usize = 256 << 10,
-    congestion_control: quic.CongestionAlgorithm = .cubic,
+    congestion_control: quic.CongestionAlgorithm = .bbr,
     /// Virtual-clock step per shuttle iteration.
     tick_us: u64 = 100,
     /// Cap on collected per-poll latency samples (8 bytes each).
@@ -326,7 +327,7 @@ pub const ImpairmentOptions = struct {
     total_bytes: usize = 8 << 20,
     chunk_bytes: usize = 256 << 10,
     tick_us: u64 = 100,
-    congestion_control: quic.CongestionAlgorithm = .cubic,
+    congestion_control: quic.CongestionAlgorithm = .bbr,
     /// RFC 9406 HyStart++ on both endpoints (A/B lever).
     hystart: bool = true,
     seed: u64 = 0xbe9c4,
@@ -565,6 +566,11 @@ test "max_queue_delay_us reaches the bottleneck model: a shallow buffer tail-dro
         .total_bytes = 1 << 20,
         .bottleneck_bytes_per_s = 1_250_000,
         .max_queue_delay_us = 25_000,
+        // Queue-filling sender under test (the buffer model needs an
+        // overshooter to tail-drop): pin CUBIC — BBRv3 (the 0.16.0
+        // default) holds the queue short and drops nothing here,
+        // which is its feature, not this test's subject.
+        .congestion_control = .cubic,
     });
     // The reported peak is the max queue delay among ACCEPTED packets,
     // so a working buffer bound is directly observable...

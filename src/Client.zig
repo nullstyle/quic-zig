@@ -290,16 +290,17 @@ pub const Config = struct {
     /// Set `enable = false` to keep the static-MTU behaviour.
     pmtud: conn_mod.PmtudConfig = .{},
 
-    /// Congestion-control algorithm: `.cubic` (RFC 9438, the
-    /// default as of 0.11.0), `.new_reno` (RFC 9002, the historical
-    /// default — the one-line rollback), or `.bbr` (BBRv3,
-    /// draft-ietf-ccwg-bbr-06, opt-in: model-based, paces at the
-    /// estimated bottleneck bandwidth; ignores `enable_hystart` —
-    /// its Startup state has its own exit machinery — and expects
-    /// `enable_pacing = true`, without which it degrades to
-    /// window-limited bursts). Applies to every path the connection
-    /// uses, including post-migration paths.
-    congestion_control: conn_mod.CongestionAlgorithm = .cubic,
+    /// Congestion-control algorithm: `.bbr` (BBRv3,
+    /// draft-ietf-ccwg-bbr-06, the default as of 0.16.0:
+    /// model-based, paces at the estimated bottleneck bandwidth;
+    /// ignores `enable_hystart` — its Startup state has its own
+    /// exit machinery — and expects `enable_pacing = true`, without
+    /// which it degrades to window-limited bursts), `.cubic`
+    /// (RFC 9438, the 0.11–0.15 default — the one-line rollback),
+    /// or `.new_reno` (RFC 9002, the conservative floor). Applies
+    /// to every path the connection uses, including post-migration
+    /// paths.
+    congestion_control: conn_mod.CongestionAlgorithm = .bbr,
 
     /// RFC 9002 §7.7 packet pacing (on by default): spreads sends at
     /// gain x cwnd/RTT instead of bursting a full window. `false`

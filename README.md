@@ -14,8 +14,9 @@ and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
 ## What It Includes
 
 - QUIC v1 connection state, packet protection, streams, DATAGRAM,
-  loss recovery, CUBIC congestion control (RFC 9438; NewReno and BBRv3
-  selectable) with RFC 9002 packet pacing, ECN, and DPLPMTUD.
+  loss recovery, BBRv3 congestion control (draft-ietf-ccwg-bbr-06;
+  CUBIC and NewReno selectable) with RFC 9002 packet pacing, ECN,
+  and DPLPMTUD.
 - High-level `Server` and `Client` wrappers for embedders that want
   quic-zig to own TLS context setup and connection state.
 - An opt-in application layer (`quic.app`) for server builders:
@@ -312,9 +313,10 @@ live only in the git repository.
   every push / PR. See
   [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md)
   for the platform tiers and graduation checklist.
-- BBRv3 congestion control (draft-ietf-ccwg-bbr-06) is available opt-in
-  via `congestion_control = .bbr`; CUBIC remains the default. Large-scale
-  performance tuning remains future work.
+- BBRv3 congestion control (draft-ietf-ccwg-bbr-06) is the default as
+  of 0.16.0, gated on the in-tree multi-flow fairness cells and the
+  interop battery; `congestion_control = .cubic` is the one-line
+  rollback. Large-scale performance tuning remains future work.
 
 ## License
 

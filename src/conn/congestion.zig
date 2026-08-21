@@ -8,9 +8,9 @@
 //! limits.
 //!
 //! `CongestionController` is the dispatch layer: a tagged union over
-//! the available algorithms (CUBIC — the default — and NewReno; the
-//! tag is chosen by `Config.algorithm` and dispatched with zero
-//! indirection via inline switches). Everything outside this file
+//! the available algorithms (BBRv3 — the default as of 0.16.0 —
+//! plus CUBIC and NewReno; the tag is chosen by `Config.algorithm`
+//! and dispatched with zero indirection via inline switches). Everything outside this file
 //! talks to the union; the concrete controllers stay exported for
 //! tests and direct embedding.
 
@@ -92,10 +92,12 @@ pub const Config = struct {
     /// Maximum UDP datagram size we'll send. Conservatively 1200
     /// per the QUIC v1 minimum; raised by PMTU discovery later.
     max_datagram_size: u64 = 1200,
-    /// Which controller `CongestionController.init` builds. CUBIC
-    /// (RFC 9438) is the default as of 0.11.0 — the industry-standard
-    /// curve; NewReno remains available as the conservative fallback.
-    algorithm: Algorithm = .cubic,
+    /// Which controller `CongestionController.init` builds. BBRv3 is
+    /// the default as of 0.16.0 (gated on the multi-flow fairness
+    /// cells + interop battery — see congestion/Bbr.zig's flip note);
+    /// CUBIC (RFC 9438, the 0.11–0.15 default) is the one-line
+    /// rollback, NewReno the conservative floor.
+    algorithm: Algorithm = .bbr,
     /// RFC 9406 HyStart++ slow-start exit. Applies to whichever
     /// algorithm is selected; `.enabled = false` restores plain
     /// RFC 9002 slow start.

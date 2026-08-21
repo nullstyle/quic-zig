@@ -35,13 +35,21 @@
 //!    §5.5.10.3 short-term decay), nothing more. The CE packet-count
 //!    delta already rides the RateSample for a future policy.
 //!
-//! DEFAULT-FLIP GATE (read before making .bbr the default): the
-//! in-tree battery has NO multi-flow fairness cell — every impairment
-//! cell runs one connection, so the Reno/CUBIC-coexistence machinery
-//! (§5.3.3.8) is entirely unobservable here. Build that instrument
-//! first (>= 2 harness Pairs sharing one SimNet bottleneck, per-flow
-//! goodput, a Jain fairness index) and pass the full interop battery —
-//! the d611e0b -> 5629357 opt-in-then-flip precedent.
+//! DEFAULT-FLIP RECORD (2026-08-21, .bbr became the default): the
+//! gate this header used to demand was built (`zig build bench-e2e
+//! -- --scenario fairness`: >= 2 Pairs share one SimNet bottleneck;
+//! per-flow goodput + Jain index) and passed on pre-registered
+//! criteria — 2-flow BBR Jain 1.0000 at 97.1% utilization (CUBIC
+//! reference 0.9996), 4-flow 0.9970, 5 s-staggered joiner converges
+//! to 1.0000, BBR-vs-CUBIC no-starvation both buffer depths (31.1%
+//! deep / 61.3% shallow BBR share), peak queue 43 ms vs CUBIC's
+//! 100 ms — plus the full interop battery, per the d611e0b ->
+//! 5629357 opt-in-then-flip precedent. First light also caught a
+//! three-defect transport deadlock (Pacer quantization freeze, the
+//! trickle-latch this file's pacing floor now guards, and
+//! credit-starvation behind the pacing gate) — fixed before the
+//! flip; the fairness cells are the regression instrument. Rollback
+//! is one line at any layer: `congestion_control = .cubic`.
 
 const Bbr = @This();
 

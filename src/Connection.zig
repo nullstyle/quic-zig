@@ -507,7 +507,7 @@ pmtud_config: path_mod.PmtudConfig = .{ .enable = false },
 /// `Config.congestion_control` through `setCongestionAlgorithm`
 /// right after `initClient`/`initServer`; paths created later
 /// (multipath, migration) inherit it at construction.
-cc_algorithm: congestion_mod.Algorithm = .cubic,
+cc_algorithm: congestion_mod.Algorithm = .bbr,
 
 /// RFC 9406 HyStart++ configuration for every path's controller.
 /// A posture switch like `cc_algorithm`; wrappers thread

@@ -40,14 +40,39 @@ test "Client.connect succeeds and yields a tickable Connection" {
     // SCID as a routable CID.
     try std.testing.expect(client.conn.localScidCount() >= 1);
 
-    // CUBIC is the default congestion controller as of 0.11.0.
+    // BBRv3 is the default congestion controller as of 0.16.0 (the
+    // gated flip; see congestion/Bbr.zig's flip record), and its
+    // model surface is live.
+    try std.testing.expectEqual(
+        quic.CongestionAlgorithm.bbr,
+        client.conn.ccForApplication().algorithm(),
+    );
+    try std.testing.expect(client.conn.ccForApplication().bbrSnapshot() != null);
+}
+
+test "Client.Config.congestion_control = .cubic is the one-line rollback" {
+    const protos = [_][]const u8{"hq-test"};
+
+    var client = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .congestion_control = .cubic,
+    });
+    defer client.deinit();
+
     try std.testing.expectEqual(
         quic.CongestionAlgorithm.cubic,
         client.conn.ccForApplication().algorithm(),
     );
+    // The posture switch is recorded so later paths (migration,
+    // multipath) inherit the same algorithm.
+    try std.testing.expectEqual(quic.CongestionAlgorithm.cubic, client.conn.cc_algorithm);
 }
 
-test "Client.Config.congestion_control = .new_reno is the one-line rollback" {
+test "Client.Config.congestion_control = .new_reno stays the conservative floor" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic.Client.connect(.{
@@ -69,7 +94,7 @@ test "Client.Config.congestion_control = .new_reno is the one-line rollback" {
     try std.testing.expectEqual(quic.CongestionAlgorithm.new_reno, client.conn.cc_algorithm);
 }
 
-test "Client.Config.congestion_control = .bbr opts into the rate-based controller" {
+test "Client.Config.congestion_control = .bbr selects the default explicitly" {
     const protos = [_][]const u8{"hq-test"};
 
     var client = try quic.Client.connect(.{

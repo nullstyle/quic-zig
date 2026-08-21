@@ -354,7 +354,7 @@ pub fn main(init: std.process.Init) !void {
 
     var scenario: Scenario = .all;
     var samples: usize = default_samples;
-    var cc: quic.CongestionAlgorithm = .cubic;
+    var cc: quic.CongestionAlgorithm = .bbr;
     var hystart = true;
     var json_path: ?[]const u8 = null;
     var json_dir: ?[]const u8 = null;

@@ -968,6 +968,12 @@ test "loss recovery: a dropped 1-RTT packet is retransmitted and cwnd shrinks (L
     try server.setPeerDcid(&ClientCid);
     try server.setLocalScid(&ServerCid);
 
+    // Loss-based semantics under test (the cwnd-shrinks assertion
+    // below): pin CUBIC — BBRv3 (the 0.16.0 default) answers a
+    // single loss through its model, not a guaranteed window cut.
+    client.setCongestionAlgorithm(.cubic);
+    server.setCongestionAlgorithm(.cubic);
+
     const total: usize = 32 * 1024;
     var data: [total]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(0x105);

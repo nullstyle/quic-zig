@@ -332,6 +332,11 @@ test "MUST trigger a congestion event when a subsequent peer ACK reports CE incr
     try pair.driveToHandshakeConfirmed();
 
     const client = pair.clientConn();
+    // Loss-based semantics under test (§B.7's cwnd cut + recovery
+    // entry): pin CUBIC explicitly — BBRv3 (the 0.16.0 default)
+    // answers CE with its own §3.7 once-per-round decay, covered by
+    // the bbr conformance suite.
+    client.setCongestionAlgorithm(.cubic);
     const lar = try driveOneAppPn(client, &pair);
 
     // First ACK establishes the baseline (no CE yet).
