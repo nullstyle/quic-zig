@@ -41,6 +41,16 @@ refined before 1.0, but changes will be deliberate, called out in
   requeued VERBATIM for 1-RTT (see `requeueRejectedEarlyData`'s CONTRACT
   block) — downstream HTTP/3 early-data support builds on it.
 - **Flow-control introspection** and the qlog-style event callbacks.
+  This includes the send-side snapshots `sendWindow` and
+  `streamSendWindow` (with the `SendWindow` struct): promoted to
+  Stable in 0.15.0 after soaking unchanged since 0.13.0 in the
+  http3-zig downstream, whose signature feedback confirmed the shape.
+- **`ConnectionStats` / `Connection.stats()`** — the whole-connection
+  observability snapshot. Promoted to Stable in 0.15.0: the 16-field
+  set is byte-identical across 0.11.0→0.14.0 (four releases). Fields
+  may still be *added* in any minor with the `ConnectionEvent`-style
+  forward-compat expectation (read what you know, ignore the rest);
+  existing fields keep their name, type, and meaning.
 - **`ConnectionEvent`** — subject to the forward-compatibility contract
   below.
 - **Error set:** the `Error` variants a public method documents it can
@@ -75,10 +85,6 @@ suite.
   intent; shape may move freely within a minor.
 - **Newly added surfaces** may see minor signature or naming refinement
   as they are exercised for the first time.
-- **`Connection.stats()` / `ConnectionStats`** (added 0.11.0): the
-  whole-connection observability snapshot. Fields may be *added* in any
-  minor; existing fields keep their meaning. Promotion to Stable is
-  planned once the field set survives one release unchanged.
 - **Config naming** follows a settled convention: on/off feature toggles use
   `enable_` (`enable_ecn`) and permission grants use `allow_`
   (`allow_no_idle_timeout`). A few fields keep intentional semantic prefixes —

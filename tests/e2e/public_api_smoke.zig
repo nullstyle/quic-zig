@@ -93,6 +93,11 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
     const stream_recv_state: *const fn (*const Conn, u64) ?quic.StreamRecvState = Conn.streamRecvState;
     const stream_priority: *const fn (*const Conn, u64) ?quic.StreamPriority = Conn.streamPriority;
     const stream_set_priority: *const fn (*Conn, u64, quic.StreamPriority) anyerror!void = Conn.streamSetPriority;
+    // Send-side flow-control snapshots, Stable as of 0.15.0.
+    const send_window: *const fn (*const Conn) u64 = Conn.sendWindow;
+    const stream_send_window: *const fn (*const Conn, u64) ?quic.SendWindow = Conn.streamSendWindow;
+    // Whole-connection observability snapshot, Stable as of 0.15.0.
+    const stats: *const fn (*const Conn) quic.ConnectionStats = Conn.stats;
 
     const begin_graceful_shutdown: *const fn (*Conn) void = Conn.beginGracefulShutdown;
     const graceful_shutdown_active: *const fn (*const Conn) bool = Conn.gracefulShutdownActive;
@@ -129,6 +134,9 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
         stream_recv_state,
         stream_priority,
         stream_set_priority,
+        send_window,
+        stream_send_window,
+        stats,
         begin_graceful_shutdown,
         graceful_shutdown_active,
         close,

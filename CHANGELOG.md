@@ -56,6 +56,15 @@ changes.
 
 ### Changed
 
+- **Promoted to the Stable tier:** `Connection.stats()` /
+  `ConnectionStats` (its 16-field set is byte-identical across
+  0.11.0→0.14.0, four releases) and the send-side snapshots
+  `Connection.sendWindow` / `streamSendWindow` (with `SendWindow`,
+  soaked unchanged in the http3-zig downstream since 0.13.0). All
+  three are now compile-pinned in `public_api_smoke.zig`, so a future
+  signature change fails CI. `ConnectionStats` fields may still be
+  *added* under the forward-compat expectation; existing fields keep
+  their name, type, and meaning.
 - **`streamRecvState` on a locally-initiated unidirectional stream
   now returns `null`** (like an unknown stream) instead of a
   fabricated non-terminal state. Such a stream has no receive half,
