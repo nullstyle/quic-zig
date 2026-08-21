@@ -117,6 +117,9 @@ const stateless_response_queue_capacity: usize = 64;
 pub const StatelessResponseKind = enum {
     version_negotiation,
     retry,
+    /// RFC 9000 §10.3 Stateless Reset for an unroutable short-header
+    /// datagram.
+    stateless_reset,
 };
 
 const server_observability = @import("Server/observability.zig");
@@ -326,6 +329,12 @@ pub const FeedOutcome = enum {
     /// `drainStatelessResponse`. No `Connection` was created.
     /// RFC 9000 §6 / RFC 8999 §6 / RFC 9368 §6.
     version_negotiated,
+    /// An unroutable short-header datagram earned an RFC 9000 §10.3
+    /// Stateless Reset (requires `Config.stateless_reset_key`; see
+    /// the field doc for the eligibility rules). The reset packet
+    /// was queued for `drainStatelessResponse`. Additive variant —
+    /// keep an `else` arm when switching on `FeedOutcome`.
+    stateless_reset_sent,
     /// `Config.retry_token_key` is set and this Initial either
     /// carried no token or carried one that is not the one we
     /// would have minted for this source. A fresh Retry packet was
@@ -431,6 +440,11 @@ source_rate_table_capacity: u32,
 /// the per-source VN rate limit; otherwise gates VN emission via
 /// the same `source_rate_table` (separate counter pair).
 max_vn_per_source: ?u64,
+/// Resolved `Config.stateless_reset_source_rate_limit`. Null
+/// disables the per-source Stateless Reset rate limit; otherwise
+/// gates reset emission via the same `source_rate_table`
+/// (dedicated counter pair).
+max_stateless_resets_per_source: ?u64,
 
 /// Per-source Retry bookkeeping. Empty when Retry is disabled.
 /// One entry per peer that earned a Retry packet, dropped once
@@ -572,6 +586,11 @@ feeds_version_negotiated: u64 = 0,
 feeds_retry_sent: u64 = 0,
 feeds_initial_too_small: u64 = 0,
 feeds_vn_rate_limited: u64 = 0,
+/// Stateless Resets queued for unroutable short-header datagrams.
+feeds_stateless_reset: u64 = 0,
+/// Reset-eligible datagrams suppressed by the per-source reset
+/// rate limit.
+feeds_reset_rate_limited: u64 = 0,
 /// Datagrams dropped at the listener-level packet rate limit
 /// (`Config.listener_datagram_rate_limit`). Subset of `feeds_dropped`.
 /// Spiking values point at a flood-style attack.
@@ -636,6 +655,13 @@ pub fn init(config: Config) Error!Server {
         if (config.source_rate_table_capacity == 0) return Error.InvalidConfig;
     }
     if (config.vn_source_rate_limit.resolve(Config.default_vn_source_rate_cap)) |cap| {
+        if (cap == 0) return Error.InvalidConfig;
+        if (config.source_rate_window_us == 0) return Error.InvalidConfig;
+        if (config.source_rate_table_capacity == 0) return Error.InvalidConfig;
+    }
+    if (config.stateless_reset_source_rate_limit.resolve(
+        Config.default_stateless_reset_rate_cap,
+    )) |cap| {
         if (cap == 0) return Error.InvalidConfig;
         if (config.source_rate_window_us == 0) return Error.InvalidConfig;
         if (config.source_rate_table_capacity == 0) return Error.InvalidConfig;
@@ -853,6 +879,9 @@ pub fn init(config: Config) Error!Server {
         ),
         .max_vn_per_source = config.vn_source_rate_limit.resolve(
             Config.default_vn_source_rate_cap,
+        ),
+        .max_stateless_resets_per_source = config.stateless_reset_source_rate_limit.resolve(
+            Config.default_stateless_reset_rate_cap,
         ),
         .source_rate_window_us = config.source_rate_window_us,
         .source_rate_table_capacity = config.source_rate_table_capacity,
@@ -1284,6 +1313,15 @@ pub fn feedWithEcn(
     // here because it rejects DCID-len > 20 — the source-rate
     // gate downstream wants to charge those datagrams too.
     if (bytes.len < 5 or (bytes[0] & 0x80) == 0) {
+        // Unroutable short header: the peer addressed connection
+        // state this server does not have (crash/restart, or the
+        // connection was reaped). RFC 9000 §10.3: answer with a
+        // Stateless Reset when policy allows. Long-header fragments
+        // under 5 bytes and short-header bytes without the fixed
+        // bit are not valid v1 packets — plain drop.
+        if ((bytes[0] & 0x80) == 0 and (bytes[0] & 0x40) != 0) {
+            return self.answerUnroutableShortHeader(bytes, from, now_us);
+        }
         self.feeds_dropped += 1;
         return .dropped;
     }
@@ -1621,6 +1659,7 @@ const resyncSlotCids = server_routing.resyncSlotCids;
 const dropAllCidsFromTable = server_routing.dropAllCidsFromTable;
 
 const acceptSourceRate = server_dos.acceptSourceRate;
+const acceptStatelessResetRate = server_dos.acceptStatelessResetRate;
 
 const acceptVnRate = server_dos.acceptVnRate;
 
@@ -1647,16 +1686,130 @@ const maybeIssueNewToken = server_dos.maybeIssueNewToken;
 
 const applyRetryGate = server_dos.applyRetryGate;
 
+/// A Stateless Reset (header byte + >= 4 unpredictable bytes +
+/// 16-byte token) is at minimum 21 bytes — RFC 9000 §10.3.
+const min_stateless_reset_bytes: usize = 21;
+/// §10.3.3: every reset MUST be smaller than its trigger, so the
+/// smallest datagram that can earn a (>= 21-byte) reset is 22 bytes.
+const min_reset_trigger_bytes: usize = 22;
+
+/// Handle an unroutable short-header datagram: queue an RFC 9000
+/// §10.3 Stateless Reset when policy allows, and surface the stale
+/// DCID to the embedder either way (the `unroutable_dcid` log
+/// event, bounded by the per-source log rate limit). Eligibility to
+/// send: a peer address, `Config.stateless_reset_key`, a complete
+/// DCID (`local_cid_len` bytes), a trigger of at least 22 bytes
+/// (§10.3.3's smaller-than-trigger rule needs room for the 21-byte
+/// minimum reset), and per-source rate budget
+/// (`stateless_reset_source_rate_limit`).
+fn answerUnroutableShortHeader(
+    self: *Server,
+    bytes: []const u8,
+    from: ?Address,
+    now_us: u64,
+) Error!FeedOutcome {
+    const cid_len: usize = self.local_cid_len;
+    const have_dcid = bytes.len >= 1 + cid_len;
+
+    var can_reset = have_dcid and
+        bytes.len >= min_reset_trigger_bytes and
+        from != null and
+        self.stateless_reset_key != null;
+    // The rate budget is charged LAST so ineligible datagrams never
+    // burn it.
+    if (can_reset) {
+        if (self.max_stateless_resets_per_source) |cap| {
+            if (!self.acceptStatelessResetRate(from.?, cap, now_us)) {
+                self.feeds_reset_rate_limited += 1;
+                can_reset = false;
+            }
+        }
+    }
+
+    var queued = false;
+    if (can_reset) {
+        queued = self.queueStatelessReset(from.?, bytes[1..][0..cid_len], bytes.len);
+    }
+
+    if (from != null and have_dcid) {
+        var dcid: [20]u8 = @splat(0);
+        @memcpy(dcid[0..cid_len], bytes[1..][0..cid_len]);
+        self.emitLog(.{ .unroutable_dcid = .{
+            .peer = from.?,
+            .dcid = dcid,
+            .dcid_len = @intCast(cid_len),
+            .datagram_len = std.math.lossyCast(u32, bytes.len),
+            .reset_queued = queued,
+        } });
+    }
+
+    if (queued) {
+        self.feeds_stateless_reset += 1;
+        return .stateless_reset_sent;
+    }
+    self.feeds_dropped += 1;
+    return .dropped;
+}
+
+/// Build and queue one Stateless Reset toward `dst` for the stale
+/// `dcid`. Returns false (drop) on any crypto/queue hiccup — a
+/// reset is best-effort by definition. Wire layout per §10.3:
+/// first byte `0b01xxxxxx` (short-header form + fixed bit, low six
+/// bits unpredictable), unpredictable middle, and the 16-byte
+/// token (the same HMAC the server commits to when issuing CIDs,
+/// so the peer's stored token matches) as the final bytes.
+///
+/// Length policy: MUST be smaller than the trigger (§10.3.3 loop
+/// rule — a reset-vs-reset exchange shrinks until it dies below
+/// the 21-byte minimum), which also satisfies the §10.3 3x
+/// amplification bound; for triggers of 43 bytes or less that
+/// means one byte shorter (the SHOULD); for larger triggers the
+/// length is randomized in [41, 63] so resets resemble ordinary
+/// short-header traffic instead of clustering at one size.
+fn queueStatelessReset(
+    self: *Server,
+    dst: Address,
+    dcid: []const u8,
+    trigger_len: usize,
+) bool {
+    const key = &(self.stateless_reset_key.?);
+    const token = conn_mod.stateless_reset.derive(key, dcid) catch return false;
+
+    var entry: StatelessResponse = .{
+        .dst = dst,
+        .len = 0,
+        .kind = .stateless_reset,
+    };
+    var rand_len: [1]u8 = undefined;
+    boringssl.crypto.rand.fillBytes(&rand_len) catch return false;
+    const target: usize = 41 + (rand_len[0] % 23);
+    const len = @min(trigger_len - 1, target);
+    std.debug.assert(len >= min_stateless_reset_bytes);
+    std.debug.assert(len < trigger_len);
+
+    boringssl.crypto.rand.fillBytes(entry.bytes[0..len]) catch return false;
+    entry.bytes[0] = 0x40 | (entry.bytes[0] & 0x3f);
+    @memcpy(entry.bytes[len - conn_mod.stateless_reset.token_len .. len], &token);
+    entry.len = len;
+
+    self.queueStatelessResponse(entry) catch return false;
+    return true;
+}
+
 // INTERNAL: pub for server/ sibling access; not part of the embedder API.
 pub fn queueStatelessResponse(self: *Server, entry: StatelessResponse) Error!void {
-    // Bound the queue: on overflow, prefer evicting the oldest
-    // VN entry over any Retry. This stops a flood of
-    // unsupported-version probes from starving Retry responses
-    // to legitimate v1 peers. If no VN is queued (the queue is
-    // all Retry), evict the oldest Retry — falling back to FIFO
-    // is still better than refusing the new entry.
+    // Bound the queue: on overflow, evict the cheapest-to-lose
+    // first — Stateless Resets (the peer re-sends and earns
+    // another), then VN, and only then Retry. This stops a flood
+    // of unsupported-version or unroutable probes from starving
+    // Retry responses to legitimate v1 peers. If the queue is all
+    // Retry, evict the oldest — falling back to FIFO is still
+    // better than refusing the new entry.
     if (self.stateless_responses.items.len >= stateless_response_queue_capacity) {
         const evict_idx: usize = blk: {
+            for (self.stateless_responses.items, 0..) |*e, i| {
+                if (e.kind == .stateless_reset) break :blk i;
+            }
             for (self.stateless_responses.items, 0..) |*e, i| {
                 if (e.kind == .version_negotiation) break :blk i;
             }

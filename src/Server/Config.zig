@@ -152,6 +152,9 @@ pub const default_vn_source_rate_cap: u64 = 8;
 /// Library-recommended cap backing
 /// `log_source_rate_limit = .default`.
 pub const default_log_source_rate_cap: u64 = 16;
+/// Library-recommended cap backing
+/// `stateless_reset_source_rate_limit = .default`.
+pub const default_stateless_reset_rate_cap: u64 = 8;
 
 /// A transport-parameter working set for a server that "just
 /// works": every flow-control / stream-count knob the RFC leaves at
@@ -403,6 +406,18 @@ source_rate_table_capacity: u32 = 4096,
 /// recommendation) — legitimate clients fix their version after
 /// one VN response and retry with v1.
 vn_source_rate_limit: RateLimit = .default,
+
+/// Per-source rate limit on RFC 9000 §10.3 Stateless Reset
+/// emission (which requires `stateless_reset_key`; without the key
+/// no reset is ever sent and this limiter is moot). §10.3.3 asks
+/// endpoints to bound the resets they generate, with per-address
+/// limits so one peer exhausting its budget cannot starve resets
+/// to others — this is that limit, on the same windowed per-source
+/// table as the Initial / VN gates. `.default` applies
+/// `default_stateless_reset_rate_cap` (8): a live peer that missed
+/// one reset re-sends and earns another, so a small cap costs
+/// legitimate peers nothing while blunting the reflection surface.
+stateless_reset_source_rate_limit: RateLimit = .default,
 
 /// 32-byte HMAC key used to mint and validate stateless Retry
 /// tokens (RFC 9000 §8.1.2). When null, Retry is disabled and

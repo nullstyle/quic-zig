@@ -5,6 +5,43 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Added
+
+- **RFC 9000 §10.3 Stateless Reset EMISSION.** With
+  `Config.stateless_reset_key` set, `Server.feed` now answers an
+  unroutable short-header datagram with a spec-shaped Stateless
+  Reset — the death certificate that lets a peer of a crashed or
+  restarted server abandon the connection immediately instead of
+  grinding out its idle timeout. Emission follows the §10.3 rules:
+  trigger must be ≥ 22 bytes and carry a complete DCID; the reset is
+  always smaller than its trigger (the §10.3.3 loop rule — a
+  reset-vs-reset exchange shrinks to death, pinned by test), one
+  byte shorter for small triggers, randomized 41–63 bytes for large
+  ones; the token tail is the same HMAC committed when issuing CIDs.
+  Per-source budget via the new
+  `Config.stateless_reset_source_rate_limit` (default cap 8).
+  Resets ride the existing stateless-response queue
+  (`StatelessResponseKind.stateless_reset`; evicted first on
+  overflow) and drain through the bundled loops unchanged.
+- **`FeedOutcome.stateless_reset_sent`** (additive enum variant —
+  keep an `else` arm when switching) and
+  **`LogEvent.unroutable_dcid`** carrying the stale DCID and a
+  `reset_queued` flag: it fires for every full-DCID unroutable
+  short-header datagram, whether or not a reset ships, so
+  DCID-routing front ends can observe stale-CID traffic. Metrics:
+  `feeds_stateless_reset`, `feeds_reset_rate_limited`.
+- **The handshake SCID's reset token is now advertised** via the
+  RFC 9000 §18.2 `stateless_reset_token` transport parameter.
+  Previously tokens reached the peer only with
+  NEW_CONNECTION_ID-provided spares and the preferred-address CID,
+  so a reset aimed at the PRIMARY connection ID could not be
+  recognized. The death-certificate e2e (client handshakes against
+  server #1, a key-sharing stateless server #2 resets it, client
+  enters draining with `CloseSource.stateless_reset`) pins the full
+  chain and fails if the advertise is removed.
+
 ## [0.14.0] - 2026-08-21
 
 The application-layer sprint: closing the silent-failure traps and

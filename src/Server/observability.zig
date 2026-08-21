@@ -44,6 +44,23 @@ pub const LogEvent = union(enum) {
     /// of rejection, surfaced so embedders can tune
     /// `initial_source_rate_limit`.
     feed_rate_limited: struct { peer: Address, recent_count: u32 },
+    /// An unroutable short-header datagram addressed connection state
+    /// this server does not have (typical: the peer kept sending
+    /// after a server restart, or after the connection was reaped).
+    /// `dcid` holds the first `dcid_len` bytes the peer addressed
+    /// (`dcid_len` = the server's local CID length). `reset_queued`
+    /// says whether an RFC 9000 §10.3 Stateless Reset was queued in
+    /// response — that requires `stateless_reset_key`, a trigger of
+    /// at least 22 bytes, a complete DCID, and per-source rate
+    /// budget. Front ends that route by dictated DCIDs use this
+    /// event to observe stale-CID traffic even when no reset ships.
+    unroutable_dcid: struct {
+        peer: Address,
+        dcid: [20]u8,
+        dcid_len: u8,
+        datagram_len: u32,
+        reset_queued: bool,
+    },
     /// A Retry packet was successfully minted and queued for `peer`.
     /// `scid_len` is the length of the server-issued SCID embedded in
     /// the Retry — currently always equal to `Config.local_cid_len`.
@@ -169,6 +186,12 @@ pub const MetricsSnapshot = struct {
     /// fired. A subset of `feeds_dropped`. Spiking values point at
     /// VN-flood probes.
     feeds_vn_rate_limited: u64,
+    /// Stateless Resets queued for unroutable short-header datagrams
+    /// (RFC 9000 §10.3).
+    feeds_stateless_reset: u64,
+    /// Reset-eligible datagrams suppressed by
+    /// `stateless_reset_source_rate_limit`.
+    feeds_reset_rate_limited: u64,
     /// Datagrams dropped at the listener-level packet rate limit
     /// (`Config.listener_datagram_rate_limit`). Subset of `feeds_dropped`.
     /// Hardening guide §4.1.
@@ -295,6 +318,8 @@ pub fn metricsSnapshot(server: *const Server) MetricsSnapshot {
         .feeds_retry_sent = server.feeds_retry_sent,
         .feeds_initial_too_small = server.feeds_initial_too_small,
         .feeds_vn_rate_limited = server.feeds_vn_rate_limited,
+        .feeds_stateless_reset = server.feeds_stateless_reset,
+        .feeds_reset_rate_limited = server.feeds_reset_rate_limited,
         .feeds_listener_rate_limited = server.feeds_listener_rate_limited,
         .feeds_listener_byte_rate_limited = server.feeds_listener_byte_rate_limited,
         .feeds_source_bandwidth_limited = server.feeds_source_bandwidth_limited,
@@ -375,6 +400,7 @@ fn logEventSource(ev: LogEvent) ?Address {
         .connection_accepted => |e| e.peer,
         .connection_closed => |e| e.peer,
         .feed_rate_limited => |e| e.peer,
+        .unroutable_dcid => |e| e.peer,
         .retry_minted => |e| e.peer,
         .version_negotiated => |e| e.peer,
         .stateless_queue_evicted => null,

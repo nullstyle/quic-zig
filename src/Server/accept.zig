@@ -78,6 +78,17 @@ pub fn openSlotFromInitial(
     var params = server.transport_params;
     params.original_destination_connection_id = original_dcid;
     params.initial_source_connection_id = ConnectionId.fromSlice(local_scid);
+    // RFC 9000 §18.2 ¶7: with a `stateless_reset_key`, advertise the
+    // stateless-reset token for the handshake-chosen SCID, so the
+    // client can recognize a §10.3 Stateless Reset for the PRIMARY
+    // connection ID — not only for NEW_CONNECTION_ID-provided
+    // spares. Same derive as the reset emitter and the CID
+    // replenisher, so the token a post-crash server recomputes for
+    // this CID matches the one advertised here.
+    if (server.stateless_reset_key) |key| {
+        params.stateless_reset_token = conn_mod.stateless_reset.derive(&key, local_scid) catch
+            return Error.RandFailed;
+    }
     if (retry_ctx) |_| {
         params.retry_source_connection_id = ConnectionId.fromSlice(local_scid);
     }

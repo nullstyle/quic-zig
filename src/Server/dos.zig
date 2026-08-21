@@ -66,6 +66,19 @@ pub fn acceptVnRate(
     return acceptWindowed(server, addr, cap, now_us, "vn_count", "vn_window_start_us");
 }
 
+/// Per-source Stateless Reset rate gate, over the entry's dedicated
+/// `reset_count` / `reset_window_start_us` pair — same isolation
+/// rationale as the VN axis: reset traffic must not burn the
+/// Initial / VN / log budgets or vice versa.
+pub fn acceptStatelessResetRate(
+    server: *Server,
+    addr: Address,
+    cap: u64,
+    now_us: u64,
+) bool {
+    return acceptWindowed(server, addr, cap, now_us, "reset_count", "reset_window_start_us");
+}
+
 /// Per-source log-emission rate gate, over the entry's tertiary
 /// `log_count` / `log_window_start_us` pair so log floods don't
 /// burn the Initial / VN budgets and vice versa. Returns `true`
@@ -581,6 +594,14 @@ pub const SourceRateEntry = struct {
     vn_count: u32 = 0,
     /// Wall-clock microseconds when the current VN window started.
     vn_window_start_us: u64 = 0,
+    /// Stateless Resets emitted toward this source within the current
+    /// reset window. Gated by
+    /// `Config.stateless_reset_source_rate_limit` (RFC 9000 §10.3.3:
+    /// per-address limits keep one peer's exhausted budget from
+    /// starving resets to others).
+    reset_count: u32 = 0,
+    /// Wall-clock microseconds when the current reset window started.
+    reset_window_start_us: u64 = 0,
     /// LogEvents emitted on behalf of this source within the current
     /// log window. Gated by `Config.log_source_rate_limit`.
     /// Hardening guide §9.4: a flood of feed-rate-limited /
