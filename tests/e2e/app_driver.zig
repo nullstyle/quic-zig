@@ -1059,6 +1059,87 @@ const DgApp = struct {
 
 const GD = quic.app.Driver(DgApp);
 
+test "Driver: Server.deinit with a live connection tears the session down (no leak)" {
+    // A server destroyed with a connection still live must still fire
+    // the will-close hook per slot, or the Driver session (and its
+    // per-stream app state) leaks — the hook was the ONLY place it
+    // freed. std.testing.allocator turns a miss into a leak failure.
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+
+    var app: LeakApp = .{ .allocator = allocator };
+    var driver = try LD.init(.{
+        .allocator = allocator,
+        .app = &app,
+        .hooks = .{
+            .on_stream_data = LeakApp.onStreamData,
+            .on_stream_end = LeakApp.onStreamEnd,
+        },
+        .max_tracked_streams = 32,
+    });
+    defer driver.deinit();
+
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .on_connection_will_close = LD.willCloseHook,
+        .on_connection_will_close_user_data = &driver,
+    });
+
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true,
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    });
+    defer cli.deinit();
+
+    var rx: [4096]u8 = undefined;
+    var now_us: u64 = 1_000;
+    try cli.conn.advance();
+    var step: u32 = 0;
+    while (step < 64) : (step += 1) {
+        try pumpClientToServer(&cli, &srv, &rx, now_us);
+        while (srv.drainStatelessResponse()) |_| {}
+        try driver.service(&srv);
+        try pumpServerToClient(&srv, &cli, &rx, now_us);
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        if (cli.conn.handshakeDone() and srv.iterator().len > 0 and
+            srv.iterator()[0].conn.handshakeDone()) break;
+        now_us += 1_000;
+    }
+    try std.testing.expect(cli.conn.handshakeDone());
+
+    // Buffer some app state on a live stream, then service so the
+    // session's table holds a tracked stream with owned bytes.
+    const stream = try cli.conn.openNextBidi();
+    _ = try cli.conn.streamWrite(stream.id, "mid-request bytes");
+    var iters: u32 = 0;
+    while (iters < 400 and app.received == 0) : (iters += 1) {
+        try pumpClientToServer(&cli, &srv, &rx, now_us);
+        try driver.service(&srv);
+        try pumpServerToClient(&srv, &cli, &rx, now_us);
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        now_us += 1_000;
+    }
+    try std.testing.expect(app.received > 0);
+    try std.testing.expectEqual(@as(usize, 1), srv.iterator().len);
+
+    // No drain, no reap: destroy the server outright. The per-slot
+    // will-close hook must synthesize the stream end and free the
+    // session; the leak checker enforces it.
+    srv.deinit();
+    try std.testing.expectEqual(@as(u32, 1), app.ends);
+    try std.testing.expect(app.last_end.? == .reaped);
+    try std.testing.expectEqual(@as(usize, "mid-request bytes".len), app.freed_bytes);
+}
+
 test "Driver: undersized datagram_buf_bytes fails loudly with DatagramBufferTooSmall" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};

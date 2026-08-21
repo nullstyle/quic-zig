@@ -976,6 +976,16 @@ pub const rotateLiveSlotCids = server_routing.rotateLiveSlotCids;
 
 pub fn deinit(self: *Server) void {
     for (self.slots.items) |slot| {
+        // Ordered-teardown hook, same as `reap`: the embedder
+        // releases anything borrowing `slot.conn` (e.g. a
+        // `quic.app.Driver` session on `slot.user_data`) while the
+        // slot is still fully alive. Without this, destroying the
+        // server with live connections leaks every Driver session —
+        // the hook was the ONLY place they freed. Runs before the
+        // connection is torn down.
+        if (self.on_connection_will_close) |callback| {
+            callback(self.on_connection_will_close_user_data, slot);
+        }
         slot.conn.destroy();
         if (slot.pending_upgrade) |pu| self.allocator.destroy(pu);
         self.allocator.destroy(slot);

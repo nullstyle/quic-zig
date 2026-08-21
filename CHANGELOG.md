@@ -66,6 +66,14 @@ changes.
 
 ### Fixed
 
+- **`Server.deinit` now fires `on_connection_will_close` per live
+  slot** before destroying it (same ordered-teardown hook `reap`
+  runs). Destroying a server with connections still live previously
+  skipped the hook — the only place a `quic.app.Driver` session
+  frees — so every such session (and its per-stream app state)
+  leaked. The pre-`deinit` drain loop is no longer a leak-safety
+  requirement (it still matters for graceful on-wire close).
+  Mutation-checked by a new no-drain-deinit leak test.
 - Four doc comments referenced a `provideConnectionId` method that
   does not exist (the real API is `replenishConnectionIds`); a
   downstream integration audit tripped on it. Corrected, including

@@ -211,10 +211,11 @@ Teardown is covered too: when a connection goes away, the will-close
 hook first delivers `onStreamEnd` (`.reaped`) for every stream still
 tracked, then `onDisconnect` — so per-stream state freed in
 `onStreamEnd` is freed on abrupt disconnects as well, with no
-app-side sweep. One obligation remains yours: the hook only fires
-from `Server.reap`. Drain connections before `Server.deinit` (close,
-`tick` past the draining period, `reap` — the examples' loops and the
-`Loopback` teardowns show the shape), or the driver's sessions leak.
+app-side sweep. This holds on BOTH teardown paths: a normal
+close→tick→reap cycle, and `Server.deinit` called with connections
+still live (it fires the same hook per slot before destroying it).
+You do not need a drain loop before `deinit` just to avoid leaking
+Driver sessions.
 
 Worked examples: `examples/echo_server.zig` (streaming echo),
 `examples/request_response_server.zig` (length-prefixed

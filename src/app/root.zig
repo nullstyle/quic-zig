@@ -424,10 +424,11 @@ pub const Outbox = struct {
 /// On teardown the contract stays airtight: `willCloseHook` fires
 /// `onStreamEnd` (`.reaped`) for every stream the table still tracks
 /// before `onDisconnect` — so per-stream state freed in `onStreamEnd`
-/// is freed on abrupt disconnects too, with no app-side sweep. The
-/// hook only runs from `Server.reap`, though: drain connections
-/// (close → tick → reap) before `Server.deinit`, or sessions leak —
-/// see `willCloseHook`'s doc.
+/// is freed on abrupt disconnects too, with no app-side sweep. This
+/// holds on both paths: the normal close → tick → reap cycle, and
+/// `Server.deinit` with connections still live (it fires the same
+/// hook per slot). No pre-`deinit` drain loop is needed to avoid
+/// leaking sessions — see `willCloseHook`'s doc.
 pub fn Driver(comptime App: type) type {
     // State types are REQUIRED decls (no @hasDecl probing — see the
     // hook-table note for why probes are banned in this module): an
@@ -617,12 +618,14 @@ pub fn Driver(comptime App: type) type {
         /// here — the connection is tearing down regardless and this
         /// hook cannot propagate them.
         ///
-        /// Reap is the trigger: `Server.deinit` alone never runs this
-        /// hook. An embedder that destroys the server with connections
-        /// still live must drain first (close, `tick` past the
-        /// close/draining period, `reap`) — the examples' loops and
-        /// `quic.testing.Loopback` teardowns show the shape — or the
-        /// sessions (and their app state) are leaked.
+        /// Both teardown paths run this hook: the normal reap cycle
+        /// (close → `tick` past draining → `reap`) AND `Server.deinit`
+        /// called with connections still live (it fires the hook per
+        /// slot before destroying it). So sessions and their app state
+        /// free on either path — no pre-`deinit` drain loop is required
+        /// just to avoid leaking them. (Draining still matters for
+        /// graceful close on the wire; it is no longer a leak-safety
+        /// obligation.)
         pub fn willCloseHook(ctx: ?*anyopaque, slot: *quic.Server.Slot) void {
             const self: *Self = @ptrCast(@alignCast(ctx.?));
             const session = sessionOf(slot) orelse return;
