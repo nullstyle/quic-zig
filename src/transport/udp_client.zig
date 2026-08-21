@@ -225,11 +225,6 @@ pub const RunError = error{
 /// as `runUdpServer`. Embedders that want application logic interleaved
 /// on one thread should use the raw `Connection` cycle in EMBEDDING.md.
 pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void {
-    // Fail up front on Windows instead of deep inside the first timed
-    // receive (see RunError.WindowsBundledLoopUnsupported).
-    if (comptime builtin.os.tag == .windows) {
-        return error.WindowsBundledLoopUnsupported;
-    }
     if (options.rx_buffer_bytes == 0 or options.tx_buffer_bytes == 0) {
         return error.InvalidBufferSize;
     }
@@ -247,6 +242,15 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
         .ip4 => .{ .ip4 = Net.Ip4Address.unspecified(0) },
         .ip6 => .{ .ip6 = Net.Ip6Address.unspecified(0) },
     };
+
+    // Argument validation above is platform-independent — the tests
+    // pin that a typo'd address or zero buffer reports as such
+    // everywhere. Past it, fail up front on Windows — before any
+    // socket is bound — instead of deep inside the first timed
+    // receive (see RunError.WindowsBundledLoopUnsupported).
+    if (comptime builtin.os.tag == .windows) {
+        return error.WindowsBundledLoopUnsupported;
+    }
 
     const sock = try Net.IpAddress.bind(&bind_addr, options.io, .{
         .mode = .dgram,

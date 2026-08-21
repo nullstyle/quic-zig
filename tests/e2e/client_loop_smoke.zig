@@ -187,13 +187,14 @@ test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
         // way.
         error.HandshakeFailed,
         => return error.SkipZigTest,
-        error.ConcurrencyUnavailable => {
-            // Native Windows cannot run this loop at all: std has no
-            // overlapped-I/O `net_receive`, so the timed receive that
-            // drives `tick` is refused outright. Pinned as a platform
-            // contract rather than skipped — if std ever gains the
-            // capability, this assertion fails and tells us to
-            // re-enable the loop there. See the note on
+        error.WindowsBundledLoopUnsupported => {
+            // Native Windows cannot run this loop at all (std has no
+            // overlapped-I/O `net_receive`), and the loop refuses up
+            // front — after argument validation, before any socket is
+            // bound — with its own documented error. Pinned as a
+            // platform contract rather than skipped — if the gate is
+            // ever lifted, this assertion fails and tells us to
+            // re-check the loop there. See the note on
             // `transport.RunError`.
             try std.testing.expect(builtin.os.tag == .windows);
             return;

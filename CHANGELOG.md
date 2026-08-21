@@ -110,6 +110,14 @@ throughout.
 
 #### Fixed
 
+- **The Windows fail-fast gate jumped ahead of argument validation.**
+  The series' `WindowsBundledLoopUnsupported` up-front gate in
+  `runUdpServer` / `runUdpClient` fired before buffer/address
+  validation, so on native Windows a typo'd address reported as a
+  platform limit — and it broke the Windows CI leg's validation and
+  early-return pins (red since 2026-08-16). Validation now runs
+  first on every platform; the gate fires after it, before any
+  socket is bound, and the smoke tests pin the gate's own error.
 - **Per-source rate limiting reset unrelated budgets.** On Initial
   window rollover, `acceptSourceRate` assigned a whole fresh
   `SourceRateEntry` instead of just its own (count, window_start) pair,

@@ -316,11 +316,6 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     if (options.rx_buffer_bytes == 0 or options.tx_buffer_bytes == 0) {
         return error.InvalidBufferSize;
     }
-    // Fail up front on Windows instead of deep inside the first timed
-    // receive (see RunError.WindowsBundledLoopUnsupported).
-    if (comptime builtin.os.tag == .windows) {
-        return error.WindowsBundledLoopUnsupported;
-    }
 
     var listeners_storage: [max_listeners]Listener = undefined;
     var listeners_len: usize = 0;
@@ -329,6 +324,14 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     const primary_addr = Net.IpAddress.parseLiteral(options.listen) catch {
         return error.InvalidListenAddress;
     };
+    // Argument validation above is platform-independent — the tests
+    // pin that a typo'd listen literal or zero buffer reports as such
+    // everywhere. Past it, fail up front on Windows — before any
+    // socket is bound — instead of deep inside the first timed
+    // receive (see RunError.WindowsBundledLoopUnsupported).
+    if (comptime builtin.os.tag == .windows) {
+        return error.WindowsBundledLoopUnsupported;
+    }
     const primary_sock = try Net.IpAddress.bind(&primary_addr, options.io, .{
         .mode = .dgram,
         .protocol = .udp,
