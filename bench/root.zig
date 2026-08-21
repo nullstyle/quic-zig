@@ -6,6 +6,7 @@
 test {
     _ = @import("connection_datagram.zig");
     _ = @import("e2e/counting_allocator.zig");
+    _ = @import("e2e/fairness.zig");
     _ = @import("e2e/harness.zig");
     _ = @import("e2e/sim_net.zig");
     _ = @import("loss_ack.zig");

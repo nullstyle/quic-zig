@@ -41,6 +41,10 @@ pub const PairOptions = struct {
     /// Congestion controller for both endpoints — the A/B lever the
     /// CUBIC-default flip gate drives. Follows the library default.
     congestion_control: quic.CongestionAlgorithm = .cubic,
+    /// Server-side override; null = same as `congestion_control`.
+    /// A diagnosis lever (e.g. isolating which endpoint's controller
+    /// causes an interaction), not a benchmark posture.
+    server_congestion_control: ?quic.CongestionAlgorithm = null,
     /// RFC 9406 HyStart++ on both endpoints (A/B lever).
     hystart: bool = true,
 };
@@ -109,7 +113,7 @@ pub const Pair = struct {
         try pair.server.setLocalScid(&server_cid);
 
         pair.client.setCongestionAlgorithm(opts.congestion_control);
-        pair.server.setCongestionAlgorithm(opts.congestion_control);
+        pair.server.setCongestionAlgorithm(opts.server_congestion_control orelse opts.congestion_control);
         pair.client.setHyStartEnabled(opts.hystart);
         pair.server.setHyStartEnabled(opts.hystart);
 

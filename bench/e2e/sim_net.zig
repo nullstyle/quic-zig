@@ -7,6 +7,15 @@
 //! tests/e2e/mock_transport_stream_exchange.zig, with probabilistic
 //! (rather than scripted) loss and delivery in release-time order so
 //! reordering actually reorders.
+//!
+//! Multi-flow: packets carry a flow index (`enqueueFor` /
+//! `deliverDueMulti`), and every flow's data direction contends for
+//! the SAME bottleneck link — that shared serialization is what makes
+//! the fairness cells a real shared-bottleneck experiment rather than
+//! N parallel links. The single-flow API (`enqueue` / `deliverDue`)
+//! delegates with flow 0 and draws from the PRNG in the exact same
+//! order as before, so the existing impairment cells stay
+//! byte-identical.
 
 const std = @import("std");
 const quic = @import("quic");
@@ -41,6 +50,15 @@ const Packet = struct {
     from_client: bool,
     release_us: u64,
     seq: u64,
+    /// Index into the endpoint slice handed to `deliverDueMulti`;
+    /// always 0 through the single-flow API.
+    flow: u32,
+};
+
+/// One flow's two ends, for `deliverDueMulti` routing.
+pub const Endpoints = struct {
+    client: *quic.Connection,
+    server: *quic.Connection,
 };
 
 pub const SimNet = struct {
@@ -76,6 +94,10 @@ pub const SimNet = struct {
     }
 
     pub fn enqueue(self: *SimNet, from_client: bool, bytes: []const u8, now_us: u64) !void {
+        return self.enqueueFor(0, from_client, bytes, now_us);
+    }
+
+    pub fn enqueueFor(self: *SimNet, flow: u32, from_client: bool, bytes: []const u8, now_us: u64) !void {
         self.enqueued += 1;
         const random = self.prng.random();
         const loss_roll = random.uintLessThan(u16, 1000);
@@ -117,6 +139,7 @@ pub const SimNet = struct {
             .from_client = from_client,
             .release_us = now_us + delay,
             .seq = self.next_seq,
+            .flow = flow,
         });
         self.next_seq += 1;
     }
@@ -127,6 +150,15 @@ pub const SimNet = struct {
         self: *SimNet,
         client: *quic.Connection,
         server: *quic.Connection,
+        now_us: u64,
+    ) !void {
+        return self.deliverDueMulti(&.{.{ .client = client, .server = server }}, now_us);
+    }
+
+    /// Multi-flow `deliverDue`: `pkt.flow` indexes `endpoints`.
+    pub fn deliverDueMulti(
+        self: *SimNet,
+        endpoints: []const Endpoints,
         now_us: u64,
     ) !void {
         while (true) {
@@ -149,10 +181,11 @@ pub const SimNet = struct {
             defer self.allocator.free(pkt.bytes);
             self.delivered += 1;
             self.delivered_bytes_hash = std.hash.Wyhash.hash(self.delivered_bytes_hash, pkt.bytes);
+            const ep = endpoints[pkt.flow];
             if (pkt.from_client) {
-                try server.handle(pkt.bytes, null, now_us);
+                try ep.server.handle(pkt.bytes, null, now_us);
             } else {
-                try client.handle(pkt.bytes, null, now_us);
+                try ep.client.handle(pkt.bytes, null, now_us);
             }
         }
     }

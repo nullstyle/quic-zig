@@ -11,8 +11,14 @@
 //!                in VIRTUAL time — deterministic for a given seed, so
 //!                congestion-control changes show up as exact deltas.
 //!
+//!  - fairness:   N flows sharing ONE bottleneck link — per-flow
+//!                goodput, shares, and the Jain index. The
+//!                DEFAULT-FLIP GATE instrument (see
+//!                src/conn/congestion/Bbr.zig).
+//!
 //! Run with `zig build bench-e2e` (`-- --scenario goodput|handshakes|
-//! impairment|all`, `--samples N`, `--json path` / `--json-dir dir`).
+//! impairment|fairness|all`, `--samples N`, `--json path` /
+//! `--json-dir dir`).
 //! Same ReleaseSafe default and `-Dbench-unsafe-release-fast` escape
 //! hatch as `zig build bench`; reports share the schema-v3 envelope
 //! (report.zig) so `zig build bench-compare` reads them.
@@ -22,6 +28,7 @@ const builtin = @import("builtin");
 const quic = @import("quic");
 const report_mod = @import("report.zig");
 const harness = @import("e2e/harness.zig");
+const fairness = @import("e2e/fairness.zig");
 
 const default_samples: usize = 5;
 const max_samples: usize = 32;
@@ -46,6 +53,7 @@ const Entries = struct {
     goodput: ?GoodputEntry = null,
     handshakes: ?HandshakesEntry = null,
     impairment: std.ArrayList(harness.ImpairmentResult) = .empty,
+    fairness: std.ArrayList(fairness.FairnessResult) = .empty,
 };
 
 fn stats(samples: []const f64) struct { median: f64, mad: f64 } {
@@ -153,6 +161,69 @@ const impairment_cells = [_]harness.ImpairmentOptions{
     },
 };
 
+// The fairness matrix is fixed (specific matchups), NOT varied by
+// --cc: fairness_10mbit_2f_cubic is the harness's own reference for
+// what "fair" looks like here, the bbr cells + the mixed cells are
+// the DEFAULT-FLIP GATE instrument (src/conn/congestion/Bbr.zig).
+// Shared 10 Mbit link, 5 s warmup after the last joiner, 20 s
+// measured, deep 100 ms buffer unless the name says otherwise.
+const fairness_cells = [_]fairness.FairnessOptions{
+    .{
+        .name = "fairness_10mbit_2f_cubic",
+        .flows = &.{ .{ .congestion_control = .cubic }, .{ .congestion_control = .cubic } },
+    },
+    .{
+        .name = "fairness_10mbit_2f_bbr",
+        .flows = &.{ .{ .congestion_control = .bbr }, .{ .congestion_control = .bbr } },
+    },
+    .{
+        .name = "fairness_10mbit_4f_bbr",
+        .flows = &.{
+            .{ .congestion_control = .bbr }, .{ .congestion_control = .bbr },
+            .{ .congestion_control = .bbr }, .{ .congestion_control = .bbr },
+        },
+    },
+    // Late-joiner convergence: does an established BBR flow yield to
+    // a newcomer (§5.3.3.8 probe scheduling)?
+    .{
+        .name = "fairness_10mbit_2f_bbr_stagger5s",
+        .flows = &.{
+            .{ .congestion_control = .bbr },
+            .{ .congestion_control = .bbr, .start_us = 5 * std.time.us_per_s },
+        },
+    },
+    // Deep buffer: the regime where a loss-based sender historically
+    // bullies a model-based one (it fills the queue BBR tries to
+    // keep short).
+    .{
+        .name = "fairness_10mbit_2f_mixed",
+        .flows = &.{ .{ .congestion_control = .bbr }, .{ .congestion_control = .cubic } },
+    },
+    // Shallow buffer: the regime where BBRv1 historically bullied
+    // loss-based flows (its inflight bound ignored their loss signal).
+    .{
+        .name = "fairness_10mbit_2f_mixed_shallow25ms",
+        .flows = &.{ .{ .congestion_control = .bbr }, .{ .congestion_control = .cubic } },
+        .max_queue_delay_us = 25_000,
+    },
+};
+
+fn runFairness(allocator: std.mem.Allocator, out: *Entries) !void {
+    for (fairness_cells) |cell| {
+        const result = try fairness.runFairnessOnce(allocator, cell);
+        try out.fairness.append(allocator, result);
+        std.debug.print("{s}: jain {d:.4}, util {d:.3}, peakq {d} us, qdrop {d} —", .{
+            result.name, result.jain_index, result.utilization, result.peak_queue_delay_us, result.queue_dropped,
+        });
+        for (0..result.flow_count) |i| {
+            std.debug.print(" [{s} {d:.2} Mbps {d:.1}%]", .{
+                @tagName(result.cc[i]), result.goodput_mbps[i], result.share[i] * 100.0,
+            });
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
 fn runImpairment(
     allocator: std.mem.Allocator,
     out: *Entries,
@@ -244,9 +315,37 @@ fn writeE2eEntries(out: *std.ArrayList(u8), allocator: std.mem.Allocator, entrie
         try out.print(allocator, "      \"seed\": {d}\n", .{cell.seed});
         try out.appendSlice(allocator, "    }\n");
     }
+    for (entries.fairness.items) |cell| {
+        try writeEntrySeparator(out, allocator, &first);
+        try out.appendSlice(allocator, "    {\n      \"name\": ");
+        try report_mod.appendJsonString(out, allocator, cell.name);
+        try out.appendSlice(allocator, ",\n      \"kind\": \"fairness\",\n");
+        try out.print(allocator, "      \"flow_count\": {d},\n", .{cell.flow_count});
+        try out.appendSlice(allocator, "      \"flows\": [");
+        for (0..cell.flow_count) |i| {
+            if (i != 0) try out.appendSlice(allocator, ", ");
+            try out.print(
+                allocator,
+                "{{\"cc\": \"{s}\", \"start_us\": {d}, \"measured_bytes\": {d}, \"goodput_mbps\": {d:.4}, \"share\": {d:.4}}}",
+                .{ @tagName(cell.cc[i]), cell.start_us[i], cell.measured_bytes[i], cell.goodput_mbps[i], cell.share[i] },
+            );
+        }
+        try out.appendSlice(allocator, "],\n");
+        try out.print(allocator, "      \"jain_index\": {d:.4},\n", .{cell.jain_index});
+        try out.print(allocator, "      \"aggregate_mbps\": {d:.4},\n", .{cell.aggregate_mbps});
+        try out.print(allocator, "      \"utilization\": {d:.4},\n", .{cell.utilization});
+        try out.print(allocator, "      \"measure_window_us\": {d},\n", .{cell.measure_window_us});
+        try out.print(allocator, "      \"virtual_us\": {d},\n", .{cell.virtual_us});
+        try out.print(allocator, "      \"enqueued\": {d},\n", .{cell.enqueued});
+        try out.print(allocator, "      \"dropped\": {d},\n", .{cell.dropped});
+        try out.print(allocator, "      \"queue_dropped\": {d},\n", .{cell.queue_dropped});
+        try out.print(allocator, "      \"peak_queue_delay_us\": {d},\n", .{cell.peak_queue_delay_us});
+        try out.print(allocator, "      \"seed\": {d}\n", .{cell.seed});
+        try out.appendSlice(allocator, "    }\n");
+    }
 }
 
-const Scenario = enum { all, goodput, handshakes, impairment };
+const Scenario = enum { all, goodput, handshakes, impairment, fairness };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -308,6 +407,7 @@ pub fn main(init: std.process.Init) !void {
 
     var entries: Entries = .{};
     defer entries.impairment.deinit(allocator);
+    defer entries.fairness.deinit(allocator);
 
     if (scenario == .all or scenario == .goodput) {
         entries.goodput = try runGoodput(allocator, samples, cc);
@@ -317,6 +417,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (scenario == .all or scenario == .impairment) {
         try runImpairment(allocator, &entries, cc, hystart);
+    }
+    if (scenario == .all or scenario == .fairness) {
+        try runFairness(allocator, &entries);
     }
 
     std.debug.print("---------------------------------------------------------------\n", .{});
