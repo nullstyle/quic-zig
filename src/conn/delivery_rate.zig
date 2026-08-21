@@ -290,8 +290,15 @@ pub const Estimator = struct {
         // (RttEstimator primes it lazily), which would admit every
         // burst-ACK interval on loopback as reliable and feed a
         // spuriously high early rate into BBR Startup. Floor the
-        // gate at kGranularity (1 ms) until the estimator primes.
-        const reliability_floor_us = @max(min_rtt_us, 1_000);
+        // gate at kGranularity (1 ms) until the estimator primes —
+        // and ONLY until then. A permanent 1 ms floor (the old
+        // @max(min_rtt, 1ms)) rejected every per-round sample on a
+        // sub-millisecond path: with a 40 us loopback min_rtt only
+        // >= 1 ms aggregates qualified, averaging across idle and
+        // aggregation gaps into a systematic underestimate — BBR
+        // Startup latched full_bw at ~2x below the path and short
+        // transfers ran 3-6x slower than CUBIC (goodput smoke).
+        const reliability_floor_us = if (min_rtt_us == 0) 1_000 else min_rtt_us;
         const has_rate = self.rs_prior_time_us != 0 and
             interval > 0 and interval >= reliability_floor_us;
 
