@@ -12,6 +12,7 @@ test {
     _ = @import("e2e/zero_rtt_replay_smoke.zig");
     _ = @import("e2e/zero_rtt_wrapper.zig");
     _ = @import("e2e/zero_rtt_mtls_identity.zig");
+    _ = @import("e2e/rendezvous_frontend.zig");
     _ = @import("e2e/path_challenge_flood_smoke.zig");
     _ = @import("e2e/vn_spoofed_source_smoke.zig");
     _ = @import("e2e/new_token_smoke.zig");

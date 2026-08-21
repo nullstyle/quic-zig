@@ -3,7 +3,7 @@
 //!
 //! `Connection.createClient` is intentionally low-level: the embedder
 //! has to build a client-mode `boringssl.tls.Context` with the right
-//! SNI hostname, generate a random initial DCID and SCID, call
+//! SNI hostname, generate the initial DCID and SCID, call
 //! `bind` / `setLocalScid` / `setInitialDcid` / `setPeerDcid` /
 //! `setTransportParams` in the right order, and only then start the
 //! `tick`/`poll` loop. Like `Server`, `Client` owns that
@@ -68,8 +68,34 @@ pub const Config = struct {
 
     /// Length of the random DCID the client picks for its very first
     /// Initial. RFC 9000 §7.2 mandates >= 8 bytes. Default 8 matches
-    /// the QNS endpoint.
+    /// the QNS endpoint. Ignored when `initial_dcid` is set.
     initial_dcid_len: u8 = 8,
+
+    /// Optional dictated initial DCID. When set, these exact bytes go
+    /// on the very first Initial instead of a random mint
+    /// (`initial_dcid_len` is then ignored). Must be 8..20 bytes
+    /// (RFC 9000 §7.2 floor, §17.2 cap). The bytes are copied during
+    /// `connect` and need not outlive the call.
+    ///
+    /// Dictating the value is legal — the initial DCID is the
+    /// client's to pick — and it is the rendezvous mechanic for
+    /// pre-arranged dials: a server that handed these bytes out
+    /// out-of-band can recognize and route the handshake from the
+    /// first datagram, before any decryption (RFC 8999 §5.1 header
+    /// peek). Three caveats carry the security weight. First, the
+    /// bytes must still be UNPREDICTABLE (RFC 9000 §7.2): the
+    /// CSPRNG mint this replaces guaranteed that, and Initial
+    /// packet-protection keys derive from this value (RFC 9001
+    /// §5.2), so a guessable DCID lets an off-path attacker forge
+    /// Initial-protected packets into the handshake — mint dictated
+    /// DCIDs from a CSPRNG. Second, the value is NOT confidential
+    /// (Initial packet protection is not secrecy), so treat it as
+    /// routing, never authorization. Third, a server Retry replaces
+    /// it on the wire — the dictated value then survives only as
+    /// the ODCID inside the server's own Retry token, so a
+    /// provision-routing front end must either not Retry these
+    /// dials or recover the ODCID from its token.
+    initial_dcid: ?[]const u8 = null,
 
     /// Length of the SCID the client offers in its first Initial.
     /// Must be 1..20. Default 8 matches the QNS endpoint.
@@ -363,10 +389,11 @@ conn: *Connection,
 /// the callback is unset. Owned by the Client; freed in `deinit`.
 new_session_holder: ?*NewSessionHolder = null,
 
-/// Build the TLS context, mint the random DCID/SCID, and
-/// initialize the underlying `Connection`. See the type
-/// docstring for the post-condition shape. The returned `Client`
-/// owns its allocations until `deinit` is called.
+/// Build the TLS context, mint the DCID/SCID (random, or the
+/// dictated `Config.initial_dcid` for the DCID), and initialize
+/// the underlying `Connection`. See the type docstring for the
+/// post-condition shape. The returned `Client` owns its
+/// allocations until `deinit` is called.
 ///
 /// The returned `Client` does not retain a pointer to the
 /// supplied `config` — copy any fields you need into your own
@@ -374,7 +401,14 @@ new_session_holder: ?*NewSessionHolder = null,
 pub fn connect(config: Config) Error!Client {
     if (config.server_name.len == 0) return Error.InvalidConfig;
     if (config.alpn_protocols.len == 0) return Error.InvalidConfig;
-    if (config.initial_dcid_len < 8 or config.initial_dcid_len > 20) return Error.InvalidConfig;
+    // `initial_dcid_len` is documented as ignored when a dictated
+    // `initial_dcid` is supplied, so it is only validated on the
+    // random-mint path.
+    if (config.initial_dcid) |dictated| {
+        if (dictated.len < 8 or dictated.len > 20) return Error.InvalidConfig;
+    } else {
+        if (config.initial_dcid_len < 8 or config.initial_dcid_len > 20) return Error.InvalidConfig;
+    }
     if (config.local_cid_len == 0 or config.local_cid_len > 20) return Error.InvalidConfig;
     // TLS credential fields only apply to the auto-built context;
     // an override context owns its own trust anchors and identity.
@@ -554,12 +588,15 @@ pub fn connect(config: Config) Error!Client {
     // derive the Initial-keys salt. The client also picks its
     // own SCID — peer-side this becomes the DCID on every
     // server->client packet until NEW_CONNECTION_ID arrives.
-    // BoringSSL's CSPRNG is good enough for both.
+    // BoringSSL's CSPRNG is good enough for both. A dictated
+    // `initial_dcid` (rendezvous dial) replaces the random mint.
     var initial_dcid_buf: [20]u8 = undefined;
     var client_scid_buf: [20]u8 = undefined;
-    try boringssl.crypto.rand.fillBytes(initial_dcid_buf[0..config.initial_dcid_len]);
+    const initial_dcid = config.initial_dcid orelse blk: {
+        try boringssl.crypto.rand.fillBytes(initial_dcid_buf[0..config.initial_dcid_len]);
+        break :blk initial_dcid_buf[0..config.initial_dcid_len];
+    };
     try boringssl.crypto.rand.fillBytes(client_scid_buf[0..config.local_cid_len]);
-    const initial_dcid = initial_dcid_buf[0..config.initial_dcid_len];
     const client_scid = client_scid_buf[0..config.local_cid_len];
 
     try conn_ptr.setLocalScid(client_scid);
@@ -669,6 +706,30 @@ test "Client.connect rejects oversized initial DCID" {
         .alpn_protocols = &protos,
         .transport_params = .{},
         .initial_dcid_len = 21,
+    }));
+}
+
+test "Client.connect rejects dictated initial DCID shorter than 8 bytes" {
+    const protos = [_][]const u8{"hq-test"};
+    const short_dcid: [7]u8 = @splat(0xAB);
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .initial_dcid = &short_dcid,
+    }));
+}
+
+test "Client.connect rejects dictated initial DCID longer than 20 bytes" {
+    const protos = [_][]const u8{"hq-test"};
+    const long_dcid: [21]u8 = @splat(0xAB);
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .initial_dcid = &long_dcid,
     }));
 }
 

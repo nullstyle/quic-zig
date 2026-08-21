@@ -7,6 +7,22 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`Client.Config.initial_dcid` — dictated initial DCID (Stable
+  surface).** Optional 8..20-byte value used verbatim on the very
+  first Initial instead of the random mint; `initial_dcid_len` is
+  ignored (and not validated) when it is set. This is the
+  rendezvous mechanic for pre-arranged dials: a server that handed
+  the bytes out out-of-band can route the handshake from the first
+  datagram via the RFC 8999 §5.1 header peek, before any
+  decryption. The field's doc comment carries the security
+  contract (bytes must be CSPRNG-unpredictable; routing, never
+  authorization; Retry rewrites the wire DCID). Demonstrated
+  end-to-end — including single-use claim semantics,
+  nonce-confirmation, and the pinned Retry limitation — in
+  `tests/e2e/rendezvous_frontend.zig`.
+
 The deduplication series: a repo-wide audit found 50 verified
 copy-paste families (41 worth extracting), and this series collapses
 them onto shared implementations. Internal-only in behavior except for
