@@ -829,6 +829,10 @@ pub const Error = error{
     /// from "nothing readable right now"; they now fail fast, the
     /// receive-side mirror of `StreamNotWritable`.
     StreamNotReadable,
+    /// `streamConsume` asked for more bytes than the current
+    /// `streamPeek` window holds — a caller contract violation, not a
+    /// transport condition (the peek length is the consume ceiling).
+    ConsumeBeyondReadable,
     /// A local stream open was refused because the connection is in
     /// graceful shutdown (`beginGracefulShutdown`): no new streams are
     /// created while in-flight streams drain. RFC 9000 has no GOAWAY, so
@@ -1466,6 +1470,15 @@ pub const StreamRecvState = struct {
     /// RESET was received, so no further peer bytes will be delivered
     /// (RFC 9000 §3.2).
     terminal: bool,
+    /// Bytes the application has consumed (`streamRead` /
+    /// `streamConsume`) — the read cursor, which is also the
+    /// flow-control consumed count. With `final_size`, this answers
+    /// "is everything delivered AND read" without reaching into
+    /// internals.
+    read_offset: u64,
+    /// The stream's total length, known once FIN or RESET_STREAM
+    /// locks it (RFC 9000 §4.5); null while the peer may still send.
+    final_size: ?u64,
 };
 
 const PendingRecvDatagram = PendingFrameQueues.PendingRecvDatagram;
@@ -2593,6 +2606,27 @@ pub const streamRead = conn_streams.streamRead;
 /// GC reaps the moment the recv side goes terminal. Prefer this over
 /// `streamRead` when you need to detect clean stream completion.
 pub const streamReadFin = conn_streams.streamReadFin;
+
+/// Zero-copy read, half one: the contiguously readable prefix of
+/// stream `id`'s receive half, borrowed straight from the reassembly
+/// buffer (Evolving tier). An empty slice means "nothing readable
+/// right now" — including a reordering hole below the read offset —
+/// never end-of-stream (`streamRecvState` is that signal). The borrow
+/// is valid only until the receive half next mutates: `streamConsume`
+/// / `streamRead` on THIS stream, or any `handle`/`advance`/`tick`
+/// that may deliver more of it (buffer growth and compaction move the
+/// bytes). Peeking consumes nothing and frees no flow-control credit;
+/// pair with `streamConsume`.
+pub const streamPeek = conn_streams.streamPeek;
+
+/// Zero-copy read, half two: advance stream `id`'s read cursor past
+/// `n` bytes previously observed via `streamPeek` (Evolving tier).
+/// Runs the exact bookkeeping `streamRead` runs — resident-budget
+/// release and MAX_STREAM_DATA / MAX_DATA credit queueing — so a
+/// peek/consume loop and a read loop are indistinguishable to the
+/// peer. `n` beyond the current peek window returns
+/// `Error.ConsumeBeyondReadable`.
+pub const streamConsume = conn_streams.streamConsume;
 
 pub const streamArrivedInEarlyData = conn_streams.streamArrivedInEarlyData;
 

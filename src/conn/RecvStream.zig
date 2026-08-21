@@ -301,16 +301,43 @@ pub fn recv(
 /// charge — bounded by the half-buffer policy and correct in the
 /// budget's own terms (the memory is genuinely allocated).
 pub fn read(self: *RecvStream, dst: []u8) usize {
-    if (self.ranges.items.len == 0) {
+    const src = self.peek();
+    if (src.len == 0) {
         self.maybeAdvanceState();
         return 0;
     }
-    const r = self.ranges.items[0];
-    if (r.offset != self.read_offset) return 0;
+    const take: usize = @min(dst.len, src.len);
+    @memcpy(dst[0..take], src[0..take]);
+    self.consume(take);
+    return take;
+}
 
+/// The contiguously readable prefix — the bytes `read` would copy —
+/// borrowed straight from the reassembly buffer, no copy. Empty when
+/// nothing is readable right now (a reordering hole below the read
+/// offset, or nothing buffered). The slice is invalidated by ANY
+/// mutation of this stream's receive half: `consume`, `read`, or a
+/// `recv` of new data (buffer growth / compaction may move it).
+pub fn peek(self: *const RecvStream) []const u8 {
+    if (self.ranges.items.len == 0) return &.{};
+    const r = self.ranges.items[0];
+    if (r.offset != self.read_offset) return &.{};
     const avail: usize = @intCast(r.end - r.offset);
-    const take: usize = @min(dst.len, avail);
-    @memcpy(dst[0..take], self.bytes.items[self.buf_start..][0..take]);
+    return self.bytes.items[self.buf_start..][0..avail];
+}
+
+/// Advance the read cursor past `take` bytes previously observed via
+/// `peek` — `read`'s bookkeeping without the copy. `take` must be at
+/// most `peek().len`.
+pub fn consume(self: *RecvStream, take: usize) void {
+    if (take == 0) {
+        self.maybeAdvanceState();
+        return;
+    }
+    const r = self.ranges.items[0];
+    std.debug.assert(r.offset == self.read_offset);
+    const avail: usize = @intCast(r.end - r.offset);
+    std.debug.assert(take <= avail);
 
     // Sliding window: advance the consumed prefix without a memmove.
     // Compaction is amortized O(1): when the prefix hits half the
@@ -348,8 +375,6 @@ pub fn read(self: *RecvStream, dst: []u8) usize {
     if (self.state == .data_recvd and self.liveBytes() == 0) {
         self.compact();
     }
-
-    return take;
 }
 
 /// Process a RESET_STREAM frame from the peer. Subsequent data
@@ -452,6 +477,52 @@ test "in-order recv + read" {
     try testing.expectEqualStrings("hello", out[0..5]);
     try testing.expectEqual(@as(u64, 5), s.read_offset);
     try testing.expectEqual(@as(u64, 0), s.readableBytes());
+}
+
+test "peek borrows the readable prefix; consume advances like read without the copy" {
+    var s = RecvStream.init(test_alloc);
+    defer s.deinit();
+
+    try s.recv(0, "helloworld", false);
+    try testing.expectEqualStrings("helloworld", s.peek());
+    // Peek consumes nothing.
+    try testing.expectEqual(@as(u64, 0), s.read_offset);
+
+    // Partial consume advances the cursor and shrinks the window.
+    s.consume(5);
+    try testing.expectEqual(@as(u64, 5), s.read_offset);
+    try testing.expectEqualStrings("world", s.peek());
+
+    // Consuming the rest matches read()'s bookkeeping: cursor, ranges,
+    // full-drain buffer reset.
+    s.consume(5);
+    try testing.expectEqual(@as(u64, 10), s.read_offset);
+    try testing.expectEqualStrings("", s.peek());
+    try testing.expectEqual(@as(u64, 0), s.readableBytes());
+}
+
+test "peek is empty across a reordering hole, never a stale window" {
+    var s = RecvStream.init(test_alloc);
+    defer s.deinit();
+
+    try s.recv(5, "world", false);
+    try testing.expectEqualStrings("", s.peek()); // gap below the cursor
+    try s.recv(0, "hello", false);
+    try testing.expectEqualStrings("helloworld", s.peek());
+}
+
+test "consume reaches data_recvd after FIN drain exactly like read" {
+    var s = RecvStream.init(test_alloc);
+    defer s.deinit();
+    try s.recv(0, "hi", true);
+    s.consume(2);
+    // Post-drain with FIN seen: data_recvd, same as a read() drain
+    // (data_read needs the connection layer's markRead, both paths).
+    try testing.expectEqual(State.data_recvd, s.state);
+    // An empty consume mirrors read()'s empty-read state advance and
+    // stays idempotent.
+    s.consume(0);
+    try testing.expectEqual(State.data_recvd, s.state);
 }
 
 test "out-of-order recv buffers until gap closes" {

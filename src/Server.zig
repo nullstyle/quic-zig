@@ -974,6 +974,23 @@ pub const installLbConfig = server_routing.installLbConfig;
 /// without a config swap.
 pub const rotateLiveSlotCids = server_routing.rotateLiveSlotCids;
 
+/// Install (or clear, with null) the ordered-teardown hook after
+/// `init` — the post-init twin of `Config.on_connection_will_close`,
+/// for wrapper stacks where the layer that owns the hook (e.g. a
+/// `quic.app.Driver` created after the server) cannot thread it
+/// through every intermediate Config. Takes effect for every
+/// teardown that has not yet fired the hook; the contract is
+/// `ConnectionWillCloseCallback`'s. Driver users: `Driver.attach`
+/// wraps this call.
+pub fn setConnectionWillCloseHook(
+    self: *Server,
+    callback: ?ConnectionWillCloseCallback,
+    user_data: ?*anyopaque,
+) void {
+    self.on_connection_will_close = callback;
+    self.on_connection_will_close_user_data = user_data;
+}
+
 pub fn deinit(self: *Server) void {
     for (self.slots.items) |slot| {
         // Ordered-teardown hook, same as `reap`: the embedder

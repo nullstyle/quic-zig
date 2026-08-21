@@ -624,6 +624,8 @@ pub fn streamRecvState(conn: *const Connection, id: u64) ?StreamRecvState {
         .fin_seen = s.recv.fin_seen,
         .reset_seen = s.recv.reset != null,
         .terminal = s.recvFullyTerminated(),
+        .read_offset = s.recv.read_offset,
+        .final_size = s.recv.final_size,
     };
 }
 
@@ -662,16 +664,48 @@ pub fn streamRead(conn: *Connection, id: u64, dst: []u8) Error!usize {
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     const before = s.recv.bytes.items.len;
     const n = s.recv.read(dst);
+    try afterStreamConsume(conn, s, id, before, n);
+    return n;
+}
+
+// Doc comment lives on the `Connection.streamPeek` thunk in Connection.zig.
+pub fn streamPeek(conn: *Connection, id: u64) Error![]const u8 {
+    if (!peerMaySendOnStream(conn, id)) return Error.StreamNotReadable;
+    const s = conn.streams.get(id) orelse return Error.StreamNotFound;
+    return s.recv.peek();
+}
+
+// Doc comment lives on the `Connection.streamConsume` thunk in Connection.zig.
+pub fn streamConsume(conn: *Connection, id: u64, n: usize) Error!void {
+    if (!peerMaySendOnStream(conn, id)) return Error.StreamNotReadable;
+    const s = conn.streams.get(id) orelse return Error.StreamNotFound;
+    if (n > s.recv.peek().len) return Error.ConsumeBeyondReadable;
+    const before = s.recv.bytes.items.len;
+    s.recv.consume(n);
+    try afterStreamConsume(conn, s, id, before, n);
+}
+
+/// Shared post-consumption bookkeeping for `streamRead` and
+/// `streamConsume` — one body so the budget release and the
+/// flow-control credit queueing can never drift between the copying
+/// and zero-copy paths.
+fn afterStreamConsume(
+    conn: *Connection,
+    s: *Stream,
+    id: u64,
+    physical_before: usize,
+    n: usize,
+) Error!void {
     // Hardening guide §3.5 / §8: the budget keys on the PHYSICAL
-    // `bytes.items.len`. `RecvStream.read` advances the sliding
-    // window without shrinking most of the time (consumed bytes
-    // keep their budget charge until the half-buffer compaction or
-    // the full-drain reset), so this release fires only at those
-    // compaction points — the over-charge in between is bounded by
-    // the half-buffer policy and correct (the memory is genuinely
-    // allocated while the prefix sits in it).
-    if (s.recv.bytes.items.len < before) {
-        conn.releaseResidentBytes(before - s.recv.bytes.items.len);
+    // `bytes.items.len`. The sliding window advances without
+    // shrinking most of the time (consumed bytes keep their budget
+    // charge until the half-buffer compaction or the full-drain
+    // reset), so this release fires only at those compaction points —
+    // the over-charge in between is bounded by the half-buffer policy
+    // and correct (the memory is genuinely allocated while the prefix
+    // sits in it).
+    if (s.recv.bytes.items.len < physical_before) {
+        conn.releaseResidentBytes(physical_before - s.recv.bytes.items.len);
     }
     if (n > 0) {
         conn.recv_stream_bytes_read += n;
@@ -691,7 +725,6 @@ pub fn streamRead(conn: *Connection, id: u64, dst: []u8) Error!usize {
         }
     }
     conn_flow.maybeReturnPeerStreamCredit(conn, s);
-    return n;
 }
 
 // Doc comment lives on the `Connection.streamReadFin` thunk in Connection.zig.

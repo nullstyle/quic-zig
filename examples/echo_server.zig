@@ -33,8 +33,10 @@ const builtin = @import("builtin");
 const quic = @import("quic");
 const common = @import("echo_common.zig");
 
-/// Per-stream read chunk the Driver reads into. The smoke test sizes
-/// its large payload from this so the multi-chunk path always runs.
+/// Sizing anchor for the smoke test's large payload (it sends this
+/// + 76 so the transfer always spans multiple packets/passes). The
+/// Driver itself now pumps zero-copy whole runs — there is no fixed
+/// read-chunk size anymore.
 pub const stream_chunk_bytes: usize = 4096;
 
 const D = quic.app.Driver(EchoApp);
@@ -76,7 +78,8 @@ const EchoApp = struct {
         }
     }
 
-    fn onDatagram(_: *EchoApp, s: *D.Session, data: []const u8) anyerror!void {
+    fn onDatagram(_: *EchoApp, s: *D.Session, dg: D.Datagram) anyerror!void {
+        const data = dg.bytes;
         s.conn.sendDatagram(data) catch |err| switch (err) {
             // Peer didn't advertise datagram support, or shrank the
             // limit below what it just sent us — drop, don't kill the
@@ -121,7 +124,6 @@ pub fn serve(
             const tp = common.transportParams();
             break :blk tp.initial_max_streams_bidi + tp.initial_max_streams_uni;
         },
-        .read_chunk_bytes = stream_chunk_bytes,
         .datagram_buf_bytes = common.transportParams().max_datagram_frame_size,
     });
     defer driver.deinit();

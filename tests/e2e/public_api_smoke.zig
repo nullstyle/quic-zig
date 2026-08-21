@@ -93,6 +93,11 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
     const stream_recv_state: *const fn (*const Conn, u64) ?quic.StreamRecvState = Conn.streamRecvState;
     const stream_priority: *const fn (*const Conn, u64) ?quic.StreamPriority = Conn.streamPriority;
     const stream_set_priority: *const fn (*Conn, u64, quic.StreamPriority) anyerror!void = Conn.streamSetPriority;
+    // Zero-copy read pair (Evolving as of 0.16.0): borrow the
+    // readable prefix, then advance the cursor with the same
+    // flow-control bookkeeping streamRead runs.
+    const stream_peek: *const fn (*Conn, u64) anyerror![]const u8 = Conn.streamPeek;
+    const stream_consume: *const fn (*Conn, u64, usize) anyerror!void = Conn.streamConsume;
     // Send-side flow-control snapshots, Stable as of 0.15.0.
     const send_window: *const fn (*const Conn) u64 = Conn.sendWindow;
     const stream_send_window: *const fn (*const Conn, u64) ?quic.SendWindow = Conn.streamSendWindow;
@@ -129,6 +134,8 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
         local_stream_type,
         stream_read,
         stream_read_fin,
+        stream_peek,
+        stream_consume,
         stream_write,
         stream_finish,
         stream_stop_sending,
@@ -201,6 +208,14 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         requireDecl(Conn, "earlyDataSendWindow");
         requireDecl(quic.Client, "earlyDataSendWindow");
         _ = quic.EarlyDataSendWindow;
+        // StreamRecvState carries the read cursor + final size as of
+        // 0.16.0 (qmsg friction #4: completion tests without
+        // reaching into internals).
+        _ = std.meta.fieldInfo(quic.StreamRecvState, .read_offset);
+        _ = std.meta.fieldInfo(quic.StreamRecvState, .final_size);
+        // Post-init teardown-hook wiring for wrapper stacks
+        // (friction #6) and the Driver convenience over it.
+        requireDecl(quic.Server, "setConnectionWillCloseHook");
         // The status enum is part of the Stable surface: embedders
         // switch on it (HTTP/3 remembered-settings replay).
         _ = quic.EarlyDataStatus;

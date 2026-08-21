@@ -35,6 +35,14 @@ const CloseEvent = quic.CloseEvent;
 
 /// Why a tracked stream's service loop ended — payload of
 /// `Driver`'s `onStreamEnd` callback.
+///
+/// LIFETIME: the table entry (and with it `entry.state`) is released
+/// the moment `on_stream_end` returns, on every variant. Anything the
+/// app still needs from the entry — accumulated per-stream state, the
+/// final buffered bytes — must be consumed or moved INSIDE the hook;
+/// a pointer kept past it dangles into a recycled slot. (The send
+/// side is independent: a staged Outbox tail for the same stream id
+/// keeps draining after release.)
 pub const StreamEnd = union(enum) {
     /// Clean EOF: the peer FINed, every byte was delivered through
     /// `onStreamData`, and the recv half is terminal.
@@ -442,18 +450,31 @@ pub fn Driver(comptime App: type) type {
         const Self = @This();
         const Table = StreamTable(AppStreamState);
 
-        /// Zero value for the app's per-connection state. `void` needs
-        /// the void literal; every other `ConnState` must be
-        /// default-constructible (`.{}` — all fields defaulted).
-        const default_app_state: AppConnState = if (AppConnState == void) {} else .{};
+        /// Zero value for an app state type: `void` gets the void
+        /// literal, optionals (incl. `?*T` session pointers) default
+        /// to null, structs must be default-constructible (`.{}` —
+        /// all fields defaulted). Anything else is a loud compile
+        /// error naming the offending type.
+        fn zeroState(comptime T: type) T {
+            return switch (@typeInfo(T)) {
+                .void => {},
+                .optional => null,
+                .@"struct" => .{},
+                else => @compileError("App ConnState/StreamState must be void, an optional " ++
+                    "(defaults to null), or a struct with every field defaulted; got " ++
+                    @typeName(T)),
+            };
+        }
+
+        /// Zero value for the app's per-connection state.
+        const default_app_state: AppConnState = zeroState(AppConnState);
 
         /// Zero value for the app's per-stream state, written into the
-        /// table entry when a stream is first tracked. Same rule as
-        /// `ConnState`: `void` or default-constructible. Without this
+        /// table entry when a stream is first tracked. Without this
         /// write the entry would hold whatever the slot held before —
         /// including the deinit-poisoned state of a previous stream
         /// that released the slot.
-        const default_stream_state: AppStreamState = if (AppStreamState == void) {} else .{};
+        const default_stream_state: AppStreamState = zeroState(AppStreamState);
 
         /// One accepted connection's driver state — allocated on first
         /// sight of the slot, freed in the will-close hook. Callbacks
@@ -487,9 +508,6 @@ pub fn Driver(comptime App: type) type {
             /// stream limits the server advertises; overflow is
             /// answered with STOP_SENDING, never a silent hang.
             max_tracked_streams: usize = 128,
-            /// Read-chunk scratch, shared across streams. 4 KiB
-            /// mirrors the canonical examples.
-            read_chunk_bytes: usize = 4096,
             /// DATAGRAM delivery buffer. Must be at least the
             /// `max_datagram_frame_size` the server advertises; a
             /// larger inbound datagram then surfaces
@@ -511,7 +529,6 @@ pub fn Driver(comptime App: type) type {
         stream_refusal_code: u64,
         /// Per-connection stream-table capacity, from `Options`.
         tracked_streams: usize,
-        read_chunk: []u8,
         datagram_buf: []u8,
         /// Callbacks registered at `init` (see the module docs'
         /// "Hook registration" section).
@@ -535,10 +552,22 @@ pub fn Driver(comptime App: type) type {
         pub const StreamOpenFn = *const fn (*App, *Session, *StreamEntry, bool) anyerror!void;
         pub const StreamDataFn = *const fn (*App, *Session, *StreamEntry, []const u8) anyerror!void;
         pub const StreamEndFn = *const fn (*App, *Session, *StreamEntry, StreamEnd) anyerror!void;
-        pub const DatagramFn = *const fn (*App, *Session, []const u8) anyerror!void;
+        pub const DatagramFn = *const fn (*App, *Session, Datagram) anyerror!void;
         pub const CloseFn = *const fn (*App, *Session, CloseEvent) anyerror!void;
         pub const EventFn = *const fn (*App, *Session, ConnectionEvent) anyerror!void;
         pub const DisconnectFn = *const fn (*App, *Session) void;
+
+        /// One delivered DATAGRAM (RFC 9221) — `on_datagram`'s
+        /// payload. Carrying the metadata alongside the bytes keeps
+        /// 0-RTT-aware apps (idempotency gates keyed on
+        /// `arrived_in_early_data`) from reaching into the transport
+        /// mid-hook.
+        pub const Datagram = struct {
+            bytes: []const u8,
+            /// The DATAGRAM arrived in 0-RTT (before the handshake
+            /// completed) — replayable; gate side effects accordingly.
+            arrived_in_early_data: bool,
+        };
 
         /// The callback set the driver dispatches on. Construct
         /// explicitly (`.{ .on_stream_data = MyApp.onStreamData, ... }`).
@@ -557,8 +586,6 @@ pub fn Driver(comptime App: type) type {
         };
 
         pub fn init(options: Options) !Self {
-            const read_chunk = try options.allocator.alloc(u8, @max(options.read_chunk_bytes, 1));
-            errdefer options.allocator.free(read_chunk);
             const datagram_buf = try options.allocator.alloc(u8, @max(options.datagram_buf_bytes, 1));
 
             return .{
@@ -566,16 +593,24 @@ pub fn Driver(comptime App: type) type {
                 .app = options.app,
                 .stream_refusal_code = options.stream_refusal_code,
                 .tracked_streams = @max(options.max_tracked_streams, 1),
-                .read_chunk = read_chunk,
                 .datagram_buf = datagram_buf,
                 .hooks = options.hooks,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.read_chunk);
             self.allocator.free(self.datagram_buf);
             self.* = undefined;
+        }
+
+        /// Wire this driver's teardown hook into `server` after both
+        /// exist — for wrapper stacks (embedder → transport wrapper →
+        /// Server) that cannot thread `Config.on_connection_will_close`
+        /// through every intermediate layer. Equivalent to setting the
+        /// Config field to `willCloseHook` + this driver; without ONE
+        /// of the two, sessions leak on teardown (see `willCloseHook`).
+        pub fn attach(self: *Self, server: *quic.Server) void {
+            server.setConnectionWillCloseHook(willCloseHook, self);
         }
 
         /// Whether an `on_stream_data` hook was registered at `init`
@@ -759,7 +794,14 @@ pub fn Driver(comptime App: type) type {
             var ended: ?StreamEnd = null;
 
             read_loop: while (true) {
-                const res = session.conn.streamReadFin(entry.id, self.read_chunk) catch |err| switch (err) {
+                // Zero-copy pump: the hook borrows the connection's
+                // own reassembly buffer (`streamPeek`), and the bytes
+                // are consumed only AFTER the hook returns — so a
+                // failing hook redelivers the same chunk on the next
+                // pass instead of losing it. The borrow is valid for
+                // the duration of the hook call; an app that keeps
+                // bytes past the hook copies what it keeps.
+                const chunk = session.conn.streamPeek(entry.id) catch |err| switch (err) {
                     // The stream already left the live table (reaped
                     // after both halves went terminal). Done.
                     error.StreamNotFound => {
@@ -768,13 +810,12 @@ pub fn Driver(comptime App: type) type {
                     },
                     else => return err,
                 };
-                if (res.n > 0) {
-                    try self.hooks.on_stream_data.?(self.app, session, entry, self.read_chunk[0..res.n]);
-                }
-                // An empty read means "nothing readable right now" —
+                // An empty peek means "nothing readable right now" —
                 // including a reordering hole below the read offset.
                 // Never an EOF signal; the terminal test below is.
-                if (res.n == 0) break :read_loop;
+                if (chunk.len == 0) break :read_loop;
+                try self.hooks.on_stream_data.?(self.app, session, entry, chunk);
+                try session.conn.streamConsume(entry.id, chunk.len);
             }
 
             if (ended == null) {
@@ -807,7 +848,10 @@ pub fn Driver(comptime App: type) type {
                     // unreachable; anything less fails loudly instead
                     // of silently dropping the tail.
                     if (info.payload_len > info.len) return error.DatagramBufferTooSmall;
-                    try f(self.app, session, self.datagram_buf[0..info.len]);
+                    try f(self.app, session, .{
+                        .bytes = self.datagram_buf[0..info.len],
+                        .arrived_in_early_data = info.arrived_in_early_data,
+                    });
                 }
                 // Without an `onDatagram` callback the payload is
                 // dropped by design — but it is still popped: a full
@@ -861,12 +905,27 @@ test "StreamTable: void state type works" {
     table.release(2);
 }
 
+test "Driver: optional state types (incl. ?*T session pointers) default to null" {
+    // The qmsg port's friction #1: `?*T` per-connection state needed a
+    // wrapper struct because the zero value only handled void/struct.
+    const OptApp = struct {
+        pub const StreamState = ?*u32;
+        pub const ConnState = ?*u64;
+    };
+    const OD = Driver(OptApp);
+    var app: OptApp = .{};
+    var driver = try OD.init(.{ .allocator = std.testing.allocator, .app = &app });
+    defer driver.deinit();
+    try std.testing.expectEqual(@as(?*u64, null), OD.default_app_state);
+    try std.testing.expectEqual(@as(?*u32, null), OD.default_stream_state);
+}
+
 const HookedApp = struct {
     pub const StreamState = struct { received: usize = 0 };
     pub const ConnState = struct { opens: u32 = 0 };
 
     fn onStreamData(_: *HookedApp, _: *HookedDriver.Session, _: *HookedDriver.StreamEntry, _: []const u8) anyerror!void {}
-    fn onDatagram(_: *HookedApp, _: *HookedDriver.Session, _: []const u8) anyerror!void {}
+    fn onDatagram(_: *HookedApp, _: *HookedDriver.Session, _: HookedDriver.Datagram) anyerror!void {}
 };
 
 const HookedDriver = Driver(HookedApp);

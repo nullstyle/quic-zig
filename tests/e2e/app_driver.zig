@@ -31,6 +31,9 @@ const EchoApp = struct {
     stream_ends: u32 = 0,
     last_end: ?quic.app.StreamEnd = null,
     last_received: usize = 0,
+    /// Largest single onStreamData chunk — pins the zero-copy pump
+    /// (whole contiguous runs, not fixed 4 KiB scratch slices).
+    max_chunk: usize = 0,
     closes: u32 = 0,
     /// Events landing in the dispatch's `else` arm (`on_event`) — the
     /// tracked-datagram ACK below guarantees at least one.
@@ -54,6 +57,7 @@ const EchoApp = struct {
     fn onStreamData(app: *EchoApp, session: *D.Session, entry: *D.StreamEntry, chunk: []const u8) anyerror!void {
         entry.state.received += chunk.len;
         app.total_received += chunk.len;
+        if (chunk.len > app.max_chunk) app.max_chunk = chunk.len;
         try session.outbox.push(session.conn, entry.id, chunk);
     }
 
@@ -64,7 +68,11 @@ const EchoApp = struct {
         if (end == .fin) try session.outbox.finish(session.conn, entry.id);
     }
 
-    fn onDatagram(app: *EchoApp, session: *D.Session, data: []const u8) anyerror!void {
+    fn onDatagram(app: *EchoApp, session: *D.Session, dg: D.Datagram) anyerror!void {
+        const data = dg.bytes;
+        // 1-RTT delivery in this fixture; the flag rides along so
+        // 0-RTT-aware apps can gate replayable side effects.
+        try std.testing.expect(!dg.arrived_in_early_data);
         session.app.datagrams += 1;
         const copy = try app.allocator.dupe(u8, data);
         try app.datagram_payloads.append(app.allocator, copy);
@@ -249,10 +257,13 @@ test "Driver: echo application over the Server/Client wrappers, with lifecycle h
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = params,
-        .on_connection_will_close = D.willCloseHook,
-        .on_connection_will_close_user_data = &driver,
     });
     defer srv.deinit();
+    // Post-init wiring (the wrapper-stack path): equivalent to the
+    // Config.on_connection_will_close pair the other tests set — this
+    // test pins `attach` through the full lifecycle instead,
+    // including the teardown leak accounting.
+    driver.attach(&srv);
 
     var cli = try quic.Client.connect(.{
         .insecure_skip_verify = true,
@@ -328,6 +339,11 @@ test "Driver: echo application over the Server/Client wrappers, with lifecycle h
     try std.testing.expectEqual(@as(u32, 1), app.stream_ends);
     try std.testing.expect(app.last_end != null and app.last_end.? == .fin);
     try std.testing.expectEqual(total, app.last_received);
+    // Zero-copy pump: a service pass hands the whole contiguous run
+    // to the hook. The first pass alone sees an initial-cwnd flight
+    // (~12 KB), so any fixed-scratch regression (the old 4 KiB
+    // read_chunk) fails this loudly.
+    try std.testing.expect(app.max_chunk > 4096);
     try std.testing.expectEqual(@as(u32, 1), app.datagram_payloads.items.len);
     try std.testing.expectEqualStrings("driver-ping", app.datagram_payloads.items[0]);
 
@@ -1054,7 +1070,7 @@ test "Driver: with no stream hooks, peer streams are refused loudly, not black-h
 const DgApp = struct {
     pub const StreamState = void;
     pub const ConnState = void;
-    fn onDatagram(_: *DgApp, _: *GD.Session, _: []const u8) anyerror!void {}
+    fn onDatagram(_: *DgApp, _: *GD.Session, _: GD.Datagram) anyerror!void {}
 };
 
 const GD = quic.app.Driver(DgApp);
