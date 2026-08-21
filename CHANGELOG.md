@@ -5,6 +5,102 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.16.0] - 2026-08-21
+
+The "fairness and the flip" release. BBRv3 is now the DEFAULT
+congestion controller, gated on a new multi-flow fairness battery
+that promptly caught (and this release fixes) a three-defect
+transport deadlock plus a sub-millisecond bandwidth-measurement bug.
+Also: a zero-copy stream read path, the qmsg-derived `quic.app`
+refinement, and the last two silent-failure traps closed.
+
+**Default behavior changes.** BBRv3 replaces CUBIC as the default;
+`congestion_control = .cubic` is the one-line rollback at any layer.
+NOTE for wrappers: if your transport snapshot-copied `.cubic` as its
+own config-field default (rather than deferring to quic-zig's), the
+flip does NOT reach your consumers until you update that default.
+
+### Changed
+
+- **BBRv3 (draft-ietf-ccwg-bbr-06) is the default congestion
+  controller.** The flip gate recorded in `congestion/Bbr.zig` was
+  built and passed on pre-registered criteria: 2-flow BBR Jain
+  1.0000 at 97.1% link utilization (CUBIC reference 0.9996), 4-flow
+  0.9970, a 5 s late joiner converging to 1.0000, no starvation
+  against CUBIC in either buffer regime (31.1% share deep / 61.3%
+  shallow) — with peak queue delay 43 ms vs CUBIC's 100 ms and zero
+  drops in the BBR-only cells — plus the full cross-implementation
+  interop matrix (quic-go / quiche / ngtcp2, loss cells included).
+  CUBIC and NewReno remain compiled-in.
+- **BREAKING: `receiveDatagram` no longer truncates silently.** An
+  undersized `dst` now returns `Error.DatagramBufferTooSmall` and
+  consumes nothing (retry after `nextDatagramSize`); the signature
+  is `Error!?usize`. `receiveDatagramInfo` keeps truncate-and-report
+  for fixed-buffer callers. Closes the silent-failure family.
+- **BREAKING (Evolving tier): `quic.app.Driver` refinements from the
+  qmsg port.** `on_datagram` now receives a `Driver.Datagram`
+  (`bytes` + `arrived_in_early_data`); `Options.read_chunk_bytes`
+  is gone (the pump is zero-copy, see Added); `quic.app` promotion
+  re-targets 0.17.
+
+### Added
+
+- **Multi-flow fairness cells** (`zig build bench-e2e -- --scenario
+  fairness`): N connection pairs share ONE simulated bottleneck;
+  per-flow goodput, shares, and the Jain index, deterministic per
+  seed. Six recorded cells (BBR/CUBIC/mixed matchups, staggered
+  start, shallow buffer) now ride the e2e baseline.
+- **Zero-copy stream reads.** `Connection.streamPeek` /
+  `streamConsume` (Evolving): borrow the readable prefix straight
+  from the reassembly buffer, then consume with the exact
+  flow-control bookkeeping `streamRead` runs. The `quic.app.Driver`
+  stream pump uses it: hooks receive whole contiguous runs with no
+  intermediate copy, and a failing hook redelivers its chunk instead
+  of losing it.
+- **`quic.app` friction list, resolved**: optional `ConnState` /
+  `StreamState` types (incl. `?*T`, defaulting to null);
+  `StreamRecvState.read_offset` + `.final_size`;
+  `Server.setConnectionWillCloseHook` + `Driver.attach(server)` for
+  post-init teardown wiring in wrapper stacks; a loud lifetime note
+  on `StreamEnd` (entry state must be consumed inside the hook).
+- **RFC 9000 §7.4.1 enforcement**: a client whose 0-RTT was accepted
+  now closes with PROTOCOL_VIOLATION if the server's fresh transport
+  parameters reduce any of the seven early-data-load-bearing limits
+  below the remembered values.
+
+### Fixed
+
+- **Pacer refill quantization starvation** (also in v0.15.1). The
+  refill clock advanced even when integer division floored the
+  accrual to zero, so any rate below one byte per poll interval
+  froze the token bucket permanently.
+- **Flow-control credit starved behind the pacing gate** (also in
+  v0.15.1). Exempt ACK sends debit the pacer; a receive-mostly
+  endpoint in permanent pacer debt never sent its queued
+  MAX_STREAM_DATA / MAX_DATA — the RFC 9000 §4.2 deadlock, observed
+  as two BBR flows wedging at exactly `initial_max_stream_data`.
+  Credit and blocked-signal frames are now exempt from the pacing
+  half of the gate (cwnd still applies).
+- **BBR pacing floor.** A receive-mostly endpoint latched a
+  garbage-low rate (~5 KB/s) from its post-handshake control-tail
+  sample and parked in Startup forever, pacing everything it owed at
+  that rate. Until the pipe has been observed full, the pacing rate
+  never drops below InitPacingRate (documented DEVIATION).
+- **Delivery-rate reliability floor is min_rtt once primed, not a
+  permanent 1 ms.** Every sub-millisecond path (loopback, LAN,
+  datacenter) was systematically underestimated under BBR — Startup
+  latched full_bw ~2x below the path; the real-socket goodput smoke
+  ran 7-20 MB/s vs CUBIC's 49, and reads 42-46 MB/s with the fix.
+  Paths with min_rtt >= 1 ms are byte-identical.
+
+## [0.15.1] - 2026-08-21
+
+Patch release: the two congestion-independent transport-liveness
+fixes above (Pacer refill quantization starvation; flow-control
+credit starved behind the pacing gate), cherry-picked onto v0.15.0
+for downstreams that want them without 0.16.0's behavior changes.
+No API or default changes.
+
 ## [0.15.0] - 2026-08-21
 
 The "serve the downstreams" release: RFC 9000 §10.3 Stateless Reset
