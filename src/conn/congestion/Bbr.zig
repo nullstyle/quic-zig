@@ -511,14 +511,28 @@ pub fn isInRecovery(self: *const Bbr, sent_time_us: u64) bool {
 /// applied). Before the first bandwidth sample, InitPacingRate =
 /// StartupPacingGain * InitialCwnd / max(srtt, 1 ms), computed
 /// with the freshest srtt this controller has seen.
+///
+/// DEVIATION (floor): until the pipe has been observed full
+/// (§5.3.1.2), the model rate never drops below InitPacingRate.
+/// A trickle-only sender — the receive side of a bulk transfer,
+/// whose only 1-RTT sends are the post-handshake control tail —
+/// legitimately measures its own trickle (a few KB over an idle
+/// gap) and would latch a garbage-low rate while parked in
+/// Startup forever. Pacing that endpoint's flow-control credit at
+/// KB/s starves the peer (found by the 2-flow BBR fairness cell);
+/// a sender still probing for bandwidth has no evidence the path
+/// is slower than a fresh connection's initial rate. Once
+/// full_bw_reached, the model is trusted verbatim — including
+/// below-floor rates on genuinely slow paths.
 pub fn pacingRateBps(self: *const Bbr, srtt_us: u64) u64 {
-    if (self.pacing_rate != 0) return self.pacing_rate;
+    if (self.pacing_rate != 0 and self.full_bw_reached) return self.pacing_rate;
     const srtt = @max(if (srtt_us != 0) srtt_us else self.stashed_srtt_us, 1_000);
-    return std.math.lossyCast(
+    const init_rate = std.math.lossyCast(
         u64,
         (@as(u128, self.cfg.initialWindow()) * startup_pacing_gain_num * us_per_s) /
             (@as(u128, startup_pacing_gain_den) * srtt),
     );
+    return @max(self.pacing_rate, init_rate);
 }
 
 pub fn snapshot(self: *const Bbr) Snapshot {
@@ -1414,8 +1428,24 @@ test "InitPacingRate falls back to gain * IW / srtt until a bandwidth sample lan
     try testing.expectEqual(expect_50ms, bbr.pacingRateBps(50_000));
     // Sub-millisecond srtt floors at 1 ms.
     try testing.expectEqual((iw * 277 * us_per_s) / (100 * 1_000), bbr.pacingRateBps(3));
-    bbr.pacing_rate = 777_000;
-    try testing.expectEqual(@as(u64, 777_000), bbr.pacingRateBps(50_000));
+    // A model rate above the floor wins even before full_bw.
+    bbr.pacing_rate = 900_000;
+    try testing.expectEqual(@as(u64, 900_000), bbr.pacingRateBps(50_000));
+}
+
+test "pacing floor: a below-init model rate is floored until the pipe is observed full" {
+    // The trickle-sender regression: a receive-mostly endpoint whose
+    // only samples measured its own post-handshake control tail
+    // latches a garbage-low rate while parked in Startup. Until
+    // full_bw_reached, InitPacingRate is the floor; after it, the
+    // model is trusted verbatim (genuinely slow paths pace slow).
+    var bbr = Bbr.init(testCfg());
+    const iw = testCfg().initialWindow();
+    const init_50ms = (iw * 277 * us_per_s) / (100 * 50_000);
+    bbr.pacing_rate = 5_361; // the observed fairness-cell latch
+    try testing.expectEqual(init_50ms, bbr.pacingRateBps(50_000));
+    bbr.full_bw_reached = true;
+    try testing.expectEqual(@as(u64, 5_361), bbr.pacingRateBps(50_000));
 }
 
 test "send quantum clamps 1ms of rate into [2*SMSS, 64KB]" {
