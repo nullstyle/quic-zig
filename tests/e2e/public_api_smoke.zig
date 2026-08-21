@@ -186,6 +186,11 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         requireDecl(Conn, "setEarlyDataEnabled");
         requireDecl(Conn, "streamArrivedInEarlyData");
         requireDecl(Conn, "setEarlyDataContextForParams");
+        // 0-RTT restore-budget query (Client convenience + the
+        // Connection method it forwards to). Evolving tier.
+        requireDecl(Conn, "earlyDataSendWindow");
+        requireDecl(quic.Client, "earlyDataSendWindow");
+        _ = quic.EarlyDataSendWindow;
         // The status enum is part of the Stable surface: embedders
         // switch on it (HTTP/3 remembered-settings replay).
         _ = quic.EarlyDataStatus;

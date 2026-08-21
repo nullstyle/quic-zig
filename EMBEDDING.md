@@ -657,6 +657,12 @@ tokens stop matching previously issued CIDs.
   request reachable over early data is idempotent.
 - Bind tickets to replay-relevant transport and application settings
   with `Connection.setEarlyDataContextForParams`.
+- Size a restore payload before you stage it: `Client.earlyDataSendWindow()`
+  (null when the client is not resuming) returns the early-data
+  flow-control budget from the remembered session — `max_data` in
+  total plus the per-stream ceilings — so an embedder staging 0-RTT
+  bytes before `advance()` can check they fit rather than discovering
+  the limit mid-flight.
 - Treat bytes where `Connection.streamArrivedInEarlyData(id)` is true as
   replayable. Only idempotent application actions should be accepted.
 

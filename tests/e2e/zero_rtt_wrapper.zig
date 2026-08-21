@@ -155,6 +155,29 @@ test "0-RTT: ticket capture + resumption + early data accepted through the wrapp
     defer cli2.deinit();
 
     const early_payload = "early-hello";
+    // The early-data budget is available BEFORE advance(), from the
+    // remembered session params — sized to what the server advertised
+    // on connection 1 (common.defaultParams()). A restore payload
+    // must fit it; ours trivially does.
+    const budget = cli2.earlyDataSendWindow() orelse return error.NoEarlyBudget;
+    try std.testing.expectEqual(common.defaultParams().initial_max_data, budget.max_data);
+    try std.testing.expectEqual(
+        common.defaultParams().initial_max_stream_data_bidi_remote,
+        budget.max_stream_data_bidi,
+    );
+    try std.testing.expect(budget.max_data >= early_payload.len);
+    // A fresh (non-resumption) client has no early-data budget.
+    {
+        var fresh = try quic.Client.connect(.{
+            .insecure_skip_verify = true,
+            .allocator = allocator,
+            .server_name = "localhost",
+            .alpn_protocols = &protos,
+            .transport_params = common.defaultParams(),
+        });
+        defer fresh.deinit();
+        try std.testing.expect(fresh.earlyDataSendWindow() == null);
+    }
     cli2.conn.setEarlyDataEnabled(true);
     _ = try cli2.conn.openBidi(0);
     _ = try cli2.conn.streamWrite(0, early_payload);

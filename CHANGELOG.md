@@ -41,6 +41,14 @@ changes.
   server #1, a key-sharing stateless server #2 resets it, client
   enters draining with `CloseSource.stateless_reset`) pins the full
   chain and fails if the advertise is removed.
+- **`Client.earlyDataSendWindow()` / `Connection.earlyDataSendWindow()`**
+  (Evolving): the 0-RTT early-data flow-control budget derived from
+  the resumed session's remembered transport parameters —
+  connection-level `max_data` plus the per-stream ceilings. Returns
+  null when the client is not resuming. Lets an embedder size a
+  restore payload to fit the early-data window before staging it
+  pre-`advance()` (RFC 9001 §4.5), instead of discovering the limit
+  mid-flight.
 
 ## [0.14.0] - 2026-08-21
 

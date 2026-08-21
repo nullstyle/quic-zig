@@ -198,6 +198,10 @@ pub const FlowBlockedInfo = conn.FlowBlockedInfo;
 /// Send-side flow-control snapshot (`Connection.streamSendWindow`).
 pub const SendWindow = conn.SendWindow;
 
+/// 0-RTT early-data flow-control budget (`Client.earlyDataSendWindow`
+/// / `Connection.earlyDataSendWindow`).
+pub const EarlyDataSendWindow = conn.EarlyDataSendWindow;
+
 /// Which flow-control axis a `FlowBlockedInfo` refers to: connection
 /// `data`, per-stream `stream_data`, or `streams` count (RFC 9000 §4).
 pub const FlowBlockedKind = conn.FlowBlockedKind;

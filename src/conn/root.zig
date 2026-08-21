@@ -126,6 +126,7 @@ pub const DatagramSendEvent = state.DatagramSendEvent;
 pub const FlowBlockedInfo = state.FlowBlockedInfo;
 /// Send-side flow-control snapshot (`Connection.streamSendWindow`).
 pub const SendWindow = state.SendWindow;
+pub const EarlyDataSendWindow = state.EarlyDataSendWindow;
 /// A newly-opened peer-initiated stream (payload of `stream_opened`).
 pub const StreamOpenedInfo = state.StreamOpenedInfo;
 /// Which kind of flow-control limit is blocking (data, stream-data, streams).

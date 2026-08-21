@@ -2458,6 +2458,49 @@ pub fn sendWindow(self: *const Connection) u64 {
     return conn_streams.connectionSendWindow(self);
 }
 
+/// The 0-RTT early-data budget this connection may stage before
+/// `advance()`, derived from the remembered peer transport
+/// parameters (`Config.resumption_state` → `setRememberedPeerTransportParams`).
+/// It is the RFC 9001 §4.5 rule in one call: early data is bounded
+/// by the flow-control limits the peer advertised in the resumed
+/// session, not by fresh negotiation. Returns null when no
+/// remembered parameters are installed (a non-0-RTT connection, or
+/// before the resumption envelope is decoded) — the caller then has
+/// no early-data budget at all.
+///
+/// The fields are the connection-level `initial_max_data` and the
+/// per-stream initial limits, so a caller sizing a restore payload
+/// across one or a few streams can check both the aggregate and the
+/// per-stream ceilings before staging. This does NOT account for the
+/// separate anti-amplification limit the server enforces before it
+/// validates the client's address (RFC 9000 §8.1): a large early
+/// flight can still be paced out across several packets even when
+/// this window admits it in one.
+pub fn earlyDataSendWindow(self: *const Connection) ?EarlyDataSendWindow {
+    const params = self.remembered_peer_transport_params orelse return null;
+    return .{
+        .max_data = params.initial_max_data,
+        .max_stream_data_bidi = params.initial_max_stream_data_bidi_remote,
+        .max_stream_data_uni = params.initial_max_stream_data_uni,
+    };
+}
+
+/// The 0-RTT early-data flow-control budget, from `earlyDataSendWindow`.
+/// All figures are the remembered peer limits from the resumed
+/// session (RFC 9001 §4.5); a restore payload staged before
+/// `advance()` must fit within them.
+pub const EarlyDataSendWindow = struct {
+    /// Connection-level `initial_max_data`: the total early stream
+    /// bytes across all streams the peer will admit.
+    max_data: u64,
+    /// Per-stream `initial_max_stream_data_bidi_remote`: the early
+    /// budget on any single client-opened bidi stream.
+    max_stream_data_bidi: u64,
+    /// Per-stream `initial_max_stream_data_uni`: the early budget on
+    /// any single client-opened uni stream.
+    max_stream_data_uni: u64,
+};
+
 /// Send-side flow-control snapshot for one stream: connection and
 /// stream credit, queued-but-unsent backlog, and the net
 /// `writable` figure a backpressure gate wants (see `SendWindow`).

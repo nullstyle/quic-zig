@@ -652,6 +652,19 @@ pub fn connect(config: Config) Error!Client {
 
 /// Tear down the connection and (if owned) the TLS context.
 /// After this returns, `self` is invalid.
+/// The 0-RTT early-data flow-control budget for this client, sized
+/// from the resumed session's remembered transport parameters
+/// (`Config.resumption_state`). Call it after `connect` and BEFORE
+/// `advance()` to size a restore payload that will ride early data:
+/// stage no more than `max_data` in total, and no more than the
+/// per-stream figure on any one stream. Returns null when the client
+/// was not configured for resumption (no `resumption_state`), i.e.
+/// there is no early-data budget. See
+/// `Connection.earlyDataSendWindow` for the full contract.
+pub fn earlyDataSendWindow(self: *const Client) ?Connection.EarlyDataSendWindow {
+    return self.conn.earlyDataSendWindow();
+}
+
 pub fn deinit(self: *Client) void {
     self.conn.destroy();
     if (self.owns_tls) self.tls_ctx.deinit();
