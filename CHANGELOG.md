@@ -5,6 +5,33 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.15.1] - 2026-08-21
+
+Patch release: two congestion-independent transport-liveness fixes,
+cherry-picked from main for downstreams that want them without the
+0.16.0 behavior changes. No API or default changes.
+
+### Fixed
+
+- **Pacer refill quantization starvation.** `Pacer.refill` committed
+  its clock even when the elapsed window's accrual floored to zero
+  under integer division, so any pacing rate below one byte per poll
+  interval (a low-rate path under a high-frequency poll loop) froze
+  the token bucket permanently. The refill window now stays open
+  until at least one whole byte accrues.
+- **Flow-control credit starved behind the pacing gate.** Exempt ACK
+  sends debit the pacer; a receive-mostly endpoint whose ACK debit
+  rate exceeded its pacing refill rate sat in permanent debt, and its
+  queued MAX_STREAM_DATA / MAX_DATA credit never went on the wire —
+  the peer wedged at the window limit forever (the RFC 9000 §4.2
+  deadlock). Credit and blocked-signal frames are now exempt from the
+  pacing half of the send gate (cwnd still applies); they ride the
+  same tiny exempt shape ACKs do and still debit the bucket.
+
+Both were found by the new multi-flow fairness instrument on main;
+the receive-mostly + mostly-idle RPC traffic shape is exactly where
+the wedge bites.
+
 ## [0.15.0] - 2026-08-21
 
 The "serve the downstreams" release: RFC 9000 §10.3 Stateless Reset
