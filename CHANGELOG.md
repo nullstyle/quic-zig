@@ -5,7 +5,13 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.15.0] - 2026-08-21
+
+The "serve the downstreams" release: RFC 9000 §10.3 Stateless Reset
+emission (the death certificate a peer of a crashed server needs), a
+0-RTT restore-budget query, the last silent-failure traps closed, an
+undrained-`Server.deinit` session leak fixed, and two observability
+surfaces promoted to Stable. No default wire behavior changed.
 
 ### Added
 

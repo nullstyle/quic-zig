@@ -76,10 +76,10 @@ The public Zig module name is `quic`.
 ### Consuming this package
 
 Fetch a tagged release into your `build.zig.zon` — substitute the
-current tag (`v0.14.0` as of this writing):
+current tag (`v0.15.0` as of this writing):
 
 ```sh
-zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.14.0.tar.gz
+zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.15.0.tar.gz
 ```
 
 Pin the **archive tarball URL exactly as above** — not a
@@ -197,16 +197,10 @@ pub fn runClient(
         .allocator = allocator,
         .server_name = server_name,
         .alpn_protocols = &protos,
-        .transport_params = .{
-            .max_idle_timeout_ms = 30_000,
-            .initial_max_data = 16 * 1024 * 1024,
-            .initial_max_stream_data_bidi_local = 1 << 20,
-            .initial_max_stream_data_bidi_remote = 1 << 20,
-            .initial_max_stream_data_uni = 1 << 20,
-            .initial_max_streams_bidi = 100,
-            .initial_max_streams_uni = 64,
-            .active_connection_id_limit = 4,
-        },
+        // The blessed working set — nonzero flow-control / stream
+        // windows so the client can receive the server's response.
+        // (`.{}` compiles but advertises a zero receive window.)
+        .transport_params = quic.Client.Config.defaultTransportParams(),
     });
     defer client.deinit();
 
