@@ -331,8 +331,18 @@ pub fn pollLevelOnPath(
     // emission, PTO PINGs, PATH_CHALLENGE, and CONNECTION_CLOSE are
     // outside this gate by construction (they never consult it), so a
     // paced-blocked poll still keeps the connection responsive.
-    const congestion_blocked = conn.congestionBlockedOnPath(lvl, app_path) or
+    //
+    // The two halves stay separately visible because flow-control
+    // credit is exempt from the PACING half only (see `app_credit`
+    // below) — and the pacing check must run unconditionally (not
+    // short-circuited behind the cwnd check): it lazily refills the
+    // path's bucket, and a receive-mostly endpoint whose polls never
+    // reached it would freeze its bucket at whatever debt the exempt
+    // ACK sends left behind.
+    const cwnd_blocked = conn.congestionBlockedOnPath(lvl, app_path);
+    const pacing_blocked =
         conn.pacingBlockedOnPath(lvl, app_path, now_us, @min(@as(u64, @intCast(app_path.pmtu)), @as(u64, @intCast(dst.len))));
+    const congestion_blocked = cwnd_blocked or pacing_blocked;
     const path_response_addr_overrides_current = blk: {
         if (lvl != .application) break :blk false;
         if (conn.pending_frames.path_response == null) break :blk false;
@@ -771,7 +781,22 @@ pub fn pollLevelOnPath(
     // inline, since that part is genuinely per-frame.
     const app_control = !app_control_blocked and lvl == .application;
 
-    if (app_control and conn.pending_frames.max_data != null) {
+    // Flow-control credit and blocked-signal frames are exempt from
+    // the PACING half of the gate (cwnd and the path-response
+    // override still apply). Pacing exists to smooth data bursts
+    // (RFC 9002 §7.7 is a SHOULD about emission timing); RFC 9000
+    // §4.2 warns that withheld credit deadlocks the connection — and
+    // that deadlock is reachable: a receive-mostly endpoint's exempt
+    // ACK sends debit the bucket faster than a low pacing rate
+    // refills it, so a MAX_STREAM_DATA grant queued behind the paced
+    // gate never leaves while the peer sits send-blocked forever
+    // (found by the 2-flow BBR fairness cell). These frames are a few
+    // dozen bytes and ride the same exempt shape ACKs do; they still
+    // debit the bucket, keeping the rate accounting truthful.
+    const app_credit = lvl == .application and
+        !cwnd_blocked and !path_response_addr_overrides_current;
+
+    if (app_credit and conn.pending_frames.max_data != null) {
         const md: frame_types.MaxData = .{ .maximum_data = conn.pending_frames.max_data.? };
         if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .max_data = md })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_data = md });
@@ -779,7 +804,7 @@ pub fn pollLevelOnPath(
             ack_eliciting = true;
         }
     }
-    if (app_control and conn.pending_frames.max_stream_data.items.len > 0) {
+    if (app_credit and conn.pending_frames.max_stream_data.items.len > 0) {
         const item = conn.pending_frames.max_stream_data.items[0];
         const msd: frame_types.MaxStreamData = .{
             .stream_id = item.stream_id,
@@ -791,7 +816,7 @@ pub fn pollLevelOnPath(
             ack_eliciting = true;
         }
     }
-    if (app_control and (conn.pending_frames.max_streams_bidi != null or conn.pending_frames.max_streams_uni != null)) {
+    if (app_credit and (conn.pending_frames.max_streams_bidi != null or conn.pending_frames.max_streams_uni != null)) {
         const bidi = conn.pending_frames.max_streams_bidi != null;
         const pending = conn_flow.pendingMaxStreamsSlot(conn, bidi);
         const ms: frame_types.MaxStreams = .{
@@ -804,7 +829,7 @@ pub fn pollLevelOnPath(
             ack_eliciting = true;
         }
     }
-    if (app_control and conn.pending_frames.data_blocked != null) {
+    if (app_credit and conn.pending_frames.data_blocked != null) {
         const db: frame_types.DataBlocked = .{ .maximum_data = conn.pending_frames.data_blocked.? };
         if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .data_blocked = db })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .data_blocked = db });
@@ -812,7 +837,7 @@ pub fn pollLevelOnPath(
             ack_eliciting = true;
         }
     }
-    if (app_control and conn.pending_frames.stream_data_blocked.items.len > 0) {
+    if (app_credit and conn.pending_frames.stream_data_blocked.items.len > 0) {
         const item = conn.pending_frames.stream_data_blocked.items[0];
         if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .stream_data_blocked = item })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .stream_data_blocked = item });
@@ -820,7 +845,7 @@ pub fn pollLevelOnPath(
             ack_eliciting = true;
         }
     }
-    if (app_control and (conn.pending_frames.streams_blocked_bidi != null or conn.pending_frames.streams_blocked_uni != null)) {
+    if (app_credit and (conn.pending_frames.streams_blocked_bidi != null or conn.pending_frames.streams_blocked_uni != null)) {
         const bidi = conn.pending_frames.streams_blocked_bidi != null;
         const pending = conn_flow.pendingStreamsBlockedSlot(conn, bidi);
         const sb: frame_types.StreamsBlocked = .{

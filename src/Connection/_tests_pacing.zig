@@ -150,6 +150,48 @@ test "no pacing deadline without pending data or while cwnd-blocked" {
     }
 }
 
+test "flow-control credit is exempt from the pacing gate (credit-starvation deadlock regression)" {
+    // The 2-flow BBR fairness cell's deadlock: a receive-mostly
+    // endpoint's exempt ACK sends drove its pacer into debt faster
+    // than a garbage-low rate refilled it, and the queued
+    // MAX_STREAM_DATA grant sat behind the paced gate forever while
+    // the peer was send-blocked at the window limit. Credit frames
+    // must pass a pacing-blocked (but cwnd-open) gate; data must not.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try preparePacedClient(conn);
+    conn.ccForApplication().setCwndForTest(12_000);
+
+    var pkt: [2048]u8 = undefined;
+    const now_us: u64 = 1_000_000;
+
+    // Sink the pacer into deep exempt-send debt by hand — the state
+    // the wedged fairness-cell server was found in.
+    const pacer = &conn.primaryPath().path.pacer;
+    pacer.primed = true;
+    pacer.last_refill_us = now_us;
+    pacer.tokens = -1_000_000;
+
+    // A queued grant must leave despite the debt (a tiny packet: the
+    // exemption covers credit frames, not data).
+    try @import("flow.zig").queueMaxStreamData(conn, 0, 5_000_000);
+    const emitted = try conn.pollDatagram(&pkt, now_us);
+    try std.testing.expect(emitted != null);
+    try std.testing.expect(emitted.?.len < 200);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        conn.pending_frames.max_stream_data.items.len,
+    );
+
+    // Stream data stays behind the paced gate in the same state.
+    try queueBulkStream(conn, 64 * 1024);
+    pacer.tokens = -1_000_000; // re-sink (the credit send debited it further)
+    try std.testing.expect((try conn.pollDatagram(&pkt, now_us)) == null);
+}
+
 test "probe debt: PTO probes bypass the gate but delay the next data send" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
