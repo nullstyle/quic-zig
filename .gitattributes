@@ -1,0 +1,7 @@
+# Byte-exact checkouts on every platform: no line-ending conversion,
+# ever. The repo is committed 100% LF and `zig fmt` requires LF, so a
+# Windows checkout that CRLF-converts (autocrlf defaults vary by git
+# install and runner image — it broke the Windows CI leg's
+# `zig fmt --check` on 2026-08-16) must not happen. `-text` disables
+# text detection and eol munging for all paths in both directions.
+* -text
