@@ -115,7 +115,22 @@ pub fn refill(
     // Commit the projection BEFORE stamping `last_refill_us` —
     // `projectedTokens` reads it to derive the elapsed window, so
     // stamping first would zero every accrual.
-    self.tokens = self.projectedTokens(now_us, rate, capacity);
+    //
+    // Quantization guard: commit ONLY when the projection moved. At a
+    // low rate a high-frequency caller's per-call elapsed window
+    // accrues less than one whole byte, which integer division floors
+    // to zero — and stamping `last_refill_us` forward on a zero
+    // accrual discards that fraction on every call. Any rate below
+    // one byte per poll interval (e.g. 5 KB/s under a 100 us driver
+    // loop) then freezes the bucket PERMANENTLY: observed as a
+    // receive-side pacer pinned at deep negative debt, never sending
+    // its queued flow-control credit — a transport deadlock. Keeping
+    // the window open until at least one byte accrues loses nothing:
+    // the projection helpers read `last_refill_us` too, so `canSend`
+    // and `nextReadyUs` stay consistent by construction.
+    const projected = self.projectedTokens(now_us, rate, capacity);
+    if (projected == self.tokens) return;
+    self.tokens = projected;
     self.last_refill_us = now_us;
 }
 
@@ -220,6 +235,28 @@ test "nextReadyUs projects the lazy refill without mutating" {
     // A bigger ask reports the residual wait from now.
     const later = pacer.nextReadyUs(1_000, 2_450, rate, 1200).?;
     try testing.expect(later > 1_000);
+}
+
+test "quantization: a low rate under a fast poll loop still accrues (no frozen bucket)" {
+    // The starvation regression: rate 5_000 B/s polled every 100 us
+    // accrues 0.5 B per call. The old refill committed
+    // `last_refill_us` on the floored-to-zero accrual, so the bucket
+    // froze forever; the guard keeps the elapsed window open until a
+    // whole byte lands. Over one second the bucket must recover
+    // ~5_000 B of debt, not zero.
+    var pacer: Pacer = .{};
+    const rate: u64 = 5_000;
+    pacer.refill(0, rate, 1200);
+    pacer.consume(12_000 + 6_000); // burst + exempt debt: tokens = -6_000
+    try testing.expectEqual(@as(i64, -6_000), pacer.tokens);
+    var now: u64 = 0;
+    while (now < 1_000_000) : (now += 100) {
+        pacer.refill(now, rate, 1200);
+    }
+    // ~5_000 B accrued (one call's sub-byte residue is tolerated).
+    try testing.expect(pacer.tokens >= -1_100);
+    // And the guard must not OVER-accrue either.
+    try testing.expect(pacer.tokens <= -900);
 }
 
 test "liveness: a paced sender sustains rate x T minus one bucket" {
