@@ -50,6 +50,14 @@
 //! credit-starvation behind the pacing gate) — fixed before the
 //! flip; the fairness cells are the regression instrument. Rollback
 //! is one line at any layer: `congestion_control = .cubic`.
+//!
+//! External evidence (capnp-zig, 2026-08-21, post-flip): their RPC
+//! churn soak A/B on identical v0.16.0 code — 60 s / 8 workers,
+//! connect/bootstrap/call/close loops + chaos closes + 1 ms-deadline
+//! cancellation sessions, loopback — read bbr-vs-cubic as a clean
+//! no-regression: +3.7% calls, p50 +0.7 ms, p99 −6%, memory flat,
+//! cancellations identical. Loopback caveat applies (no bottleneck
+//! to bind against); cite as theirs, workload as described.
 
 const Bbr = @This();
 

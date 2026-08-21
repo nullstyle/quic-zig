@@ -31,7 +31,7 @@ flip does NOT reach your consumers until you update that default.
   shallow) — with peak queue delay 43 ms vs CUBIC's 100 ms and zero
   drops in the BBR-only cells — plus the full cross-implementation
   interop matrix (quic-go / quiche / ngtcp2, loss cells included).
-  CUBIC and NewReno remain compiled-in.
+  CUBIC and NewReno remain compiled-in (`.cubic`, `.new_reno`).
 - **BREAKING: `receiveDatagram` no longer truncates silently.** An
   undersized `dst` now returns `Error.DatagramBufferTooSmall` and
   consumes nothing (retry after `nextDatagramSize`); the signature
