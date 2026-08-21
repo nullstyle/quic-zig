@@ -5,7 +5,7 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.14.0] - 2026-08-21
 
 The application-layer sprint: closing the silent-failure traps and
 adding `quic.app` / `quic.testing`, so a custom server is a
