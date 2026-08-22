@@ -5,7 +5,11 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.16.1] - 2026-08-21
+
+Patch release: closes a stateless-reset configuration hole reported by
+a downstream embedder, and collects the documentation for what a null
+`stateless_reset_key` silently disables. No wire behavior changes.
 
 ### Changed
 
