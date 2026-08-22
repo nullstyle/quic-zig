@@ -306,11 +306,14 @@ local_cid_len: u8 = 8,
 /// yourself" applies.
 ///
 /// Do NOT hand-set `transport_params.stateless_reset_token`
-/// instead: that advertises one FIXED token to every connection
-/// this server accepts, so any peer that ever completed a handshake
-/// could reset any other peer's connection. Tokens must be per-CID
-/// and unpredictable (§10.3); this key is the only supported way to
-/// get that. `Server.init` emits a `config_warning` if it sees one.
+/// instead: §18.2's token belongs to the handshake CID, which
+/// differs per connection, so a value in per-server config cannot be
+/// right for more than one peer. Keyless it advertises one FIXED
+/// token to every connection this server accepts — any peer that
+/// ever completed a handshake could then reset any other peer's
+/// connection. `Server.init` REFUSES that combination with
+/// `error.InvalidConfig`; set this key and let the accept path
+/// derive per-CID tokens.
 ///
 /// The keyless escape hatch, if you truly cannot hold a key: drive
 /// replenishment manually via the `connection_ids_needed` event

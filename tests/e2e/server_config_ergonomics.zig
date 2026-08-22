@@ -41,45 +41,37 @@ test "Server.init warns when transport_params admit nothing" {
     try std.testing.expect(std.mem.indexOf(u8, ctx.warnings.items[0], "admit no streams") != null);
 }
 
-test "Server.init warns when transport_params.stateless_reset_token is hand-set" {
-    // The footgun: `transport_params` is copied verbatim onto every
-    // accepted connection and the accept path only OVERWRITES this
-    // field when a `stateless_reset_key` exists — so a hand-set token
-    // is advertised, unchanged, to every peer. One shared token means
-    // any peer that ever handshook can reset any other connection
-    // (RFC 9000 §10.3 wants per-CID unpredictable tokens), and this
-    // server can never emit a matching reset anyway (the emitter
-    // derives from the key it does not have).
+test "Server.init refuses a hand-set transport_params.stateless_reset_token without a key" {
+    // The footgun: §18.2's token is the HANDSHAKE CID's token — a
+    // different value per connection — so a value in per-server
+    // config cannot be correct for more than one connection.
+    // `transport_params` is copied verbatim onto every accepted
+    // connection and the accept path only OVERWRITES this field when
+    // a key exists, so keyless the SAME token reaches every peer: any
+    // peer that ever handshook could reset any other connection
+    // (§10.3 wants per-CID unpredictable tokens), and this server
+    // could never emit a matching reset anyway. Refused, not warned —
+    // a warning reaches only embedders who wired `log_callback`.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
-    var ctx: WarnCtx = .{};
-    defer ctx.warnings.deinit(allocator);
 
     var params = quic.Server.Config.defaultTransportParams();
     params.stateless_reset_token = @splat(0x77);
 
-    var srv = try quic.Server.init(.{
+    try std.testing.expectError(error.InvalidConfig, quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
         .transport_params = params,
-        .log_callback = WarnCtx.onLog,
-        .log_user_data = &ctx,
-    });
-    defer srv.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), ctx.warnings.items.len);
-    try std.testing.expect(
-        std.mem.indexOf(u8, ctx.warnings.items[0], "stateless_reset_token is set directly") != null,
-    );
+    }));
 }
 
-test "no stateless-reset-token warning once a real key is configured" {
+test "a hand-set token is accepted once a real key makes it inert" {
     // With a key the accept path overwrites the field per-connection
     // with a properly derived per-CID token, so the hand-set value is
-    // harmless and the warning must stay silent — otherwise every
-    // correctly-configured server would carry a spurious warning.
+    // dead config rather than a hazard. Accepting it keeps the
+    // refusal scoped to the configuration that is actually harmful.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
     var ctx: WarnCtx = .{};

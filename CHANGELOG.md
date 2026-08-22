@@ -5,6 +5,38 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Changed
+
+- **`Server.init` now refuses a hand-set
+  `transport_params.stateless_reset_token` when `stateless_reset_key`
+  is null** (`error.InvalidConfig`). RFC 9000 §18.2's token belongs to
+  the handshake CID and therefore differs per connection, so a value
+  in per-server config cannot be correct for more than one peer:
+  `transport_params` is copied verbatim onto every accepted connection
+  and the accept path only *overwrites* this field when a key is set.
+  Keyless, the same token reached every peer — so any peer that ever
+  completed a handshake could reset any other peer's connection — and
+  it could never be honored, since the emitter derives from the absent
+  key. Set `stateless_reset_key` and let per-CID tokens be derived.
+  A hand-set token alongside a real key is still accepted (the accept
+  path overwrites it, making it inert).
+
+### Documentation
+
+- The `Server.Config.stateless_reset_key` docstring is now the single
+  place collecting everything a null key silently disables: reset
+  emission, the §18.2 advertisement peers need to *detect* a reset
+  (without it a client of a crashed-and-restarted server idles out
+  rather than failing fast), auto CID replenishment (whose flag
+  defaults to true), client-initiated migration, and peer CID
+  rotation on NAT rebinding. EMBEDDING.md and the README hardening
+  checklist are reframed from "required for preferred-address /
+  QUIC-LB" to "set it on any deployed server"; the README previously
+  told readers to *persist* the key but never to *set* it. Reported
+  by a downstream embedder (capnp-zig).
+
 ## [0.16.0] - 2026-08-21
 
 The "fairness and the flip" release. BBRv3 is now the DEFAULT
