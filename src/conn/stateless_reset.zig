@@ -30,6 +30,15 @@
 //! Embedders that want a different scheme (e.g. encrypted tokens
 //! that double as routing keys) keep ignoring this module and supply
 //! their own bytes via `ConnectionIdProvision.stateless_reset_token`.
+//!
+//! Deriving a token is only half the job: a peer can detect nothing
+//! until it has been TOLD the token, and detection is a plain table
+//! lookup against what it was told. Tokens reach a peer by exactly
+//! two routes — the RFC 9000 §18.2 `stateless_reset_token` transport
+//! parameter (the handshake CID; `Server` sends it only when
+//! `Config.stateless_reset_key` is set) and NEW_CONNECTION_ID frames
+//! (spare CIDs). A server that derives tokens perfectly but
+//! advertises none ships resets nobody can recognize.
 
 const std = @import("std");
 const boringssl = @import("boringssl");

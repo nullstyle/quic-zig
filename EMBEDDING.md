@@ -628,8 +628,18 @@ Set these deliberately for any deployed server:
 - `retry_token_key`: enables stateless Retry before allocating a
   connection slot.
 - `new_token_key`: enables NEW_TOKEN issuance for returning clients.
-- `stateless_reset_key`: required when the server auto-issues CIDs that
-  need reset tokens, including preferred-address and QUIC-LB rotation.
+- `stateless_reset_key`: set it on any deployed server. It is not a
+  per-feature prerequisite — it gates the whole RFC 9000 §10.3
+  mechanism. Without it: no reset emission; no §18.2 token advertised,
+  so peers cannot detect a reset and a client of a crashed-and-restarted
+  server waits out its idle timeout instead of learning the connection
+  died; `auto_replenish_connection_ids` silently no-ops, leaving each
+  connection on its single handshake CID, which in turn makes
+  client-initiated migration fail (`MigrationNoFreshPeerCid`) and skips
+  CID rotation on NAT rebinding. It is additionally *required* for
+  preferred-address and QUIC-LB rotation, which `Server.init` enforces.
+  Do not hand-set `transport_params.stateless_reset_token` in its
+  place — that advertises one fixed token to every peer.
 
 Implementation limits: quic-zig caps what `transport_params` may
 advertise, and values above the caps are rejected with

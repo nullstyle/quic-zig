@@ -260,8 +260,15 @@ Before exposing a server to arbitrary peers:
   the dangerous "unset" state unspellable.
 - Use `retry_token_key` and `new_token_key` when clients should prove
   source address ownership before allocation.
+- Set `stateless_reset_key` on any deployed server. It gates the whole
+  RFC 9000 §10.3 mechanism — emission, the §18.2 token peers need to
+  *detect* a reset (without it, clients of a crashed server idle out
+  instead of failing fast), spare-CID replenishment, and migration.
+  See its `Server.Config` docstring for the full list.
 - Persist `stateless_reset_key`, Retry token keys, and NEW_TOKEN keys
-  across graceful restarts when those features are enabled.
+  across graceful restarts when those features are enabled. A forgotten
+  reset key invalidates every token it ever issued, which defeats
+  precisely the crash-restart detection the key exists for.
 - Keep 0-RTT off unless `tls.AntiReplayTracker` is wired, its versioned
   state is persisted across restarts, and the application rejects
   non-idempotent early requests. Persist client resumption via

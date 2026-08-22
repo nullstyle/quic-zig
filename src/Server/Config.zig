@@ -257,23 +257,67 @@ max_concurrent_connections: u32 = 1000,
 /// this field with the resolved value.
 local_cid_len: u8 = 8,
 
-/// 32-byte HMAC key used to derive stateless-reset tokens
-/// (RFC 9000 §10.3) for CIDs the Server auto-issues on
-/// `installLbConfig` rotation. Off by default — leave null and
-/// drive replenishment manually via the `connection_ids_needed`
-/// event flow with embedder-supplied tokens.
+/// 32-byte HMAC key backing the entire RFC 9000 §10.3
+/// stateless-reset mechanism. Tokens derive as
+/// `HMAC-SHA256(stateless_reset_key, "quic stateless reset v1"
+/// || cid)` per `quic.conn.stateless_reset.derive`.
 ///
-/// When set, `installLbConfig` automatically pushes a
-/// NEW_CONNECTION_ID frame to every live slot using the new LB
-/// factory; tokens are derived as
-/// `HMAC-SHA256(stateless_reset_key, "quic stateless reset
-/// v1" || cid)` per `quic.conn.stateless_reset.derive`.
+/// **Null by default, and null is a materially degraded posture.**
+/// This one field gates five behaviors, each silently off without
+/// it — collected here because a reader deciding whether to set the
+/// key would otherwise have to visit five files to learn what they
+/// are giving up:
+///
+///  1. **Reset emission.** `Server.feed` cannot answer an
+///     unroutable short-header datagram with a §10.3 reset
+///     (`FeedOutcome.stateless_reset_sent` never fires;
+///     `MetricsSnapshot.feeds_stateless_reset` is pinned at 0 and
+///     the traffic is charged to `feeds_dropped`). The
+///     `unroutable_dcid` log event still fires with
+///     `reset_queued = false`, so a wired `log_callback` is the one
+///     surface that stays honest.
+///  2. **Peer-side reset DETECTION — including the crash-restart
+///     case.** RFC 9000 §18.2's `stateless_reset_token` transport
+///     parameter is advertised only when this key is set
+///     (`Server/accept.zig`). A peer's `isKnownStatelessReset`
+///     matches inbound resets purely by table lookup against tokens
+///     it was told about, so with no key a peer CANNOT recognize a
+///     reset aimed at its handshake CID — after this server crashes
+///     and restarts, its clients wait out the idle timeout instead
+///     of learning the connection is dead. The key is load-bearing
+///     for the detection half, not only the emission half.
+///  3. **Auto CID replenishment.** `auto_replenish_connection_ids`
+///     defaults to true but is a no-op without the key, so each
+///     connection lives its whole life on the single seq-0
+///     handshake CID (see that field's doc).
+///  4. **Client-initiated active migration against this server**,
+///     which needs a fresh unused peer CID (RFC 9000 §5.1.2 ¶1) and
+///     therefore fails with `MigrationNoFreshPeerCid`.
+///  5. **Peer CID rotation on NAT rebinding** (§9.5 linkability
+///     hygiene): with no spare to rotate to, the peer keeps using
+///     the same CID across the address change.
 ///
 /// **Persist this key across server restarts.** A cold-start
 /// embedder that forgets the key invalidates every previously
-/// issued reset token: live connections through the restart will
-/// no longer drop on stateless reset. The same hardening note in
-/// the README §"Things you must wire yourself" applies.
+/// issued reset token: live connections through the restart no
+/// longer drop on stateless reset — which defeats the crash-restart
+/// detection in (2), the case the mechanism most exists for. The
+/// same hardening note in the README §"Things you must wire
+/// yourself" applies.
+///
+/// Do NOT hand-set `transport_params.stateless_reset_token`
+/// instead: that advertises one FIXED token to every connection
+/// this server accepts, so any peer that ever completed a handshake
+/// could reset any other peer's connection. Tokens must be per-CID
+/// and unpredictable (§10.3); this key is the only supported way to
+/// get that. `Server.init` emits a `config_warning` if it sees one.
+///
+/// The keyless escape hatch, if you truly cannot hold a key: drive
+/// replenishment manually via the `connection_ids_needed` event
+/// flow with embedder-supplied tokens. That covers
+/// NEW_CONNECTION_ID-provided CIDs only — never the seq-0 handshake
+/// CID — and you must then emit resets and reconstruct matching
+/// tokens across restarts yourself.
 stateless_reset_key: ?conn_mod.stateless_reset.Key = null,
 
 /// QUIC-LB connection-ID generation

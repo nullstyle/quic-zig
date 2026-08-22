@@ -41,6 +41,68 @@ test "Server.init warns when transport_params admit nothing" {
     try std.testing.expect(std.mem.indexOf(u8, ctx.warnings.items[0], "admit no streams") != null);
 }
 
+test "Server.init warns when transport_params.stateless_reset_token is hand-set" {
+    // The footgun: `transport_params` is copied verbatim onto every
+    // accepted connection and the accept path only OVERWRITES this
+    // field when a `stateless_reset_key` exists — so a hand-set token
+    // is advertised, unchanged, to every peer. One shared token means
+    // any peer that ever handshook can reset any other connection
+    // (RFC 9000 §10.3 wants per-CID unpredictable tokens), and this
+    // server can never emit a matching reset anyway (the emitter
+    // derives from the key it does not have).
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    var ctx: WarnCtx = .{};
+    defer ctx.warnings.deinit(allocator);
+
+    var params = quic.Server.Config.defaultTransportParams();
+    params.stateless_reset_token = @splat(0x77);
+
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = params,
+        .log_callback = WarnCtx.onLog,
+        .log_user_data = &ctx,
+    });
+    defer srv.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.warnings.items.len);
+    try std.testing.expect(
+        std.mem.indexOf(u8, ctx.warnings.items[0], "stateless_reset_token is set directly") != null,
+    );
+}
+
+test "no stateless-reset-token warning once a real key is configured" {
+    // With a key the accept path overwrites the field per-connection
+    // with a properly derived per-CID token, so the hand-set value is
+    // harmless and the warning must stay silent — otherwise every
+    // correctly-configured server would carry a spurious warning.
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    var ctx: WarnCtx = .{};
+    defer ctx.warnings.deinit(allocator);
+
+    var params = quic.Server.Config.defaultTransportParams();
+    params.stateless_reset_token = @splat(0x77);
+
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = params,
+        .stateless_reset_key = try quic.Server.Config.mintKey(),
+        .log_callback = WarnCtx.onLog,
+        .log_user_data = &ctx,
+    });
+    defer srv.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), ctx.warnings.items.len);
+}
+
 test "no config_warning for a working set or a datagram-only posture" {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};

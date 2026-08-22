@@ -763,6 +763,25 @@ pub fn init(config: Config) Error!Server {
                     "use Server.Config.defaultTransportParams() or set flow-control fields",
             } });
         }
+        // A hand-set §18.2 token is always wrong and is never what
+        // the setter wanted. `transport_params` is copied verbatim
+        // onto every accepted connection, and the accept path only
+        // OVERWRITES this field when `stateless_reset_key` is set —
+        // so a hand-set value is advertised, unchanged, to every
+        // peer. RFC 9000 §10.3 requires tokens to be per-CID and
+        // unpredictable; one shared token means any peer that ever
+        // handshook can reset any other peer's connection. It is
+        // also inert in the useful direction: the emitter derives
+        // from the key and refuses to send without one, so the
+        // advertised token would never be honored by this server.
+        if (tp.stateless_reset_token != null and config.stateless_reset_key == null) {
+            cb(config.log_user_data, .{ .config_warning = .{
+                .message = "transport_params.stateless_reset_token is set directly: the same " ++
+                    "token is advertised to every peer (RFC 9000 §10.3 requires per-CID " ++
+                    "unpredictable tokens) and this server can never emit a matching reset; " ++
+                    "set Server.Config.stateless_reset_key instead",
+            } });
+        }
     }
     const resolved_local_cid_len: u8 = if (config.quic_lb) |lb_cfg| blk: {
         if (lb_cfg.isPlaintext() and !resolved_transport_params.disable_active_migration) {
