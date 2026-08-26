@@ -5,6 +5,70 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.17.0] - 2026-08-26
+
+The receive-side DATAGRAM release. Inbound queue overflow now sheds
+datagrams (RFC 9221 §5.3) instead of closing the connection — before
+this, one conforming packet packed with tiny DATAGRAM frames could
+kill its own connection, which a new downstream embedding (mruby-quic,
+fed by a quinn-based client) hit live. Plus a receive-drop counter,
+honest inbound-queue accounting, and a comment-anchor lint. Wire
+defaults and encodings are unchanged.
+
+Verified toolchain: zig 0.17.0-dev.1683+5ceec001b (CI pin; also
+built on dev.1786 locally).
+
+### Changed
+
+- **Inbound DATAGRAM overflow sheds instead of closing.** RFC 9221
+  §5.3: datagrams "MAY be dropped by the receiver if the receiver
+  cannot process them"; nothing in the RFC calls for a close, and
+  closing converted recoverable loss into an unrecoverable fault.
+  `handleDatagram` queue pressure — and, on this path only, an
+  over-cap `max_connection_memory` reservation — now drops the
+  arriving datagram and counts it. The two RFC 9221 §3
+  negotiated-parameter closes stay (frame above the advertised
+  `max_datagram_frame_size`; any DATAGRAM when support was not
+  advertised). CRYPTO and STREAM overflow still closes, deliberately:
+  reliable bytes cannot be shed after the carrying packet is ACKed,
+  while a datagram ACK explicitly does not promise app delivery
+  (§5.2). Send-side `DatagramQueueFull` backpressure is unchanged.
+- **The inbound queue's 64-item count cap is retired.** A single
+  ~1200-byte packet can legally carry hundreds of minimal DATAGRAM
+  frames (~3 bytes each), so any small fixed count was trippable by
+  one conforming packet; it effectively bounded "datagrams per
+  event-loop iteration", which nothing documented. Admission now
+  charges `payload + recv_datagram_item_overhead` (new const, 48
+  bytes, comptime-checked against the queue-slot size) against
+  `max_pending_datagram_bytes`, so tiny/empty datagrams cannot
+  occupy unbounded slots and the worst-case queue length (~1365)
+  keeps `popRecvDatagram`'s O(n) head removal bounded.
+  `max_pending_datagram_count` remains as the send-side cap it always
+  documented. Capacity check: ~10-byte payloads now queue ≈1130 deep
+  (was 64).
+- **New `ConnectionStats.datagrams_dropped_recv`** (additive,
+  monotonic): inbound datagrams shed under queue/memory pressure, so
+  an application can tell "peer never sent it" from "we shed it".
+  The `receiveDatagram` docs now state the drain contract: drain to
+  empty each service iteration — one pop per event-loop tick cannot
+  keep up with packed frames (`quic.app` already drains in a loop).
+  Two alternatives were considered and rejected, with rationale in
+  the code and commit: a per-drop hook (fires exactly under drop
+  storms; the counter carries the signal at O(1)) and a batch-drain
+  API (fatality gone, cost unmeasured — reopen with a profile).
+
+### Documentation
+
+- **The ghost "hardening guide" citations are gone again, and a lint
+  now keeps them out.** Commit `4a3ecdd` (0.10.x) removed 27 comments
+  citing section numbers of an internal security guide that was never
+  written; later work reintroduced ~45 more, plus two pointers to
+  README sections that do not exist. All are repointed to the
+  governing RFC section or a self-contained mechanism name, keeping
+  every rationale. `tests/lint_comment_anchors.zig` (part of
+  `zig build test`, mutation-checked) fails on any comment matching
+  the ghost citation style, so the third wave cannot land.
+
 ## [0.16.1] - 2026-08-21
 
 Patch release: closes a stateless-reset configuration hole reported by
