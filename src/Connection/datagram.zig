@@ -95,7 +95,7 @@ pub fn receiveDatagram(conn: *Connection, dst: []u8) Error!?usize {
 pub fn receiveDatagramInfo(conn: *Connection, dst: []u8) ?IncomingDatagram {
     const item = conn.pending_frames.popRecvDatagram() orelse return null;
     defer conn.allocator.free(item.data);
-    // Hardening guide §3.5 / §8: pair the resident-bytes release
+    // Per-connection memory DoS cap: pair the resident-bytes release
     // with the queue dequeue. `popRecvDatagram` already decrements
     // `recv_datagram_bytes`; this drops the matching cents from
     // the global resident-bytes counter.

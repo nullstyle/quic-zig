@@ -30,6 +30,12 @@ pub const ConnectionStats = struct {
     packets_sent: u64,
     packets_received: u64,
     packets_lost: u64,
+    /// Inbound RFC 9221 DATAGRAMs shed under queue/memory pressure
+    /// instead of queued (receiver-side drop is permitted by §5.3;
+    /// the connection stays up). Monotonic. A rising value means the
+    /// application drains `receiveDatagram` slower than the peer
+    /// sends — drain the queue to empty each service iteration.
+    datagrams_dropped_recv: u64,
 
     /// The path the snapshot section below describes.
     active_path_id: u32,
@@ -59,6 +65,7 @@ pub fn stats(conn: *const Connection) ConnectionStats {
         .packets_sent = conn.qlog_packets_sent,
         .packets_received = conn.qlog_packets_received,
         .packets_lost = conn.qlog_packets_lost,
+        .datagrams_dropped_recv = conn.datagrams_dropped_recv,
 
         .active_path_id = active_id,
         .cwnd = if (ps) |p| p.cwnd else 0,

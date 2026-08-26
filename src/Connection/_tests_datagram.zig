@@ -12,6 +12,8 @@ const default_mtu = state.default_mtu;
 const frame_mod = state.frame_mod;
 const long_packet_mod = state.long_packet_mod;
 const max_pending_datagram_count = state.max_pending_datagram_count;
+const max_pending_datagram_bytes = state.max_pending_datagram_bytes;
+const recv_datagram_item_overhead = state.recv_datagram_item_overhead;
 const max_supported_udp_payload_size = state.max_supported_udp_payload_size;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const util = @import("_test_util.zig");
@@ -208,11 +210,13 @@ test "tracked DATAGRAM emits loss event without retransmission" {
     try std.testing.expectEqual(lost.pn, event.datagram_lost.packet_number);
 }
 
-test "handleDatagram enforces local DATAGRAM limit and queue budget" {
+test "handleDatagram closes on parameter violation, sheds on queue pressure" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
 
+    // A DATAGRAM frame when we advertised no support is a negotiated-
+    // parameter violation (RFC 9221 §3) — this close stays.
     {
         const conn = try Connection.createServer(allocator, ctx);
         defer conn.destroy();
@@ -220,28 +224,68 @@ test "handleDatagram enforces local DATAGRAM limit and queue budget" {
         try std.testing.expect(conn.lifecycle.pending_close != null);
         try std.testing.expectEqual(transport_error_protocol_violation, conn.lifecycle.pending_close.?.error_code);
         try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.recv_datagrams.items.len);
+        try std.testing.expectEqual(@as(u64, 0), conn.datagrams_dropped_recv);
     }
 
+    // A burst of small datagrams far past the retired 64-item cap all
+    // queue: one conforming ~1200-byte packet can carry hundreds of
+    // minimal DATAGRAM frames, so bursting past a small fixed count
+    // must not read as a peer fault (the old cap closed here).
     {
         const conn = try Connection.createServer(allocator, ctx);
         defer conn.destroy();
         conn.local_transport_params.max_datagram_frame_size = max_supported_udp_payload_size;
-        while (conn.pending_frames.recv_datagrams.items.len < max_pending_datagram_count) {
+        var i: usize = 0;
+        while (i < 200) : (i += 1) {
+            try conn.handleDatagram(.application, .{ .data = "0123456789", .has_length = true });
+        }
+        try std.testing.expect(conn.lifecycle.pending_close == null);
+        try std.testing.expectEqual(@as(usize, 200), conn.pending_frames.recv_datagrams.items.len);
+        try std.testing.expectEqual(@as(usize, 2000), conn.pending_frames.recv_datagram_bytes);
+        try std.testing.expectEqual(@as(u64, 0), conn.datagrams_dropped_recv);
+    }
+
+    // Overflowing the byte budget (payload + per-item overhead) sheds
+    // the arrivals — RFC 9221 §5.3 — and counts them; the connection
+    // stays up, and draining one item readmits exactly one.
+    {
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        conn.local_transport_params.max_datagram_frame_size = max_supported_udp_payload_size;
+        const per_item = 1 + recv_datagram_item_overhead;
+        const cap = max_pending_datagram_bytes / per_item;
+        var i: usize = 0;
+        while (i < cap + 5) : (i += 1) {
             try conn.handleDatagram(.application, .{ .data = "x", .has_length = true });
         }
-        try std.testing.expectEqual(max_pending_datagram_count, conn.pending_frames.recv_datagrams.items.len);
-        try std.testing.expectEqual(max_pending_datagram_count, conn.pending_frames.recv_datagram_bytes);
+        try std.testing.expect(conn.lifecycle.pending_close == null);
+        try std.testing.expectEqual(cap, conn.pending_frames.recv_datagrams.items.len);
+        try std.testing.expectEqual(@as(u64, 5), conn.datagrams_dropped_recv);
 
         var buf: [1]u8 = undefined;
         const info = conn.receiveDatagramInfo(&buf).?;
         try std.testing.expectEqual(@as(usize, 1), info.len);
-        try std.testing.expectEqual(max_pending_datagram_count - 1, conn.pending_frames.recv_datagrams.items.len);
-        try std.testing.expectEqual(max_pending_datagram_count - 1, conn.pending_frames.recv_datagram_bytes);
+        try conn.handleDatagram(.application, .{ .data = "x", .has_length = true });
+        try conn.handleDatagram(.application, .{ .data = "x", .has_length = true });
+        try std.testing.expect(conn.lifecycle.pending_close == null);
+        try std.testing.expectEqual(cap, conn.pending_frames.recv_datagrams.items.len);
+        try std.testing.expectEqual(@as(u64, 6), conn.datagrams_dropped_recv);
+        try std.testing.expectEqual(@as(u64, 6), conn.stats().datagrams_dropped_recv);
+    }
 
-        try conn.handleDatagram(.application, .{ .data = "x", .has_length = true });
-        try conn.handleDatagram(.application, .{ .data = "x", .has_length = true });
-        try std.testing.expect(conn.lifecycle.pending_close != null);
-        try std.testing.expectEqual(transport_error_protocol_violation, conn.lifecycle.pending_close.?.error_code);
+    // The per-connection resident-bytes cap sheds too: the reliable
+    // buffers close on an over-cap reservation, but datagrams are
+    // sheddable (see Error.ExcessiveLoad).
+    {
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        conn.local_transport_params.max_datagram_frame_size = max_supported_udp_payload_size;
+        conn.max_connection_memory = 4;
+        try conn.handleDatagram(.application, .{ .data = "12345678", .has_length = true });
+        try std.testing.expect(conn.lifecycle.pending_close == null);
+        try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.recv_datagrams.items.len);
+        try std.testing.expectEqual(@as(u64, 1), conn.datagrams_dropped_recv);
+        try std.testing.expectEqual(@as(u64, 0), conn.bytes_resident);
     }
 }
 

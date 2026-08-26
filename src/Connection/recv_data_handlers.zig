@@ -21,7 +21,7 @@ const max_recv_plaintext = state_mod.max_recv_plaintext;
 const max_pending_crypto_fragments_per_level = state_mod.max_pending_crypto_fragments_per_level;
 const transport_error_excessive_load = state_mod.transport_error_excessive_load;
 const max_supported_udp_payload_size = state_mod.max_supported_udp_payload_size;
-const max_pending_datagram_count = state_mod.max_pending_datagram_count;
+const recv_datagram_item_overhead = state_mod.recv_datagram_item_overhead;
 const max_crypto_reassembly_gap = state_mod.max_crypto_reassembly_gap;
 const max_pending_datagram_bytes = state_mod.max_pending_datagram_bytes;
 const max_pending_crypto_bytes_per_level = state_mod.max_pending_crypto_bytes_per_level;
@@ -30,6 +30,22 @@ const transport_error_flow_control = state_mod.transport_error_flow_control;
 const transport_error_final_size = state_mod.transport_error_final_size;
 
 /// Apply a peer-sent DATAGRAM frame (RFC 9221) to the inbound queue.
+///
+/// Overflow policy: a frame above the advertised
+/// `max_datagram_frame_size` (or sent when we advertised none) is a
+/// negotiated-parameter violation and closes the connection — RFC 9221
+/// §3 mandates PROTOCOL_VIOLATION for both. Queue pressure is NOT a
+/// violation: one conforming ~1200-byte packet can carry hundreds of
+/// minimal DATAGRAM frames, so overflow only means the application is
+/// draining slower than the peer sends. Per §5.3, datagrams "MAY be
+/// dropped by the receiver if the receiver cannot process them" — so
+/// pressure sheds the arriving datagram and counts it in
+/// `datagrams_dropped_recv`. DATAGRAM is the only peer-fed buffer with
+/// shed semantics: CRYPTO and STREAM overflow still closes, because
+/// reliable bytes cannot be shed after the carrying packet is ACKed,
+/// while a datagram ACK explicitly does not promise app delivery
+/// (§5.2).
+///
 /// Public so per-connection hardening tests can drive the
 /// resident-bytes accounting without crafting encrypted packets;
 /// the production path is `handleOnePacket` → `handleApplication`.
@@ -43,22 +59,25 @@ pub fn handleDatagram(
         conn.close(true, transport_error_protocol_violation, "datagram exceeds local limit");
         return;
     }
-    if (conn.pending_frames.recv_datagrams.items.len >= max_pending_datagram_count) {
-        conn.close(true, transport_error_protocol_violation, "datagram receive queue exhausted");
+    // Inbound-queue budget: payload bytes plus a per-item overhead
+    // charge, so tiny (even empty) datagrams cannot occupy unbounded
+    // queue slots under the byte budget alone. No item-count cap —
+    // the overhead charge already bounds the count (see the constant).
+    const need = dg.data.len + recv_datagram_item_overhead;
+    const used = conn.pending_frames.recv_datagram_bytes +
+        conn.pending_frames.recv_datagrams.items.len * recv_datagram_item_overhead;
+    if (need > max_pending_datagram_bytes or used > max_pending_datagram_bytes - need) {
+        conn.datagrams_dropped_recv += 1;
         return;
     }
-    if (dg.data.len > max_pending_datagram_bytes or
-        conn.pending_frames.recv_datagram_bytes > max_pending_datagram_bytes - dg.data.len)
-    {
-        conn.close(true, transport_error_protocol_violation, "datagram receive budget exhausted");
-        return;
-    }
-    // Hardening guide §3.5 / §8: the inbound DATAGRAM queue and
-    // every other peer-controlled buffer share one resident-bytes
-    // budget so a peer cannot bypass each per-buffer cap by
-    // ballooning many of them at once.
+    // Per-connection memory DoS cap (`max_connection_memory`): the
+    // inbound DATAGRAM queue and every other peer-controlled buffer
+    // share one resident-bytes budget so a peer cannot bypass each
+    // per-buffer cap by ballooning many of them at once. The reliable
+    // buffers close on an over-cap reservation; datagrams are
+    // sheddable (RFC 9221 §5.3), so shed instead.
     conn.tryReserveResidentBytes(dg.data.len) catch {
-        conn.close(true, transport_error_excessive_load, "excessive resource use");
+        conn.datagrams_dropped_recv += 1;
         return;
     };
     const copy = conn.allocator.alloc(u8, dg.data.len) catch |err| {

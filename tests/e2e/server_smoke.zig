@@ -1754,11 +1754,14 @@ test "Stream recv reassembly past max_connection_memory closes the connection" {
 }
 
 test "Frees release resident bytes so the cap is reusable" {
-    // Hardening guide §3.5 / §8: every reservation pairs with a
+    // Per-connection memory DoS cap: every reservation pairs with a
     // release on the matching free path. Reserve a chunk that sits
-    // close to the cap, drain it via `receiveDatagramInfo` (the
-    // dequeue path that releases the corresponding bytes), then
-    // reserve again. The second reservation must succeed.
+    // close to the cap, shed an arrival that would overshoot it
+    // (inbound DATAGRAMs shed rather than close — RFC 9221 §5.3),
+    // drain via `receiveDatagram` (the dequeue path that releases the
+    // corresponding bytes), then reserve again. The post-drain
+    // reservation must succeed — the cap is a ceiling on *resident*
+    // bytes, not a quota over the connection's lifetime.
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
@@ -1776,25 +1779,25 @@ test "Frees release resident bytes so the cap is reusable" {
     try std.testing.expectEqual(@as(u64, 600), conn.bytes_resident);
 
     // Second DATAGRAM with the buffer still full would overshoot
-    // 800. Verify we can drain and then reserve again — the cap is
-    // a soft ceiling on *resident* bytes, not a quota over the
-    // connection's lifetime.
+    // 800: it is shed and counted, and the connection stays up.
     var dg2: [400]u8 = @splat('D');
     try conn.handleDatagram(.application, .{ .data = &dg2 });
-    // Connection should have closed with EXCESSIVE_LOAD; after
-    // draining, the budget recovers.
-    const ev1 = conn.closeEvent() orelse return error.TestExpectedClose;
-    try std.testing.expectEqual(
-        quic.conn.state.transport_error_excessive_load,
-        ev1.error_code,
-    );
+    try std.testing.expect(conn.closeEvent() == null);
+    try std.testing.expectEqual(@as(u64, 1), conn.datagrams_dropped_recv);
+    try std.testing.expectEqual(@as(u64, 600), conn.bytes_resident);
 
     // Drain the queued DATAGRAM and confirm the budget drops back
-    // toward the floor.
+    // to the floor.
     var sink: [4096]u8 = undefined;
     const got = (try conn.receiveDatagram(&sink)) orelse return error.TestExpectedDatagram;
     try std.testing.expectEqual(@as(usize, 600), got);
     try std.testing.expectEqual(@as(u64, 0), conn.bytes_resident);
+
+    // The freed headroom is reusable: the datagram that was shed
+    // over the cap now lands when resent.
+    try conn.handleDatagram(.application, .{ .data = &dg2 });
+    try std.testing.expectEqual(@as(u64, 400), conn.bytes_resident);
+    try std.testing.expectEqual(@as(u64, 1), conn.datagrams_dropped_recv);
 }
 
 // -- §4.1: listener-level packet rate limit ---------------------------

@@ -484,6 +484,13 @@ qlog_packets_lost: u64 = 0,
 qlog_bytes_sent: u64 = 0,
 /// Total UDP payload bytes the peer has sent us.
 qlog_bytes_received: u64 = 0,
+/// Inbound RFC 9221 DATAGRAMs shed under queue/memory pressure
+/// instead of queued (§5.3 permits receiver-side drop; see
+/// `handleDatagram`). Monotonic; surfaced as
+/// `ConnectionStats.datagrams_dropped_recv`. A rising value means
+/// the application drains `receiveDatagram` slower than the peer
+/// sends — drain the queue to empty each service iteration.
+datagrams_dropped_recv: u64 = 0,
 
 /// Local datagram budget for outgoing packets. Functions as the
 /// connection-wide ceiling: per-path PMTU values discovered via
@@ -839,13 +846,15 @@ pub const Error = error{
     /// this is a local-only signal paired with withheld MAX_STREAMS credit.
     ShuttingDown,
     /// `tryReserveResidentBytes` would push the connection past
-    /// `max_connection_memory`. Hardening guide §3.5 / §8: peer-driven
-    /// allocations (CRYPTO reassembly, DATAGRAM queues, stream
-    /// reassembly / send queues) collectively must not exceed the
-    /// per-Connection budget. Returned from any handler that detects
-    /// an over-cap reservation; callers close the connection with
-    /// `transport_error_excessive_load` and a redacted reason before
-    /// the over-cap allocation lands.
+    /// `max_connection_memory` (the per-connection memory DoS cap):
+    /// peer-driven allocations (CRYPTO reassembly, DATAGRAM queues,
+    /// stream reassembly / send queues) collectively must not exceed
+    /// the per-Connection budget. Returned from any handler that
+    /// detects an over-cap reservation; callers close the connection
+    /// with `transport_error_excessive_load` and a redacted reason
+    /// before the over-cap allocation lands. Exception: inbound
+    /// DATAGRAMs are sheddable (RFC 9221 §5.3), so `handleDatagram`
+    /// drops the arriving datagram and counts it instead of closing.
     ExcessiveLoad,
     /// `Connection.setNewTokenCallback` /
     /// `Connection.queueNewToken` / `Connection.setInitialToken` were
@@ -1062,9 +1071,34 @@ pub const min_quic_udp_payload_size: usize = default_mtu;
 /// Bounded queue budgets for RFC 9221 DATAGRAM payloads.
 pub const max_outbound_datagram_payload_size: usize = default_mtu - 9;
 /// Maximum number of unsent outbound DATAGRAM frames buffered at once.
+/// Send-side only: `sendDatagram` returns `DatagramQueueFull` at the
+/// cap so the application feels the backpressure directly. The inbound
+/// queue is deliberately NOT count-capped — a single ~1200-byte packet
+/// can legally carry hundreds of minimal DATAGRAM frames, so any small
+/// fixed count is trippable by one conforming packet; it is bounded by
+/// bytes instead (`max_pending_datagram_bytes` with
+/// `recv_datagram_item_overhead` charged per item) and sheds on
+/// overflow — see `handleDatagram`.
 pub const max_pending_datagram_count: usize = 64;
-/// Maximum total byte volume of unsent outbound DATAGRAM frames buffered at once.
+/// Maximum total byte volume of buffered DATAGRAM frames, per
+/// direction: unsent outbound frames on the send side, and
+/// received-but-unread frames on the receive side (where each queued
+/// item additionally charges `recv_datagram_item_overhead`).
 pub const max_pending_datagram_bytes: usize = 64 * 1024;
+/// Per-item charge against `max_pending_datagram_bytes` for each
+/// *inbound* queued DATAGRAM, covering the queue slot
+/// (`@sizeOf(PendingRecvDatagram)`, 24 bytes on 64-bit) plus allocator
+/// bookkeeping for the payload copy. Without it, tiny (even empty)
+/// datagrams would queue in unbounded numbers under a pure payload-byte
+/// budget. It also bounds the worst-case queue length to
+/// `max_pending_datagram_bytes / recv_datagram_item_overhead` (~1365),
+/// which in turn bounds `popRecvDatagram`'s O(n) head removal.
+pub const recv_datagram_item_overhead: usize = 48;
+comptime {
+    // The overhead charge must at least cover the queue slot it
+    // stands in for; the remainder approximates allocator bookkeeping.
+    std.debug.assert(recv_datagram_item_overhead >= @sizeOf(PendingFrameQueues.PendingRecvDatagram));
+}
 
 /// Bounded reassembly budgets for peer-controlled CRYPTO gaps.
 pub const max_pending_crypto_bytes_per_level: usize = 64 * 1024;
@@ -2744,6 +2778,14 @@ pub const advertiseAlternativeV6Address = conn_migration.advertiseAlternativeV6A
 /// member of the silent-failure family; `receiveDatagramInfo`
 /// remains the truncate-and-report alternative for callers that
 /// prefer a fixed buffer.)
+///
+/// The inbound queue is bounded (`max_pending_datagram_bytes` plus a
+/// per-item overhead charge). While it is full, newly arriving
+/// datagrams are shed — not fatal to the connection (RFC 9221 §5.3) —
+/// and counted in `ConnectionStats.datagrams_dropped_recv`. Drain to
+/// empty (loop until null) each service iteration; popping one
+/// datagram per event-loop tick cannot keep up with a peer that packs
+/// many small DATAGRAM frames into each packet.
 pub const receiveDatagram = conn_datagram.receiveDatagram;
 
 /// Pop the oldest received DATAGRAM and include whether it arrived
