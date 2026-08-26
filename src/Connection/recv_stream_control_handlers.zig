@@ -26,7 +26,7 @@ pub fn handleResetStream(conn: *Connection, rs: frame_types.ResetStream) Error!v
         .stream = "peer reset exceeds stream data limit",
         .conn = "peer reset exceeds connection data limit",
     }) orelse return;
-    // Hardening guide §3.5 / §8: snapshot the recv buffer length
+    // Per-connection memory DoS cap: snapshot the recv buffer length
     // before `resetStream`, which discards buffered-but-undelivered
     // bytes (no-longer-needed reassembly state) and shrinks the
     // backing allocation to zero. Reconcile the global

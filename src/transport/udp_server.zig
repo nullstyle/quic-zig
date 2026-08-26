@@ -56,8 +56,7 @@ pub const SendBatch = egress.SendBatch;
 /// the QNS endpoint's `rx` buffer.
 pub const default_rx_buffer_bytes: usize = 64 * 1024;
 
-// Hardening guide §8 `max_datagrams_per_event_loop_tick`: ingress per
-// iteration is BOUNDED — the loop receives at most
+// Bounded per-iteration ingress budget: the loop receives at most
 // `RunUdpOptions.max_datagrams_per_iteration` datagrams per listener
 // (one batched `receiveManyTimeout` call), then drains every slot's
 // outbox and ticks before looping back. The bound keeps PTO /

@@ -43,7 +43,7 @@ const frame_type_alternative_v6_address: u64 = 0x1d5845e3;
 ///   underflows the descending PN cursor. Per RFC 9000 §19.3.1, ranges
 ///   are encoded strictly descending from `largest_acked`; any
 ///   redundancy is malformed and a peer that emits it is wasting
-///   decoder cycles. Hardening guide §4.7 calls for fail-fast at
+///   decoder cycles. The decode-DoS policy is fail-fast at
 ///   decode rather than letting downstream loss-detection see ranges
 ///   that overlap each other.
 pub const Error = varint.Error || wire_header.Error || error{
@@ -264,7 +264,7 @@ fn decodePathAck(src: []const u8, start: usize, with_ecn: bool) Error!Decoded {
 /// subtraction would dip below zero — is malformed. There is no valid
 /// way for two ranges in a single ACK frame to overlap or duplicate
 /// each other; an "overlapping" encoding manifests as one of these
-/// underflows because PN-space is unsigned. Hardening guide §4.7.
+/// underflows because PN-space is unsigned — the fail-fast decode gate.
 ///
 /// `ranges_bytes` is the slice the decode loop above already
 /// successfully parsed, so varint.decode here cannot fail

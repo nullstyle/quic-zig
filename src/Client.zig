@@ -115,7 +115,7 @@ pub const Config = struct {
     /// derived from `ca_pem`. The auto-built context's
     /// `early_data_enabled` flag follows whether `resumption_state` is
     /// non-null — 0-RTT is only enabled at the TLS layer when the
-    /// embedder actually plans to use it (§5.2 / §12 hardening).
+    /// embedder actually plans to use it (replayable 0-RTT stays opt-in).
     /// Pass your own to enable, e.g., custom session-ticket capture
     /// or keylog wiring (see the QNS endpoint).
     tls_context_override: ?boringssl.tls.Context = null,
@@ -192,8 +192,8 @@ pub const Config = struct {
 
     /// Hard ceiling on the aggregate bytes resident in peer-controlled
     /// reassembly / queue buffers for this connection (the
-    /// `Connection.max_connection_memory` memory-DoS cap; hardening
-    /// guide §3.5 / §8). Mirrors `Server.Config.max_connection_memory`
+    /// `Connection.max_connection_memory` per-connection memory-DoS
+    /// cap). Mirrors `Server.Config.max_connection_memory`
     /// — a client talking to a hostile or buggy server benefits from
     /// the same aggregate bound. Defaults to
     /// `Connection.default_max_connection_memory` (32 MiB), the value

@@ -457,7 +457,7 @@ retry_token_lifetime_us: u64,
 retry_state_table_capacity: u32,
 
 /// Captured `Config.new_token_key`. Null disables NEW_TOKEN
-/// issuance. Hardening guide §4.3 / RFC 9000 §8.1.3.
+/// issuance. RFC 9000 §8.1.3 (address validation for future connections).
 new_token_key: ?conn_mod.NewTokenKey,
 /// Captured `Config.new_token_lifetime_us`. Only consulted when
 /// `new_token_key` is non-null.
@@ -495,13 +495,13 @@ preferred_address: ?PreferredAddressConfig,
 /// Resolved `Config.listener_datagram_rate_limit`. Null disables the
 /// listener-level packet rate limit; otherwise gates *every*
 /// inbound datagram (existing-slot routes included) at the very
-/// top of `feed`. Hardening guide §4.1.
+/// top of `feed`. Global listener DoS backstop.
 max_datagrams_per_window: ?u64,
 /// Resolved `Config.listener_byte_rate_limit`. Null disables the
 /// listener-level byte rate limit; otherwise gates *every* inbound
 /// datagram by total bytes accumulated within the shared window.
 /// Runs after the packet-count gate at the top of `feed`.
-/// Hardening guide §4.1.
+/// Global listener DoS backstop.
 max_bytes_per_window: ?u64,
 /// Captured `Config.listener_rate_window_us`. Window length shared
 /// by the two listener limiters.
@@ -517,11 +517,11 @@ listener_rate_window_start_us: u64 = 0,
 /// the per-source bandwidth shaper; when set, every datagram that
 /// the global listener gates approve charges `bytes.len` against
 /// the source's token bucket (one second's burst capacity, refills
-/// at the configured rate). Hardening guide §4.1 token-bucket.
+/// at the configured rate). Per-source token-bucket DoS defense.
 max_bytes_per_source_per_second: ?u64,
 
 /// Resolved `Config.log_source_rate_limit`. Null
-/// disables the per-source log rate limit. Hardening guide §9.4.
+/// disables the per-source log rate limit (log-flood DoS defense).
 max_log_events_per_source: ?u64,
 
 /// Captured `Config.accepted_versions`. Drives both the Version Negotiation
@@ -603,7 +603,7 @@ feeds_listener_byte_rate_limited: u64 = 0,
 /// (`Config.source_byte_rate_limit`). Subset of
 /// `feeds_dropped`. Spiking values point at a single-source
 /// bandwidth abuser that the global listener cap is wide enough
-/// to let through. Hardening guide §4.1 token-bucket.
+/// to let through. Per-source token-bucket DoS defense.
 feeds_source_bandwidth_limited: u64 = 0,
 /// Egress attempts abandoned because the socket reported a *local*
 /// fault — no interface (`NetworkDown`), no buffers
@@ -677,7 +677,7 @@ pub fn init(config: Config) Error!Server {
         // that as misconfiguration.
         if (config.new_token_lifetime_us == 0) return Error.InvalidConfig;
     }
-    // Hardening guide §4.1: cap=0 is meaningless for the listener
+    // Cap=0 is meaningless for the listener
     // rate limits — it would drop every datagram. Surface it as
     // `InvalidConfig` instead of letting it silently DoS the
     // server itself.
@@ -689,7 +689,7 @@ pub fn init(config: Config) Error!Server {
         if (cap == 0) return Error.InvalidConfig;
         if (config.listener_rate_window_us == 0) return Error.InvalidConfig;
     }
-    // Hardening guide §4.1 token-bucket: cap=0 is meaningless —
+    // Per-source token-bucket shaper: cap=0 is meaningless —
     // it would drop every datagram. Surface it as `InvalidConfig`
     // instead of letting it silently DoS the server. The shaper
     // shares the `source_rate_table` with `acceptSourceRate` /
@@ -854,7 +854,7 @@ pub fn init(config: Config) Error!Server {
     // no PRNG-from-seed cache: each ID is a fresh
     // `crypto.rand.fillBytes` call so an attacker observing
     // server-issued CIDs can't predict future ones from a finite
-    // PRNG state. (Hardening guide §4.5.)
+    // PRNG state.
 
     const slots_initial_capacity: usize = @min(config.max_concurrent_connections, 64);
     var slots: std.ArrayList(*Slot) = .empty;
@@ -1036,7 +1036,7 @@ pub fn deinit(self: *Server) void {
     self.source_rate_table.deinit(self.allocator);
     self.retry_state_table.deinit(self.allocator);
     self.stateless_responses.deinit(self.allocator);
-    // Hardening guide §3.5 / §9.4: zero the Retry-token HMAC key
+    // Zero-sensitive-material policy: zero the Retry-token HMAC key
     // before the `Server` struct is released. Even though the
     // memory is about to leave scope, the optimizer can't elide
     // a volatile-backed `secureZero`, so the key bytes don't
@@ -1139,7 +1139,7 @@ pub fn feedWithEcn(
     // Server-driven time. No-op when 0-RTT or anti-replay isn't
     // configured.
     if (self.early_data_anti_replay) |tracker| tracker.bumpClock(now_us);
-    // Hardening guide §4.1: listener-level packet + byte rate
+    // Global DoS backstop: listener-level packet + byte rate
     // limits. Runs *before* the empty-bytes check, before the
     // 1200-byte Initial size gate, before slot lookup — every
     // datagram entering the server passes here so a flood from
@@ -1187,7 +1187,7 @@ pub fn feedWithEcn(
         return .dropped;
     }
 
-    // Hardening guide §4.1 token-bucket: per-source bandwidth
+    // Token-bucket DoS defense: per-source bandwidth
     // shaper. Runs after the global listener gates (so the global
     // aggregate ceiling still bounds total bandwidth even when
     // every source has a full bucket) but before slot lookup (so

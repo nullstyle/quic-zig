@@ -1,4 +1,4 @@
-//! Hardening guide §11.2 #14 regression: all-unknown-frames payload.
+//! DoS regression: all-unknown-frames payload.
 //!
 //! A peer that fills a 1-RTT packet with bytes that all decode as
 //! unknown QUIC frame types must not be able to make the receiver

@@ -513,7 +513,7 @@ test "DATAGRAM round-trips through the 1-RTT path" {
     try std.testing.expectEqualStrings("hello-from-client", rx_s[0..sn]);
 }
 
-test "CONNECTION_CLOSE wire-redacts the reason by default (hardening §9 / §12)" {
+test "CONNECTION_CLOSE wire-redacts the reason by default" {
     const allocator = std.testing.allocator;
 
     var server_tls: boringssl.tls.Context = undefined;

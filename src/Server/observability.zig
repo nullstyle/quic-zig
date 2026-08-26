@@ -194,19 +194,17 @@ pub const MetricsSnapshot = struct {
     feeds_reset_rate_limited: u64,
     /// Datagrams dropped at the listener-level packet rate limit
     /// (`Config.listener_datagram_rate_limit`). Subset of `feeds_dropped`.
-    /// Hardening guide §4.1.
     feeds_listener_rate_limited: u64,
     /// Datagrams dropped at the listener-level byte rate limit
     /// (`Config.listener_byte_rate_limit`). Subset of `feeds_dropped`.
     /// Tracks bandwidth-flavored floods that the packet-count cap
-    /// would let through (few-but-large datagrams). Hardening guide §4.1.
+    /// would let through (few-but-large datagrams).
     feeds_listener_byte_rate_limited: u64,
     /// Datagrams dropped at the per-source bandwidth shaper
     /// (`Config.source_byte_rate_limit`). Subset of
     /// `feeds_dropped`. Distinct from `feeds_listener_byte_rate_limited`:
     /// the listener cap protects the aggregate firehose, this protects
     /// against any single source consuming more than its fair share.
-    /// Hardening guide §4.1 token-bucket.
     feeds_source_bandwidth_limited: u64,
     /// Egress attempts abandoned on a *local* socket fault
     /// (NetworkDown / SystemResources / AccessDenied) inside
@@ -217,7 +215,7 @@ pub const MetricsSnapshot = struct {
     /// LogEvents the server dropped under the per-source log rate
     /// limit (`Config.log_source_rate_limit`).
     /// Distinct from `feeds_dropped` — feeding a datagram and emitting
-    /// a log are separate side effects. Hardening guide §9.4.
+    /// a log are separate side effects (log-flood DoS defense).
     feeds_log_rate_limited: u64,
     /// Echoed Retry tokens that successfully validated and led to a
     /// post-Retry `.accepted`. Always less than or equal to
@@ -393,7 +391,7 @@ pub fn rateLimitSnapshot(server: *const Server) RateLimitSnapshot {
 /// rate limit. Returns null when the event has no source attribution
 /// (e.g. `stateless_queue_evicted`) or the source is itself null
 /// (`connection_closed` / `table_full` paths where the embedder
-/// didn't pass `from`). Hardening guide §9.4: events with no source
+/// didn't pass `from`). Log-flood defense scope: events with no source
 /// bypass the limiter.
 fn logEventSource(ev: LogEvent) ?Address {
     return switch (ev) {

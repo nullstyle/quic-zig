@@ -7,7 +7,7 @@
 //! previous v1 HMAC-only format leaked all bound fields in plaintext
 //! (only the HMAC tag was opaque); v2 keeps the same authenticity
 //! guarantee while making the token bytes a uniformly random opaque
-//! blob to peers and on-path observers (hardening item B2).
+//! blob to peers and on-path observers (anti-fingerprinting).
 //!
 //! Wire format (v2, fixed 96 bytes):
 //!

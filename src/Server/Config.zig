@@ -302,8 +302,8 @@ local_cid_len: u8 = 8,
 /// issued reset token: live connections through the restart no
 /// longer drop on stateless reset — which defeats the crash-restart
 /// detection in (2), the case the mechanism most exists for. The
-/// same hardening note in the README §"Things you must wire
-/// yourself" applies.
+/// same persistence note in the README's Production Checklist
+/// applies.
 ///
 /// Do NOT hand-set `transport_params.stateless_reset_token`
 /// instead: §18.2's token belongs to the handshake CID, which
@@ -406,7 +406,7 @@ early_data_application_context: []const u8 = "quic-zig Server wrapper v1",
 /// unless `client_ca_pem` is set, which turns on required client
 /// -certificate verification (mTLS). The auto-built context's
 /// early-data posture is gated by `Config.early_data` (off by
-/// default; §5.2 / §12 hardening). Pass your own to enable
+/// default; replayable 0-RTT stays opt-in). Pass your own to enable
 /// session-ticket callbacks or any other TLS-context behavior the
 /// auto-built path doesn't expose; combining an override with
 /// `client_ca_pem` fails `init` with `InvalidConfig`.
@@ -445,7 +445,7 @@ source_rate_table_capacity: u32 = 4096,
 /// for the same reason as `initial_source_rate_limit`).
 /// `.disabled` turns the limiter off (every non-v1 long-header
 /// packet earns a VN response, subject only to the bounded
-/// global stateless queue). Hardening guide §4.4: a peer
+/// global stateless queue). Anti-amplification DoS defense: a peer
 /// flooding non-v1 long-header probes from a single address can
 /// otherwise force up to `stateless_response_queue_capacity`
 /// outbound bytes per drain cycle. `.default` applies
@@ -515,7 +515,7 @@ new_token_lifetime_us: u64 = 24 * 3600 * 1_000_000,
 /// QUIC 0-RTT (early data) posture on the auto-built TLS context
 /// (replaces `enable_0rtt: bool` + `early_data_anti_replay: ?*T`
 /// as of 0.10.0 — see `EarlyData`). `.disabled` by default to
-/// satisfy the §5.2 / §12 hardening posture: 0-RTT is replayable
+/// satisfy the anti-replay posture (RFC 9001 §9.2): 0-RTT is replayable
 /// and unsuitable for state-changing requests without an
 /// anti-replay mechanism (RFC 9001 §5.6 / RFC 8446 §8).
 ///
@@ -614,7 +614,7 @@ listener_byte_rate_limit: RateLimit = .default,
 /// listener-level caps share this single window.
 listener_rate_window_us: u64 = 1_000_000,
 
-/// Per-source bandwidth shaping (hardening §4.1 token-bucket; was
+/// Per-source bandwidth shaping (token-bucket DoS defense; was
 /// `max_bytes_per_source_per_second: ?u64` before 0.10.0). The cap
 /// is in **bytes per second**: every accepted datagram from a given
 /// source charges `bytes.len` against a token bucket that refills
@@ -632,8 +632,8 @@ listener_rate_window_us: u64 = 1_000_000,
 /// `InvalidConfig`.
 source_byte_rate_limit: RateLimit = .default,
 
-/// Per-source cap on `LogEvent` emissions per window (hardening
-/// guide §9.4; was `max_log_events_per_source_per_window: ?u32`
+/// Per-source cap on `LogEvent` emissions per window (log-flood
+/// DoS defense; was `max_log_events_per_source_per_window: ?u32`
 /// before 0.10.0 — renamed and retyped alongside its two sibling
 /// limiters so `null` could not silently switch off a
 /// default-on protection). When the cap fires, the log is

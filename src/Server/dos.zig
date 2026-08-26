@@ -22,8 +22,8 @@ const wire = @import("../wire/root.zig");
 /// seconds is comfortably longer than the default
 /// `source_rate_window_us` (one second), so a source seen recently
 /// enough to keep its bucket warm survives `pruneSourceRate` even
-/// when its Initial / VN / log windows have aged out. Hardening
-/// guide §4.1 token-bucket. Declared here (not on the hub): this
+/// when its Initial / VN / log windows have aged out (token-bucket
+/// DoS defense). Declared here (not on the hub): this
 /// file owns the source-rate table and is the constant's only user.
 pub const bandwidth_idle_threshold_us: u64 = 5_000_000;
 const StatelessResponse = Server.StatelessResponse;
@@ -84,7 +84,7 @@ pub fn acceptStatelessResetRate(
 /// burn the Initial / VN budgets and vice versa. Returns `true`
 /// when emission is permitted.
 ///
-/// Hardening guide §9.4: a peer that triggers many feed-rate-limit
+/// Log-flood DoS defense: a peer that triggers many feed-rate-limit
 /// or table-full or VN-rate-limit events from a single address
 /// would otherwise let the attacker flood the embedder's log
 /// pipeline (disk, stdout, structured-logging dependency, etc.).
@@ -160,8 +160,8 @@ fn ensureSourceRateRoom(server: *Server, now_us: u64) void {
 ///
 /// The bucket is sized to one second of `cap_per_second`, refills
 /// at `cap_per_second` bytes/s up to that ceiling, and debits
-/// `bytes_charged` per accepted datagram. Hardening guide §4.1
-/// token-bucket: this is the per-source companion to the global
+/// `bytes_charged` per accepted datagram. This token-bucket is
+/// the per-source companion to the global
 /// sliding-window byte-rate cap. The shaper sits AFTER the global
 /// listener gates so the global aggregate ceiling still bounds
 /// total bandwidth even with every source's bucket full.
@@ -604,7 +604,7 @@ pub const SourceRateEntry = struct {
     reset_window_start_us: u64 = 0,
     /// LogEvents emitted on behalf of this source within the current
     /// log window. Gated by `Config.log_source_rate_limit`.
-    /// Hardening guide §9.4: a flood of feed-rate-limited /
+    /// Log-flood DoS defense: a flood of feed-rate-limited /
     /// table-full / VN-rate-limited / etc. log events from one
     /// address would otherwise let the peer flood the embedder's
     /// log pipeline; this counter caps that.
@@ -614,7 +614,7 @@ pub const SourceRateEntry = struct {
     /// Token-bucket level (in bytes) for per-source bandwidth shaping.
     /// Gated by `Config.source_byte_rate_limit`. Refilled at
     /// the configured rate up to a one-second burst cap; each accepted
-    /// datagram debits `bytes.len`. Hardening guide §4.1 token-bucket.
+    /// datagram debits `bytes.len` (per-source token-bucket).
     bandwidth_tokens: u64 = 0,
     /// Wall-clock microseconds at the most recent token-bucket refill.
     /// Driven by the per-feed `now_us` so the shaper reads the

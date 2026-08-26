@@ -140,8 +140,8 @@ alert: ?u8 = null,
 /// `recordAuthenticatedDatagramAddress` bypasses its
 /// `handshakeDone()` check so peer-address-change tests can fire
 /// migration without driving a full TLS handshake. Production
-/// code MUST NOT set this — it disables RFC 9000 §9.6 / hardening
-/// guide §4.8 enforcement.
+/// code MUST NOT set this — it disables the RFC 9000 §9.6
+/// pre-confirmation migration gate.
 test_only_force_handshake_for_migration: bool = false,
 
 /// Whether to encode the locally-recorded close-reason string into
@@ -1915,7 +1915,7 @@ pub fn setHyStartEnabled(self: *Connection, enabled: bool) void {
 pub const Tunables = struct {
     /// See `Connection.reveal_close_reason_on_wire`.
     reveal_close_reason_on_wire: bool,
-    /// See `Connection.max_connection_memory` (hardening §3.5 / §8
+    /// See `Connection.max_connection_memory` (the per-connection
     /// aggregate memory DoS cap).
     max_connection_memory: u64,
     /// See `Connection.delayed_ack_packet_threshold` (RFC 9000
@@ -2020,7 +2020,7 @@ pub fn deinit(self: *Connection) void {
         list.deinit(self.allocator);
     }
 
-    // Hardening guide §3.5 / §9.4: zero sensitive packet
+    // Zero-sensitive-material policy: wipe packet
     // protection material before the buffers go back to the
     // allocator. `secureZero` is volatile-backed so the optimizer
     // can't elide it on the dead-store path where the struct is

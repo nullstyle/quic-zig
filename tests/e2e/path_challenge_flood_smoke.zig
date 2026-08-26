@@ -1,4 +1,4 @@
-//! Hardening guide §4.8 / §11.2 regression: PATH_CHALLENGE flood
+//! Path-probe flood defense regression: PATH_CHALLENGE flood
 //! (receive-side).
 //!
 //! A peer that floods the server with PATH_CHALLENGE frames must not

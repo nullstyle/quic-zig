@@ -913,7 +913,7 @@ test "Server.feed Retry happy-path: client echoes a valid token and a slot opens
     const retry = retry_parsed.header.retry;
     try std.testing.expectEqual(quic.QUIC_VERSION_1, retry.version);
     // v2 (AES-GCM-256) Retry token: 12-byte nonce + 68-byte ciphertext
-    // + 16-byte tag = 96 bytes. The §4.3 hardening pass moved off the
+    // + 16-byte tag = 96 bytes. The Retry-token hardening pass moved off the
     // v1 53-byte HMAC-only format so the wire bytes are uniformly
     // random (no plaintext bound-field reveal).
     try std.testing.expectEqual(quic.conn.retry_token.max_token_len, retry.retry_token.len);
@@ -1689,7 +1689,7 @@ test "Server metricsSnapshot stateless_queue_high_water is sticky across drains"
 // -- §3.5 / §8: Connection.max_connection_memory cap -------------------
 
 test "Connection rejects CRYPTO bytes that would exceed max_connection_memory" {
-    // Hardening guide §3.5 / §8: the per-Connection resident-bytes
+    // Memory DoS cap: the per-Connection resident-bytes
     // budget is the aggregate guard above the per-buffer caps. Tiny
     // cap here; push out-of-order CRYPTO totalling > cap so the
     // reservation trips before the per-level CRYPTO cap (which is
@@ -2043,7 +2043,7 @@ test "Server log rate limit window resets after elapsed" {
 }
 
 test "Server log rate limit doesn't block log events for from=null paths" {
-    // Hardening guide §9.4: events with no source attribution
+    // Log-flood defense scope: events with no source attribution
     // bypass the per-source log limiter. Verify by triggering a
     // table-full event with `from = null` — the log fires unconditionally.
     const protos = [_][]const u8{"hq-test"};

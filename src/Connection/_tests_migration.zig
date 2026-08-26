@@ -563,7 +563,7 @@ test "migration callback: no callback installed preserves prior migration behavi
 }
 
 test "pre-handshake migration: peer-address change is dropped, no PATH_CHALLENGE" {
-    // Hardening guide §4.8 / RFC 9000 §9.6: an authenticated peer-
+    // RFC 9000 §9.6: an authenticated peer-
     // address change before handshake confirmation is not legitimate
     // migration. The gate must drop the datagram (no anti-amp credit,
     // no validator state, no PATH_CHALLENGE) and emit
@@ -608,7 +608,7 @@ test "pre-handshake migration: peer-address change is dropped, no PATH_CHALLENGE
 }
 
 test "post-handshake migration: PATH_CHALLENGE rate-limit blocks rapid-fire probes" {
-    // Hardening guide §4.8: per-path PATH_CHALLENGE rate limit
+    // Path-probe flood defense: per-path PATH_CHALLENGE rate limit
     // (`min_path_challenge_interval_us`). The first migration after
     // handshake fires a challenge; a second migration arriving
     // sooner than the interval is rate-limited (no second challenge).

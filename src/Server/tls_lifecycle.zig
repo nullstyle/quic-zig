@@ -152,7 +152,7 @@ pub fn antiReplayEarlyDataTrampoline(
 /// `Server.init` and `replaceTlsContext({.pem = ...})` go through
 /// it, deliberately: the two paths used to carry hand-mirrored
 /// copies of this sequence, and commit 7fc58b6 landed the
-/// anti-replay hook (RFC 9001 §5.6 / hardening §5.2) on the init
+/// anti-replay hook (RFC 9001 §5.6) on the init
 /// copy only, leaving `.pem` cert rotations silently accepting
 /// replayed 0-RTT flights until 1b69f8a backfilled it. Every
 /// future posture knob (ticket keys, cipher preferences, OCSP,
@@ -200,7 +200,7 @@ pub fn buildServerContext(
         // full 1-RTT handshake on every resumption.
         try ctx.setAllowEarlyDataCallback(denyEarlyDataTrampoline, null);
     }
-    // Hardening §5.2 / RFC 9001 §5.6: when the embedder installs an
+    // RFC 9001 §5.6 (0-RTT anti-replay): when the embedder installs an
     // `AntiReplayTracker`, hook BoringSSL's pre-resumption
     // early-data callback so duplicate 0-RTT attempts are rejected
     // at the TLS layer (not just at application post-handshake). A

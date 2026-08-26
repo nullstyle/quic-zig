@@ -205,8 +205,8 @@ pub const Path = struct {
 
     /// Microseconds-clock when we most recently emitted a
     /// PATH_CHALLENGE for this path. Drives the rate-limit gate in
-    /// `Connection.recordAuthenticatedDatagramAddress` (hardening
-    /// guide §4.8: "rate-limit path probes"). Null until the first
+    /// `Connection.recordAuthenticatedDatagramAddress` (path-probe
+    /// flood defense: rate-limit path probes). Null until the first
     /// challenge.
     last_path_challenge_at_us: ?u64 = null,
 

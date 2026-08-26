@@ -240,7 +240,7 @@ test "MUST NOT accept an ACK whose range_count exceeds the implementation cap [R
     // §13.1 calls for bounded ACK processing; quic caps incoming
     // ACK range_count at 256 (`max_incoming_ack_ranges`). A peer
     // claiming 1000 ranges must be rejected before we walk any
-    // varint pairs — this is the §13.1 / hardening §4.7 DoS gate.
+    // varint pairs — this is the §13.1 fail-fast decode DoS gate.
     const bytes = [_]u8{
         0x02, // ACK (no ECN)
         0x00, // largest_acked = 0

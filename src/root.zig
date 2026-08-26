@@ -75,7 +75,7 @@ pub const qlog = @import("qlog/root.zig");
 /// Server-side QUIC-LB connection-ID generation
 /// (draft-ietf-quic-load-balancers-21). Off by default — wiring
 /// `Server.Config.quic_lb` opts in. See `lb.LbConfig` for the
-/// per-deployment shape and the README hardening note for the
+/// per-deployment shape and the `lb` module's hardening note for the
 /// CSPRNG-by-default inversion this introduces.
 pub const lb = @import("lb/root.zig");
 

@@ -1,4 +1,4 @@
-//! Hardening guide §4.4 / §11.2 regression: Version Negotiation flood
+//! Anti-amplification DoS regression: Version Negotiation flood
 //! under spoofed-source mix.
 //!
 //! Secure-by-default version negotiation uses two separate VN protections:

@@ -283,7 +283,7 @@ pub fn write(self: *SendStream, data: []const u8) Error!usize {
     if (self.fin_marked or self.reset != null) return Error.StreamClosed;
     if (data.len == 0) return 0;
 
-    // Hardening guide §8 (`max_send_queue_bytes`): cap how many
+    // Bounded send-queue memory cap: cap how many
     // app-written bytes can sit in `bytes` waiting to be sent.
     // Without this an embedder calling `streamWrite` faster than
     // the peer ACKs grows the buffer unboundedly.
@@ -842,7 +842,7 @@ test "stress with simulated 10% loss until convergence" {
     try testing.expectEqual(@as(u64, total), s.ackedFloor());
 }
 
-test "write short-writes when max_buffered cap would overflow (hardening §8)" {
+test "write short-writes when max_buffered cap would overflow" {
     // Cap at 8 bytes; first write of 6 bytes accepts all 6; second
     // write of 10 bytes only accepts the remaining 2 bytes of
     // headroom (8 - 6 = 2). A third write returns 0 — the queue is

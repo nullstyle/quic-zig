@@ -1,4 +1,4 @@
-//! Hardening guide §5.2 / §11.2 regression: 0-RTT replay rejection.
+//! Anti-replay regression (RFC 9001 §9.2): 0-RTT replay rejection.
 //!
 //! Embedders that opt in to 0-RTT (`Server.Config.early_data`)
 //! are required to wire `quic.tls.AntiReplayTracker` into their

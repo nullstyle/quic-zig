@@ -426,7 +426,7 @@ pub fn pollLevelOnPath(
         if (lvl != .application and conn.app_write_current != null) {
             return null;
         }
-        // Hardening guide §9 / §12: redact the reason on the wire
+        // Secure-by-default redaction: keep the reason off the wire
         // by default. Embedders can opt in to wire-visible reasons
         // via `reveal_close_reason_on_wire = true`. Local sticky
         // reason (`lifecycle.record(...)` above the close path) is

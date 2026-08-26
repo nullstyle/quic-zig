@@ -18,7 +18,7 @@
 //! ## Hardening note
 //!
 //! quic's default posture is "server SCIDs are CSPRNG draws — no
-//! deployment metadata leaks on the wire" (see README §"On by default").
+//! deployment metadata leaks on the wire".
 //! Configuring `Server.Config.quic_lb` deliberately inverts that: every
 //! minted CID encodes the configured `server_id`, and in plaintext mode
 //! anyone observing the network can read it. Treat the load balancer as

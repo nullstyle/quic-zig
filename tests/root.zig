@@ -28,4 +28,5 @@ test {
     _ = @import("e2e/testing_loopback.zig");
     _ = @import("e2e/public_api_smoke.zig");
     _ = @import("e2e/internal_surface_smoke.zig");
+    _ = @import("lint_comment_anchors.zig");
 }

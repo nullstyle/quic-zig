@@ -150,7 +150,7 @@ pub fn handleCrypto(
             conn.close(true, transport_error_protocol_violation, "crypto reassembly fragment count exceeds limit");
             return;
         }
-        // Hardening guide §3.5 / §8: reserve from the global
+        // Per-connection memory DoS cap: reserve from the global
         // resident-bytes budget *before* allocating. The per-level
         // crypto cap above gates a single level; this gates the
         // whole connection (CRYPTO + DATAGRAM + stream buffers
@@ -303,7 +303,7 @@ pub fn handleStream(
         .stream = "peer exceeded stream data limit",
         .conn = "peer exceeded connection data limit",
     }) orelse return;
-    // Hardening guide §3.5 / §8: snapshot the recv-buffer length
+    // Per-connection memory DoS cap: snapshot the recv-buffer length
     // around `recv()` and reconcile the global resident-bytes
     // budget. `RecvStream.recv` may grow its internal buffer to
     // cover [read_offset, frame_end) — the diff captures whatever

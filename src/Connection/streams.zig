@@ -633,7 +633,7 @@ pub fn streamRecvState(conn: *const Connection, id: u64) ?StreamRecvState {
 pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
     if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
-    // Hardening guide §3.5 / §8: pre-flight the resident-bytes
+    // Per-connection memory DoS cap: pre-flight the resident-bytes
     // budget against the bytes we'd accept. The per-stream
     // `max_buffered` cap already gates a single stream; this
     // shares one budget with CRYPTO / DATAGRAM / recv reassembly
@@ -696,7 +696,7 @@ fn afterStreamConsume(
     physical_before: usize,
     n: usize,
 ) Error!void {
-    // Hardening guide §3.5 / §8: the budget keys on the PHYSICAL
+    // Per-connection memory DoS cap: the budget keys on the PHYSICAL
     // `bytes.items.len`. The sliding window advances without
     // shrinking most of the time (consumed bytes keep their budget
     // charge until the half-buffer compaction or the full-drain
