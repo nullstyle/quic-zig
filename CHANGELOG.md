@@ -5,16 +5,20 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.18.0] - 2026-08-27
 
-The multi-process port-sharing release candidate. EMBEDDING.md's
-"Scaling across cores" guidance told embedders to bind their own
-`SO_REUSEPORT` socket and hand it to `runUdpServer` — an instruction
-the shipped loop could not accept (it binds from
-`RunUdpOptions.listen` itself, and a second process on the same
-`ip:port` died with `AddressInUse`; reproduced against 0.17.0).
-Evaluated against a downstream suggestions doc from mruby-quic, whose
-`--workers N` supervisor design is the first consumer.
+The multi-process port-sharing release. EMBEDDING.md's "Scaling
+across cores" guidance told embedders to bind their own `SO_REUSEPORT`
+socket and hand it to `runUdpServer` — an instruction the shipped loop
+could not accept (it binds from `RunUdpOptions.listen` itself, and a
+second process on the same `ip:port` died with `AddressInUse`;
+reproduced against 0.17.0). Evaluated against a downstream
+suggestions doc from mruby-quic, whose `--workers N` supervisor
+design is the first consumer; the platform semantics it assumed were
+measured rather than trusted and are pinned by test.
+
+Verified toolchain: zig 0.17.0-dev.1683+5ceec001b (CI pin; also
+built on dev.1786 locally).
 
 ### Added
 
