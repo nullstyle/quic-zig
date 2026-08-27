@@ -5,21 +5,23 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.19.0] - 2026-08-27
 
-The handshake-liveness release candidate. A `Connection` whose
-handshake never completed, whose peer then went quiet, NEVER died:
-RFC 9000 §10.1's idle timeout is the min of both endpoints'
-advertised values, which pre-confirmation either hasn't arrived (a
-dropped-server dial) or is 0 (idle opted out) — so the client-side
-shape was an eternal dial (Initial retransmission budget, then
-silence forever, no CloseEvent) and the server-side shape was the
-QUIC SYN-flood analog (abandoned dials parking every
-`max_concurrent_connections` slot `.open` until the endpoint mutes).
-Measured downstream in capnp-zig's fanout soak (2026-08-27) and
-reproduced against pre-fix quic-zig in what is now
+The handshake-liveness release. A `Connection` whose handshake never
+completed, whose peer then went quiet, NEVER died: RFC 9000 §10.1's
+idle timeout is the min of both endpoints' advertised values, which
+pre-confirmation either hasn't arrived (a dropped-server dial) or is 0
+(idle opted out) — so the client-side shape was an eternal dial
+(Initial retransmission budget, then silence forever, no CloseEvent)
+and the server-side shape was the QUIC SYN-flood analog (abandoned
+dials parking every `max_concurrent_connections` slot `.open` until
+the endpoint mutes). Measured downstream in capnp-zig's fanout soak
+(2026-08-27) and reproduced against pre-fix quic-zig in what is now
 `tests/e2e/handshake_timeout.zig` (600 simulated seconds, both
 endpoints `.open`, zero close events).
+
+Verified toolchain: zig 0.17.0-dev.1683+5ceec001b (CI pin; also
+built on dev.1786 locally).
 
 ### Added
 
