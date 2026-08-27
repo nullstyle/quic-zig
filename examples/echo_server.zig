@@ -9,6 +9,11 @@
 //! ./zig-out/bin/echo-client-example              # round-trips against it
 //! ```
 //!
+//! `--reuse-port` as the second argument joins a `SO_REUSEPORT` group
+//! on the listen port, so N copies of the server share one port —
+//! run two with the flag and the client below is served by whichever
+//! copy the kernel picks.
+//!
 //! The whole application is the three callbacks on `EchoApp` below:
 //! stream chunks are pushed back through the session's `Outbox`
 //! (which stages whatever the connection refuses and retries it on a
@@ -105,6 +110,7 @@ pub fn serve(
     allocator: std.mem.Allocator,
     io: std.Io,
     listen: []const u8,
+    reuse_port: bool,
     shutdown_flag: *const std.atomic.Value(bool),
 ) !void {
     var app: EchoApp = .{};
@@ -145,6 +151,7 @@ pub fn serve(
     try quic.transport.runUdpServer(&server, .{
         .listen = listen,
         .io = io,
+        .reuse_port = reuse_port,
         .shutdown_flag = shutdown_flag,
         // Demo posture: skip the SO_RCVBUF/SO_SNDBUF bump so the
         // example runs unprivileged everywhere. Production servers
@@ -173,6 +180,14 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next(); // program name
     const listen = args.next() orelse common.default_addr;
+    // `--reuse-port`: join a SO_REUSEPORT group on the listen port so
+    // several copies of this binary share it (EMBEDDING.md, "Scaling
+    // across cores"). On Linux the kernel hash-balances flows across
+    // the copies; on macOS the most recently started copy serves.
+    const reuse_port = if (args.next()) |flag|
+        std.mem.eql(u8, flag, "--reuse-port")
+    else
+        false;
 
     if (builtin.os.tag != .windows) {
         const act: std.posix.Sigaction = .{
@@ -184,5 +199,5 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("[server] Ctrl-C to shut down gracefully\n", .{});
     }
 
-    try serve(allocator, io, listen, &sigint_flag);
+    try serve(allocator, io, listen, reuse_port, &sigint_flag);
 }

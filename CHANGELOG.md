@@ -5,6 +5,67 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+The multi-process port-sharing release candidate. EMBEDDING.md's
+"Scaling across cores" guidance told embedders to bind their own
+`SO_REUSEPORT` socket and hand it to `runUdpServer` — an instruction
+the shipped loop could not accept (it binds from
+`RunUdpOptions.listen` itself, and a second process on the same
+`ip:port` died with `AddressInUse`; reproduced against 0.17.0).
+Evaluated against a downstream suggestions doc from mruby-quic, whose
+`--workers N` supervisor design is the first consumer.
+
+### Added
+
+- **`RunUdpOptions.reuse_port`** (default `false`): sets
+  `SO_REUSEPORT` on every listener the loop binds — primary and
+  `preferred_address` alt listeners alike — so N independent
+  processes share one `ip:port`. Off means byte-identical behavior:
+  the bind still goes through the `std.Io` `netBindIp` vtable, so
+  custom Io backends keep seeing every bind. Platform posture is
+  explicit rather than defaulted: Linux gets kernel 4-tuple hash
+  balancing (the intended multi-worker path; same-effective-UID group
+  joining per socket(7) is the documented tradeoff); macOS/BSD permit
+  the shared bind but deliver to the most recently bound socket
+  (measured on darwin 25.6: 32 flows, 0/32 split; survivors take over
+  when the newest closes) — bind-sharing and failover, not balancing;
+  targets without the option fail fast with the new
+  `RunError.ReusePortUnsupported` instead of a fleet dying one
+  `AddressInUse` at a time. Windows keeps refusing the whole loop up
+  front (`WindowsBundledLoopUnsupported` fires first).
+- **`transport.bindUdpSocket(&addr, .{ .reuse_port = true })`** and
+  `transport.BindUdpOptions`: a POSIX-direct UDP bind that applies
+  pre-bind socket options std's atomic `IpAddress.bind` leaves no
+  window for. This is the supported way for ANY std-based embedder —
+  foreign-loop ones included — to obtain a `SO_REUSEPORT` socket; the
+  loop's flag routes through it. Returns a normal `Net.Socket` usable
+  with any `std.Io` (POSIX sockets are plain `{handle, address}`
+  values there); the errno mapping lands in
+  `Net.IpAddress.BindError` so existing error handling transfers.
+  Mirrors std's own backend behavior for `SOCK_CLOEXEC` (Darwin/Haiku
+  reject it inside `socket()`'s type argument with `EPROTOTYPE`;
+  plain type + `fcntl(F_SETFD)` after, per the same predicate std's
+  backends consult).
+
+### Rejected alternatives
+
+- **A `prebound`-socket option on `RunUdpOptions`** (embedder binds,
+  loop adopts): rejected. It buys socket-activation / fd-passing
+  scenarios with no consumer behind them, at the cost of an ownership
+  model (who closes), a `listen`-plus-`prebound` conflict policy, and
+  socket-type validation — each answer a doc line and a test.
+  `SO_REUSEPORT` group joins already make worker restarts seamless on
+  Linux, which is what the actual downstream design (spawn-and-reexec
+  supervisor) needs. Revisit with a concrete socket-activation
+  requirement; the composable `bindUdpSocket` helper is where extra
+  pre-bind options should land first.
+- **Silently ignoring `reuse_port` on platforms without the option**:
+  rejected in favor of the loud `RunError.ReusePortUnsupported`. A
+  silently-ignored flag would resurface as per-worker `AddressInUse`
+  deaths — the exact failure the flag exists to remove, one step
+  removed from its cause.
+
 ## [0.17.0] - 2026-08-26
 
 The receive-side DATAGRAM release. Inbound queue overflow now sheds

@@ -41,6 +41,17 @@ pub const applyServerTuning = socket_opts.applyServerTuning;
 pub const default_server_recv_buffer_bytes = socket_opts.default_server_recv_buffer_bytes;
 /// Re-export of `socket_opts.default_server_send_buffer_bytes` (4 MiB).
 pub const default_server_send_buffer_bytes = socket_opts.default_server_send_buffer_bytes;
+/// Re-export of `socket_opts.bindUdpSocket` — bind a UDP socket with
+/// pre-bind options std's `IpAddress.bind` cannot express (currently
+/// `SO_REUSEPORT` for multi-process port sharing). The supported way
+/// for a foreign-loop embedder to obtain a reuse-group socket;
+/// `RunUdpOptions.reuse_port` routes through it for the bundled loop.
+pub const bindUdpSocket = socket_opts.bindUdpSocket;
+/// Re-export of `socket_opts.BindUdpOptions`.
+pub const BindUdpOptions = socket_opts.BindUdpOptions;
+/// Re-export of `socket_opts.has_reuseport_sockopt` — whether this
+/// target's sockets expose `SO_REUSEPORT` at all.
+pub const has_reuseport_sockopt = socket_opts.has_reuseport_sockopt;
 /// Re-export of `udp_server.classifyReceiveError` — the shared
 /// receive-errno policy both bundled loops apply (peer-influenced
 /// errors are tolerated, local faults propagate). The 0.12.0

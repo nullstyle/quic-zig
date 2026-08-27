@@ -56,7 +56,7 @@ const ServerTask = struct {
     failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn run(task: *ServerTask) void {
-        echo_server.serve(task.allocator, task.io, task.listen, task.shutdown) catch |err| {
+        echo_server.serve(task.allocator, task.io, task.listen, false, task.shutdown) catch |err| {
             std.debug.print("echo-smoke: server loop failed: {s}\n", .{@errorName(err)});
             task.failed.store(true, .release);
         };

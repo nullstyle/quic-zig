@@ -60,6 +60,9 @@ test "RunUdpOptions defaults match the documented contract" {
     try std.testing.expectEqual(@as(i64, 5), opts.receive_timeout.toMilliseconds());
     // Tuning on by default for production sanity.
     try std.testing.expect(opts.tune_socket);
+    // Port-sharing is opt-in; a lone server must keep the historical
+    // exclusive bind.
+    try std.testing.expect(!opts.reuse_port);
     // 5 second grace — plenty for CONNECTION_CLOSE to flush even
     // through a single 200 ms RTT path with retransmits.
     try std.testing.expectEqual(@as(u64, 5_000_000), opts.shutdown_grace_us);
@@ -245,4 +248,107 @@ test "runUdpServer binds preferred-address alt listener and returns cleanly" {
     };
 
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
+}
+
+/// Fixture for the two `reuse_port` tests below: a socket that holds
+/// a loopback port in a `SO_REUSEPORT` group and stays open, standing
+/// in for "worker #1 is already running" while the loop under test
+/// plays worker #2. `listen_literal` receives the shared port.
+const ReuseGroupHolder = struct {
+    sock: std.Io.net.Socket,
+
+    fn init() !ReuseGroupHolder {
+        if (!quic.transport.has_reuseport_sockopt) return error.SkipZigTest;
+        const addr = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+        const sock = try quic.transport.bindUdpSocket(&addr, .{ .reuse_port = true });
+        return .{ .sock = sock };
+    }
+
+    fn deinit(self: *ReuseGroupHolder) void {
+        self.sock.close(std.testing.io);
+    }
+
+    fn listenLiteral(self: *const ReuseGroupHolder, buf: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "127.0.0.1:{d}", .{self.sock.address.ip4.port});
+    }
+};
+
+test "runUdpServer with reuse_port joins a port another socket holds" {
+    // Worker #2 boots while worker #1's socket is bound: the loop's
+    // primary listener must join the reuseport group instead of dying
+    // with AddressInUse, then exit cleanly on the preset shutdown
+    // flag. Without the flag this exact setup fails — the test below
+    // pins that contrast.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var holder = try ReuseGroupHolder.init();
+    defer holder.deinit();
+    var lit_buf: [32]u8 = undefined;
+    const listen = try holder.listenLiteral(&lit_buf);
+
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer srv.deinit();
+
+    var stop = std.atomic.Value(bool).init(true);
+    quic.transport.runUdpServer(&srv, .{
+        .listen = listen,
+        .io = std.testing.io,
+        .reuse_port = true,
+        .shutdown_flag = &stop,
+        .tune_socket = false,
+        .shutdown_grace_us = 1_000,
+        .receive_timeout = std.Io.Duration.fromMilliseconds(1),
+    }) catch |err| switch (err) {
+        // The reuse group join itself can fail in a sandbox.
+        error.AddressUnavailable,
+        error.AddressFamilyUnsupported,
+        error.SystemResources,
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
+        error.SocketModeUnsupported,
+        error.NetworkDown,
+        => return error.SkipZigTest,
+        // AddressInUse here would mean the flag is not wired to the
+        // bind path — the exact regression this test exists for.
+        else => return err,
+    };
+
+    try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
+}
+
+test "runUdpServer without reuse_port conflicts with an open holder" {
+    // The contrast arm: same open reuseport holder, no flag, and the
+    // loop's plain bind must fail with AddressInUse — deterministic,
+    // because the holder stays open for the whole call and a bind
+    // without SO_REUSEPORT cannot join it.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var holder = try ReuseGroupHolder.init();
+    defer holder.deinit();
+    var lit_buf: [32]u8 = undefined;
+    const listen = try holder.listenLiteral(&lit_buf);
+
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer srv.deinit();
+
+    try std.testing.expectError(
+        error.AddressInUse,
+        quic.transport.runUdpServer(&srv, .{
+            .listen = listen,
+            .io = std.testing.io,
+            .tune_socket = false,
+        }),
+    );
 }

@@ -99,6 +99,24 @@ pub const RunUdpOptions = struct {
     /// embedders pick smaller (embedded targets) or larger (10G NIC)
     /// buffers without disabling tuning altogether.
     tuning: socket_opts.ServerTuning = .{},
+    /// Set `SO_REUSEPORT` on every listener this loop binds — primary
+    /// AND `preferred_address` alt listeners — so N independent
+    /// processes may share one `ip:port` (EMBEDDING.md, "Scaling
+    /// across cores"). Off by default: the same-UID port-joining it
+    /// permits is a property the embedder should opt into. POSIX-only;
+    /// targets whose sockets lack the option fail fast with
+    /// `RunError.ReusePortUnsupported`, and native Windows never gets
+    /// that far (`WindowsBundledLoopUnsupported` fires first). See
+    /// `socket_opts.BindUdpOptions.reuse_port` for what the kernel does
+    /// with the shared port per platform.
+    ///
+    /// A `prebound`-socket alternative (embedder binds, loop adopts)
+    /// was evaluated and rejected: it buys socket-activation/fd-passing
+    /// scenarios nobody has asked for, at the cost of an ownership and
+    /// `listen`-conflict policy the flag doesn't need — `reuse_port`
+    /// group joins already cover seamless worker restarts on Linux.
+    /// Revisit with a concrete socket-activation requirement.
+    reuse_port: bool = false,
 
     /// Enable IETF ECN signaling (RFC 9000 §13.4). When `true`, the
     /// loop sets `IP_TOS` / `IPV6_TCLASS` to ECT(0) on the bound
@@ -233,6 +251,14 @@ pub const RunError = error{
     /// fully portable; drive the connection with
     /// examples/foreign_loop_embedder.zig instead.
     WindowsBundledLoopUnsupported,
+    /// `RunUdpOptions.reuse_port` was set on a target whose sockets do
+    /// not expose `SO_REUSEPORT`. Refused up front rather than
+    /// silently ignored: a fleet of workers that each believe they are
+    /// sharing the port would instead die one by one with
+    /// `AddressInUse`, which is the exact failure the flag exists to
+    /// remove. Unreachable on the CI platforms (Linux and macOS both
+    /// have the option, making this check comptime-dead there).
+    ReusePortUnsupported,
     OutOfMemory,
     //
     // Inherited from `Net.Socket.ReceiveTimeoutError`, and worth
@@ -293,6 +319,30 @@ const Listener = struct {
 
 const max_listeners: usize = 3;
 
+/// Bind one listener, honoring `RunUdpOptions.reuse_port`.
+///
+/// `reuse_port = false` keeps the exact historical path through the
+/// `std.Io` `netBindIp` vtable — a custom Io backend still sees every
+/// bind, and behavior is byte-identical to before the option existed.
+/// `true` routes through `socket_opts.bindUdpSocket`, the POSIX
+/// socket → setsockopt(SO_REUSEPORT) → bind sequence std's atomic
+/// `IpAddress.bind` leaves no window for. Used for the primary
+/// listener and both `preferred_address` alt listeners alike: sharing
+/// must be uniform or the second worker fails an alt bind and cannot
+/// boot at all (alt-bind failures propagate by policy — see the
+/// preferred-address block in `runUdpServer`).
+fn bindListener(
+    addr: *const Net.IpAddress,
+    io: std.Io,
+    reuse_port: bool,
+) Net.IpAddress.BindError!Net.Socket {
+    if (reuse_port) return socket_opts.bindUdpSocket(addr, .{ .reuse_port = true });
+    return Net.IpAddress.bind(addr, io, .{
+        .mode = .dgram,
+        .protocol = .udp,
+    });
+}
+
 /// Run a UDP server loop driven by `server`. Blocks until either
 /// `RunUdpOptions.shutdown_flag` is observed true or an unrecoverable
 /// I/O error occurs.
@@ -331,10 +381,15 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     if (comptime builtin.os.tag == .windows) {
         return error.WindowsBundledLoopUnsupported;
     }
-    const primary_sock = try Net.IpAddress.bind(&primary_addr, options.io, .{
-        .mode = .dgram,
-        .protocol = .udp,
-    });
+    if (options.reuse_port) {
+        // Comptime-dead wherever the option exists (Linux, macOS); a
+        // loud up-front refusal anywhere it doesn't, per
+        // `RunError.ReusePortUnsupported`.
+        if (comptime !socket_opts.has_reuseport_sockopt) {
+            return error.ReusePortUnsupported;
+        }
+    }
+    const primary_sock = try bindListener(&primary_addr, options.io, options.reuse_port);
     listeners_storage[0] = .{
         .sock = primary_sock,
         .bind_addr = primary_addr,
@@ -353,10 +408,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     if (server.preferred_address) |pa| {
         if (pa.ipv4) |v4| {
             var bind_v4: Net.IpAddress = .{ .ip4 = v4 };
-            const alt_sock = try Net.IpAddress.bind(&bind_v4, options.io, .{
-                .mode = .dgram,
-                .protocol = .udp,
-            });
+            const alt_sock = try bindListener(&bind_v4, options.io, options.reuse_port);
             listeners_storage[listeners_len] = .{
                 .sock = alt_sock,
                 .bind_addr = bind_v4,
@@ -366,10 +418,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
         }
         if (pa.ipv6) |v6| {
             var bind_v6: Net.IpAddress = .{ .ip6 = v6 };
-            const alt_sock = try Net.IpAddress.bind(&bind_v6, options.io, .{
-                .mode = .dgram,
-                .protocol = .udp,
-            });
+            const alt_sock = try bindListener(&bind_v6, options.io, options.reuse_port);
             listeners_storage[listeners_len] = .{
                 .sock = alt_sock,
                 .bind_addr = bind_v6,
@@ -1052,6 +1101,8 @@ test "RunUdpOptions: defaults are sensible" {
     try testing.expectEqualStrings("127.0.0.1:0", opts.listen);
     try testing.expectEqual(@as(i64, 5), opts.receive_timeout.toMilliseconds());
     try testing.expect(opts.tune_socket);
+    // Port-sharing is opt-in: an embedder must ask for SO_REUSEPORT.
+    try testing.expect(!opts.reuse_port);
     try testing.expectEqual(@as(u64, 5_000_000), opts.shutdown_grace_us);
     try testing.expectEqual(default_rx_buffer_bytes, opts.rx_buffer_bytes);
     try testing.expectEqual(default_tx_buffer_bytes, opts.tx_buffer_bytes);

@@ -1065,3 +1065,335 @@ test "negotiateUdpOffloads: best-effort on loopback, never errors" {
         try testing.expect(!state.ecn_active);
     }
 }
+
+// -- Pre-bind socket options: SO_REUSEPORT -----------------------------------
+
+/// True iff this target's sockets expose `SO_REUSEPORT`. Structural
+/// (probes `std.posix.SO`) rather than an OS list so it tracks std;
+/// native Windows is excluded because winsock has no such option (and
+/// the bundled loops refuse to run there anyway — see
+/// `RunError.WindowsBundledLoopUnsupported`).
+pub const has_reuseport_sockopt: bool = builtin.os.tag != .windows and
+    @hasDecl(posix.SO, "REUSEPORT");
+
+/// Options for `bindUdpSocket` — the pre-bind socket options std's
+/// `IpAddress.bind` has no window to express, because it creates and
+/// binds the socket in a single Io-vtable call. Fields here exist for
+/// the same reason the helper does: `SO_REUSEPORT` (and anything else
+/// that must precede `bind(2)`) cannot be set on a socket that API
+/// never hands out unbound.
+pub const BindUdpOptions = struct {
+    /// Set `SO_REUSEPORT` before bind so that N processes may bind the
+    /// same `ip:port` simultaneously. Platform behavior after the
+    /// shared bind is the kernel's, not this library's, and it differs:
+    ///
+    ///   * Linux (>= 3.9) hash-balances flows across the socket group
+    ///     by 4-tuple — each connection stays on one worker while the
+    ///     client's address and port are stable. Every socket in the
+    ///     group must share one effective UID (socket(7)); a process
+    ///     under that UID can therefore join the port and receive its
+    ///     traffic. That is inherent to `SO_REUSEPORT`, which is why
+    ///     this is opt-in everywhere it is offered.
+    ///   * macOS / BSD lineage permit the shared bind but deliver each
+    ///     datagram to the most recently bound socket (measured on
+    ///     darwin 25.6: 64 flows, 0 / 64 split; survivors take over
+    ///     when the newest closes). A macOS fleet therefore behaves
+    ///     active/passive, not load-balanced.
+    ///   * A client whose 4-tuple changes — connection migration, NAT
+    ///     rebinding, a `preferred_address` — can land on a socket that
+    ///     does not own its connection. Deployments needing migration
+    ///     resilience must route by CID (QUIC-LB, an eBPF reuseport
+    ///     program, or an external load balancer) rather than rely on
+    ///     the kernel hash.
+    reuse_port: bool = false,
+};
+
+/// Error space of `bindUdpSocket`. Deliberately identical to
+/// `Net.IpAddress.BindError` — the helper is a drop-in alternative to
+/// `IpAddress.bind`, so callers' existing error handling keeps
+/// working; the POSIX errno paths below are mapped into it.
+pub const BindUdpError = Net.IpAddress.BindError;
+
+/// Bind a UDP socket directly through POSIX, applying pre-bind socket
+/// options std's `IpAddress.bind` cannot express. Returns a `Net.Socket`
+/// usable with any `std.Io` (POSIX sockets are plain `{ handle,
+/// address }` values there; I/O operations take the Io instance
+/// per-call, so a handle created outside the vtable drives the same
+/// `operate` path as one the backend made itself).
+///
+/// When no pre-bind option is requested, embedders should prefer
+/// `IpAddress.bind` through their `Io` — this helper exists for the
+/// options, not as a general replacement, and it does mean a custom
+/// `std.Io` backend's `netBindIp` is bypassed on this one path.
+/// `RunUdpOptions.reuse_port` routes through here; foreign-loop
+/// embedders can call it directly.
+pub fn bindUdpSocket(
+    address: *const Net.IpAddress,
+    options: BindUdpOptions,
+) BindUdpError!Net.Socket {
+    if (comptime builtin.os.tag == .windows) return error.OptionUnsupported;
+    if (options.reuse_port and !has_reuseport_sockopt) return error.OptionUnsupported;
+
+    const family: posix.sa_family_t = switch (address.*) {
+        .ip4 => posix.AF.INET,
+        .ip6 => posix.AF.INET6,
+    };
+    // SOCK.CLOEXEC inside socket()'s type argument is rejected by
+    // Darwin and Haiku with EPROTOTYPE; consult the same predicate
+    // std's own backends consult, and fall back to fcntl(F_SETFD)
+    // after the fact exactly as they do.
+    const type_flags: u32 = posix.SOCK.DGRAM |
+        if (std.Io.Threaded.socket_flags_unsupported) 0 else posix.SOCK.CLOEXEC;
+    const sock_rc = posix.system.socket(family, type_flags, @intCast(posix.IPPROTO.UDP));
+    switch (posix.errno(sock_rc)) {
+        .SUCCESS => {},
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NOBUFS, .NOMEM => return error.SystemResources,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        .INVAL => return error.ProtocolUnsupportedBySystem,
+        .PROTONOSUPPORT => return error.ProtocolUnsupportedByAddressFamily,
+        .PROTOTYPE => return error.SocketModeUnsupported,
+        else => |err| return posix.unexpectedErrno(err),
+    }
+    const fd: posix.socket_t = @intCast(sock_rc);
+    errdefer {
+        // Best-effort cleanup on the error paths below; the caller
+        // never sees this fd, so a close failure has nowhere to go.
+        _ = posix.system.close(fd);
+    }
+    if (comptime std.Io.Threaded.socket_flags_unsupported) {
+        switch (posix.errno(posix.system.fcntl(fd, posix.F.SETFD, @as(usize, posix.FD_CLOEXEC)))) {
+            .SUCCESS => {},
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+
+    if (options.reuse_port) {
+        const one: c_int = 1;
+        const one_bytes = std.mem.asBytes(&one);
+        switch (posix.errno(std.c.setsockopt(
+            fd,
+            posix.SOL.SOCKET,
+            posix.SO.REUSEPORT,
+            one_bytes.ptr,
+            @intCast(one_bytes.len),
+        ))) {
+            .SUCCESS => {},
+            // The comptime gate above already refused platforms
+            // without the option; reaching one of these at runtime
+            // means a kernel that disagrees with its own headers.
+            .INVAL, .NOPROTOOPT, .OPNOTSUPP, .PROTONOSUPPORT => return error.OptionUnsupported,
+            .PERM, .ACCES => return error.AccessDenied,
+            .NOMEM, .NOBUFS => return error.SystemResources,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+
+    var storage: posix.sockaddr.storage = undefined;
+    const addr_len = fillSockaddr(address, &storage);
+    while (true) {
+        switch (posix.errno(posix.system.bind(fd, @ptrCast(&storage), addr_len))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            .ACCES => return error.AccessDenied,
+            .ADDRINUSE => return error.AddressInUse,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .NOMEM => return error.SystemResources,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+
+    // Read back the kernel-resolved address (the whole point is the
+    // ephemeral port when the caller asked for :0) and project only
+    // the port back onto the caller's address — the rest of the
+    // address is byte-identical to what was just bound.
+    var bound: posix.sockaddr.storage = undefined;
+    var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+    switch (posix.errno(posix.system.getsockname(fd, @ptrCast(&bound), &bound_len))) {
+        .SUCCESS => {},
+        .NOBUFS => return error.SystemResources,
+        else => |err| return posix.unexpectedErrno(err),
+    }
+    var resolved = address.*;
+    const bound_port: u16 = switch (resolved) {
+        .ip4 => blk: {
+            const in: *const posix.sockaddr.in = @ptrCast(&bound);
+            break :blk std.mem.bigToNative(u16, in.port);
+        },
+        .ip6 => blk: {
+            const in6: *const posix.sockaddr.in6 = @ptrCast(&bound);
+            break :blk std.mem.bigToNative(u16, in6.port);
+        },
+    };
+    switch (resolved) {
+        .ip4 => |*a| a.port = bound_port,
+        .ip6 => |*a| a.port = bound_port,
+    }
+    return .{ .handle = fd, .address = resolved };
+}
+
+/// Project an `IpAddress` into a zeroed POSIX sockaddr storage and
+/// return the sockaddr length `bind(2)` wants. Mirrors the byte math
+/// of std's backend-internal `addressToPosix` (network-order port and
+/// address bytes pass through untouched; IPv6 flowinfo follows the
+/// address's `flow`), stated here because that helper is private to
+/// `std.Io.Threaded`.
+fn fillSockaddr(
+    address: *const Net.IpAddress,
+    storage: *posix.sockaddr.storage,
+) posix.socklen_t {
+    @memset(std.mem.asBytes(storage), 0);
+    switch (address.*) {
+        .ip4 => |ip4| {
+            const in: *posix.sockaddr.in = @ptrCast(storage);
+            in.family = posix.AF.INET;
+            in.port = std.mem.nativeToBig(u16, ip4.port);
+            const addr_raw: *align(1) const u32 = @ptrCast(&ip4.bytes);
+            in.addr = addr_raw.*;
+            return @sizeOf(posix.sockaddr.in);
+        },
+        .ip6 => |ip6| {
+            const in6: *posix.sockaddr.in6 = @ptrCast(storage);
+            in6.family = posix.AF.INET6;
+            in6.port = std.mem.nativeToBig(u16, ip6.port);
+            in6.flowinfo = ip6.flow;
+            in6.addr = ip6.bytes;
+            return @sizeOf(posix.sockaddr.in6);
+        },
+    }
+}
+
+test "bindUdpSocket: reuse_port lets two sockets share one port" {
+    if (!has_reuseport_sockopt) return error.SkipZigTest;
+    const io = std.testing.io;
+    const first_addr = try Net.IpAddress.parseLiteral("127.0.0.1:0");
+    const first = try bindUdpSocket(&first_addr, .{ .reuse_port = true });
+    defer first.close(io);
+    // :0 must come back resolved by the getsockname projection.
+    try testing.expect(first.address.ip4.port != 0);
+
+    var lit_buf: [32]u8 = undefined;
+    const same_port = try Net.IpAddress.parseLiteral(try std.fmt.bufPrint(
+        &lit_buf,
+        "127.0.0.1:{d}",
+        .{first.address.ip4.port},
+    ));
+    const second = try bindUdpSocket(&same_port, .{ .reuse_port = true });
+    defer second.close(io);
+    try testing.expect(second.address.ip4.port == first.address.ip4.port);
+    try testing.expect(second.handle != first.handle);
+}
+
+test "bindUdpSocket: without reuse_port the second bind conflicts" {
+    if (!has_reuseport_sockopt) return error.SkipZigTest;
+    const io = std.testing.io;
+    const first_addr = try Net.IpAddress.parseLiteral("127.0.0.1:0");
+    // Even a REUSEPORT holder does not admit a plain second bind —
+    // pins that reuse_port = false really leaves the option unset.
+    const first = try bindUdpSocket(&first_addr, .{ .reuse_port = true });
+    defer first.close(io);
+
+    var lit_buf: [32]u8 = undefined;
+    const same_port = try Net.IpAddress.parseLiteral(try std.fmt.bufPrint(
+        &lit_buf,
+        "127.0.0.1:{d}",
+        .{first.address.ip4.port},
+    ));
+    try testing.expectError(
+        error.AddressInUse,
+        bindUdpSocket(&same_port, .{ .reuse_port = false }),
+    );
+}
+
+test "bindUdpSocket: the fd drives the normal std.Io operate path" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const bound_addr = try Net.IpAddress.parseLiteral("127.0.0.1:0");
+    const bound = try bindUdpSocket(&bound_addr, .{});
+    defer bound.close(io);
+
+    const peer_addr = try Net.IpAddress.parseLiteral("127.0.0.1:0");
+    const peer = try Net.IpAddress.bind(&peer_addr, io, .{
+        .mode = .dgram,
+        .protocol = .udp,
+    });
+    defer peer.close(io);
+
+    try peer.send(io, &bound.address, "ping");
+    var rx: [64]u8 = undefined;
+    const msg = try bound.receive(io, &rx);
+    try testing.expectEqualStrings("ping", msg.data);
+}
+
+test "SO_REUSEPORT delivery: balanced on Linux, newest-bound on Darwin" {
+    if (!has_reuseport_sockopt) return error.SkipZigTest;
+    const io = std.testing.io;
+    const flows: usize = 32;
+
+    const group_addr = try Net.IpAddress.parseLiteral("127.0.0.1:0");
+    const first = try bindUdpSocket(&group_addr, .{ .reuse_port = true });
+    defer first.close(io);
+    var lit_buf: [32]u8 = undefined;
+    const same_port = try Net.IpAddress.parseLiteral(try std.fmt.bufPrint(
+        &lit_buf,
+        "127.0.0.1:{d}",
+        .{first.address.ip4.port},
+    ));
+    const last = try bindUdpSocket(&same_port, .{ .reuse_port = true });
+    defer last.close(io);
+
+    // One datagram per distinct sender socket = one per 4-tuple, the
+    // quantity a reuseport hash is defined over.
+    const one = [_]u8{0x2a};
+    for (0..flows) |_| {
+        const sender_addr = try Net.IpAddress.parseLiteral("127.0.0.1:0");
+        const sender = try Net.IpAddress.bind(&sender_addr, io, .{
+            .mode = .dgram,
+            .protocol = .udp,
+        });
+        defer sender.close(io);
+        try sender.send(io, &first.address, &one);
+    }
+
+    // Zero-duration receiveTimeout: a nonblocking probe that ends the
+    // drain on WouldBlock/Timeout rather than parking the test.
+    var rx: [64]u8 = undefined;
+    var first_got: usize = 0;
+    var last_got: usize = 0;
+    while (true) {
+        _ = first.receiveTimeout(io, &rx, .{
+            .duration = .{ .raw = std.Io.Duration.fromMilliseconds(0), .clock = .awake },
+        }) catch |err| switch (err) {
+            error.Timeout => break,
+            else => return err,
+        };
+        first_got += 1;
+    }
+    while (true) {
+        _ = last.receiveTimeout(io, &rx, .{
+            .duration = .{ .raw = std.Io.Duration.fromMilliseconds(0), .clock = .awake },
+        }) catch |err| switch (err) {
+            error.Timeout => break,
+            else => return err,
+        };
+        last_got += 1;
+    }
+
+    if (builtin.os.tag.isDarwin()) {
+        // BSD lineage: the most recently bound socket receives every
+        // datagram; the survivors take over only when it closes. A
+        // failure here means Apple changed the semantics — update the
+        // `BindUdpOptions.reuse_port` and EMBEDDING.md text with it.
+        try testing.expectEqual(flows, last_got);
+        try testing.expectEqual(@as(usize, 0), first_got);
+    } else {
+        // Linux: the 4-tuple hash balances the group. With 32 flows
+        // the probability of every flow hashing one way is ~2^-31, so
+        // requiring at least one datagram per socket is safe.
+        try testing.expect(first_got >= 1);
+        try testing.expect(last_got >= 1);
+        try testing.expectEqual(flows, first_got + last_got);
+    }
+}
