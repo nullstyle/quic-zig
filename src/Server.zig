@@ -926,6 +926,7 @@ pub fn init(config: Config) Error!Server {
             .congestion_control = config.congestion_control,
             .pacing_enabled = config.enable_pacing,
             .hystart_enabled = config.enable_hystart,
+            .handshake_timeout_us = config.handshake_timeout_ms * std.time.us_per_ms,
             .qlog_callback = config.qlog_callback,
             .qlog_user_data = config.qlog_user_data,
         },

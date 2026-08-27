@@ -5,6 +5,7 @@ test {
     _ = @import("e2e/mock_transport_real_handshake.zig");
     _ = @import("e2e/server_smoke.zig");
     _ = @import("e2e/server_loop_smoke.zig");
+    _ = @import("e2e/handshake_timeout.zig");
     _ = @import("e2e/client_smoke.zig");
     _ = @import("e2e/client_loop_smoke.zig");
     _ = @import("e2e/server_client_handshake.zig");

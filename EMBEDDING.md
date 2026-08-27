@@ -636,7 +636,26 @@ Set these deliberately for any deployed server:
 - `transport_params.max_idle_timeout_ms`: `Server.init` substitutes a
   safe 30s timeout when this is left at `0`; set it explicitly to match
   your deployment, or set `Server.Config.allow_no_idle_timeout = true` to
-  genuinely run with no idle timer.
+  genuinely run with no idle timer. Note the idle timer only governs a
+  connection once its handshake is CONFIRMED — before that there may be
+  no negotiated idle value at all (the peer's parameters haven't
+  arrived, or either side advertised 0), which is what the next knob
+  covers.
+- `handshake_timeout_ms` (server default 10s, client default 30s, `0`
+  disables): bounds how long a connection may live without completing
+  its handshake. Without it, a dial to a server that drops every packet
+  retransmits its Initial budget and then sits silently forever, and a
+  server receiving abandoned dials accumulates half-open slots until
+  `max_concurrent_connections` is exhausted and the endpoint mutes —
+  the QUIC analog of a SYN flood. On expiry the connection drains (no
+  CONNECTION_CLOSE is sent; the peer is unresponsive by definition)
+  and `pollEvent` reports `CloseSource.handshake_timeout`, so "never
+  became viable" stays distinguishable from "went quiet after
+  establishing". The timer disarms at handshake confirmation and hands
+  liveness back to the idle timeout; 0-RTT resumption attempts get the
+  same bound. If you run with the idle timeout opted out AND a
+  confirmed connection goes silent, that connection lives until your
+  embedder-level guards act — by then it is your policy, not a gap.
 - `transport_params.initial_max_*`: stream and connection flow-control
   limits for your application workload.
 - `max_concurrent_connections`: slot-table cap.

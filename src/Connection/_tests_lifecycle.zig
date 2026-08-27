@@ -10,6 +10,7 @@ const CloseState = state.CloseState;
 const Connection = state.Connection;
 const ConnectionPhase = state.ConnectionPhase;
 const Error = state.Error;
+const TimerKind = state.TimerKind;
 const frame_mod = state.frame_mod;
 
 test "peer close records transport error details" {
@@ -108,4 +109,72 @@ test "per-space tracker capacities: 256 for Initial/Handshake, 4096 for Applicat
         @as(u32, sent_packets.max_tracked),
         conn.sentForLevel(.application).capacity(),
     );
+}
+
+test "handshake timeout: anchored at first tick, fires at the deadline" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    conn.handshake_timeout_us = 1_000;
+    // Pre-arm: nextTimerDeadline must already surface the projected
+    // deadline so a loop parking before the first tick wakes in time.
+    const projected = conn.nextTimerDeadline(0).?;
+    try std.testing.expectEqual(TimerKind.handshake_timeout, projected.kind);
+    try std.testing.expectEqual(@as(u64, 1_000), projected.at_us);
+
+    // First tick anchors the deadline; it must not drift on later
+    // ticks (the budget is from connection start, not from the most
+    // recent activity — a client retrying forever must still die).
+    try conn.tick(100);
+    try std.testing.expectEqual(@as(u64, 1_100), conn.handshake_deadline_us.?);
+    try conn.tick(500);
+    try std.testing.expectEqual(@as(u64, 1_100), conn.handshake_deadline_us.?);
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+
+    // At the deadline: draining with the typed cause — same posture
+    // as the idle timeout (no CONNECTION_CLOSE to an unresponsive
+    // peer).
+    try conn.tick(1_100);
+    try std.testing.expectEqual(CloseState.draining, conn.closeState());
+    const close_event = conn.closeEvent().?;
+    try std.testing.expectEqual(CloseSource.handshake_timeout, close_event.source);
+    try std.testing.expectEqual(CloseErrorSpace.transport, close_event.error_space);
+    try std.testing.expectEqualStrings("handshake timeout", close_event.reason);
+}
+
+test "handshake timeout: disabled knob never arms" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    conn.handshake_timeout_us = 0;
+    try conn.tick(0);
+    try conn.tick(1_000_000_000);
+    try std.testing.expectEqual(@as(?u64, null), conn.handshake_deadline_us);
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+}
+
+test "handshake timeout: disarms at handshake confirmation" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    conn.handshake_timeout_us = 1_000;
+    try conn.tick(100);
+    try std.testing.expect(conn.handshake_deadline_us != null);
+
+    // Confirmation latch (RFC 9001 §4.9.2 key discard): the timer
+    // disarms and the connection survives far past the budget.
+    conn.handshake_keys_discarded = true;
+    try conn.tick(1_000_000);
+    try std.testing.expectEqual(@as(?u64, null), conn.handshake_deadline_us);
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+    try std.testing.expect(conn.closeEvent() == null);
 }

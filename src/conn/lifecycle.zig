@@ -23,6 +23,16 @@ pub const CloseSource = enum {
     local,
     peer,
     idle_timeout,
+    /// The handshake-liveness backstop fired: the TLS handshake had
+    /// not completed within `Connection.handshake_timeout_us` of the
+    /// connection's start, so the connection was torn down (via
+    /// draining — no CONNECTION_CLOSE is sent; the peer is by
+    /// definition unresponsive). Distinguishable from `idle_timeout`
+    /// on purpose: a connection that never became viable is a
+    /// different operational signal than one that went quiet after
+    /// establishing, and downstream consumers (e.g. capnp-zig's
+    /// DisconnectCause mapping) key off exactly this distinction.
+    handshake_timeout,
     stateless_reset,
     version_negotiation,
 };

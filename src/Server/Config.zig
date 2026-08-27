@@ -146,6 +146,16 @@ pub const EarlyData = union(enum) {
 /// Library-recommended open-internet cap backing
 /// `initial_source_rate_limit = .default`.
 pub const default_initial_source_rate_cap: u64 = 32;
+/// Default handshake-liveness budget backing
+/// `handshake_timeout_ms`. 10s, tighter than the client-side 30s,
+/// because server slots are the scarce and floodable resource:
+/// without the bound, abandoned dials park slots `.open` forever
+/// (the idle timeout cannot backstop a handshake that never
+/// completes — see `Connection.default_handshake_timeout_us`)
+/// until every `max_concurrent_connections` slot is a zombie and
+/// the endpoint mutes. Measured in capnp-zig's fanout soak before
+/// this knob existed.
+pub const default_server_handshake_timeout_ms: u64 = 10_000;
 /// Library-recommended open-internet cap backing
 /// `vn_source_rate_limit = .default`.
 pub const default_vn_source_rate_cap: u64 = 8;
@@ -565,6 +575,19 @@ max_connection_memory: u64 = conn_mod.state.default_max_connection_memory,
 /// ACKed; raise it to amortize ACK overhead at the cost of more
 /// peer PTOs. Threaded onto every Connection at slot-open time.
 delayed_ack_packet_threshold: u8 = conn_mod.state.application_ack_eliciting_threshold,
+
+/// Handshake-liveness budget in milliseconds: a slot whose TLS
+/// handshake has not been confirmed within this long of opening is torn
+/// down (draining, then terminal `.closed`, so `reap` reclaims the
+/// slot) and its `ConnectionEvent` carries
+/// `CloseSource.handshake_timeout`. This is the QUIC analog of a
+/// SYN-flood bound: a hostile source sending bare Initials can
+/// otherwise occupy the whole connection table with half-opens.
+/// Default `default_server_handshake_timeout_ms` (10s). 0 disables
+/// the backstop (the pre-0.19.0 behavior). Covers 0-RTT resumption
+/// attempts too — a stalled resumption occupies a slot exactly like
+/// a stalled full handshake.
+handshake_timeout_ms: u64 = default_server_handshake_timeout_ms,
 
 /// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168) on every
 /// Connection the Server creates. Default `true` — production

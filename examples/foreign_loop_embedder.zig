@@ -2109,14 +2109,18 @@ test "ClientPump: bootstrap queues the ClientHello with nothing armed to wake th
 
     // Nothing on the wire yet...
     try testing.expectEqual(@as(u32, 0), counter.datagrams);
-    // ...and nothing to wake a loop that parks here. With a wake fd in
-    // the set that is a -1 timeout: block until an application thread
-    // happens to poke us, which for a handshake is forever.
-    try testing.expect(client.conn.nextTimerDeadline(0) == null);
-    try testing.expectEqual(
-        @as(i32, -1),
-        pollTimeoutMs(0, client.conn.nextTimerDeadline(0), default_idle_cap_ms, true),
-    );
+    // ...and the only deadline armed at bootstrap is the
+    // handshake-liveness backstop. (Before it existed a fresh client
+    // armed NOTHING here — no PTO until the first send, no idle
+    // timer until peer parameters arrive — which is exactly why the
+    // drain-before-park invariant this test pins mattered: a wake-fd
+    // loop blocking on -1 had nothing coming. The backstop bounds
+    // that park from above; the drain invariant still governs
+    // everything below it.)
+    const hsk = client.conn.nextTimerDeadline(0);
+    try testing.expect(hsk != null);
+    try testing.expectEqual(quic.TimerKind.handshake_timeout, hsk.?.kind);
+    try testing.expect(pollTimeoutMs(0, hsk, default_idle_cap_ms, true) >= 0);
 
     // One `service` ships the ClientHello...
     try pump.service(1_000);

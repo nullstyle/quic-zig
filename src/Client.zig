@@ -204,10 +204,27 @@ pub const Config = struct {
     /// Number of ack-eliciting application packets the client requires
     /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
     /// matches `quic.conn.state.application_ack_eliciting_threshold`.
-    /// Lower this to 1 for low-RTT links where every packet should be
+    /// Lower to 1 for low-RTT links where every packet should be
     /// ACKed; raise it to amortize ACK overhead at the cost of more
     /// peer PTOs.
     delayed_ack_packet_threshold: u8 = conn_mod.state.application_ack_eliciting_threshold,
+
+    /// Handshake-liveness budget in milliseconds: if the TLS
+    /// handshake has not been confirmed within this long of `connect`,
+    /// the connection is torn down and `pollEvent` surfaces a close
+    /// with `CloseSource.handshake_timeout`. Without it, a dial to a
+    /// server that drops every packet sends its Initial
+    /// retransmission budget and then sits silently forever — the
+    /// idle timeout cannot backstop this phase (no peer transport
+    /// parameters, so no negotiated idle value; see
+    /// `Connection.default_handshake_timeout_us`).
+    ///
+    /// Default 30s, matching the raw-connection default; covers
+    /// high-RTT and lossy paths with an order of magnitude of
+    /// headroom. 0 restores the unbounded dial. Covers 0-RTT
+    /// resumptions too: a stalled or rejected resumption is still an
+    /// incomplete handshake and gets the same bound.
+    handshake_timeout_ms: u64 = Connection.default_handshake_timeout_us / std.time.us_per_ms,
 
     /// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168) on the
     /// underlying Connection. Default `true`. Flip to `false` only
@@ -573,6 +590,7 @@ pub fn connect(config: Config) Error!Client {
         .congestion_control = config.congestion_control,
         .pacing_enabled = config.enable_pacing,
         .hystart_enabled = config.enable_hystart,
+        .handshake_timeout_us = config.handshake_timeout_ms * std.time.us_per_ms,
         .qlog_callback = config.qlog_callback,
         .qlog_user_data = config.qlog_user_data,
     });

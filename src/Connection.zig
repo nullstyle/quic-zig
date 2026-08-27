@@ -630,6 +630,26 @@ early_data_rejection_processed: bool = false,
 /// quic maintains it.
 last_activity_us: u64 = 0,
 
+/// Handshake-liveness budget in microseconds: how long the
+/// connection may live without its handshake being CONFIRMED
+/// (RFC 9001 §4.1.2 — see `handshakeDeadline` for the exact latch).
+/// Zero disables the backstop (the historical behavior). See
+/// `handshakeDeadline` for why the idle timeout cannot cover this
+/// phase and `default_handshake_timeout_us` for the default's
+/// rationale. Set wholesale via `applyTunables` (Client.Config's
+/// `handshake_timeout_ms` / Server.Config's `handshake_timeout_ms`
+/// are the embedder-facing knobs).
+handshake_timeout_us: u64 = default_handshake_timeout_us,
+/// Absolute deadline (same clock as `tick`) after which an
+/// unconfirmed handshake is torn down. Anchored at the first `tick`
+/// — the closest thing to "connection creation" a Connection ever
+/// sees, since neither `createClient` nor the server accept path
+/// takes a timestamp. Loops tick every iteration, so the anchor
+/// lands within one loop iteration of `connect` / slot-open.
+/// Cleared once the handshake is confirmed; `null` while never
+/// armed.
+handshake_deadline_us: ?u64 = null,
+
 /// Close/draining lifecycle: pending CONNECTION_CLOSE, closing/
 /// draining deadlines, rate-limit bookkeeping, sticky close event,
 /// and the reason-phrase buffer. See `lifecycle.zig`.
@@ -1058,6 +1078,35 @@ pub const transport_error_crypto_handshake_failure: u64 =
 /// Tuneable per `Connection` via `max_connection_memory`; the
 /// `Server.Config` default threads through to every accepted slot.
 pub const default_max_connection_memory: u64 = 32 * 1024 * 1024;
+
+/// Default handshake-liveness budget: 30 seconds from the
+/// connection's start for the handshake to be CONFIRMED, else the
+/// connection is torn down (`CloseSource.handshake_timeout`).
+///
+/// Why the idle timeout cannot cover this phase, so a dedicated
+/// budget must: RFC 9000 §10.1 makes the effective idle timeout the
+/// minimum of BOTH endpoints' advertised values and "0 means none",
+/// and the value only exists once the peer's transport parameters
+/// have been processed. Before the handshake completes, a connection
+/// therefore has (a) no negotiated idle timeout at all — the peer's
+/// parameters may never arrive (the dropped-server case) — or (b) a
+/// negotiated value of 0 when the peer advertises no idle timeout,
+/// which disables the server's backstop too. Either way, a
+/// handshake that never completes and a peer that goes quiet is a
+/// connection that lives forever: measured downstream (capnp-zig
+/// fanout soak, 2026-08-27) as both the client-side eternal dial
+/// (Initial retransmission budget exhausted, then silent
+/// indefinitely, no CloseEvent) and the server-side QUIC SYN-flood
+/// analog (every `max_concurrent_connections` slot parked `.open`
+/// by abandoned dials until the endpoint mutes).
+///
+/// 30s as the raw-cycle default matches the client wrapper default
+/// (`Client.Config.handshake_timeout_ms`) and covers high-RTT +
+/// lossy paths with an order of magnitude to spare; the server
+/// wrapper pins a tighter 10s (`Server.Config.handshake_timeout_ms`)
+/// because server slots are the scarce, floodable resource. Set 0 to
+/// restore the unbounded (pre-0.19.0) behavior.
+pub const default_handshake_timeout_us: u64 = 30 * 1_000 * 1_000;
 
 /// Upper bound on AEAD plaintext for a single received packet. This
 /// implementation deliberately advertises and enforces the same 4 KiB
@@ -1526,6 +1575,11 @@ pub const TimerKind = enum {
     loss_detection,
     pto,
     idle,
+    /// Handshake-liveness backstop: the handshake has not been
+    /// confirmed and `handshake_timeout_us` is about to elapse since
+    /// the connection's start. `tick` tears the connection down (via
+    /// draining) when it fires.
+    handshake_timeout,
     /// RFC 9002 §7.7 pacing: application data is waiting on send
     /// credit; `at_us` is when the pacer's token bucket next covers a
     /// full datagram. `tick` does nothing for this kind — waking and
@@ -1933,6 +1987,10 @@ pub const Tunables = struct {
     pacing_enabled: bool,
     /// RFC 9406 HyStart++; applied via `setHyStartEnabled`.
     hystart_enabled: bool,
+    /// Handshake-liveness budget in microseconds; 0 disables. See
+    /// `Connection.handshake_timeout_us` and
+    /// `default_handshake_timeout_us` for the hazard this bounds.
+    handshake_timeout_us: u64,
     /// Optional qlog sink; installed via `setQlogCallback` when
     /// non-null (which also emits `connection_started`).
     qlog_callback: ?QlogCallback,
@@ -1958,6 +2016,7 @@ pub fn applyTunables(self: *Connection, t: Tunables) void {
     self.setCongestionAlgorithm(t.congestion_control);
     self.pacing_enabled = t.pacing_enabled;
     self.setHyStartEnabled(t.hystart_enabled);
+    self.handshake_timeout_us = t.handshake_timeout_us;
 
     if (t.qlog_callback) |cb| self.setQlogCallback(cb, t.qlog_user_data);
 }
@@ -3182,6 +3241,38 @@ pub fn idleTimeoutUs(self: *const Connection) ?u64 {
     return @min(local, params.max_idle_timeout_ms) * RttEstimator.ms;
 }
 
+/// Absolute deadline after which an incomplete handshake is torn
+/// down. Null when the backstop is disabled (`handshake_timeout_us
+/// == 0`) or the handshake has already been CONFIRMED — from
+/// confirmation on, the §10.1 idle-timeout machinery owns liveness
+/// (the peer's transport parameters are necessarily cached by then:
+/// RFC 9001 §7.4.1 makes the quic_transport_parameters extension
+/// mandatory, so a completed handshake always leaves a negotiated
+/// idle value behind, even if that value is 0-by-choice).
+///
+/// "Confirmed" is `handshake_keys_discarded` — RFC 9001 §4.1.2 /
+/// §4.9.2's own confirmation latch, which this codebase already
+/// maintains symmetrically: the server latches it when the client's
+/// Finished is processed, the client on receiving HANDSHAKE_DONE.
+/// Deliberately NOT the TLS-completion or application-write-key
+/// boundary: a client that received the server's flight but whose
+/// own Finished was lost has application write keys and a "done"
+/// TLS state machine, yet is unconfirmed and — when the embedder
+/// opted out of the idle timeout — otherwise immortal. That
+/// mid-confirmation stall is one of the exact shapes this backstop
+/// exists to bound.
+///
+/// The deadline anchors at the first `tick` (`handshake_deadline_us`
+/// holds it once armed); this projection also answers
+/// `now_us +| handshake_timeout_us` for a not-yet-armed connection
+/// so `nextTimerDeadline` can surface the right park target on the
+/// very first iteration, before any tick has run.
+pub fn handshakeDeadline(self: *const Connection, now_us: u64) ?u64 {
+    if (self.handshake_timeout_us == 0) return null;
+    if (self.handshake_keys_discarded) return null;
+    return self.handshake_deadline_us orelse (now_us +| self.handshake_timeout_us);
+}
+
 pub const primaryPath = conn_paths.primaryPath;
 
 pub const primaryPathConst = conn_paths.primaryPathConst;
@@ -3727,6 +3818,12 @@ pub fn nextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline {
     if (self.idleDeadline()) |at_us| {
         considerDeadline(&best, .{ .kind = .idle, .at_us = at_us });
     }
+    // Handshake-liveness backstop (pre-handshake there may be no
+    // negotiated idle timeout at all — see `handshakeDeadline`), so
+    // this is often the ONLY park target a stalled dial offers.
+    if (self.handshakeDeadline(now_us)) |at_us| {
+        considerDeadline(&best, .{ .kind = .handshake_timeout, .at_us = at_us });
+    }
     return best;
 }
 
@@ -4201,6 +4298,44 @@ pub fn tick(self: *Connection, now_us: u64) Error!void {
     }
 
     if (self.lifecycle.closed) return;
+
+    // Handshake-liveness backstop. Checked BEFORE the idle timeout
+    // on purpose: a connection whose handshake never completed never
+    // became viable, and reporting its death as a handshake timeout
+    // (rather than whichever of the two timers happened to expire
+    // first) is the truthful cause — downstream consumers key off
+    // the distinction. RFC 9000 §10.2.1 lets an endpoint abandon a
+    // handshake at any time; quic's posture on expiry mirrors the
+    // idle-timeout path exactly: enter draining without sending a
+    // CONNECTION_CLOSE (a peer this timer describes is unresponsive
+    // by construction, so a CC would be pure amplification), let the
+    // §10.2 draining window elapse, then land in terminal `.closed`
+    // where `Server.reap` reclaims the slot. A queued-CC close via
+    // `Connection.close` was considered and rejected on that same
+    // amplification ground.
+    if (self.handshakeDeadline(now_us)) |deadline| {
+        if (self.handshake_deadline_us == null) {
+            // First tick: anchor the deadline (see
+            // `handshakeDeadline` for why the anchor is tick-time).
+            self.handshake_deadline_us = deadline;
+        }
+        if (now_us >= deadline) {
+            self.enterDraining(
+                .handshake_timeout,
+                .transport,
+                0,
+                0,
+                "handshake timeout",
+                now_us,
+            );
+            return;
+        }
+    } else if (self.handshake_deadline_us != null) {
+        // Handshake confirmed (or the knob was disabled after
+        // arming): disarm so `nextTimerDeadline` stops surfacing a
+        // stale park target.
+        self.handshake_deadline_us = null;
+    }
 
     if (!self.lifecycle.closed) {
         if (self.idleDeadline()) |deadline| {

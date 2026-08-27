@@ -5,6 +5,76 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+The handshake-liveness release candidate. A `Connection` whose
+handshake never completed, whose peer then went quiet, NEVER died:
+RFC 9000 §10.1's idle timeout is the min of both endpoints'
+advertised values, which pre-confirmation either hasn't arrived (a
+dropped-server dial) or is 0 (idle opted out) — so the client-side
+shape was an eternal dial (Initial retransmission budget, then
+silence forever, no CloseEvent) and the server-side shape was the
+QUIC SYN-flood analog (abandoned dials parking every
+`max_concurrent_connections` slot `.open` until the endpoint mutes).
+Measured downstream in capnp-zig's fanout soak (2026-08-27) and
+reproduced against pre-fix quic-zig in what is now
+`tests/e2e/handshake_timeout.zig` (600 simulated seconds, both
+endpoints `.open`, zero close events).
+
+### Added
+
+- **Handshake-liveness backstop, on by default** —
+  `Client.Config.handshake_timeout_ms` (default 30s),
+  `Server.Config.handshake_timeout_ms` (default 10s, the scarcer and
+  floodable side), and the raw-cycle
+  `Connection.handshake_timeout_us` they thread onto
+  `Connection.Tunables`. The deadline anchors at the connection's
+  first `tick` (≈ `connect` / slot-open), surfaces as the new
+  `TimerKind.handshake_timeout` through `nextTimerDeadline` (often
+  the only park target a stalled dial offers), and on expiry tears
+  the connection down through draining to terminal `.closed`, where
+  `Server.reap` reclaims the slot. Posture on expiry mirrors the
+  idle timeout exactly: silent draining, no CONNECTION_CLOSE — a
+  peer this timer describes is unresponsive by definition, so a CC
+  would be pure amplification (a queued-CC close via
+  `Connection.close` was considered and rejected on that ground).
+- **`CloseSource.handshake_timeout`** (additive enum variant): the
+  sticky `CloseEvent` and `pollEvent`'s close event carry it, so
+  "never became viable" stays distinguishable from
+  `idle_timeout`'s "went quiet after establishing". Downstream
+  first-write-wins cause latches (capnp-zig's
+  `disconnectCauseFor`) can map it exactly; the variant is safe for
+  non-exhaustive consumers per the `ConnectionEvent` forward-compat
+  contract in docs/API_STABILITY.md.
+
+### Design decisions worth knowing
+
+- **The disarm boundary is handshake CONFIRMATION, not TLS
+  completion.** The timer stays armed through the mid-confirmation
+  stall — server flight delivered, client's Finished lost — where
+  both sides have application write keys and a "done" TLS state
+  machine yet the connection is not viable and (with the idle
+  timeout opted out) otherwise immortal. The latch it consults is
+  `handshake_keys_discarded` (RFC 9001 §4.1.2 / §4.9.2), which this
+  codebase already maintains symmetrically: server-side on
+  processing the client's Finished, client-side on receiving
+  HANDSHAKE_DONE. 0-RTT resumption dials walk the same paths and get
+  the same bound — a stalled resumption occupies a slot exactly like
+  a stalled full handshake.
+- **Defaults are on, not opt-in** (the silent default was the
+  hazard). 30s client / 10s server mirror what the downstream embed
+  chose for its own guards, which remain useful defense in depth;
+  equal-value windows are fine either way since the downstream cause
+  latch is first-write-wins. `0` restores the pre-0.19.0 unbounded
+  behavior for embedders that want their own guard to be the only
+  one.
+- One embedder-visible behavior change beyond the knob: a fresh
+  client's `nextTimerDeadline` now reports the handshake backstop at
+  bootstrap, where it previously reported null ("nothing armed"). The
+  foreign-loop example's drain-before-park lesson test was updated
+  accordingly — the park is now bounded from above, which is the
+  improvement the lesson always wanted.
+
 ## [0.18.0] - 2026-08-27
 
 The multi-process port-sharing release. EMBEDDING.md's "Scaling
