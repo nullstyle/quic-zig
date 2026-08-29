@@ -248,7 +248,11 @@ app-side sweep. This holds on BOTH teardown paths: a normal
 close→tick→reap cycle, and `Server.deinit` called with connections
 still live (it fires the same hook per slot before destroying it).
 You do not need a drain loop before `deinit` just to avoid leaking
-Driver sessions.
+Driver sessions. `deinit` itself is silent — no CONNECTION_CLOSE is
+sent — so peers of live connections see a drop, not a close. When the
+close must be wire-visible, call `server.shutdown(code, reason)` first
+and keep servicing until the slots reach `.closed` (then `reap`),
+calling `deinit` last.
 
 Worked examples: `examples/echo_server.zig` (streaming echo),
 `examples/request_response_server.zig` (length-prefixed
@@ -640,7 +644,13 @@ Set these deliberately for any deployed server:
   connection once its handshake is CONFIRMED — before that there may be
   no negotiated idle value at all (the peer's parameters haven't
   arrived, or either side advertised 0), which is what the next knob
-  covers.
+  covers. The timer also cannot observe a peer that dies while this
+  side's ack-eliciting data is unacked: loss recovery keeps PTO-probing,
+  every outbound probe refreshes the connection's activity clock, and
+  the idle deadline moves with it — such connections are structurally
+  immortal at the connection layer. That failure mode is answered by
+  stateless resets (`stateless_reset_key` below), not by the idle
+  timeout; sizing the timeout smaller does not close it.
 - `handshake_timeout_ms` (server default 10s, client default 30s, `0`
   disables): bounds how long a connection may live without completing
   its handshake. Without it, a dial to a server that drops every packet
@@ -706,6 +716,15 @@ Persist Retry, NEW_TOKEN, and stateless-reset keys across graceful
 restarts when continuity matters. Rotating them is a deployment event:
 old Retry and NEW_TOKEN values stop validating, and old stateless-reset
 tokens stop matching previously issued CIDs.
+
+For the stateless-reset key the requirement is stronger than "survive
+graceful restarts": reset tokens are derived per-CID from the key, so a
+*replacement* listener — a restarted instance, or a sibling instance
+behind the same port — can only reset a dead instance's orphaned
+connections if it holds the SAME key. Pin one stateless-reset key
+across every instance and restart of a deployment; with per-instance
+keys, orphan cleanup degrades to waiting out each peer's idle timeout
+(or forever, per the `max_idle_timeout_ms` note above).
 
 ## 0-RTT
 

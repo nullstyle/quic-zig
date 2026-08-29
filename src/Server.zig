@@ -1016,6 +1016,15 @@ pub fn setConnectionWillCloseHook(
     self.on_connection_will_close_user_data = user_data;
 }
 
+/// Reclaim the server's memory. Purely local teardown: each slot's
+/// `on_connection_will_close` hook fires while the connection is
+/// still fully alive (a `quic.app.Driver` frees its session there),
+/// then the slot is destroyed — NO CONNECTION_CLOSE is sent or
+/// queued, so peers observe a silent drop and wait out their own
+/// idle timeouts. When the close must be visible on the wire, call
+/// `shutdown(error_code, reason)` first and keep `poll`ing and
+/// `tick`ing until slots reach `.closed` (reclaiming via `reap`),
+/// with `deinit` last.
 pub fn deinit(self: *Server) void {
     for (self.slots.items) |slot| {
         // Ordered-teardown hook, same as `reap`: the embedder

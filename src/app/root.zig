@@ -429,6 +429,16 @@ pub const Outbox = struct {
 /// bytes. A hand-rolled loop must preserve the same order: service
 /// the Driver before `conn.tick`.
 ///
+/// Timing consequence of that order: `onStreamOpen` fires during the
+/// event drain, before the same pass's stream reads — so a freshly
+/// opened stream has ZERO readable bytes at open time even when data
+/// is already buffered; the read pump delivers it moments later in
+/// the same pass, or in a later pass when the first bytes have not
+/// arrived yet. Per-stream state armed in `onStreamOpen` must mean
+/// "open, nothing observed yet" — never "data is available" or "the
+/// stream's shape is decided". Observation begins at the first
+/// `onStreamData` / `onStreamEnd`, not at open.
+///
 /// On teardown the contract stays airtight: `willCloseHook` fires
 /// `onStreamEnd` (`.reaped`) for every stream the table still tracks
 /// before `onDisconnect` — so per-stream state freed in `onStreamEnd`
@@ -576,6 +586,14 @@ pub fn Driver(comptime App: type) type {
         pub const Hooks = struct {
             on_connect: ?ConnectFn = null,
             on_handshake: ?HandshakeFn = null,
+            /// Fires from the event drain, BEFORE the same pass's
+            /// stream reads: a freshly opened stream has zero
+            /// readable bytes at open time even when data is already
+            /// buffered — `onStreamData` delivers it later in the
+            /// same pass (or a later one). Arm per-stream state as
+            /// "open, nothing observed yet", not "data available";
+            /// treat an empty peek/read at open as expected, not
+            /// EOF. See the module docs' "Ordering guarantees".
             on_stream_open: ?StreamOpenFn = null,
             on_stream_data: ?StreamDataFn = null,
             on_stream_end: ?StreamEndFn = null,

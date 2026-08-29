@@ -315,6 +315,15 @@ local_cid_len: u8 = 8,
 /// same persistence note in the README's Production Checklist
 /// applies.
 ///
+/// **Pin ONE key across every instance of a deployment.** Tokens
+/// derive per-CID from this key, so a replacement listener (a
+/// restarted instance, or a sibling sharing the port) can only
+/// emit a reset an orphan recognizes when it holds the SAME key
+/// the dead instance minted that CID's token under. Per-instance
+/// keys strand orphans: they die only by their peers' idle
+/// timeouts — or, with unacked ack-eliciting data outstanding,
+/// never (see `Connection.last_activity_us`).
+///
 /// Do NOT hand-set `transport_params.stateless_reset_token`
 /// instead: §18.2's token belongs to the handshake CID, which
 /// differs per connection, so a value in per-server config cannot be

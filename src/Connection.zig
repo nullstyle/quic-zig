@@ -628,6 +628,17 @@ early_data_rejection_processed: bool = false,
 /// directly as the connection clock rather than threading their
 /// own timestamp through every call. Read-only for embedders —
 /// quic maintains it.
+///
+/// Both directions refresh it: every datagram this side emits —
+/// including PTO probes and close retransmits — and every non-empty
+/// datagram it receives. The send-side refresh has an operational
+/// consequence for the idle timeout: a peer that dies while our
+/// ack-eliciting data is unacked is PTO-probed forever, and each
+/// probe restarts the idle clock, so death-under-load never trips
+/// the idle timeout at the connection layer. That failure mode is
+/// answered by RFC 9000 §10.3 stateless resets (`Server.Config.
+/// stateless_reset_key`): a replacement listener holding the same
+/// key resets the dead instance's orphans on their first probe.
 last_activity_us: u64 = 0,
 
 /// Handshake-liveness budget in microseconds: how long the
@@ -3924,9 +3935,13 @@ pub fn gracefulShutdownActive(self: *const Connection) bool {
     return self.graceful_shutdown;
 }
 
-/// True after we've sent or received CONNECTION_CLOSE, received a
-/// stateless reset, or timed out. Use `closeState` to distinguish
-/// closing, draining, and terminal closed states.
+/// True only once the connection is terminal — past the
+/// closing/draining deadline, a stateless reset, or a timeout.
+/// NOT true during `.closing`/`.draining`: after CONNECTION_CLOSE
+/// is sent or received, the connection sits in those states until
+/// its deadline elapses, and only then latches closed. Use
+/// `closeState` to distinguish closing, draining, and terminal
+/// closed states.
 pub fn isClosed(self: *const Connection) bool {
     return self.lifecycle.closed;
 }
