@@ -639,6 +639,33 @@ pub fn build(b: *std.Build) void {
     const bench_e2e_step = b.step("bench-e2e", "Run quic end-to-end benchmarks (goodput, handshakes, impairment)");
     bench_e2e_step.dependOn(&run_bench_e2e.step);
 
+    // std.Io backend comparison: the bundled UDP loops over real
+    // loopback sockets under std.Io.Threaded vs std.Io.Evented, picked
+    // at runtime (bench/io_backend.zig). Same ReleaseSafe policy and
+    // module graph as `bench`. The artifact is also installed so a
+    // sweep can rerun `zig-out/bin/quic-zig-bench-io` without
+    // rebuilding. Evented needs a std where `std.Io.Evented` is not
+    // void (on macOS today: a fork checkout via `--zig-lib-dir`).
+    const bench_io_mod = b.createModule(.{
+        .root_source_file = b.path("bench/io_backend.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+        .sanitize_c = sanitize_c,
+    });
+    bench_io_mod.addImport("quic", bench_quic_mod);
+    bench_io_mod.addImport("boringssl", bench_boringssl_mod);
+
+    const bench_io_exe = b.addExecutable(.{
+        .name = "quic-zig-bench-io",
+        .root_module = bench_io_mod,
+    });
+    const install_bench_io = b.addInstallArtifact(bench_io_exe, .{});
+    const run_bench_io = b.addRunArtifact(bench_io_exe);
+    run_bench_io.addPassthruArgs();
+    const bench_io_step = b.step("bench-io", "Run the std.Io backend comparison (Threaded vs Evented) over loopback UDP");
+    bench_io_step.dependOn(&install_bench_io.step);
+    bench_io_step.dependOn(&run_bench_io.step);
+
     const bench_tests_mod = b.createModule(.{
         .root_source_file = b.path("bench/root.zig"),
         .target = target,
