@@ -46,7 +46,7 @@ const cert_pem = @embedFile("e2e/support/test_cert.pem");
 const key_pem = @embedFile("e2e/support/test_key.pem");
 const alpn = "bench-io/1";
 
-const Backend = enum { threaded, evented };
+const Backend = enum { threaded, evented, @"ev-thread" };
 const Scenario = enum { goodput, echo };
 
 const Options = struct {
@@ -673,7 +673,21 @@ fn runSampleLoops(
         };
     }
     var group: std.Io.Group = .init;
-    for (tasks) |*task| try group.concurrent(io, ServerTask.run, .{task});
+    // `--io ev-thread`: every loop is an OS thread driving its own
+    // single-threaded Evented instance (see `serverLoopThread`), so a loop
+    // cannot migrate between workers and its ring is its thread's own.
+    // Otherwise the loops are Group tasks: threads under Threaded, fibers
+    // the Evented workers may steal under Evented.
+    const per_thread = backend == .@"ev-thread";
+    var server_threads: []std.Thread = &.{};
+    defer if (per_thread) gpa.free(server_threads);
+    if (per_thread) {
+        server_threads = try gpa.alloc(std.Thread, n);
+        for (tasks, server_threads) |*task, *thread_slot|
+            thread_slot.* = try std.Thread.spawn(.{}, serverLoopThread, .{ gpa, task });
+    } else {
+        for (tasks) |*task| try group.concurrent(io, ServerTask.run, .{task});
+    }
     defer group.await(io) catch {};
     defer shutdown.store(true, .release);
 
@@ -713,8 +727,20 @@ fn runSampleLoops(
         .t0 = t0,
     };
     var client_group: std.Io.Group = .init;
-    for (clients) |*client| try client_group.concurrent(io, ClientTask.run, .{client});
-    try client_group.await(io);
+    var client_threads: []std.Thread = &.{};
+    defer if (per_thread) gpa.free(client_threads);
+    if (per_thread) {
+        client_threads = try gpa.alloc(std.Thread, m);
+        for (clients, client_threads) |*client, *thread_slot|
+            thread_slot.* = try std.Thread.spawn(.{}, clientLoopThread, .{ gpa, client });
+    } else {
+        for (clients) |*client| try client_group.concurrent(io, ClientTask.run, .{client});
+    }
+    if (per_thread) {
+        for (client_threads) |t| t.join();
+    } else {
+        try client_group.await(io);
+    }
     for (clients) |*client| if (client.err) |err| return err;
 
     var first_start: u64 = std.math.maxInt(u64);
@@ -780,7 +806,11 @@ fn runSampleLoops(
     }
 
     shutdown.store(true, .release);
-    try group.await(io);
+    if (per_thread) {
+        for (server_threads) |t| t.join();
+    } else {
+        try group.await(io);
+    }
     // Per-server counters outlive this call: the JSON report prints them
     // and `main` frees them with the sample list.
     const server_bytes = try gpa.alloc(u64, n);
@@ -822,6 +852,41 @@ fn madF(values: []const f64, median: f64, scratch: []f64) f64 {
     return medianF(scratch[0..values.len]);
 }
 
+/// One loop on one thread driving one single-threaded Evented instance
+/// (`thread_limit = 0`): the loop cannot migrate between workers and its
+/// io_uring ring is that thread's own. The `--io ev-thread` placement
+/// experiment (Uring only; compare against `evented` under the same
+/// `--loops/--clients` shape).
+fn serverLoopThread(gpa: std.mem.Allocator, task: *ServerTask) void {
+    if (comptime builtin.os.tag == .linux) {
+        var evented: std.Io.Uring = undefined;
+        evented.init(gpa, .{ .thread_limit = 0 }) catch {
+            task.failed.store(true, .release);
+            return;
+        };
+        defer evented.deinit();
+        task.io = evented.io();
+        ServerTask.run(task);
+    } else {
+        task.failed.store(true, .release);
+    }
+}
+
+fn clientLoopThread(gpa: std.mem.Allocator, task: *ClientTask) void {
+    if (comptime builtin.os.tag == .linux) {
+        var evented: std.Io.Uring = undefined;
+        evented.init(gpa, .{ .thread_limit = 0 }) catch {
+            task.err = error.EventedInitFailed;
+            return;
+        };
+        defer evented.deinit();
+        task.io = evented.io();
+        ClientTask.run(task);
+    } else {
+        task.err = error.EventedInitFailed;
+    }
+}
+
 fn runBackend(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -830,8 +895,7 @@ fn runBackend(
     payload: []const u8,
     rtts: []u64,
     samples: *std.ArrayList(Sample),
-) !void {
-    for (opts.scenarios) |scenario| {
+) !void {    for (opts.scenarios) |scenario| {
         for (0..opts.samples) |i| {
             // `--loops 1 --clients N` is the control: one server, bound exactly
             // as in the classic path, N clients.
@@ -936,7 +1000,7 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--io")) {
             const v = args.next() orelse return usage();
-            opts.backends = if (std.mem.eql(u8, v, "threaded")) &.{.threaded} else if (std.mem.eql(u8, v, "evented")) &.{.evented} else if (std.mem.eql(u8, v, "both")) &.{ .threaded, .evented } else return usage();
+            opts.backends = if (std.mem.eql(u8, v, "threaded")) &.{.threaded} else if (std.mem.eql(u8, v, "evented")) &.{.evented} else if (std.mem.eql(u8, v, "ev-thread")) &.{.@"ev-thread"} else if (std.mem.eql(u8, v, "all")) &.{ .threaded, .evented, .@"ev-thread" } else if (std.mem.eql(u8, v, "both")) &.{ .threaded, .evented } else return usage();
         } else if (std.mem.eql(u8, arg, "--scenario")) {
             const v = args.next() orelse return usage();
             opts.scenarios = if (std.mem.eql(u8, v, "goodput")) &.{.goodput} else if (std.mem.eql(u8, v, "echo")) &.{.echo} else if (std.mem.eql(u8, v, "all")) &.{ .goodput, .echo } else return usage();
@@ -986,6 +1050,22 @@ pub fn main(init: std.process.Init) !void {
             var threaded: std.Io.Threaded = .init(gpa, .{});
             defer threaded.deinit();
             try runBackend(gpa, threaded.io(), backend, opts, payload, rtts, &samples);
+        },
+        .@"ev-thread" => {
+            // The placement experiment: loops on their own threads with
+            // single-threaded Evented instances. Only meaningful in
+            // multi-loop mode, and only on the io_uring backend; the
+            // coordinator io (port picking, sleeps, clocks, the report) is
+            // Threaded.
+            if (std.Io.Evented != std.Io.Uring) {
+                std.debug.print("bench-io: --io ev-thread needs the io_uring backend; skipping\n", .{});
+            } else if (opts.loops < 2 and (opts.clients == 0 or opts.clients < 2)) {
+                std.debug.print("bench-io: --io ev-thread needs --loops N (N>1) or --clients M (M>1); skipping\n", .{});
+            } else {
+                var threaded: std.Io.Threaded = .init(gpa, .{});
+                defer threaded.deinit();
+                try runBackend(gpa, threaded.io(), backend, opts, payload, rtts, &samples);
+            }
         },
         .evented => {
             const Evented = std.Io.Evented;
