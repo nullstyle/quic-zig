@@ -665,6 +665,10 @@ pub fn build(b: *std.Build) void {
     const bench_io_step = b.step("bench-io", "Run the std.Io backend comparison (Threaded vs Evented) over loopback UDP");
     bench_io_step.dependOn(&install_bench_io.step);
     bench_io_step.dependOn(&run_bench_io.step);
+    // Build-only variant for cross targets (the binary is then run on the
+    // target machine, e.g. a Linux VM for the io_uring backend).
+    const bench_io_build_step = b.step("bench-io-build", "Build and install the std.Io backend comparison without running it");
+    bench_io_build_step.dependOn(&install_bench_io.step);
 
     const bench_tests_mod = b.createModule(.{
         .root_source_file = b.path("bench/root.zig"),

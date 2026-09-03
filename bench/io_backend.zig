@@ -729,9 +729,12 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("bench-io: std.Io.Evented is void on {s}-{s} with this std; skipping evented\n", .{ @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) });
             } else {
                 var evented: Evented = undefined;
-                try Evented.init(&evented, gpa, .{
+                // `leeway` (timer slack) exists only on the libdispatch
+                // backend; the io_uring and kqueue backends take defaults.
+                const evented_options: Evented.InitOptions = if (Evented == std.Io.Dispatch) .{
                     .leeway = std.Io.Duration.fromMilliseconds(opts.leeway_ms),
-                });
+                } else .{};
+                try Evented.init(&evented, gpa, evented_options);
                 defer evented.deinit();
                 try runBackend(gpa, evented.io(), backend, opts, payload, rtts, &samples);
             }
