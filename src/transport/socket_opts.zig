@@ -1076,12 +1076,22 @@ test "negotiateUdpOffloads: best-effort on loopback, never errors" {
 pub const has_reuseport_sockopt: bool = builtin.os.tag != .windows and
     @hasDecl(posix.SO, "REUSEPORT");
 
-/// Options for `bindUdpSocket` — the pre-bind socket options std's
-/// `IpAddress.bind` has no window to express, because it creates and
-/// binds the socket in a single Io-vtable call. Fields here exist for
-/// the same reason the helper does: `SO_REUSEPORT` (and anything else
-/// that must precede `bind(2)`) cannot be set on a socket that API
-/// never hands out unbound.
+/// Whether this std's `IpAddress.BindOptions` has a `reuse_port` field.
+/// When it does, the bundled loop binds every listener through the
+/// `std.Io` vtable and `bindUdpSocket` is only a fallback for embedders
+/// on an older std. Bind your own reuse-group socket the same way:
+/// `IpAddress.bind(&addr, io, .{ .mode = .dgram, .protocol = .udp,
+/// .reuse_port = true })`.
+pub const std_bind_has_reuse_port: bool =
+    @hasField(Net.IpAddress.BindOptions, "reuse_port");
+
+/// Options for `bindUdpSocket` — the pre-bind socket options an older
+/// std's `IpAddress.bind` cannot express: it creates and binds the
+/// socket in a single Io-vtable call and has no `reuse_port` field
+/// (`std_bind_has_reuse_port` false), so `SO_REUSEPORT` (and anything
+/// else that must precede `bind(2)`) cannot otherwise be set on a
+/// socket that API never hands out unbound. On a std with the field,
+/// pass `.reuse_port = true` to `IpAddress.bind` instead.
 pub const BindUdpOptions = struct {
     /// Set `SO_REUSEPORT` before bind so that N processes may bind the
     /// same `ip:port` simultaneously. Platform behavior after the
@@ -1089,16 +1099,20 @@ pub const BindUdpOptions = struct {
     ///
     ///   * Linux (>= 3.9) hash-balances flows across the socket group
     ///     by 4-tuple — each connection stays on one worker while the
-    ///     client's address and port are stable. Every socket in the
-    ///     group must share one effective UID (socket(7)); a process
-    ///     under that UID can therefore join the port and receive its
-    ///     traffic. That is inherent to `SO_REUSEPORT`, which is why
-    ///     this is opt-in everywhere it is offered.
-    ///   * macOS / BSD lineage permit the shared bind but deliver each
-    ///     datagram to the most recently bound socket (measured on
-    ///     darwin 25.6: 64 flows, 0 / 64 split; survivors take over
-    ///     when the newest closes). A macOS fleet therefore behaves
-    ///     active/passive, not load-balanced.
+    ///     client's address and port AND the group's membership are
+    ///     stable (a worker joining or leaving re-maps a share of the
+    ///     other workers' flows). Every socket in the group must be
+    ///     owned by one UID — the uid it was created under, not the
+    ///     binder's — so a process under that UID can join the port
+    ///     and receive its traffic. That is inherent to `SO_REUSEPORT`,
+    ///     which is why this is opt-in everywhere it is offered.
+    ///   * macOS / BSD lineage permit the shared bind but do not
+    ///     balance: one socket receives every unicast datagram — the
+    ///     most recently bound one for a specific-address bind, the
+    ///     OLDEST one for a wildcard (`0.0.0.0` / `[::]`) bind
+    ///     (measured on darwin 25.6: 0 / 16 vs 16 / 0). The next in
+    ///     line takes over when it closes. A macOS fleet therefore
+    ///     behaves active/passive, not load-balanced.
     ///   * A client whose 4-tuple changes — connection migration, NAT
     ///     rebinding, a `preferred_address` — can land on a socket that
     ///     does not own its connection. Deployments needing migration
@@ -1115,18 +1129,25 @@ pub const BindUdpOptions = struct {
 pub const BindUdpError = Net.IpAddress.BindError;
 
 /// Bind a UDP socket directly through POSIX, applying pre-bind socket
-/// options std's `IpAddress.bind` cannot express. Returns a `Net.Socket`
-/// usable with any `std.Io` (POSIX sockets are plain `{ handle,
-/// address }` values there; I/O operations take the Io instance
-/// per-call, so a handle created outside the vtable drives the same
-/// `operate` path as one the backend made itself).
+/// options an older std's `IpAddress.bind` cannot express. Returns a
+/// `Net.Socket` whose handle drives the normal per-call `operate` path.
+/// The socket is BLOCKING (no O_NONBLOCK) and was not created by your
+/// `Io` backend. `std.Io.Threaded` (poll + MSG_DONTWAIT) and
+/// `std.Io.Uring` (its own sockets are blocking too; it drains with
+/// MSG_DONTWAIT and waits in the ring) handle that. `std.Io.Dispatch`
+/// does not: it sets O_NONBLOCK at socket creation and its recvmsg
+/// carries no MSG_DONTWAIT, so on a blocking socket `receiveManyTimeout`
+/// ignores its timeout and returns only once every message slot is
+/// filled — the bundled loop would neither tick timers nor see the
+/// first datagram of a batch until `max_datagrams_per_iteration`
+/// datagrams had arrived.
 ///
-/// When no pre-bind option is requested, embedders should prefer
-/// `IpAddress.bind` through their `Io` — this helper exists for the
-/// options, not as a general replacement, and it does mean a custom
-/// `std.Io` backend's `netBindIp` is bypassed on this one path.
-/// `RunUdpOptions.reuse_port` routes through here; foreign-loop
-/// embedders can call it directly.
+/// Prefer `IpAddress.bind` through your `Io` whenever it can express
+/// the option (`std_bind_has_reuse_port`); this helper exists for std
+/// versions that cannot, not as a general replacement, and it does
+/// mean a custom `std.Io` backend's `netBindIp` is bypassed on this
+/// one path. `RunUdpOptions.reuse_port` routes through here only on
+/// such a std; foreign-loop embedders can call it directly.
 pub fn bindUdpSocket(
     address: *const Net.IpAddress,
     options: BindUdpOptions,
@@ -1382,7 +1403,8 @@ test "SO_REUSEPORT delivery: balanced on Linux, newest-bound on Darwin" {
     }
 
     if (builtin.os.tag.isDarwin()) {
-        // BSD lineage: the most recently bound socket receives every
+        // BSD lineage (specific-address bind; a wildcard bind favours
+        // the oldest): the most recently bound socket receives every
         // datagram; the survivors take over only when it closes. A
         // failure here means Apple changed the semantics — update the
         // `BindUdpOptions.reuse_port` and EMBEDDING.md text with it.

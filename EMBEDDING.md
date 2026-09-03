@@ -116,12 +116,15 @@ single-threaded instance. To use more than one core, run N independent
 `Server` instances (each on its own thread or process) sharing the
 same port: pass the same `listen` string to every instance and set
 `RunUdpOptions.reuse_port = true`, which applies `SO_REUSEPORT` to
-every listener the loop binds before the bind. (Driving each instance
-caller-drives instead? Bind through
-`quic.transport.bindUdpSocket(&addr, .{ .reuse_port = true })` —
-std's `IpAddress.bind` creates and binds in one call with no window to
-set the option, so that helper is the supported way to get a
-reuse-group socket of your own.) No shared state exists between
+every listener the loop binds before the bind. (Binding a socket of
+your own for a caller-driven instance? When
+`quic.transport.std_bind_has_reuse_port` is true, pass
+`.reuse_port = true` to `std.Io.net.IpAddress.bind` and stay on your
+`Io` backend. On an older std, bind through
+`quic.transport.bindUdpSocket(&addr, .{ .reuse_port = true })`, a
+POSIX-direct fallback whose socket is blocking and therefore suits
+`std.Io.Threaded` and `std.Io.Uring` but not `std.Io.Dispatch`.) No
+shared state exists between
 instances, so no locks are needed; connection CIDs and stateless-reset
 tokens must be minted from per-instance configurations (QUIC-LB or
 random SCIDs) so peers route to the instance that owns their
@@ -132,20 +135,33 @@ not library behavior, and it differs:
 
 - **Linux** (kernel ≥ 3.9) hash-balances flows across the socket group
   by 4-tuple, so each connection stays on one worker for as long as
-  the client's address and port are stable — and a worker that exits
-  and rejoins does not disturb the others' connections. Every socket
-  in the group must share one effective UID (socket(7)); any process
+  the client's address and port AND the group's membership are stable.
+  The kernel picks `socks[hash * N >> 32]` over its array of N sockets;
+  a worker leaving shrinks N and drops the last-bound socket into the
+  vacated slot, a worker joining appends. Either re-homes a share of
+  the flows that were on the OTHER workers (none to most of them,
+  depending on which slot the departing worker held), and a sibling
+  that receives such a packet answers it with a stateless reset when
+  the shared `stateless_reset_key` is pinned, so those connections
+  die. Rolling restarts therefore need CID routing just as migration
+  does (below); `SO_REUSEPORT` alone only lets the replacement bind
+  while the old worker still holds the port. Every socket in the group
+  must be owned by one UID (the uid it was created under); any process
   under that UID can join the port and receive its traffic. That is
   inherent to `SO_REUSEPORT`, which is why the option is opt-in.
-- **macOS / BSD** permit the shared bind but deliver each datagram to
-  the most recently bound socket; when that one closes, the survivors
-  take over. A macOS fleet therefore behaves active/passive (the
-  newest worker serves everything), not load-balanced — fine for
-  bind-sharing and failover, not a scaling story.
+- **macOS / BSD** permit the shared bind but do not balance: one
+  socket receives every unicast datagram — the most recently bound one
+  when the workers bind a specific address, the OLDEST one when they
+  bind the wildcard address (`0.0.0.0` / `[::]`, the usual server
+  shape). When that socket closes, the next in line takes over. A
+  macOS fleet therefore behaves active/passive, not load-balanced —
+  fine for bind-sharing and failover, not a scaling story — and with
+  wildcard binds a newly spawned worker receives nothing until every
+  older one has exited.
 - A client whose 4-tuple changes — connection migration, NAT
   rebinding, a `preferred_address` — can land on an instance that does
   not own its connection. Deployments that need migration resilience
-  must route by CID (QUIC-LB, an eBPF reuseport program, or an
+  or disruption-free worker restarts must route by CID (QUIC-LB, an eBPF reuseport program, or an
   external load balancer) rather than rely on the kernel hash. The
   loop applies `reuse_port` to `preferred_address` alt listeners too,
   so all workers can boot, but migration across them has this same

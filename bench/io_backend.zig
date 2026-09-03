@@ -24,6 +24,18 @@
 //! sets `std.Io.Evented.InitOptions.leeway` (std default 10 ms), the
 //! timer slack libdispatch is allowed on every timed wait.
 //!
+//! `--loops N` runs N server loops that share one port through
+//! `RunUdpOptions.reuse_port` (the std needs `IpAddress.BindOptions.reuse_port`
+//! so the bind goes through the Io vtable: the older POSIX-direct fallback's
+//! blocking socket stalls `std.Io.Dispatch` on macOS, while `std.Io.Uring`
+//! on Linux is indifferent, its sockets being blocking either way) and
+//! `--clients M` (default N) client loops against them at once. Rates are
+//! then aggregate over the window from the first client's start to the last
+//! client's finish, on one clock. On Linux the kernel spreads the connections
+//! across the N sockets by flow hash; on macOS a single socket of the group
+//! receives everything (no balancing). The per-server byte and datagram
+//! counts in the output show the split.
+//!
 //! Pass/fail is completion only; rates are printed for humans and JSON.
 
 const std = @import("std");
@@ -47,6 +59,12 @@ const Options = struct {
     leeway_ms: i64 = 10,
     /// `RunUdpOptions.receive_timeout` / `RunUdpClientOptions.receive_timeout`.
     receive_timeout_ms: i64 = 5,
+    /// Server loops sharing one port (`reuse_port`). Together with
+    /// `clients` <= 1 this is the classic single-server, single-client shape.
+    loops: usize = 1,
+    /// Concurrent client loops; 0 = same as `loops`. `--loops 1 --clients N`
+    /// is the one-server control for `--loops N`.
+    clients: usize = 0,
     json_path: ?[]const u8 = null,
 };
 
@@ -164,6 +182,7 @@ const ServerTask = struct {
     listen: []const u8,
     shutdown: *const std.atomic.Value(bool),
     receive_timeout_ms: i64,
+    reuse_port: bool = false,
     failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn run(task: *ServerTask) void {
@@ -192,6 +211,7 @@ const ServerTask = struct {
             .shutdown_grace_us = 100_000,
             .receive_timeout = std.Io.Duration.fromMilliseconds(task.receive_timeout_ms),
             .tune_socket = false,
+            .reuse_port = task.reuse_port,
             .on_iteration = ServerApp.onIteration,
             .on_iteration_ctx = task.app,
         });
@@ -213,6 +233,16 @@ const UploadFlow = struct {
     cpu_start_us: u64 = 0,
     cpu_finish_us: u64 = 0,
     iterations: u64 = 0,
+    /// Shared clock for the multi-loop mode: `now_us` is relative to this
+    /// loop's own start, so windows across loops use `t0` instead.
+    io: ?std.Io = null,
+    t0: std.Io.Timestamp = undefined,
+    start_abs_us: u64 = 0,
+    finish_abs_us: u64 = 0,
+
+    fn absNow(flow: *const UploadFlow) u64 {
+        return if (flow.io) |io| elapsedUs(io, flow.t0) else 0;
+    }
 
     fn onIteration(ctx: ?*anyopaque, client: *quic.Client, now_us: u64) anyerror!void {
         const flow: *UploadFlow = @ptrCast(@alignCast(ctx.?));
@@ -227,6 +257,7 @@ const UploadFlow = struct {
                 flow.stage = .uploading;
                 flow.handshake_us = now_us;
                 flow.start_us = now_us;
+                flow.start_abs_us = flow.absNow();
                 flow.cpu_start_us = cpuTimeUs();
             },
             else => {},
@@ -245,9 +276,13 @@ const UploadFlow = struct {
                 flow.stage = .awaiting_acks;
             },
             .awaiting_acks => {
-                const complete = if (client.conn.stream(flow.stream_id)) |s| s.send.fin_acked else true;
+                // `fin_acked` alone is not delivery: the FIN chunk can be acked
+                // while earlier chunks are still lost, and `close()` below then
+                // pre-empts their retransmission. Wait for every byte to be acked.
+                const complete = if (client.conn.stream(flow.stream_id)) |s| s.send.isTerminal() else true;
                 if (!complete) return;
                 flow.finish_us = now_us;
+                flow.finish_abs_us = flow.absNow();
                 flow.cpu_finish_us = cpuTimeUs();
                 flow.stage = .done;
                 client.conn.close(false, 0, "bench done");
@@ -268,6 +303,14 @@ const EchoFlow = struct {
     cpu_start_us: u64 = 0,
     cpu_finish_us: u64 = 0,
     iterations: u64 = 0,
+    io: ?std.Io = null,
+    t0: std.Io.Timestamp = undefined,
+    first_ping_abs_us: u64 = 0,
+    last_pong_abs_us: u64 = 0,
+
+    fn absNow(flow: *const EchoFlow) u64 {
+        return if (flow.io) |io| elapsedUs(io, flow.t0) else 0;
+    }
 
     fn onIteration(ctx: ?*anyopaque, client: *quic.Client, now_us: u64) anyerror!void {
         const flow: *EchoFlow = @ptrCast(@alignCast(ctx.?));
@@ -297,6 +340,7 @@ const EchoFlow = struct {
             flow.seq += 1;
             flow.in_flight_sent_us = null;
             flow.last_pong_us = now_us;
+            flow.last_pong_abs_us = flow.absNow();
             if (flow.done_count == flow.rtts_us.len) {
                 flow.cpu_finish_us = cpuTimeUs();
                 flow.stage = .done;
@@ -311,6 +355,7 @@ const EchoFlow = struct {
         try client.conn.sendDatagram(&payload);
         if (flow.first_ping_us == null) {
             flow.first_ping_us = now_us;
+            flow.first_ping_abs_us = flow.absNow();
             flow.cpu_start_us = cpuTimeUs();
         }
         flow.in_flight_sent_us = now_us;
@@ -325,6 +370,8 @@ const ClientTask = struct {
     scenario: Scenario,
     payload: []const u8,
     rtts: []u64,
+    /// Set in the multi-loop mode: the flows stamp their windows on this clock.
+    t0: ?std.Io.Timestamp = null,
     upload: UploadFlow = undefined,
     echo: EchoFlow = undefined,
     err: ?anyerror = null,
@@ -347,7 +394,11 @@ const ClientTask = struct {
         defer client.deinit();
         switch (task.scenario) {
             .goodput => {
-                task.upload = .{ .payload = task.payload };
+                task.upload = .{
+                    .payload = task.payload,
+                    .io = if (task.t0 != null) task.io else null,
+                    .t0 = task.t0 orelse undefined,
+                };
                 try quic.transport.runUdpClient(&client, .{
                     .target = task.target,
                     .io = task.io,
@@ -358,7 +409,11 @@ const ClientTask = struct {
                 });
             },
             .echo => {
-                task.echo = .{ .rtts_us = task.rtts };
+                task.echo = .{
+                    .rtts_us = task.rtts,
+                    .io = if (task.t0 != null) task.io else null,
+                    .t0 = task.t0 orelse undefined,
+                };
                 try quic.transport.runUdpClient(&client, .{
                     .target = task.target,
                     .io = task.io,
@@ -387,6 +442,12 @@ const Sample = struct {
     handshake_ms: f64,
     client_iterations: u64,
     server_iterations: u64,
+    /// In multi-loop mode (`loops > 1 or clients > 1`) `mib` and `pings`
+    /// are totals across all clients (they are the denominators of
+    /// `cpu_ms_per_mib` and `round_trips_per_sec`), `handshake_ms` is the
+    /// per-client mean, and `cpu_ms` spans the earliest client's start to
+    /// the latest client's finish; `Report.mib` / `Report.pings` stay per
+    /// client.
     // goodput
     mib: usize = 0,
     mib_per_sec: f64 = 0,
@@ -398,6 +459,13 @@ const Sample = struct {
     rtt_p99_us: f64 = 0,
     rtt_max_us: f64 = 0,
     round_trips_per_sec: f64 = 0,
+    // multi-loop mode (`--loops N`)
+    loops: usize = 1,
+    clients: usize = 1,
+    /// Per server loop: stream bytes sunk (goodput) and datagrams echoed
+    /// (echo). Shows how the kernel spread the clients across the port group.
+    server_bytes: []const u64 = &.{},
+    server_datagrams: []const u64 = &.{},
 };
 
 const Summary = struct {
@@ -424,6 +492,8 @@ const Report = struct {
     receive_timeout_ms: i64,
     mib: usize,
     pings: usize,
+    loops: usize,
+    clients: usize,
     summaries: []const Summary,
     samples: []const Sample,
 };
@@ -561,6 +631,179 @@ fn runSample(
     return sample;
 }
 
+/// `--loops N`: N server loops share one port through `reuse_port`, and
+/// `clients` client loops (default N) each run the scenario against it at
+/// the same time. Rates are aggregate: total bytes (or pings) over the
+/// window from the first client's start to the last client's finish, both
+/// stamped on one clock (`t0`).
+fn runSampleLoops(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    backend: Backend,
+    scenario: Scenario,
+    opts: Options,
+    payload: []const u8,
+    rtts: []u64,
+) !Sample {
+    const n = opts.loops;
+    const m = if (opts.clients == 0) n else opts.clients;
+    const port = try pickLoopbackPort(io);
+    var addr_buf: [32]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1:{d}", .{port});
+
+    var shutdown = std.atomic.Value(bool).init(false);
+    const readies = try gpa.alloc(std.atomic.Value(bool), n);
+    defer gpa.free(readies);
+    const apps = try gpa.alloc(ServerApp, n);
+    defer gpa.free(apps);
+    const tasks = try gpa.alloc(ServerTask, n);
+    defer gpa.free(tasks);
+    for (readies, apps, tasks) |*ready, *app, *task| {
+        ready.* = std.atomic.Value(bool).init(false);
+        app.* = .{ .allocator = gpa, .ready = ready };
+        task.* = .{
+            .app = app,
+            .io = io,
+            .listen = addr,
+            .shutdown = &shutdown,
+            .receive_timeout_ms = opts.receive_timeout_ms,
+            // The one-server control (`--loops 1 --clients N`) binds exactly
+            // as the classic path does; only a real group needs the option.
+            .reuse_port = n > 1,
+        };
+    }
+    var group: std.Io.Group = .init;
+    for (tasks) |*task| try group.concurrent(io, ServerTask.run, .{task});
+    defer group.await(io) catch {};
+    defer shutdown.store(true, .release);
+
+    var waited: usize = 0;
+    for (readies, tasks) |*ready, *task| {
+        while (!ready.load(.acquire)) : (waited += 1) {
+            if (task.failed.load(.acquire)) return error.ServerLoopFailed;
+            if (waited > 10_000) return error.ServerNotReady;
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+        }
+    }
+
+    const cpu_before = cpuTimeUs();
+    const t0 = std.Io.Timestamp.now(io, .awake);
+    var sample: Sample = .{
+        .backend = @tagName(backend),
+        .scenario = @tagName(scenario),
+        .wall_ms = 0,
+        .cpu_total_ms = 0,
+        .cpu_ms = 0,
+        .handshake_ms = 0,
+        .client_iterations = 0,
+        .server_iterations = 0,
+        .loops = n,
+        .clients = m,
+    };
+    const clients = try gpa.alloc(ClientTask, m);
+    defer gpa.free(clients);
+    for (clients, 0..) |*client, i| client.* = .{
+        .gpa = gpa,
+        .io = io,
+        .target = addr,
+        .receive_timeout_ms = opts.receive_timeout_ms,
+        .scenario = scenario,
+        .payload = payload,
+        .rtts = rtts[i * opts.pings ..][0..opts.pings],
+        .t0 = t0,
+    };
+    var client_group: std.Io.Group = .init;
+    for (clients) |*client| try client_group.concurrent(io, ClientTask.run, .{client});
+    try client_group.await(io);
+    for (clients) |*client| if (client.err) |err| return err;
+
+    var first_start: u64 = std.math.maxInt(u64);
+    var last_finish: u64 = 0;
+    var cpu_start: u64 = std.math.maxInt(u64);
+    var cpu_finish: u64 = 0;
+    var handshake_sum: u64 = 0;
+    switch (scenario) {
+        .goodput => {
+            for (clients) |*client| {
+                const flow = &client.upload;
+                if (flow.stage != .done) return error.GoodputIncomplete;
+                if (flow.start_abs_us < first_start) {
+                    first_start = flow.start_abs_us;
+                    cpu_start = flow.cpu_start_us;
+                }
+                if (flow.finish_abs_us > last_finish) {
+                    last_finish = flow.finish_abs_us;
+                    cpu_finish = flow.cpu_finish_us;
+                }
+                handshake_sum += flow.handshake_us.?;
+                sample.client_iterations += flow.iterations;
+            }
+            const total_bytes = payload.len * m;
+            const secs = @as(f64, @floatFromInt(last_finish - first_start)) / 1e6;
+            sample.mib = total_bytes >> 20;
+            sample.mib_per_sec = if (secs <= 0) 0 else @as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0) / secs;
+        },
+        .echo => {
+            for (clients) |*client| {
+                const flow = &client.echo;
+                if (flow.stage != .done) return error.EchoIncomplete;
+                if (flow.first_ping_abs_us < first_start) {
+                    first_start = flow.first_ping_abs_us;
+                    cpu_start = flow.cpu_start_us;
+                }
+                if (flow.last_pong_abs_us > last_finish) {
+                    last_finish = flow.last_pong_abs_us;
+                    cpu_finish = flow.cpu_finish_us;
+                }
+                handshake_sum += flow.handshake_us.?;
+                sample.client_iterations += flow.iterations;
+            }
+            const used = rtts[0 .. opts.pings * m];
+            std.mem.sort(u64, used, {}, std.sort.asc(u64));
+            sample.pings = used.len;
+            sample.rtt_p50_us = @floatFromInt(percentile(used, 50));
+            sample.rtt_p90_us = @floatFromInt(percentile(used, 90));
+            sample.rtt_p99_us = @floatFromInt(percentile(used, 99));
+            sample.rtt_max_us = @floatFromInt(used[used.len - 1]);
+            const span_us = last_finish - first_start;
+            sample.round_trips_per_sec = if (span_us == 0) 0 else @as(f64, @floatFromInt(used.len)) * 1e6 / @as(f64, @floatFromInt(span_us));
+        },
+    }
+    sample.handshake_ms = @as(f64, @floatFromInt(handshake_sum)) / 1e3 / @as(f64, @floatFromInt(m));
+    sample.cpu_ms = @as(f64, @floatFromInt(cpu_finish - cpu_start)) / 1e3;
+    const wall_us = elapsedUs(io, t0);
+    const cpu_us = cpuTimeUs() - cpu_before;
+    sample.wall_ms = @as(f64, @floatFromInt(wall_us)) / 1e3;
+    sample.cpu_total_ms = @as(f64, @floatFromInt(cpu_us)) / 1e3;
+    if (scenario == .goodput and sample.mib > 0) {
+        sample.cpu_ms_per_mib = sample.cpu_ms / @as(f64, @floatFromInt(sample.mib));
+    }
+
+    shutdown.store(true, .release);
+    try group.await(io);
+    // Per-server counters outlive this call: the JSON report prints them
+    // and `main` frees them with the sample list.
+    const server_bytes = try gpa.alloc(u64, n);
+    errdefer gpa.free(server_bytes);
+    const server_datagrams = try gpa.alloc(u64, n);
+    errdefer gpa.free(server_datagrams);
+    var delivered: u64 = 0;
+    for (apps, tasks, server_bytes, server_datagrams) |*app, *task, *bytes, *datagrams| {
+        if (task.failed.load(.acquire)) return error.ServerLoopFailed;
+        delivered += app.bytes_sunk;
+        sample.server_iterations += app.iterations;
+        bytes.* = app.bytes_sunk;
+        datagrams.* = app.datagrams_echoed;
+    }
+    sample.server_bytes = server_bytes;
+    sample.server_datagrams = server_datagrams;
+    if (scenario == .goodput and delivered != payload.len * m) {
+        std.debug.print("bench-io: servers sank {d} of {d} bytes\n", .{ delivered, payload.len * m });
+        return error.GoodputIncomplete;
+    }
+    return sample;
+}
+
 fn percentile(sorted: []const u64, p: usize) u64 {
     if (sorted.len == 0) return 0;
     const idx = (sorted.len - 1) * p / 100;
@@ -590,7 +833,12 @@ fn runBackend(
 ) !void {
     for (opts.scenarios) |scenario| {
         for (0..opts.samples) |i| {
-            const s = try runSample(gpa, io, backend, scenario, opts, payload, rtts);
+            // `--loops 1 --clients N` is the control: one server, bound exactly
+            // as in the classic path, N clients.
+            const s = if (opts.loops > 1 or opts.clients > 1)
+                try runSampleLoops(gpa, io, backend, scenario, opts, payload, rtts)
+            else
+                try runSample(gpa, io, backend, scenario, opts, payload, rtts[0..opts.pings]);
             switch (scenario) {
                 .goodput => std.debug.print(
                     "{s}/{s} sample {d}/{d}: {d:.1} MiB/s ({d} MiB; sample {d:.0} ms; handshake {d:.2} ms; cpu {d:.0} ms in window, {d:.0} ms total; client iters {d}, server iters {d})\n",
@@ -601,6 +849,10 @@ fn runBackend(
                     .{ @tagName(backend), @tagName(scenario), i + 1, opts.samples, s.round_trips_per_sec, s.rtt_p50_us, s.rtt_p90_us, s.rtt_p99_us, s.rtt_max_us, s.handshake_ms, s.cpu_ms, s.cpu_total_ms },
                 ),
             }
+            if (opts.loops > 1 or opts.clients > 1) std.debug.print(
+                "  {d} server loops x {d} clients; per-server bytes {any}; per-server datagrams {any}\n",
+                .{ s.loops, s.clients, s.server_bytes, s.server_datagrams },
+            );
             try samples.append(gpa, s);
         }
     }
@@ -669,7 +921,7 @@ fn usage() void {
     std.debug.print(
         \\usage: quic-zig-bench-io [--io threaded|evented|both] [--scenario goodput|echo|all]
         \\                         [--samples N] [--mib N] [--pings N] [--leeway-ms N]
-        \\                         [--receive-timeout-ms N] [--json PATH]
+        \\                         [--receive-timeout-ms N] [--loops N] [--clients N] [--json PATH]
         \\
     , .{});
 }
@@ -698,6 +950,10 @@ pub fn main(init: std.process.Init) !void {
             opts.leeway_ms = try std.fmt.parseInt(i64, args.next() orelse return usage(), 10);
         } else if (std.mem.eql(u8, arg, "--receive-timeout-ms")) {
             opts.receive_timeout_ms = try std.fmt.parseInt(i64, args.next() orelse return usage(), 10);
+        } else if (std.mem.eql(u8, arg, "--loops")) {
+            opts.loops = try std.fmt.parseInt(usize, args.next() orelse return usage(), 10);
+        } else if (std.mem.eql(u8, arg, "--clients")) {
+            opts.clients = try std.fmt.parseInt(usize, args.next() orelse return usage(), 10);
         } else if (std.mem.eql(u8, arg, "--json")) {
             opts.json_path = args.next() orelse return usage();
         } else {
@@ -706,16 +962,24 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (opts.samples == 0 or opts.samples > 64) return error.InvalidArgument;
+    if (opts.loops == 0 or opts.loops > 64 or opts.clients > 256) return error.InvalidArgument;
 
     const payload = try gpa.alloc(u8, opts.mib << 20);
     defer gpa.free(payload);
     var prng = std.Random.DefaultPrng.init(0x10b3);
     prng.random().bytes(payload);
-    const rtts = try gpa.alloc(u64, opts.pings);
+    const client_count = if (opts.clients == 0) opts.loops else opts.clients;
+    const rtts = try gpa.alloc(u64, opts.pings * client_count);
     defer gpa.free(rtts);
 
     var samples: std.ArrayList(Sample) = .empty;
-    defer samples.deinit(gpa);
+    defer {
+        for (samples.items) |s| {
+            gpa.free(s.server_bytes);
+            gpa.free(s.server_datagrams);
+        }
+        samples.deinit(gpa);
+    }
 
     for (opts.backends) |backend| switch (backend) {
         .threaded => {
@@ -744,6 +1008,11 @@ pub fn main(init: std.process.Init) !void {
     const summaries = try summarize(gpa, opts, samples.items);
     defer gpa.free(summaries);
     std.debug.print("\n== summary (median of {d} samples, +/- MAD) ==\n", .{opts.samples});
+    if (opts.loops > 1) {
+        std.debug.print("   {d} server loops sharing one port (reuse_port), {d} clients; rates are aggregate\n", .{ opts.loops, client_count });
+    } else if (client_count > 1) {
+        std.debug.print("   1 server loop, {d} clients (control); rates are aggregate\n", .{client_count});
+    }
     for (summaries) |s| {
         if (std.mem.eql(u8, s.scenario, "goodput")) {
             std.debug.print("{s:<9} goodput: {d:8.1} +/- {d:5.1} MiB/s  cpu {d:7.0} ms   handshake {d:6.2} ms\n", .{ s.backend, s.rate_median, s.rate_mad, s.cpu_ms_median, s.handshake_ms_median });
@@ -763,6 +1032,8 @@ pub fn main(init: std.process.Init) !void {
             .receive_timeout_ms = opts.receive_timeout_ms,
             .mib = opts.mib,
             .pings = opts.pings,
+            .loops = opts.loops,
+            .clients = client_count,
             .summaries = summaries,
             .samples = samples.items,
         };

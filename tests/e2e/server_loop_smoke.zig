@@ -322,6 +322,83 @@ test "runUdpServer with reuse_port joins a port another socket holds" {
     try std.testing.expectEqual(@as(usize, 0), srv.connectionCount());
 }
 
+/// Pins which `bindListener` branch is compiled in. On a std whose
+/// `IpAddress.BindOptions` has `reuse_port`, the loop's listener bind must
+/// reach the `Io` vtable with the flag set; on an older std it must not
+/// (the POSIX-direct fallback binds instead). The plain reuse_port tests
+/// above cannot tell the two apart: `std.testing.io` is `Io.Threaded`,
+/// whose sockets are blocking too, so both branches pass them.
+const RecordingBindIo = struct {
+    var inner: std.Io = undefined;
+    var bind_calls: usize = 0;
+    var saw_reuse_port: bool = false;
+
+    fn netBindIp(
+        userdata: ?*anyopaque,
+        address: *const std.Io.net.IpAddress,
+        options: std.Io.net.IpAddress.BindOptions,
+    ) std.Io.net.IpAddress.BindError!std.Io.net.Socket {
+        bind_calls += 1;
+        if (@hasField(@TypeOf(options), "reuse_port")) saw_reuse_port = options.reuse_port;
+        return inner.vtable.netBindIp(userdata, address, options);
+    }
+};
+
+test "runUdpServer with reuse_port binds through the Io vtable when std can" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!quic.transport.has_reuseport_sockopt) return error.SkipZigTest;
+    // Spelled independently of the library's own gate, so a typo in the
+    // library's `@hasField` string fails here instead of passing quietly.
+    const std_has = @hasField(std.Io.net.IpAddress.BindOptions, "reuse_port");
+    try std.testing.expectEqual(std_has, quic.transport.std_bind_has_reuse_port);
+
+    RecordingBindIo.inner = std.testing.io;
+    RecordingBindIo.bind_calls = 0;
+    RecordingBindIo.saw_reuse_port = false;
+    var vtable = std.testing.io.vtable.*;
+    vtable.netBindIp = RecordingBindIo.netBindIp;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = test_cert_pem,
+        .tls_key_pem = test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer srv.deinit();
+
+    var stop = std.atomic.Value(bool).init(true);
+    quic.transport.runUdpServer(&srv, .{
+        .listen = "127.0.0.1:0",
+        .io = io,
+        .reuse_port = true,
+        .shutdown_flag = &stop,
+        .tune_socket = false,
+        .shutdown_grace_us = 1_000,
+        .receive_timeout = std.Io.Duration.fromMilliseconds(1),
+    }) catch |err| switch (err) {
+        error.AddressInUse,
+        error.AddressUnavailable,
+        error.AddressFamilyUnsupported,
+        error.SystemResources,
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
+        error.SocketModeUnsupported,
+        error.NetworkDown,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+
+    if (std_has) {
+        try std.testing.expectEqual(@as(usize, 1), RecordingBindIo.bind_calls);
+        try std.testing.expect(RecordingBindIo.saw_reuse_port);
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), RecordingBindIo.bind_calls);
+    }
+}
+
 test "runUdpServer without reuse_port conflicts with an open holder" {
     // The contrast arm: same open reuseport holder, no flag, and the
     // loop's plain bind must fail with AddressInUse — deterministic,

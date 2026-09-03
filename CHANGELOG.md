@@ -5,6 +5,33 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+- **`RunUdpOptions.reuse_port` binds through std when std can.** When
+  `std.Io.net.IpAddress.BindOptions` has a `reuse_port` field, every
+  listener the bundled loop binds goes through the `Io` vtable, so a
+  custom backend sees the bind and `std.Io.Dispatch` gets the O_NONBLOCK
+  socket its receive path depends on. Before, `reuse_port = true` always
+  took the POSIX-direct `transport.bindUdpSocket` path, whose blocking
+  socket makes `receiveManyTimeout` on `std.Io.Dispatch` ignore its
+  timeout and block until the whole batch (`max_datagrams_per_iteration`,
+  default 16) is full, stalling timers and the first datagram of every
+  batch (`std.Io.Threaded` and `std.Io.Uring` were unaffected). Older std
+  versions keep the old path unchanged; `transport.std_bind_has_reuse_port`
+  says which one is in effect. `bindUdpSocket` stays for those std
+  versions and its docs now say the socket is blocking.
+- **Docs: what `SO_REUSEPORT` does and does not give you.** Linux
+  re-hashes flows across the group whenever a socket joins or leaves, so
+  a worker restart moves a share of the *other* workers' connections onto
+  instances that do not own them (which stateless-reset them when the
+  shared key is pinned); `reuse_port` alone does not make restarts
+  seamless — CID routing does. On macOS the one socket that receives
+  everything is the newest for a specific-address bind but the oldest
+  for a wildcard bind. EMBEDDING.md and the option docs said otherwise.
+- **`bench-io --loops N --clients M`**: N server loops on one port via
+  `reuse_port` and M concurrent clients, aggregate rates plus the
+  per-server split; `--loops 1 --clients M` is the one-server control.
+
 ## [0.19.0] - 2026-08-27
 
 The handshake-liveness release. A `Connection` whose handshake never

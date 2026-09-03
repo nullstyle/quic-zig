@@ -41,17 +41,24 @@ pub const applyServerTuning = socket_opts.applyServerTuning;
 pub const default_server_recv_buffer_bytes = socket_opts.default_server_recv_buffer_bytes;
 /// Re-export of `socket_opts.default_server_send_buffer_bytes` (4 MiB).
 pub const default_server_send_buffer_bytes = socket_opts.default_server_send_buffer_bytes;
-/// Re-export of `socket_opts.bindUdpSocket` — bind a UDP socket with
-/// pre-bind options std's `IpAddress.bind` cannot express (currently
-/// `SO_REUSEPORT` for multi-process port sharing). The supported way
-/// for a foreign-loop embedder to obtain a reuse-group socket;
-/// `RunUdpOptions.reuse_port` routes through it for the bundled loop.
+/// Re-export of `socket_opts.bindUdpSocket` — a POSIX-direct UDP bind
+/// that sets `SO_REUSEPORT` before `bind(2)` for std versions whose
+/// `IpAddress.BindOptions` has no `reuse_port` field. Its socket is
+/// blocking (fine under `std.Io.Threaded` and `std.Io.Uring`, not
+/// `std.Io.Dispatch`). When `std_bind_has_reuse_port` is true, bind
+/// through `IpAddress.bind` with `.reuse_port = true` instead; the
+/// bundled loop routes through this helper only on such an older std.
 pub const bindUdpSocket = socket_opts.bindUdpSocket;
 /// Re-export of `socket_opts.BindUdpOptions`.
 pub const BindUdpOptions = socket_opts.BindUdpOptions;
 /// Re-export of `socket_opts.has_reuseport_sockopt` — whether this
 /// target's sockets expose `SO_REUSEPORT` at all.
 pub const has_reuseport_sockopt = socket_opts.has_reuseport_sockopt;
+/// Re-export of `socket_opts.std_bind_has_reuse_port` — whether this
+/// std's `IpAddress.BindOptions` has `reuse_port`, in which case the
+/// bundled loop binds through the `Io` vtable and `bindUdpSocket` is
+/// only the fallback for older std versions.
+pub const std_bind_has_reuse_port = socket_opts.std_bind_has_reuse_port;
 /// Re-export of `udp_server.classifyReceiveError` — the shared
 /// receive-errno policy both bundled loops apply (peer-influenced
 /// errors are tolerated, local faults propagate). The 0.12.0

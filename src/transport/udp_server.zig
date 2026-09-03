@@ -110,12 +110,29 @@ pub const RunUdpOptions = struct {
     /// `socket_opts.BindUdpOptions.reuse_port` for what the kernel does
     /// with the shared port per platform.
     ///
+    /// How the option reaches the socket depends on std. When
+    /// `IpAddress.BindOptions` has a `reuse_port` field
+    /// (`socket_opts.std_bind_has_reuse_port`), every listener is bound
+    /// through the `Io` vtable, so a custom backend sees the bind and
+    /// `std.Io.Dispatch` gets the O_NONBLOCK socket its receive path
+    /// depends on. Older std versions fall back to the POSIX-direct
+    /// `socket_opts.bindUdpSocket`, whose blocking socket works under
+    /// `std.Io.Threaded` and `std.Io.Uring` but not `std.Io.Dispatch`
+    /// (see `bindUdpSocket`). A third-party `Io` backend may decline the
+    /// option; std's contract for that is `error.OptionUnsupported` from
+    /// the bind (already in `RunError` via `BindError`), while
+    /// `ReusePortUnsupported` stays reserved for targets whose sockets
+    /// lack the option at all.
+    ///
     /// A `prebound`-socket alternative (embedder binds, loop adopts)
     /// was evaluated and rejected: it buys socket-activation/fd-passing
     /// scenarios nobody has asked for, at the cost of an ownership and
     /// `listen`-conflict policy the flag doesn't need — `reuse_port`
-    /// group joins already cover seamless worker restarts on Linux.
-    /// Revisit with a concrete socket-activation requirement.
+    /// already lets a replacement worker bind while the old one still
+    /// holds the port (the kernel re-hashes flows on every group
+    /// join/leave, so restarts preserve connections only with CID
+    /// routing; see EMBEDDING.md, "Scaling across cores"). Revisit with
+    /// a concrete socket-activation requirement.
     reuse_port: bool = false,
 
     /// Enable IETF ECN signaling (RFC 9000 §13.4). When `true`, the
@@ -321,21 +338,31 @@ const max_listeners: usize = 3;
 
 /// Bind one listener, honoring `RunUdpOptions.reuse_port`.
 ///
-/// `reuse_port = false` keeps the exact historical path through the
-/// `std.Io` `netBindIp` vtable — a custom Io backend still sees every
-/// bind, and behavior is byte-identical to before the option existed.
-/// `true` routes through `socket_opts.bindUdpSocket`, the POSIX
-/// socket → setsockopt(SO_REUSEPORT) → bind sequence std's atomic
-/// `IpAddress.bind` leaves no window for. Used for the primary
-/// listener and both `preferred_address` alt listeners alike: sharing
-/// must be uniform or the second worker fails an alt bind and cannot
-/// boot at all (alt-bind failures propagate by policy — see the
+/// With a std whose `IpAddress.BindOptions` carries `reuse_port`
+/// (`socket_opts.std_bind_has_reuse_port`), every bind goes through the
+/// `std.Io` `netBindIp` vtable: a custom Io backend sees it, and
+/// `std.Io.Dispatch` gets the O_NONBLOCK socket its receive path
+/// depends on (`std.Io.Uring` creates blocking sockets itself and is
+/// indifferent). On an older std, `reuse_port = false` keeps that same
+/// vtable path and `true` routes through `socket_opts.bindUdpSocket`,
+/// the POSIX socket → setsockopt(SO_REUSEPORT) → bind sequence such a
+/// std's atomic `IpAddress.bind` leaves no window for. Used for the
+/// primary listener and both `preferred_address` alt listeners alike:
+/// sharing must be uniform or the second worker fails an alt bind and
+/// cannot boot at all (alt-bind failures propagate by policy — see the
 /// preferred-address block in `runUdpServer`).
 fn bindListener(
     addr: *const Net.IpAddress,
     io: std.Io,
     reuse_port: bool,
 ) Net.IpAddress.BindError!Net.Socket {
+    if (comptime socket_opts.std_bind_has_reuse_port) {
+        return Net.IpAddress.bind(addr, io, .{
+            .mode = .dgram,
+            .protocol = .udp,
+            .reuse_port = reuse_port,
+        });
+    }
     if (reuse_port) return socket_opts.bindUdpSocket(addr, .{ .reuse_port = true });
     return Net.IpAddress.bind(addr, io, .{
         .mode = .dgram,
