@@ -19,10 +19,14 @@
 //! zig build bench-io -- --io both --scenario all --samples 5 --json report.json
 //! ```
 //!
-//! `--io evented` needs a std where `std.Io.Evented` is not `void`
-//! (on macOS: a fork checkout passed via `--zig-lib-dir`). `--leeway-ms`
-//! sets `std.Io.Evented.InitOptions.leeway` (std default 10 ms), the
-//! timer slack libdispatch is allowed on every timed wait.
+//! `--io evented` and `--io ev-thread` need the fork std: a fork release
+//! from `0.17.0-dev.1994+96ced66cf` (2026-09-03) or later, or the checkout
+//! passed via `ZIG_LIB_DIR`/`--zig-lib-dir`. Stock upstream Zig fails to
+//! build the evented branch (its `Io.Dispatch` does not compile on the
+//! batch path) — build with `-Dbench-io-threaded-only` to drop the evented
+//! backends and get a Threaded-only bench that compiles on stock Zig.
+//! `--leeway-ms` sets `std.Io.Evented.InitOptions.leeway` (std default
+//! 10 ms), the timer slack libdispatch is allowed on every timed wait.
 //!
 //! `--loops N` runs N server loops that share one port through
 //! `RunUdpOptions.reuse_port` (the std needs `IpAddress.BindOptions.reuse_port`
@@ -41,6 +45,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const quic = @import("quic");
+const bench_io_options = @import("bench_io_options");
+
+/// `-Dbench-io-threaded-only`: the evented backends are compiled out so the
+/// bench builds with a stock (non-fork) std.
+const threaded_only = bench_io_options.threaded_only;
 
 const cert_pem = @embedFile("e2e/support/test_cert.pem");
 const key_pem = @embedFile("e2e/support/test_key.pem");
@@ -50,7 +59,7 @@ const Backend = enum { threaded, evented, @"ev-thread" };
 const Scenario = enum { goodput, echo };
 
 const Options = struct {
-    backends: []const Backend = &.{ .threaded, .evented },
+    backends: []const Backend = if (threaded_only) &.{.threaded} else &.{ .threaded, .evented },
     scenarios: []const Scenario = &.{ .goodput, .echo },
     samples: usize = 5,
     mib: usize = 32,
@@ -858,7 +867,7 @@ fn madF(values: []const f64, median: f64, scratch: []f64) f64 {
 /// experiment (Uring only; compare against `evented` under the same
 /// `--loops/--clients` shape).
 fn serverLoopThread(gpa: std.mem.Allocator, task: *ServerTask) void {
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.os.tag == .linux and !threaded_only) {
         var evented: std.Io.Uring = undefined;
         evented.init(gpa, .{ .thread_limit = 0 }) catch {
             task.failed.store(true, .release);
@@ -873,7 +882,7 @@ fn serverLoopThread(gpa: std.mem.Allocator, task: *ServerTask) void {
 }
 
 fn clientLoopThread(gpa: std.mem.Allocator, task: *ClientTask) void {
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.os.tag == .linux and !threaded_only) {
         var evented: std.Io.Uring = undefined;
         evented.init(gpa, .{ .thread_limit = 0 }) catch {
             task.err = error.EventedInitFailed;
@@ -1000,7 +1009,9 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--io")) {
             const v = args.next() orelse return usage();
-            opts.backends = if (std.mem.eql(u8, v, "threaded")) &.{.threaded} else if (std.mem.eql(u8, v, "evented")) &.{.evented} else if (std.mem.eql(u8, v, "ev-thread")) &.{.@"ev-thread"} else if (std.mem.eql(u8, v, "all")) &.{ .threaded, .evented, .@"ev-thread" } else if (std.mem.eql(u8, v, "both")) &.{ .threaded, .evented } else return usage();
+            opts.backends = if (std.mem.eql(u8, v, "threaded")) &.{.threaded} else if (comptime threaded_only) {
+                return usage();
+            } else if (std.mem.eql(u8, v, "evented")) &.{.evented} else if (std.mem.eql(u8, v, "ev-thread")) &.{.@"ev-thread"} else if (std.mem.eql(u8, v, "all")) &.{ .threaded, .evented, .@"ev-thread" } else if (std.mem.eql(u8, v, "both")) &.{ .threaded, .evented } else return usage();
         } else if (std.mem.eql(u8, arg, "--scenario")) {
             const v = args.next() orelse return usage();
             opts.scenarios = if (std.mem.eql(u8, v, "goodput")) &.{.goodput} else if (std.mem.eql(u8, v, "echo")) &.{.echo} else if (std.mem.eql(u8, v, "all")) &.{ .goodput, .echo } else return usage();
@@ -1067,7 +1078,9 @@ pub fn main(init: std.process.Init) !void {
                 try runBackend(gpa, threaded.io(), backend, opts, payload, rtts, &samples);
             }
         },
-        .evented => {
+        .evented => if (comptime threaded_only) {
+            std.debug.print("bench-io: built with -Dbench-io-threaded-only; skipping evented\n", .{});
+        } else {
             const Evented = std.Io.Evented;
             if (Evented == void) {
                 std.debug.print("bench-io: std.Io.Evented is void on {s}-{s} with this std; skipping evented\n", .{ @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) });

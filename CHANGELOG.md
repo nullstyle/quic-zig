@@ -7,6 +7,32 @@ changes.
 
 ## [Unreleased]
 
+- **`error.Canceled` from a send is its own send disposition.**
+  `transport.classifySendError` now classifies it as `.canceled`
+  instead of `.fatal`: a bundled loop whose task was cancelled
+  mid-send returns so the cancelled thread or fiber exits, instead of
+  counting an egress local fault and continuing (after cancellation
+  every I/O call fails this way, so the loop would spin). The client
+  loop exits cleanly — no error surfaces to the embedder, since the
+  cancellation was requested, not suffered.
+- **`bench-io` builds on stock Zig with `-Dbench-io-threaded-only`.**
+  The evented backends compile out under the option, giving a
+  Threaded-only bench on upstream std (whose `Io.Dispatch` does not
+  compile on the batch path); the header documents which fork
+  releases the evented modes need.
+- **New bench mode `--io ev-thread`** (Linux): one loop per thread on
+  its own single-threaded Evented instance — the evented placement
+  experiment. At 8 servers x 16 clients it overtakes Threaded on
+  group goodput (1011.7 vs 869.7 MiB/s) where a shared instance
+  trails it (665.9), with echo latency at parity and the best tail
+  latency. Embedders on Linux should prefer one Evented instance per
+  thread; EMBEDDING.md says so.
+- **Docs: loop thread or loop fiber.** EMBEDDING.md now states what
+  "the loop's own thread" means per backend, that the shutdown flag
+  is the only stop mechanism that works everywhere today (Evented
+  network waits are not cancellation points), and what to expect from
+  `error.Canceled` on the way out.
+
 - **`RunUdpOptions.reuse_port` binds through std when std can.** When
   `std.Io.net.IpAddress.BindOptions` has a `reuse_port` field, every
   listener the bundled loop binds goes through the `Io` vtable, so a

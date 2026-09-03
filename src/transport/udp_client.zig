@@ -484,6 +484,9 @@ fn drainOutbound(
     // closed out by the idle timeout, which is the clean path.
     batch.flush(io, sock) catch |err| switch (udp_server.classifySendError(err)) {
         .tolerate => {},
+        // The loop's task was cancelled mid-send: return so the cancelled
+        // task exits. Not the embedder's fault, so not an error either.
+        .canceled => return,
         .fatal => return err,
     };
 }

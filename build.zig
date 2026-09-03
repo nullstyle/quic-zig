@@ -644,8 +644,16 @@ pub fn build(b: *std.Build) void {
     // at runtime (bench/io_backend.zig). Same ReleaseSafe policy and
     // module graph as `bench`. The artifact is also installed so a
     // sweep can rerun `zig-out/bin/quic-zig-bench-io` without
-    // rebuilding. Evented needs a std where `std.Io.Evented` is not
-    // void (on macOS today: a fork checkout via `--zig-lib-dir`).
+    // rebuilding. Evented needs the fork std; stock upstream Zig does
+    // not compile the evented branch, so `-Dbench-io-threaded-only`
+    // drops it for a Threaded-only bench that builds on stock Zig.
+    const bench_io_threaded_only = b.option(
+        bool,
+        "bench-io-threaded-only",
+        "Drop the evented backends from bench-io so it builds with a stock std",
+    ) orelse false;
+    const bench_io_options = b.addOptions();
+    bench_io_options.addOption(bool, "threaded_only", bench_io_threaded_only);
     const bench_io_mod = b.createModule(.{
         .root_source_file = b.path("bench/io_backend.zig"),
         .target = target,
@@ -654,6 +662,7 @@ pub fn build(b: *std.Build) void {
     });
     bench_io_mod.addImport("quic", bench_quic_mod);
     bench_io_mod.addImport("boringssl", bench_boringssl_mod);
+    bench_io_mod.addImport("bench_io_options", bench_io_options.createModule());
 
     const bench_io_exe = b.addExecutable(.{
         .name = "quic-zig-bench-io",

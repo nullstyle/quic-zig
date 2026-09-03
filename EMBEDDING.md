@@ -109,6 +109,28 @@ echo example pair is built on exactly that hook. When your process
 already has an event loop of its own, drive the caller-drives path
 directly instead: see "Foreign Event Loops" below.
 
+#### Loop thread or loop fiber
+
+What "the loop's own thread" means depends on the `std.Io` backend
+driving the loop. Under `std.Io.Threaded` the loop is an ordinary
+thread: run it on a `std.Thread`, or in a `std.Io.Group` task, and stop
+it either way. Under an Evented backend (`std.Io.Dispatch` on macOS,
+`std.Io.Uring` on Linux) the loop is a fiber on one of the backend's
+worker threads — `Io.Group` tasks and `Io.async` fibers both work, and
+on Linux prefer one Evented instance per loop thread (see the bench's
+`--io ev-thread` mode; a shared instance's work stealing costs group
+goodput).
+
+The stop mechanism differs with it. The shutdown flag — checked every
+`receive_timeout_ms` — is the only stop path that works on every
+backend today: Evented network waits are not cancellation points
+(`Io.Dispatch` has none yet), so a `Group` cancellation cannot
+interrupt a parked receive; it lands on the next in-flight call at
+best, which the loops treat as a clean exit (`error.Canceled` from a
+send is its own send disposition, neither a fault nor a peer event).
+Set the flag, then await the loop task, and expect the exit to take up
+to one receive timeout.
+
 ### Scaling across cores
 
 There is no built-in multi-worker mode: one `Server` is one

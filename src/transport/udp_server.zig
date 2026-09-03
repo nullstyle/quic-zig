@@ -728,15 +728,24 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 socket_opts.default_gso_max_segments,
                 now_us,
                 options.io,
-            ) catch |err| countEgressFault(server, err);
-            slot.conn.tick(now_us) catch |err| countEgressFault(server, err);
+            ) catch |err| {
+                if (classifySendError(err) == .canceled) return;
+                countEgressFault(server, err);
+            };
+            slot.conn.tick(now_us) catch |err| {
+                if (classifySendError(err) == .canceled) return;
+                countEgressFault(server, err);
+            };
         }
         // Ship whatever the drain pass accumulated — one syscall per
         // listener for up to max_send_batch_datagrams datagrams across
         // ALL slots (best-effort, matching the historical per-datagram
         // posture).
         for (send_batches, 0..) |*b, li| {
-            b.flush(options.io, listeners[li].sock) catch |err| countEgressFault(server, err);
+            b.flush(options.io, listeners[li].sock) catch |err| {
+                if (classifySendError(err) == .canceled) return;
+                countEgressFault(server, err);
+            };
         }
 
         iteration_count +%= 1;
@@ -998,6 +1007,9 @@ test "remote-influenced receive errors never end the loop" {
 fn countEgressFault(server: *Server, err: anyerror) void {
     switch (classifySendError(err)) {
         .tolerate => {},
+        // Cancellation is handled where it is caught (the loop returns so
+        // the cancelled task exits); it is never an egress fault.
+        .canceled => {},
         .fatal => server.egress_local_faults +%= 1,
     }
 }
@@ -1010,6 +1022,11 @@ pub const SendDisposition = enum {
     /// closes the connection cleanly — which is a better outcome than
     /// handing the embedder an error and skipping the close.
     tolerate,
+    /// The loop's own task was cancelled mid-send (a `Group` await
+    /// cancelling its thread or fiber). The loop should return so the
+    /// cancelled task exits instead of spinning: after cancellation
+    /// every I/O call fails this way.
+    canceled,
     /// A genuine local fault. The socket cannot send at all.
     fatal,
 };
@@ -1037,6 +1054,7 @@ pub const SendDisposition = enum {
 /// anticipated should be surfaced, not swallowed.
 pub fn classifySendError(err: anyerror) SendDisposition {
     return switch (err) {
+        error.Canceled => .canceled,
         error.ConnectionRefused,
         error.ConnectionResetByPeer,
         error.HostUnreachable,
@@ -1062,7 +1080,7 @@ pub fn sendTolerant(
 ) !void {
     sock.send(io, dest, data) catch |err| switch (classifySendError(err)) {
         .tolerate => {},
-        .fatal => return err,
+        .canceled, .fatal => return err,
     };
 }
 
@@ -1078,6 +1096,10 @@ test "a peer cannot end a loop through the send path" {
     }) |err| {
         try std.testing.expectEqual(SendDisposition.tolerate, classifySendError(err));
     }
+
+    // Cancellation is its own disposition: the loop exits, nothing is
+    // counted, no fault is reported.
+    try std.testing.expectEqual(SendDisposition.canceled, classifySendError(error.Canceled));
 
     // Local faults: the socket is not going to start working.
     for ([_]Net.Socket.SendError{
