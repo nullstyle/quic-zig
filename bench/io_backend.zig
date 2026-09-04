@@ -55,7 +55,7 @@ const cert_pem = @embedFile("e2e/support/test_cert.pem");
 const key_pem = @embedFile("e2e/support/test_key.pem");
 const alpn = "bench-io/1";
 
-const Backend = enum { threaded, evented, @"ev-thread" };
+const Backend = enum { threaded, evented, @"ev-thread", @"kqueue-shared" };
 const Scenario = enum { goodput, echo };
 
 const Options = struct {
@@ -1033,7 +1033,7 @@ pub fn main(init: std.process.Init) !void {
             const v = args.next() orelse return usage();
             opts.backends = if (std.mem.eql(u8, v, "threaded")) &.{.threaded} else if (comptime threaded_only) {
                 return usage();
-            } else if (std.mem.eql(u8, v, "evented")) &.{.evented} else if (std.mem.eql(u8, v, "ev-thread")) &.{.@"ev-thread"} else if (std.mem.eql(u8, v, "all")) &.{ .threaded, .evented, .@"ev-thread" } else if (std.mem.eql(u8, v, "both")) &.{ .threaded, .evented } else return usage();
+            } else if (std.mem.eql(u8, v, "evented")) &.{.evented} else if (std.mem.eql(u8, v, "ev-thread")) &.{.@"ev-thread"} else if (std.mem.eql(u8, v, "kqueue-shared")) &.{.@"kqueue-shared"} else if (std.mem.eql(u8, v, "all")) &.{ .threaded, .evented, .@"ev-thread" } else if (std.mem.eql(u8, v, "both")) &.{ .threaded, .evented } else return usage();
         } else if (std.mem.eql(u8, arg, "--scenario")) {
             const v = args.next() orelse return usage();
             opts.scenarios = if (std.mem.eql(u8, v, "goodput")) &.{.goodput} else if (std.mem.eql(u8, v, "echo")) &.{.echo} else if (std.mem.eql(u8, v, "all")) &.{ .goodput, .echo } else return usage();
@@ -1118,6 +1118,21 @@ pub fn main(init: std.process.Init) !void {
                 defer evented.deinit();
                 try runBackend(gpa, evented.io(), backend, opts, payload, rtts, &samples);
             }
+        },
+        // Debugging backend: `std.Io.Kqueue` directly, as one shared
+        // instance (default thread count, work stealing enabled) even on
+        // targets where `std.Io.Evented` would pick another backend. This
+        // is the configuration the shared-instance scheduler crash
+        // reproduces in; see HANDOFF.md.
+        .@"kqueue-shared" => if (comptime threaded_only) {
+            std.debug.print("bench-io: built with -Dbench-io-threaded-only; skipping kqueue-shared\n", .{});
+        } else if (comptime !(builtin.os.tag.isDarwin() or builtin.os.tag.isBSD())) {
+            std.debug.print("bench-io: --io kqueue-shared needs a kqueue target; skipping\n", .{});
+        } else {
+            var kqueue: std.Io.Kqueue = undefined;
+            try std.Io.Kqueue.init(&kqueue, gpa, .{});
+            defer kqueue.deinit();
+            try runBackend(gpa, kqueue.io(), backend, opts, payload, rtts, &samples);
         },
     };
 
