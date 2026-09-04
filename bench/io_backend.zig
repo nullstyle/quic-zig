@@ -861,15 +861,38 @@ fn madF(values: []const f64, median: f64, scratch: []f64) f64 {
     return medianF(scratch[0..values.len]);
 }
 
-/// One loop on one thread driving one single-threaded Evented instance
-/// (`thread_limit = 0`): the loop cannot migrate between workers and its
-/// io_uring ring is that thread's own. The `--io ev-thread` placement
-/// experiment (Uring only; compare against `evented` under the same
-/// `--loops/--clients` shape).
+/// Whether `std.Io.Evented` on this platform can run as one
+/// single-threaded instance per thread, and how to ask for that.
+const EvThread = struct {
+    /// The Evented backend on this target supports single-threaded mode.
+    fn supported() bool {
+        const Evented = std.Io.Evented;
+        return !threaded_only and switch (builtin.os.tag) {
+            .linux => Evented == std.Io.Uring,
+            .freebsd, .netbsd, .openbsd, .dragonfly => Evented == std.Io.Kqueue,
+            else => false,
+        };
+    }
+
+    fn init(gpa: std.mem.Allocator) !std.Io.Evented {
+        var evented: std.Io.Evented = undefined;
+        if (std.Io.Evented == std.Io.Uring) {
+            try std.Io.Uring.init(&evented, gpa, .{ .thread_limit = 0 });
+        } else if (std.Io.Evented == std.Io.Kqueue) {
+            try std.Io.Kqueue.init(&evented, gpa, .{ .n_threads = 1 });
+        } else unreachable;
+        return evented;
+    }
+};
+
+/// One loop on one thread driving one single-threaded Evented instance:
+/// the loop cannot migrate between workers and its event queue (io_uring
+/// ring, kqueue fd) is that thread's own. The `--io ev-thread` placement
+/// experiment; compare against `evented` under the same
+/// `--loops/--clients` shape.
 fn serverLoopThread(gpa: std.mem.Allocator, task: *ServerTask) void {
-    if (comptime builtin.os.tag == .linux and !threaded_only) {
-        var evented: std.Io.Uring = undefined;
-        evented.init(gpa, .{ .thread_limit = 0 }) catch {
+    if (comptime EvThread.supported()) {
+        var evented = EvThread.init(gpa) catch {
             task.failed.store(true, .release);
             return;
         };
@@ -882,9 +905,8 @@ fn serverLoopThread(gpa: std.mem.Allocator, task: *ServerTask) void {
 }
 
 fn clientLoopThread(gpa: std.mem.Allocator, task: *ClientTask) void {
-    if (comptime builtin.os.tag == .linux and !threaded_only) {
-        var evented: std.Io.Uring = undefined;
-        evented.init(gpa, .{ .thread_limit = 0 }) catch {
+    if (comptime EvThread.supported()) {
+        var evented = EvThread.init(gpa) catch {
             task.err = error.EventedInitFailed;
             return;
         };
@@ -1065,11 +1087,12 @@ pub fn main(init: std.process.Init) !void {
         .@"ev-thread" => {
             // The placement experiment: loops on their own threads with
             // single-threaded Evented instances. Only meaningful in
-            // multi-loop mode, and only on the io_uring backend; the
-            // coordinator io (port picking, sleeps, clocks, the report) is
-            // Threaded.
-            if (std.Io.Evented != std.Io.Uring) {
-                std.debug.print("bench-io: --io ev-thread needs the io_uring backend; skipping\n", .{});
+            // multi-loop mode, and only where the Evented backend runs
+            // single-threaded (io_uring on Linux, kqueue on the BSDs);
+            // the coordinator io (port picking, sleeps, clocks, the
+            // report) is Threaded.
+            if (comptime !EvThread.supported()) {
+                std.debug.print("bench-io: --io ev-thread needs a single-threaded-capable Evented backend (Uring or Kqueue); skipping\n", .{});
             } else if (opts.loops < 2 and (opts.clients == 0 or opts.clients < 2)) {
                 std.debug.print("bench-io: --io ev-thread needs --loops N (N>1) or --clients M (M>1); skipping\n", .{});
             } else {
