@@ -54,6 +54,11 @@ const BoringsslForward = struct {
     /// "zig" builds BoringSSL from source; "cmake" links the
     /// prebuilt archives under the boringssl package's vendor tree.
     source: ?[]const u8,
+    /// With source="cmake": absolute path holding lib/lib{crypto,ssl}.a
+    /// plus include/ (forwarded to the dependency's
+    /// -Dboringssl-prebuilt-path).
+    prebuilt_path: ?[]const u8,
+
     /// With source="cmake": which vendor/boringssl-prebuilt/<dir> to
     /// link. Resolved to "native" when only `source` was passed.
     prebuilt_target: ?[]const u8,
@@ -76,6 +81,7 @@ fn boringsslDependency(
                 .@"sanitize-c" = sanitizeCOption(mode),
                 .@"boringssl-source" = src,
                 .@"boringssl-target" = prebuilt,
+                .@"boringssl-prebuilt-path" = fwd.prebuilt_path,
             });
         }
         return b.dependency("boringssl", .{
@@ -83,6 +89,7 @@ fn boringsslDependency(
             .optimize = optimize,
             .@"boringssl-source" = src,
             .@"boringssl-target" = prebuilt,
+            .@"boringssl-prebuilt-path" = fwd.prebuilt_path,
         });
     }
     if (fwd.sanitize_c) |mode| {
@@ -90,11 +97,13 @@ fn boringsslDependency(
             .target = target,
             .optimize = optimize,
             .@"sanitize-c" = sanitizeCOption(mode),
+            .@"boringssl-prebuilt-path" = fwd.prebuilt_path,
         });
     }
     return b.dependency("boringssl", .{
         .target = target,
         .optimize = optimize,
+        .@"boringssl-prebuilt-path" = fwd.prebuilt_path,
     });
 }
 
@@ -179,11 +188,29 @@ pub fn build(b: *std.Build) void {
     {
         std.debug.panic("-Dboringssl-target requires -Dboringssl-source=cmake", .{});
     }
+    const bssl_prebuilt_path = b.option(
+        []const u8,
+        "boringssl-prebuilt-path",
+        "Forwarded to boringssl: absolute dir with lib/lib{crypto,ssl}.a + include/",
+    );
     const bssl_fwd: BoringsslForward = .{
         .sanitize_c = sanitize_c,
         .source = bssl_source,
         .prebuilt_target = bssl_prebuilt_target,
+        .prebuilt_path = bssl_prebuilt_path,
     };
+
+    // For FreeBSD cross-compilation from another host: a libc paths file
+    // pointing at a harvested sysroot (see HANDOFF). Applied to every
+    // module that compiles C or links, including the boringssl
+    // dependency's.
+    const freebsd_libc = b.option(
+        []const u8,
+        "freebsd-libc",
+        "libc paths file for aarch64-freebsd cross-compilation",
+    );
+    if (freebsd_libc != null and target.result.os.tag != .freebsd)
+        std.debug.panic("-Dfreebsd-libc requires -Dtarget=*-freebsd", .{});
 
     const boringssl_dep = boringsslDependency(b, target, optimize, bssl_fwd);
     const boringssl_mod = boringssl_dep.module("boringssl");
@@ -596,6 +623,7 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .sanitize_c = sanitize_c,
     });
+
     bench_quic_mod.addImport("boringssl", bench_boringssl_mod);
     bench_quic_mod.addImport("build_options", build_options_mod);
 
@@ -660,6 +688,7 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .sanitize_c = sanitize_c,
     });
+
     bench_io_mod.addImport("quic", bench_quic_mod);
     bench_io_mod.addImport("boringssl", bench_boringssl_mod);
     bench_io_mod.addImport("bench_io_options", bench_io_options.createModule());
@@ -668,6 +697,11 @@ pub fn build(b: *std.Build) void {
         .name = "quic-zig-bench-io",
         .root_module = bench_io_mod,
     });
+    if (freebsd_libc) |p| {
+        bench_io_exe.setLibCFile(b.graph.cwdRelativePath(p));
+        // BoringSSL's static archives carry C++ symbols.
+        bench_io_mod.link_libcpp = true;
+    }
     const install_bench_io = b.addInstallArtifact(bench_io_exe, .{});
     const run_bench_io = b.addRunArtifact(bench_io_exe);
     run_bench_io.addPassthruArgs();
