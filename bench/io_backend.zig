@@ -1022,7 +1022,16 @@ fn usage() void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = std.heap.smp_allocator;
+    // HEAPDEBUG=1 swaps in the debug allocator: slower, but it validates
+    // frees (double free, use-after-free with metadata retention) and so
+    // can name the allocator misuse behind the shared-instance heap
+    // corruption. See HANDOFF.md item 7.
+    var debug_allocator: std.heap.DebugAllocator(.{ .safety = true, .never_unmap = true, .retain_metadata = true }) = .init;
+    defer _ = debug_allocator.deinit();
+    const gpa = if (std.c.getenv("HEAPDEBUG") != null)
+        debug_allocator.allocator()
+    else
+        std.heap.smp_allocator;
     var opts: Options = .{};
 
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
