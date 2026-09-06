@@ -109,6 +109,22 @@ echo example pair is built on exactly that hook. When your process
 already has an event loop of its own, drive the caller-drives path
 directly instead: see "Foreign Event Loops" below.
 
+#### Discovering fully-authenticated connections
+
+A slot becomes a fully authenticated peer the moment its TLS handshake
+completes — mid-`feed`, on the datagram that carried the client's
+Finished. `Server.Config.on_handshake_complete` (or the post-init
+`setOnHandshakeCompleteHook`) fires there, exactly once per slot, with
+the slot's connection established and open: negotiated ALPN, transport
+parameters, and the client's authenticated identity
+(`conn.peerCertSpkiDigest()`) are all readable, and it is the right
+place to allocate per-connection application state onto
+`slot.user_data`. This replaces the diff-`iterator()`-and-poll-
+`handshakeDone()` pattern embedders otherwise need at the accept
+boundary. The callback runs synchronously inside `feed` on the loop
+thread; per-slot mutation is the intended use, but do not call back
+into the server from it.
+
 #### Loop thread or loop fiber
 
 What "the loop's own thread" means depends on the `std.Io` backend
@@ -388,6 +404,54 @@ when the server requests one) and, on the server, set
 certificates. For self-signed or test peers, set
 `.insecure_skip_verify = true` in the `Client.connect` config — it turns
 off impersonation protection, so keep it out of production.
+
+### Peer identity: who did the handshake authenticate?
+
+Once a connection's handshake completes, `conn.peerCertSpkiDigest()`
+returns the SHA-256 fingerprint of the peer's leaf-certificate
+SubjectPublicKeyInfo — the same value
+`openssl x509 -pubkey | openssl pkey -pubin -outform DER |
+openssl dgst -sha256` prints for that certificate. It is null before
+the handshake completes, when the peer presented no certificate (a
+server that verifies but does not require client certs), or once the
+connection leaves its open phase. The digest is stable across
+certificate re-issuance as long as the keypair is retained, works on
+resumed sessions, and reads the other role's certificate — a server
+sees the client's key, a client the server's — so it is the natural
+embedder-side peer id ("who am I talking to?") for mTLS meshes:
+
+```zig
+// Inside your per-connection accept path (e.g. on_handshake_complete):
+if (conn.peerCertSpkiDigest()) |digest| {
+    // Bind application session state to the authenticated key.
+    sessions.put(digest, makeSession(conn));
+}
+```
+
+### Dialing by address: skipping the name check under a pinned CA
+
+A mesh client dials addresses learned out-of-band; the peer
+certificate's identity is its cluster membership, not the name dialed.
+`.identity_verification = .none` sends SNI as usual but skips the
+SAN/CN-vs-`server_name` check while chain validation against `ca_pem`
+stays mandatory. It requires `ca_pem` (combining it with
+`insecure_skip_verify`, `tls_context_override`, or no pinned roots at
+all fails `connect` with `InvalidConfig` — it must never silently
+downgrade to no verification):
+
+```zig
+var client = try quic.Client.connect(.{
+    .allocator = allocator,
+    .server_name = "mesh-node-7.internal", // SNI only; not identity
+    .alpn_protocols = &protos,
+    .transport_params = params,
+    .ca_pem = cluster_ca_pem,
+    .identity_verification = .none,
+});
+```
+
+Read the peer's `peerCertSpkiDigest()` after the handshake to learn
+which cluster member actually answered.
 
 ## Raw Connection Cycle
 

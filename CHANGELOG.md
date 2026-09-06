@@ -7,6 +7,58 @@ changes.
 
 ## [Unreleased]
 
+- **`Connection.peerCertSpkiDigest()`: the authenticated peer
+  identity.** Returns SHA-256 over the DER-encoded SubjectPublicKeyInfo
+  of the peer's leaf certificate once the handshake completed and the
+  peer presented a certificate — the preimage of the standard
+  `openssl x509 -pubkey | openssl pkey -pubin -outform DER |
+  openssl dgst -sha256` fingerprint pipeline, so expected values can
+  be computed with any toolchain. Null otherwise (handshake
+  incomplete, no peer certificate, connection past its open phase).
+  Role-agnostic (a server reads the client cert, a client the server
+  cert), stable across certificate re-issuance while the keypair is
+  retained, and correct on resumed sessions (BoringSSL keeps the
+  session's peer certificate). Backed by new `boringssl.tls.Conn`
+  accessors in the 0.6.6 boringssl pin (`SSL_get_peer_certificate` +
+  SPKI DER + SHA-256); the pin moves byte-identically in quic-zig and
+  http3-zig per the pin-lint contract. mTLS embedders (service meshes,
+  replication, message buses) bind application peer ids to this digest
+  instead of announced ids inside the channel. New e2e suite
+  `tests/e2e/peer_identity.zig` pins the digest against
+  openssl-computed KAT constants for both fixtures, both roles, null
+  gating pre-handshake and under optional client certs, and
+  resumption.
+
+- **`Client.Config.identity_verification`: pinned-CA dials without the
+  name check.** `.server_name` (default) keeps today's behavior — SNI
+  plus SAN/CN verification against `server_name`. `.none` sends SNI
+  but skips the name check while chain validation against `ca_pem`
+  remains mandatory — the posture for private-cluster peers dialed by
+  address whose certificate identity is cluster membership, not the
+  dialed name. `.none` without `ca_pem` (including via
+  `insecure_skip_verify` or `tls_context_override` combinations) fails
+  `connect` with `InvalidConfig` so the posture can never silently
+  downgrade to no verification. Plumbing: `Connection.createClientWithPolicy`
+  / `initClientAtWithPolicy` (additive; the existing constructors keep
+  the `.server_name` default) on top of a new
+  `boringssl.tls.Conn.setSni` that installs SNI without the
+  `X509_VERIFY_PARAM_set1_host` binding. e2e: a name outside the SAN
+  completes under `.none` + pinned roots, an untrusted chain is still
+  rejected, and the configuration matrix is unit-pinned.
+
+- **`Server.Config.on_handshake_complete`: per-slot
+  discovery of fully-authenticated connections.** Fires exactly once
+  per slot, from inside `feed`, on the datagram whose processing
+  completed the TLS handshake — replacing the
+  diff-`iterator()`-and-poll-`handshakeDone()` accept-boundary pattern
+  embedders needed. Inside the callback the connection is established
+  and open: ALPN, transport parameters, and
+  `conn.peerCertSpkiDigest()` are readable and `slot.user_data` can be
+  installed. `Server.setOnHandshakeCompleteHook` is the post-init
+  twin. e2e-pinned in `tests/e2e/server_lifecycle_hooks.zig` including
+  the once-per-slot latch and identity readability inside the
+  callback.
+
 ## [0.20.0] - 2026-09-06
 
 The padded-Initial release. A client padded only ack-eliciting Initial

@@ -158,6 +158,20 @@ pub const Config = struct {
     /// to an untrusted network.
     insecure_skip_verify: bool = false,
 
+    /// How the server certificate's identity is bound. `.server_name`
+    /// (the default) is today's behavior: SNI is sent and the
+    /// certificate's SAN/CN is verified against `server_name`.
+    /// `.none` sends SNI but skips the name check while chain
+    /// verification against `ca_pem` remains mandatory — the
+    /// private-CA posture for peers dialed by address (gossip,
+    /// service discovery) whose certificate identity is cluster
+    /// membership rather than the dialed name. `.none` without a
+    /// non-null `ca_pem` fails `connect` with `Error.InvalidConfig`
+    /// (it must never silently downgrade to no verification), and so
+    /// does combining it with `insecure_skip_verify` or
+    /// `tls_context_override` (both already conflict with `ca_pem`).
+    identity_verification: Connection.ServerNameVerification = .server_name,
+
     /// If non-null, the freshly-built `Connection` is wired up to
     /// this qlog callback for per-connection security/lifecycle
     /// telemetry. Same shape as `Server.Config.qlog_callback`.
@@ -472,6 +486,13 @@ pub fn connect(config: Config) Error!Client {
     if (config.ca_pem != null and config.insecure_skip_verify) {
         return Error.InvalidConfig;
     }
+    // `.none` decouples SNI from identity checking ONLY under a
+    // pinned-CA posture; without pinned roots it would silently
+    // downgrade to whatever the auto-built context does (system
+    // roots or nothing), so it is rejected outright.
+    if (config.identity_verification == .none and config.ca_pem == null) {
+        return Error.InvalidConfig;
+    }
     if (config.ca_pem) |pem_bytes| {
         if (pem_bytes.len == 0) return Error.InvalidConfig;
     }
@@ -569,7 +590,12 @@ pub fn connect(config: Config) Error!Client {
         return Error.OutOfMemory;
     defer config.allocator.free(server_name_z);
 
-    const conn_ptr = try Connection.createClient(config.allocator, tls_ctx, server_name_z);
+    const conn_ptr = try Connection.createClientWithPolicy(
+        config.allocator,
+        tls_ctx,
+        server_name_z,
+        config.identity_verification,
+    );
     errdefer conn_ptr.destroy();
     // RFC 9368 §3 / §5: pick the wire-format version *before*
     // any Initial keys are derived. `setVersion` is a no-op when
@@ -827,6 +853,39 @@ test "Client.connect rejects ca_pem combined with insecure_skip_verify" {
         .alpn_protocols = &protos,
         .transport_params = .{},
         .ca_pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        .insecure_skip_verify = true,
+    }));
+}
+
+test "Client.connect rejects identity_verification=.none without pinned roots" {
+    // `.none` skips the name check; without ca_pem it would silently
+    // downgrade to system-store (or, with insecure_skip_verify, no)
+    // verification — the exact posture the InvalidConfig guards
+    // against. Also fires under tls_context_override (ca_pem is
+    // required to be null there, so the requirement is unsatisfiable
+    // by construction — override embedders own their posture).
+    const protos = [_][]const u8{"hq-test"};
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .identity_verification = .none,
+    }));
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .identity_verification = .none,
+        .tls_context_override = .{ .inner = undefined, .mode = .client },
+    }));
+    try std.testing.expectError(Client.Error.InvalidConfig, Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = .{},
+        .identity_verification = .none,
         .insecure_skip_verify = true,
     }));
 }

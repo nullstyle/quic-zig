@@ -136,6 +136,7 @@ const SourceRateEntry = server_dos.SourceRateEntry;
 pub const LogEvent = server_observability.LogEvent;
 pub const LogCallback = server_observability.LogCallback;
 pub const ConnectionWillCloseCallback = server_observability.ConnectionWillCloseCallback;
+pub const HandshakeCompleteCallback = server_observability.HandshakeCompleteCallback;
 pub const MetricsSnapshot = server_observability.MetricsSnapshot;
 pub const RateLimitSnapshot = server_observability.RateLimitSnapshot;
 
@@ -239,6 +240,10 @@ pub const Slot = struct {
     /// every subsequent datagram skips the mint cost). Stays false
     /// for the slot's lifetime when `Server.new_token_key` is null.
     new_token_emitted: bool = false,
+    /// True once `Config.on_handshake_complete` has fired for this
+    /// slot (only ever set when the callback is installed). Keeps the
+    /// notification once-per-slot across the routed-feed retry paths.
+    handshake_complete_surfaced: bool = false,
 
     /// Embedder-owned per-connection pointer; quic never reads or
     /// frees it. Set it when `feed` reports `.accepted` (the new slot is
@@ -416,6 +421,8 @@ log_callback: ?LogCallback,
 log_user_data: ?*anyopaque,
 on_connection_will_close: ?ConnectionWillCloseCallback,
 on_connection_will_close_user_data: ?*anyopaque,
+on_handshake_complete: ?HandshakeCompleteCallback,
+on_handshake_complete_user_data: ?*anyopaque,
 early_data_application_context: []const u8,
 auto_replenish_connection_ids: bool,
 max_auto_replenish_cids: u8,
@@ -892,6 +899,8 @@ pub fn init(config: Config) Error!Server {
         .log_user_data = config.log_user_data,
         .on_connection_will_close = config.on_connection_will_close,
         .on_connection_will_close_user_data = config.on_connection_will_close_user_data,
+        .on_handshake_complete = config.on_handshake_complete,
+        .on_handshake_complete_user_data = config.on_handshake_complete_user_data,
         .early_data_application_context = config.early_data_application_context,
         .auto_replenish_connection_ids = config.auto_replenish_connection_ids,
         .max_auto_replenish_cids = config.max_auto_replenish_cids,
@@ -1014,6 +1023,34 @@ pub fn setConnectionWillCloseHook(
 ) void {
     self.on_connection_will_close = callback;
     self.on_connection_will_close_user_data = user_data;
+}
+
+/// Install (or clear, with null) the handshake-complete hook after
+/// `init` — the post-init twin of `Config.on_handshake_complete`.
+/// Takes effect for every slot that has not yet fired the hook; the
+/// contract is `HandshakeCompleteCallback`'s.
+pub fn setOnHandshakeCompleteHook(
+    self: *Server,
+    callback: ?HandshakeCompleteCallback,
+    user_data: ?*anyopaque,
+) void {
+    self.on_handshake_complete = callback;
+    self.on_handshake_complete_user_data = user_data;
+}
+
+/// Fire `Config.on_handshake_complete` for `slot` if the callback is
+/// installed, the slot's connection has completed its TLS handshake,
+/// and this slot has not been notified yet. Called from the routed
+/// and accepted feed paths next to the other first-post-handshake
+/// latches (NEW_TOKEN issuance, CID replenish) — a server-side
+/// handshake only ever completes while processing an inbound
+/// datagram, so feed is the sole observation point.
+fn notifyHandshakeComplete(self: *Server, slot: *Slot) void {
+    const callback = self.on_handshake_complete orelse return;
+    if (slot.handshake_complete_surfaced) return;
+    if (!slot.conn.handshakeDone()) return;
+    slot.handshake_complete_surfaced = true;
+    callback(self.on_handshake_complete_user_data, slot);
 }
 
 /// Reclaim the server's memory. Purely local teardown: each slot's
@@ -1299,6 +1336,11 @@ pub fn feedWithEcn(
             slot.peer_addr = addr;
         }
         try self.resyncSlotCids(slot);
+        // Handshake-complete notification fires before the other
+        // first-post-handshake latches so the embedder's per-
+        // connection state (installed on slot.user_data) exists
+        // before NEW_TOKEN / CID-replenish side effects run.
+        self.notifyHandshakeComplete(slot);
         // RFC 9000 §8.1.3: once the handshake is confirmed, the
         // server MAY issue NEW_TOKEN frames usable on the peer's
         // future first Initial. We emit exactly one per session
@@ -1484,10 +1526,11 @@ pub fn feedWithEcn(
     }
     try self.dispatchToSlot(slot, bytes, from, now_us);
     try self.resyncSlotCids(slot);
-    // Same NEW_TOKEN issuance check the routed path runs — a
-    // pathological 0-RTT-only handshake might confirm in the
-    // very first received datagram, in which case there is no
-    // later "routed" feed to trip the issuance check.
+    // Same first-post-handshake checks the routed path runs — a
+    // pathological 0-RTT-only handshake might confirm in the very
+    // first received datagram, in which case there is no later
+    // "routed" feed to trip them.
+    self.notifyHandshakeComplete(slot);
     self.maybeIssueNewToken(slot, from, now_us);
     self.maybeReplenishConnectionIds(slot);
     self.feeds_accepted += 1;

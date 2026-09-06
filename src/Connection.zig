@@ -1804,11 +1804,44 @@ pub const CryptoBuffer = struct {
 /// `handleDatagram` / `handleClientInitial` / `handleStatelessReset`, drive
 /// time forward with `tick`, pull outgoing datagrams via `pollDatagram`, and
 /// observe lifecycle changes through `pollEvent` / `nextTimer`.
+/// How a client-side connection binds server-certificate identity to
+/// the server name it was constructed with. Mirrors
+/// `Client.Config.identity_verification` (the wrapper-level knob with
+/// the validation that `.none` requires pinned roots).
+pub const ServerNameVerification = enum {
+    /// Send the name as SNI and verify the server certificate's
+    /// identity against it (`X509_VERIFY_PARAM_set1_host`) — the
+    /// default, and the only posture public CAs should ever be used
+    /// with.
+    server_name,
+    /// Send the name as SNI but skip the identity check. Chain
+    /// verification against the context's trust anchors still runs,
+    /// so the context MUST carry pinned roots (`Client.connect`
+    /// enforces exactly that; raw `createClientWithPolicy` callers
+    /// own it themselves). The private-CA posture for peers whose
+    /// certificate identity is cluster membership, not the dialed
+    /// name.
+    none,
+};
+
 pub fn initClientAt(
     conn: *Connection,
     allocator: std.mem.Allocator,
     tls_ctx: boringssl.tls.Context,
     server_name: [:0]const u8,
+) !void {
+    return initClientAtWithPolicy(conn, allocator, tls_ctx, server_name, .server_name);
+}
+
+/// Caller-owned-storage twin of `createClientWithPolicy`; see
+/// `initClientAt` for the stable-address contract and
+/// `ServerNameVerification` for the policy semantics.
+pub fn initClientAtWithPolicy(
+    conn: *Connection,
+    allocator: std.mem.Allocator,
+    tls_ctx: boringssl.tls.Context,
+    server_name: [:0]const u8,
+    policy: ServerNameVerification,
 ) !void {
     var sent_trackers: [2]SentPacketTracker = undefined;
     sent_trackers[0] = try SentPacketTracker.init(allocator, SentPacketTracker.initial_handshake_max_tracked);
@@ -1846,7 +1879,7 @@ pub fn initClientAt(
     // automatically). `setPmtudConfig` does the matching lift on
     // `self.mtu` for us.
     conn.setPmtudConfig(conn.pmtud_config);
-    try conn.installTls(server_name);
+    try conn.installTls(server_name, policy);
 }
 
 /// Construct a server-side `Connection` in place at `conn` — the
@@ -1878,7 +1911,9 @@ pub fn initServerAt(
     // RFC 8899 DPLPMTUD on the primary path. See `initClientAt`
     // for the embedder-config plumbing path.
     conn.setPmtudConfig(conn.pmtud_config);
-    try conn.installTls(null);
+    // Server connections never bind a hostname; the policy argument
+    // is inert for them.
+    try conn.installTls(null, .server_name);
 }
 
 /// Build a client-side `Connection` on the heap and return its
@@ -1892,9 +1927,24 @@ pub fn createClient(
     tls_ctx: boringssl.tls.Context,
     server_name: [:0]const u8,
 ) !*Connection {
+    return createClientWithPolicy(allocator, tls_ctx, server_name, .server_name);
+}
+
+/// `createClient` with an explicit server-name verification policy;
+/// see `ServerNameVerification`. The `.none` policy sends SNI but
+/// leaves server-certificate identity unchecked — chain validation
+/// against the context's trust anchors still runs, so callers MUST
+/// pass a context with pinned roots (the wrapper path
+/// `Client.connect` enforces this via `InvalidConfig`).
+pub fn createClientWithPolicy(
+    allocator: std.mem.Allocator,
+    tls_ctx: boringssl.tls.Context,
+    server_name: [:0]const u8,
+    policy: ServerNameVerification,
+) !*Connection {
     const conn = try allocator.create(Connection);
     errdefer allocator.destroy(conn);
-    try initClientAt(conn, allocator, tls_ctx, server_name);
+    try initClientAtWithPolicy(conn, allocator, tls_ctx, server_name, policy);
     return conn;
 }
 
@@ -2046,10 +2096,17 @@ pub fn pmtu(self: *const Connection) usize {
 /// construction, so there is no bind-later window. (qlog's
 /// `connection_started` is emitted by `setQlogCallback`, the
 /// first moment a sink exists to receive it.)
-fn installTls(self: *Connection, hostname: ?[:0]const u8) !void {
+fn installTls(self: *Connection, hostname: ?[:0]const u8, policy: ServerNameVerification) !void {
     try self.inner.setUserData(self);
     try self.inner.setQuicMethod(&method);
-    if (hostname) |h| try self.inner.setHostname(h);
+    if (hostname) |h| switch (policy) {
+        // BoringSSL has no API to clear a set1_host binding, so the
+        // name-check decision must be made here, before any hostname
+        // touches the SSL — a `.none` set after `setHostname` would
+        // be a silent no-op.
+        .server_name => try self.inner.setHostname(h),
+        .none => try self.inner.setSni(h),
+    };
 }
 
 /// Tear down a Connection built by `createClient`/`createServer`:
@@ -2380,6 +2437,30 @@ pub fn setEarlyDataContextForParams(
 /// data was negotiated; everything else waits.
 pub fn handshakeDone(self: *Connection) bool {
     return self.inner.handshakeDone();
+}
+
+/// SHA-256 of the peer's leaf-certificate SubjectPublicKeyInfo
+/// (the full DER-encoded SPKI — the preimage of the standard
+/// `openssl x509 -pubkey | openssl pkey -pubin -outform DER |
+/// openssl dgst -sha256` fingerprint pipeline). Available once the
+/// handshake has completed and the peer presented a certificate;
+/// null otherwise (handshake incomplete, no peer cert — e.g. a
+/// server configured to verify-but-not-require client certs on a
+/// connection where none was presented — or the connection is past
+/// its open phase).
+///
+/// Role-agnostic: the server reads the client's certificate, the
+/// client the server's. Works on resumed sessions — BoringSSL keeps
+/// the original session's peer certificate — and the digest is
+/// stable across certificate re-issuance as long as the keypair is
+/// retained, so embedders use it as the authenticated peer identity
+/// (mTLS identity binding, mesh PeerIds).
+pub fn peerCertSpkiDigest(self: *const Connection) ?[32]u8 {
+    // `phase()` is the transport-level completion signal: `.established`
+    // means application write secrets are installed, which lags the TLS
+    // handshake's completion by nothing the embedder can observe.
+    if (self.phase() != .established) return null;
+    return self.inner.peerCertSpkiDigest();
 }
 
 // INTERNAL: pub for Connection/recv_data_handlers.zig access; not part of the embedder API.

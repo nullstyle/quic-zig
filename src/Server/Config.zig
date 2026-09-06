@@ -19,6 +19,7 @@ const state = conn_mod.state;
 // sibling imports, config.zig is a leaf.
 const LogCallbackImpl = server_observability.LogCallback;
 const ConnectionWillCloseCallbackImpl = server_observability.ConnectionWillCloseCallback;
+const HandshakeCompleteCallbackImpl = server_observability.HandshakeCompleteCallback;
 const QlogCallback = conn_mod.QlogCallback;
 const TransportParams = tls_mod.TransportParams;
 const RetryTokenKey = conn_mod.RetryTokenKey;
@@ -386,6 +387,15 @@ log_user_data: ?*anyopaque = null,
 on_connection_will_close: ?ConnectionWillCloseCallbackImpl = null,
 /// Opaque pointer passed back to `on_connection_will_close`.
 on_connection_will_close_user_data: ?*anyopaque = null,
+
+/// Per-slot discovery hook: fires once per accepted connection,
+/// from inside `feed`, the moment the slot's TLS handshake
+/// completes — the substitute for diffing `Server.iterator()` and
+/// polling `Connection.handshakeDone()`. See
+/// `HandshakeCompleteCallback` for the contract. Null disables it.
+on_handshake_complete: ?HandshakeCompleteCallbackImpl = null,
+/// Opaque pointer passed back to `on_handshake_complete`.
+on_handshake_complete_user_data: ?*anyopaque = null,
 
 /// Proactively top up each connection's local CID inventory once
 /// its handshake completes. RFC 9000 §9: a client can only migrate

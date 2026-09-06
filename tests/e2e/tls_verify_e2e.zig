@@ -23,7 +23,11 @@
 //!   6. The mTLS posture survives `replaceTlsContext(.{ .pem = ... })`
 //!      rotation, and the `.override` variant is rejected while mTLS
 //!      is configured (it would silently drop enforcement).
-//!   7. `tls.pem` failure-path coverage on real fixtures: a bundle
+//!   7. `identity_verification = .none`: the pinned chain validates
+//!      while the SAN/CN-vs-`server_name` check is skipped (the
+//!      private-CA mesh posture), and an untrusted chain is still
+//!      rejected — `.none` never degrades to no verification.
+//!   8. `tls.pem` failure-path coverage on real fixtures: a bundle
 //!      with a malformed trailing block, a garbage key after a valid
 //!      chain, and a well-formed key that mismatches the chain.
 //!
@@ -389,6 +393,73 @@ test "mTLS posture survives replaceTlsContext(.pem) rotation; .override is rejec
     });
     defer authed.deinit();
     try std.testing.expect(try driveToCompletion(&authed, &srv, 1_000_000));
+}
+
+test "identity_verification=.none: pinned chain validates without the name check" {
+    // The private-CA mesh posture: the client pins the fixture root
+    // and dials with a server_name that is NOT in the certificate's
+    // SAN. Chain validation stays mandatory (the untrusted-root test
+    // below proves it); only the identity binding is skipped.
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    });
+    defer srv.deinit();
+
+    var cli = try quic.Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "mesh-node-7.internal", // not in the SAN
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .ca_pem = common.test_cert_pem,
+        .identity_verification = .none,
+    });
+    defer cli.deinit();
+
+    try std.testing.expect(try driveToCompletion(&cli, &srv, 0));
+
+    // The posture still authenticates the server: the peer identity
+    // accessor must report the pinned root's key.
+    const digest = cli.conn.peerCertSpkiDigest() orelse
+        return error.NoServerCertDigest;
+    const want = [32]u8{
+        0xa9, 0xf8, 0x24, 0xa8, 0x09, 0x75, 0x5b, 0x5f,
+        0x75, 0x7a, 0xa2, 0x40, 0x28, 0x93, 0x61, 0x8d,
+        0x9d, 0x81, 0xaa, 0x98, 0x58, 0xde, 0x5f, 0x38,
+        0xda, 0xe9, 0x5c, 0xca, 0xee, 0x40, 0xed, 0x46,
+    };
+    try std.testing.expectEqualSlices(u8, &want, &digest);
+}
+
+test "identity_verification=.none: a chain that misses the pinned roots is still rejected" {
+    // `.none` decouples ONLY the name check. The server presents the
+    // untrusted fixture while the client pins the trusted one; the
+    // handshake must fail on the chain, proving `.none` never
+    // degrades into insecure_skip_verify.
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = common.test_untrusted_cert_pem,
+        .tls_key_pem = common.test_untrusted_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    });
+    defer srv.deinit();
+
+    var cli = try quic.Client.connect(.{
+        .allocator = std.testing.allocator,
+        .server_name = "localhost", // even a MATCHING name must not save it
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .ca_pem = common.test_cert_pem,
+        .identity_verification = .none,
+    });
+    defer cli.deinit();
+
+    try std.testing.expect(try driveExpectingRejection(&cli, &srv, 0));
+    try expectCryptoErrorClose(cli.conn.closeEvent() orelse return error.NoClientCloseEvent);
 }
 
 test "tls.pem failure paths on real fixtures: truncated bundle, garbage key, mismatched key" {

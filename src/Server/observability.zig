@@ -119,6 +119,25 @@ pub const LogCallback = *const fn (user_data: ?*anyopaque, ev: LogEvent) void;
 /// `log_callback`).
 pub const ConnectionWillCloseCallback = *const fn (user_data: ?*anyopaque, slot: *SlotImpl) void;
 
+/// Callback invoked from `Server.feed` the first time a slot's
+/// connection reports a completed TLS handshake — the moment the
+/// connection first becomes a fully authenticated peer. This is the
+/// discovery hook server-side embedders otherwise build by diffing
+/// `Server.iterator()` against their own bookkeeping and polling
+/// `Connection.handshakeDone()`; the callback replaces that polling
+/// with one synchronous notification per slot.
+///
+/// Inside the callback `slot.conn` is established and open: safe to
+/// read the negotiated ALPN, transport parameters, and the peer's
+/// authenticated identity (`Connection.peerCertSpkiDigest`), and to
+/// install `slot.user_data` for per-connection application state.
+/// Runs synchronously on the embedder's thread inside `feed` and
+/// must not call back into the Server (no `feed`, `reap`, or other
+/// server-mutating call — per-slot mutation is the intended use).
+/// Fires once per slot; slots whose handshake never completes
+/// (rejected, timed out) never fire it.
+pub const HandshakeCompleteCallback = *const fn (user_data: ?*anyopaque, slot: *SlotImpl) void;
+
 /// By-value snapshot of the server's instrumentation counters and
 /// gauges. Returned from `Server.metricsSnapshot`; the snapshot is
 /// taken atomically (no mutation between fields) because all reads
