@@ -28,6 +28,7 @@ test {
     _ = @import("e2e/app_driver.zig");
     _ = @import("e2e/testing_loopback.zig");
     _ = @import("e2e/initial_padding.zig");
+    _ = @import("e2e/coalesced_loss.zig");
     _ = @import("e2e/public_api_smoke.zig");
     _ = @import("e2e/internal_surface_smoke.zig");
     _ = @import("lint_comment_anchors.zig");
