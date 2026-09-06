@@ -7,6 +7,18 @@ changes.
 
 ## [Unreleased]
 
+- **Clients pad every Initial-leading datagram to 1200 bytes.** RFC 9000
+  §14.1 requires a client to expand every UDP datagram that carries an
+  Initial packet, not only ack-eliciting ones; the ack-eliciting condition
+  belongs to the server side of that rule. `Server.feed` drops
+  Initial-leading datagrams under 1200 bytes, so a client's unpadded
+  ACK-only Initial was silently discarded and the server retransmitted its
+  first flight at every probe timeout before finishing the handshake: about
+  two seconds per connection against a real network peer, invisible on
+  loopback where the client's next Initial coalesces with ack-eliciting
+  Handshake data. The e2e test `initial_padding.zig` inspects every client
+  datagram of a loopback handshake before the server sees it.
+
 - **`error.Canceled` from a send is its own send disposition.**
   `transport.classifySendError` now classifies it as `.canceled`
   instead of `.fatal`: a bundled loop whose task was cancelled

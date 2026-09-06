@@ -1114,11 +1114,15 @@ pub fn pollLevelOnPath(
             .largest_acked = largest_acked,
             .payload = pl_buf[0..pl_pos],
             .keys = &keys,
-            // RFC 9000 §14.1: a client MUST pad UDP datagrams
-            // carrying ack-eliciting Initial packets to ≥1200
-            // bytes. Non-ack-eliciting Initials (e.g. ACK-only
-            // coalesced with a Handshake CRYPTO) need no pad here.
-            .pad_to = if (conn.role == .client and ack_eliciting) 1200 else 0,
+            // RFC 9000 §14.1: a client MUST expand every UDP datagram
+            // carrying an Initial packet to ≥1200 bytes, ACK-only
+            // Initials included; only the server side of that rule is
+            // limited to ack-eliciting Initials. Servers drop shorter
+            // Initial-leading datagrams (see `Server.feed`), so an
+            // unpadded ACK-only Initial stalls the peer's first flight
+            // until its probe timeouts. The Initial leads a coalesced
+            // datagram, so padding it here pads the datagram.
+            .pad_to = if (conn.role == .client) 1200 else 0,
             .quic_bit = quic_bit,
         }),
         .handshake => try long_packet_mod.sealHandshake(dst, .{
