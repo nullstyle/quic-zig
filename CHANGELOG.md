@@ -7,6 +7,16 @@ changes.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-06
+
+The padded-Initial release. A client padded only ack-eliciting Initial
+packets, so its ACK-only Initial left as a ~100-byte datagram that every
+RFC-conformant server drops; against a real network peer the server then
+waited for two probe timeouts before it could finish the handshake, about
+two seconds per connection, while loopback never showed it. Verified
+toolchain: 0.17.0-dev.1683+5ceec001b (macOS, and the fleet-revisions
+consumer on 0.17.0-dev.1978+c961124d9 on macOS and aarch64 Linux).
+
 - **Clients pad every Initial-leading datagram to 1200 bytes.** RFC 9000
   §14.1 requires a client to expand every UDP datagram that carries an
   Initial packet, not only ack-eliciting ones; the ack-eliciting condition
