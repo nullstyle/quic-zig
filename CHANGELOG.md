@@ -7,6 +7,34 @@ changes.
 
 ## [Unreleased]
 
+- **Fixed: every Handshake and 0-RTT packet-key derivation leaked its
+  BoringSSL AEAD context.** `Connection.packetKeys` derived a fresh
+  `PacketKeys` — whose `aead` field owns a heap `EVP_AEAD_CTX` — on
+  every call at the `.handshake` and `.early_data` levels, and both
+  callers dropped it: the send path (`send.pollLevelOnPath` derives
+  on every poll at those levels, even when no packet leaves) and the
+  receive handlers (`recv_packet_handlers.handleHandshake` /
+  `handleZeroRtt`). Application epochs and Initial keys were already
+  cached; Handshake and 0-RTT keys now are too: derived once per
+  secret, stored in `PerLevelState.read_keys`/`write_keys`, and freed
+  when the secret is replaced (`setSecret`), discarded
+  (`discardHandshakeKeys`), or the connection is destroyed. Callers
+  receive a borrowed copy and must not `deinitAead` it — the same
+  semantics Application and Initial keys already had — and
+  `packetKeys` accordingly takes `*Connection` to install the cache.
+  Two more members of the same class are fixed alongside:
+  `setInitialDcid` and `setVersion` dropped the Initial keys without
+  freeing their contexts (every Retry leaked the pair), and
+  `Connection.deinit` now frees Initial and per-level cached keys on
+  a mid-handshake teardown. Pre-fix, measured with
+  `MallocStackLogging` on an embedded member at two QUIC sessions
+  per second: 7,661 live 640-byte contexts after ten idle minutes
+  (~5,600 under the send path, ~2,060 under the receive path), about
+  10 KB/s of steady growth. Pinned by new derive-once identity tests
+  (the cached context's address is stable across calls, per
+  direction) and a discard-frees-the-cache test.
+
+
 ## [0.21.0] - 2026-09-06
 
 The mTLS peer-identity release. An embedder building a cluster on

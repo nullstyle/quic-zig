@@ -23,6 +23,7 @@ const util = @import("_test_util.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
 const installTestApplicationReadSecret = util.installTestApplicationReadSecret;
 const installTestEarlyDataReadSecret = util.installTestEarlyDataReadSecret;
+const installTestEarlyDataWriteSecret = util.installTestEarlyDataWriteSecret;
 const testEarlyDataPacketKeys = util.testEarlyDataPacketKeys;
 const markTestMultipathNegotiated = util.markTestMultipathNegotiated;
 
@@ -417,6 +418,91 @@ test "client discards Handshake keys when HANDSHAKE_DONE arrives [RFC9001 §4.9.
     try std.testing.expectEqual(@as(u64, 0), conn.sentForLevel(.handshake).bytes_in_flight);
     try std.testing.expectEqual(@as(u32, 0), conn.pto_count[1]);
     try std.testing.expectEqual(false, conn.pending_ping[1]);
+}
+
+// The AEAD context inside `PacketKeys` is heap state: two independent
+// derivations allocate two contexts, a cached derivation reuses one. The
+// derive-once tests below use its address as derivation-count identity.
+fn aeadCtxAddr(keys: *const short_packet_mod.PacketKeys) usize {
+    return switch (keys.aead) {
+        .aes128 => |a| @intFromPtr(a.ctx),
+        .aes256 => |a| @intFromPtr(a.ctx),
+        .chacha20 => |a| @intFromPtr(a.ctx),
+    };
+}
+
+test "Handshake-level packet keys are derived once per secret, not per call" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // Plant distinct read/write secret material, the way the TLS bridge
+    // does via setSecret. Each direction must derive at most one key set
+    // for the secret's lifetime: a per-call derivation leaks one
+    // EVP_AEAD_CTX per packet (the idle-member growth the fleet measured).
+    const hsk_idx = EncryptionLevel.handshake.idx();
+    var read_material: SecretMaterial = .{ .cipher_protocol_id = 0x1301 };
+    read_material.secret_len = 32;
+    @memset(read_material.secret[0..32], 0x42);
+    conn.levels[hsk_idx].read = read_material;
+    var write_material: SecretMaterial = .{ .cipher_protocol_id = 0x1301 };
+    write_material.secret_len = 32;
+    @memset(write_material.secret[0..32], 0x7f);
+    conn.levels[hsk_idx].write = write_material;
+
+    const read_first = (try conn.packetKeys(.handshake, .read)).?;
+    const read_second = (try conn.packetKeys(.handshake, .read)).?;
+    try std.testing.expectEqual(aeadCtxAddr(&read_first), aeadCtxAddr(&read_second));
+
+    const write_first = (try conn.packetKeys(.handshake, .write)).?;
+    const write_second = (try conn.packetKeys(.handshake, .write)).?;
+    try std.testing.expectEqual(aeadCtxAddr(&write_first), aeadCtxAddr(&write_second));
+
+    // Read and write are different secrets — their contexts must not
+    // collapse into one shared cache slot.
+    try std.testing.expect(aeadCtxAddr(&read_first) != aeadCtxAddr(&write_first));
+}
+
+test "0-RTT packet keys are derived once per secret, not per call" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    installTestEarlyDataWriteSecret(conn);
+    const first = (try conn.packetKeys(.early_data, .write)).?;
+    const second = (try conn.packetKeys(.early_data, .write)).?;
+    try std.testing.expectEqual(aeadCtxAddr(&first), aeadCtxAddr(&second));
+}
+
+test "discardHandshakeKeys frees the cached Handshake packet keys" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    const hsk_idx = EncryptionLevel.handshake.idx();
+    var material: SecretMaterial = .{ .cipher_protocol_id = 0x1301 };
+    material.secret_len = 32;
+    conn.levels[hsk_idx].read = material;
+    conn.levels[hsk_idx].write = material;
+    _ = (try conn.packetKeys(.handshake, .read)).?;
+    _ = (try conn.packetKeys(.handshake, .write)).?;
+    try std.testing.expect(conn.levels[hsk_idx].read_keys != null);
+    try std.testing.expect(conn.levels[hsk_idx].write_keys != null);
+
+    conn.discardHandshakeKeys();
+
+    // The cached sets (and their heap AEAD contexts) must be gone
+    // with the secrets, not just unreachable behind nulled material.
+    try std.testing.expect(conn.levels[hsk_idx].read_keys == null);
+    try std.testing.expect(conn.levels[hsk_idx].write_keys == null);
+    try std.testing.expect((try conn.packetKeys(.handshake, .read)) == null);
+    try std.testing.expect((try conn.packetKeys(.handshake, .write)) == null);
 }
 
 test "server discards Handshake keys at handshake-complete [RFC9001 §4.1.2 ¶1]" {

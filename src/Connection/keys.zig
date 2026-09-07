@@ -67,8 +67,17 @@ pub fn cipherSuite(
 /// Derive AEAD/IV/HP keys for the given (level, direction). The
 /// secret was captured by the TLS bridge; HKDF-Expand-Label
 /// turns it into per-packet protection material.
+///
+/// Handshake and 0-RTT keys are derived once per secret and cached
+/// in the level slot; every call returns a *borrowed copy* of the
+/// cached set (the `aead` field aliases the stored heap context), so
+/// callers must not `deinitAead` the result. The cache is freed when
+/// the secret is replaced or discarded. Deriving per call instead
+/// leaked one `EVP_AEAD_CTX` per packet on the Handshake/0-RTT seal
+/// and open paths; application epochs and Initial keys were already
+/// cached for the same reason.
 pub fn packetKeys(
-    conn: *const Connection,
+    conn: *Connection,
     lvl: EncryptionLevel,
     dir: Direction,
 ) Error!?PacketKeys {
@@ -78,7 +87,12 @@ pub fn packetKeys(
             .write => if (conn.app_write_current) |epoch| return epoch.keys,
         }
     }
-    const slot = conn.levels[lvl.idx()];
+    const slot = &conn.levels[lvl.idx()];
+    const cached = switch (dir) {
+        .read => &slot.read_keys,
+        .write => &slot.write_keys,
+    };
+    if (cached.*) |*keys| return keys.*;
     const material_opt = switch (dir) {
         .read => slot.read,
         .write => slot.write,
@@ -87,7 +101,24 @@ pub fn packetKeys(
     const suite = Suite.fromProtocolId(material.cipher_protocol_id) orelse
         return Error.UnsupportedCipherSuite;
     const secret = material.secret[0..material.secret_len];
-    return try short_packet_mod.derivePacketKeys(suite, secret);
+    cached.* = try short_packet_mod.derivePacketKeys(suite, secret);
+    return cached.*.?;
+}
+
+/// Free a level slot's cached packet keys — the heap `EVP_AEAD_CTX`
+/// plus the sensitive key bytes — before its secret is replaced or
+/// the slot is torn down. Call at every site that overwrites or
+/// drops a non-application `PerLevelState` secret; a silent drop is
+/// exactly the leak `packetKeys`'s cache exists to prevent.
+pub fn freeLevelKeys(slot: *?PacketKeys) void {
+    if (slot.*) |*keys| {
+        keys.deinitAead();
+        std.crypto.secureZero(u8, &keys.key);
+        std.crypto.secureZero(u8, &keys.iv);
+        std.crypto.secureZero(u8, &keys.hp);
+        std.crypto.secureZero(u8, std.mem.asBytes(&keys.hp_cipher));
+        slot.* = null;
+    }
 }
 
 fn applicationKeyEpochFromMaterial(
@@ -523,6 +554,11 @@ pub fn discardHandshakeKeys(conn: *Connection) void {
     if (conn.levels[hsk_lvl_idx].write) |*material| {
         std.crypto.secureZero(u8, &material.secret);
     }
+    // The cached PacketKeys derived from those secrets hold live heap
+    // AEAD contexts; freeing them is as much a part of the discard as
+    // zeroing the secrets.
+    freeLevelKeys(&conn.levels[hsk_lvl_idx].read_keys);
+    freeLevelKeys(&conn.levels[hsk_lvl_idx].write_keys);
     conn.levels[hsk_lvl_idx].read = null;
     conn.levels[hsk_lvl_idx].write = null;
     // Initial uses idx 0 in connPnIdx mapping; Handshake is idx 1.

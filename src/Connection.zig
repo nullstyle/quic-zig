@@ -963,6 +963,17 @@ pub const SecretMaterial = struct {
 pub const PerLevelState = struct {
     read: ?SecretMaterial = null,
     write: ?SecretMaterial = null,
+    /// Packet-protection keys derived from the matching secret,
+    /// cached on first use so the Handshake/0-RTT seal and open
+    /// paths borrow one set per secret instead of deriving (and
+    /// leaking) a fresh `EVP_AEAD_CTX` per packet. Freed when the
+    /// secret is replaced (`setSecret`), discarded
+    /// (`discardHandshakeKeys`), or the connection is destroyed.
+    /// The application level caches in `app_*_current/next` epochs
+    /// instead, and Initial keys live in `initial_keys_read/write`;
+    /// neither uses these slots.
+    read_keys: ?PacketKeys = null,
+    write_keys: ?PacketKeys = null,
 };
 
 /// RFC 9218 (Extensible Priorities) per-stream send priority — the minimal
@@ -2153,10 +2164,16 @@ pub fn deinit(self: *Connection) void {
     // can't elide it on the dead-store path where the struct is
     // about to be `undefined`-poisoned. We zero in place — the
     // surrounding ArrayLists and structs will be deinit-ed below.
+    // The cached packet keys are freed (not just zeroed): each holds
+    // a live heap `EVP_AEAD_CTX`, and a connection torn down
+    // mid-handshake still has Handshake/0-RTT/Initial keys installed.
     for (&self.levels) |*level| {
         if (level.read) |*material| std.crypto.secureZero(u8, &material.secret);
         if (level.write) |*material| std.crypto.secureZero(u8, &material.secret);
+        conn_keys.freeLevelKeys(&level.read_keys);
+        conn_keys.freeLevelKeys(&level.write_keys);
     }
+    conn_keys.discardInitialKeys(self);
     zeroAppKeyEpoch(&self.app_read_previous);
     zeroAppKeyEpoch(&self.app_read_current);
     zeroAppKeyEpoch(&self.app_read_next);
@@ -4613,8 +4630,17 @@ fn setSecret(
     if (lvl == .application) {
         conn.installApplicationSecret(dir, material) catch return 0;
     } else switch (dir) {
-        .read => conn.levels[lvl.idx()].read = material,
-        .write => conn.levels[lvl.idx()].write = material,
+        // A replacement secret invalidates any packet keys cached for
+        // the old one (BoringSSL can re-derive 0-RTT secrets after a
+        // HelloRetryRequest); drop them before overwriting the slot.
+        .read => {
+            conn_keys.freeLevelKeys(&conn.levels[lvl.idx()].read_keys);
+            conn.levels[lvl.idx()].read = material;
+        },
+        .write => {
+            conn_keys.freeLevelKeys(&conn.levels[lvl.idx()].write_keys);
+            conn.levels[lvl.idx()].write = material;
+        },
     }
     if (lvl != .application) {
         conn_qlog.emitQlog(conn, .{ .name = .key_updated, .level = lvl });

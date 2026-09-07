@@ -162,6 +162,11 @@ pub fn setInitialDcid(conn: *Connection, dcid: []const u8) Error!void {
     }
     conn.initial_dcid = ConnectionId.fromSlice(dcid);
     conn.initial_dcid_set = true;
+    // A changed DCID means fresh Initial keys on the next
+    // `ensureInitialKeys`; free the old contexts first — every Retry
+    // used to leak the pair derived for the pre-Retry DCID.
+    if (conn.initial_keys_read) |*k| k.deinitAead();
+    if (conn.initial_keys_write) |*k| k.deinitAead();
     conn.initial_keys_read = null;
     conn.initial_keys_write = null;
 }
@@ -177,6 +182,10 @@ pub fn setInitialDcid(conn: *Connection, dcid: []const u8) Error!void {
 pub fn setVersion(conn: *Connection, version: u32) void {
     if (conn.version == version) return;
     conn.version = version;
+    // Free the heap AEAD contexts before zeroing the bytes that hold
+    // them — zeroing first would orphan the allocations for good.
+    if (conn.initial_keys_read) |*k| k.deinitAead();
+    if (conn.initial_keys_write) |*k| k.deinitAead();
     if (conn.initial_keys_read) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
     if (conn.initial_keys_write) |*k| std.crypto.secureZero(u8, std.mem.asBytes(k));
     conn.initial_keys_read = null;
