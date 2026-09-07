@@ -7,6 +7,22 @@ changes.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-06
+
+The mTLS peer-identity release. An embedder building a cluster on
+mutual TLS had no way to learn *which* peer a connection actually
+authenticated as: the certificate was validated, but its identity was
+not readable, so application peer ids had to be taken on trust from
+inside the channel. This release exposes that identity
+(`Connection.peerCertSpkiDigest`), makes private-cluster dials by
+address practical without weakening chain validation
+(`Client.Config.identity_verification`), and gives servers a precise
+moment at which a connection is authenticated and its identity
+readable (`Server.Config.on_handshake_complete`). Together they let a
+mesh, a replication link, or a message bus bind its own peer id to the
+key that signed the handshake. Verified toolchain:
+0.17.0-dev.1683+5ceec001b (macOS).
+
 - **`Connection.peerCertSpkiDigest()`: the authenticated peer
   identity.** Returns SHA-256 over the DER-encoded SubjectPublicKeyInfo
   of the peer's leaf certificate once the handshake completed and the
