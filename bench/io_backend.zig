@@ -926,7 +926,8 @@ fn runBackend(
     payload: []const u8,
     rtts: []u64,
     samples: *std.ArrayList(Sample),
-) !void {    for (opts.scenarios) |scenario| {
+) !void {
+    for (opts.scenarios) |scenario| {
         for (0..opts.samples) |i| {
             // `--loops 1 --clients N` is the control: one server, bound exactly
             // as in the classic path, N clients.
