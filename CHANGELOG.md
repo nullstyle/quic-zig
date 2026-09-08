@@ -7,6 +7,17 @@ changes.
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-09-07
+
+The packet-key leak fix. Every Handshake and 0-RTT key derivation
+allocated a fresh BoringSSL AEAD context and dropped it on the floor —
+on the receive path once per packet and on the send path once per poll —
+so a long-lived process holding QUIC sessions grew at a steady ~10 KB/s
+at two sessions per second, reported by `leaks` as root leaks. Anyone
+embedding quic-zig in a durable process should upgrade; behavior is
+otherwise unchanged. Verified toolchain:
+0.17.0-dev.1683+5ceec001b (macOS).
+
 - **Fixed: every Handshake and 0-RTT packet-key derivation leaked its
   BoringSSL AEAD context.** `Connection.packetKeys` derived a fresh
   `PacketKeys` — whose `aead` field owns a heap `EVP_AEAD_CTX` — on
