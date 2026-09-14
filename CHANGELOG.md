@@ -21,6 +21,11 @@ exercised end-to-end downstream under 0.17.0-dev.1978 via nest's
 
 ## [Unreleased]
 
+- Fixed a connection reset when reordered or retransmitted replies arrived
+  after local bidirectional stream state was reclaimed. GC now remembers
+  actual local stream reaps in a fixed-size bitmap, so late STREAM and
+  RESET_STREAM frames are ignored without accepting genuinely unopened IDs.
+  Live stream final-size checks remain intact; reaped IDs cannot be reopened.
 - Added `app.ConnectionDriver(App)`, borrowing either an accepted or dialed
   connection. Its data hook reports consumed bytes; zero or partial progress
   pauses the stream without releasing credit for unread bytes. Local bidi

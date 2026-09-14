@@ -627,6 +627,98 @@ test "gcClosedStreams: an out-of-order reaped peer stream above the watermark is
     try std.testing.expect(conn.streams.get(id1) != null);
 }
 
+test "gcClosedStreams: reordered replies to reaped local bidi streams do not close the connection" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |server| {
+        var ctx = if (server) try boringssl.tls.Context.initServer(.{}) else try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = if (server) try Connection.createServer(allocator, ctx) else try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
+        const role: u64 = if (server) 1 else 0;
+        try conn.setTransportParams(.{ .initial_max_data = 4096, .initial_max_stream_data_bidi_local = 4096 });
+        _ = try conn.openBidi(role); // A lower local stream remains alive.
+        const sid = role + 8;
+        const stream = try conn.openBidi(sid);
+        // The request's empty FIN was ACKed; the real receive path consumes
+        // the reply's bytes and FIN before GC. Another copy may still be on
+        // the network because packet-level ACK/loss decisions raced delivery.
+        try conn.streamFinish(sid);
+        stream.send.fin_acked = true;
+        stream.send.state = .data_recvd;
+        try conn.handleStream(.application, .{ .stream_id = sid, .data = "ok", .has_length = true, .fin = true });
+        var buf: [2]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 2), try conn.streamRead(sid, &buf));
+        try conn.tick(1000);
+        try std.testing.expect(conn.stream(sid) == null);
+
+        try conn.handleStream(.application, .{ .stream_id = sid, .data = "ok", .has_length = true, .fin = true });
+        try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+        try conn.handleResetStream(.{ .stream_id = sid, .application_error_code = 0, .final_size = 2 });
+        try @import("recv_stream_control_handlers.zig").handleStopSending(conn, .{ .stream_id = sid, .application_error_code = 0 });
+        conn.handleMaxStreamData(.{ .stream_id = sid, .maximum_stream_data = 4096 });
+        try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+        try std.testing.expect(conn.stream(sid) == null);
+        try std.testing.expect(conn.stream(role) != null);
+        try std.testing.expectError(Error.StreamAlreadyOpen, conn.openBidi(sid));
+    }
+}
+
+test "gcClosedStreams: local bidi tombstones retain pre-parameter IDs outside the bounded range" {
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(std.testing.allocator, ctx, "x");
+    defer conn.destroy();
+    try conn.setTransportParams(.{ .initial_max_data = 4096, .initial_max_stream_data_bidi_local = 4096 });
+    for ([_]u64{ max_streams_per_connection - 1, max_streams_per_connection }) |index| {
+        const sid = index * 4;
+        const stream = try conn.openBidi(sid);
+        try conn.streamFinish(sid);
+        stream.send.fin_acked = true;
+        stream.send.state = .data_recvd;
+        try conn.handleStream(.application, .{ .stream_id = sid, .data = "", .has_length = true, .fin = true });
+    }
+    try conn.tick(1000);
+    try std.testing.expect(conn.stream((max_streams_per_connection - 1) * 4) == null);
+    try std.testing.expect(conn.stream(max_streams_per_connection * 4) != null);
+    for ([_]u64{ max_streams_per_connection - 1, max_streams_per_connection }) |index| {
+        try conn.handleStream(.application, .{ .stream_id = index * 4, .data = "", .has_length = true, .fin = true });
+    }
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+}
+
+test "gcClosedStreams: an absent local stream below the allocation watermark is not necessarily reaped" {
+    for ([_]bool{ false, true }) |reset| {
+        var ctx = try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createClient(std.testing.allocator, ctx, "x");
+        defer conn.destroy();
+        _ = try conn.openBidi(8); // Neither 0 nor 4 was materialized/reaped.
+        if (reset) try conn.handleResetStream(.{ .stream_id = 4, .application_error_code = 0, .final_size = 0 }) else try conn.handleStream(.application, .{ .stream_id = 4, .data = "unexpected", .has_length = true });
+        try std.testing.expectEqual(@as(u64, 5), conn.closeEvent().?.error_code);
+        try std.testing.expect(conn.stream(4) == null);
+    }
+}
+
+test "gcClosedStreams: a still-live local bidi stream keeps its final-size validation" {
+    for ([_]bool{ false, true }) |reset| {
+        var ctx = try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createClient(std.testing.allocator, ctx, "x");
+        defer conn.destroy();
+        try conn.setTransportParams(.{ .initial_max_data = 4096, .initial_max_stream_data_bidi_local = 4096 });
+        _ = try conn.openBidi(0);
+        try conn.handleStream(.application, .{ .stream_id = 0, .data = "ok", .has_length = true, .fin = true });
+        // Leave the send half live: terminal-receive GC must not bypass the
+        // locked final size while this stream still owns state.
+        var buf: [2]u8 = undefined;
+        _ = try conn.streamRead(0, &buf);
+        try conn.tick(1000);
+        try std.testing.expect(conn.stream(0) != null);
+        if (reset) try conn.handleResetStream(.{ .stream_id = 0, .application_error_code = 0, .final_size = 3 }) else try conn.handleStream(.application, .{ .stream_id = 0, .data = "bad", .has_length = true, .fin = true });
+        try std.testing.expectEqual(@as(u64, 6), conn.closeEvent().?.error_code);
+    }
+}
+
 test "initialSendStreamLimit: remembered 0-RTT params bound the pre-params send window (L6)" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

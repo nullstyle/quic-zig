@@ -36,7 +36,7 @@ const transport_error_protocol_violation = state_mod.transport_error_protocol_vi
 // Doc comment lives on the `Connection.openBidi` thunk in Connection.zig.
 pub fn openBidi(conn: *Connection, id: u64) Error!*Stream {
     if (!streamIsBidi(id) or !streamInitiatedByLocal(conn, id)) return Error.InvalidStreamId;
-    if (conn.streams.contains(id)) return Error.StreamAlreadyOpen;
+    if (conn.streams.contains(id) or localBidiStreamAlreadyReaped(conn, id)) return Error.StreamAlreadyOpen;
     try recordLocalStreamOpen(conn, id);
     return try openStream(conn, id);
 }
@@ -118,8 +118,8 @@ pub const PeerStreamFrame = enum { stream_data, reset_stream };
 /// Gate order is load-bearing:
 /// 1. `peerMaySendOnStream` — data/reset on our send-only uni stream
 ///    closes with STREAM_STATE_ERROR;
-/// 2. an absent stream the *local* side should have opened closes
-///    with STREAM_STATE_ERROR;
+/// 2. an absent local bidi stream actually recorded by GC is post-terminal
+///    and ignored; any other absent local stream closes with STREAM_STATE_ERROR;
 /// 3. RFC 9000 §3.2: an absent peer stream that already reached a
 ///    terminal state and was reaped is post-terminal — the frame is
 ///    dropped instead of resurrecting the stream with fresh
@@ -145,6 +145,7 @@ pub fn ensurePeerStream(conn: *Connection, id: u64, frame: PeerStreamFrame) Erro
     const existing = conn.streams.get(id);
     if (existing) |ptr| return ptr;
     if (streamInitiatedByLocal(conn, id)) {
+        if (localBidiStreamAlreadyReaped(conn, id)) return null;
         conn.close(true, transport_error_stream_state, switch (frame) {
             .stream_data => "peer referenced unopened local stream",
             .reset_stream => "peer reset unopened local stream",
@@ -297,10 +298,15 @@ pub fn peerStreamAlreadyReaped(conn: *const Connection, id: u64) bool {
     return bits.isSet(@intCast(idx));
 }
 
+fn localBidiStreamAlreadyReaped(conn: *const Connection, id: u64) bool {
+    const idx = streamIndex(id);
+    return idx < max_streams_per_connection and conn.local_reaped_bits_bidi.isSet(@intCast(idx));
+}
+
 /// Record that a peer-initiated stream was reaped, advancing the
-/// contiguous reaped watermark. Local streams are ignored (their
-/// absence is handled by the "peer referenced unopened local stream"
-/// guards). Sets the index's bit, then advances the watermark past
+/// contiguous reaped watermark. Local bidi reaps use their own bitmap;
+/// send-only local uni streams cannot receive STREAM/RESET_STREAM frames.
+/// Sets the index's bit, then advances the watermark past
 /// any consecutive run of reaped indices from the bottom.
 fn notePeerStreamReaped(conn: *Connection, id: u64) void {
     if (streamInitiatedByLocal(conn, id)) return;
@@ -495,6 +501,11 @@ pub fn gcClosedStreams(conn: *Connection) void {
         else
             recv_done;
         if (!reclaimable) continue;
+        // The negotiated local-open range is capped at 4096 streams. Before
+        // peer parameters arrive, the explicit-open API can name higher IDs;
+        // preserve their terminal state rather than lose a receive tombstone.
+        if (streamIsBidi(s.id) and streamInitiatedByLocal(conn, s.id) and
+            streamIndex(s.id) >= max_streams_per_connection) continue;
         if (n == batch.len) break;
         batch[n] = s.id;
         n += 1;
@@ -502,10 +513,12 @@ pub fn gcClosedStreams(conn: *Connection) void {
     for (batch[0..n]) |id| {
         const removed = conn.streams.fetchRemove(id) orelse continue;
         const s = removed.value;
-        // Record the reap so a later STREAM/RESET_STREAM for this
-        // peer-initiated id is treated as post-terminal (RFC 9000
-        // §3.2) instead of resurrecting the stream with fresh state.
-        notePeerStreamReaped(conn, id);
+        // A late STREAM/RESET_STREAM is post-terminal regardless of which
+        // endpoint initiated the bidi stream. Remember only actual reaps:
+        // local allocation watermarks can include sparse, unopened IDs.
+        if (streamInitiatedByLocal(conn, id) and streamIsBidi(id)) {
+            conn.local_reaped_bits_bidi.set(@intCast(streamIndex(id)));
+        } else notePeerStreamReaped(conn, id);
         const held = s.send.bytes.items.len + s.recv.bytes.items.len;
         if (held > 0) conn.releaseResidentBytes(held);
         conn_qlog.emitQlog(conn, .{
