@@ -21,6 +21,23 @@ exercised end-to-end downstream under 0.17.0-dev.1978 via nest's
 
 ## [Unreleased]
 
+- Added `app.ConnectionDriver(App)`, borrowing either an accepted or dialed
+  connection. Its data hook reports consumed bytes; zero or partial progress
+  pauses the stream without releasing credit for unread bytes. Local bidi
+  streams can register for response delivery with `trackStream`.
+- The existing server `app.Driver` shares that pump, attaches teardown
+  automatically, preserves embedder `slot.user_data`, and chains the previous
+  will-close hook. Use `sessionOn(slot)` for driver state and destroy the
+  server before the driver. Its optional `on_stream_data_consumed` callback
+  adds the same pause contract without changing the existing void callback.
+  Both drivers expose `refusedStreams()` for stream admission metrics.
+- `app.Outbox` now bounds pending stream count and bytes (defaults 128 and
+  16 MiB), reserves complete pushes before accepting any prefix, and exposes
+  pending counts. `QueueFull` accepts no bytes. Flushing visits every queued
+  stream, including those beyond a blocked first 128 entries.
+- Exposed `Connection.streamInitiatedByLocal` and `streamIsBidi`. Added the
+  socket-free `zig build test-app` contract suite, including real TLS pairs.
+
 ## [0.21.1] - 2026-09-07
 
 The packet-key leak fix. Every Handshake and 0-RTT key derivation

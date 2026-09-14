@@ -19,7 +19,7 @@ and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
   and DPLPMTUD.
 - High-level `Server` and `Client` wrappers for embedders that want
   quic-zig to own TLS context setup and connection state.
-- An opt-in application layer (`quic.app`) for server builders:
+- An opt-in application layer (`quic.app`) for connection and server builders:
   typed callbacks over the polled event/stream surface, per-stream
   tracking, short-write staging, and reordering-safe end-of-stream
   detection — plus `quic.testing`, an in-memory loopback harness

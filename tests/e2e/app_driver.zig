@@ -1230,3 +1230,179 @@ test "Driver: undersized datagram_buf_bytes fails loudly with DatagramBufferTooS
     }
     try std.testing.expectEqual(@as(usize, 0), srv.iterator().len);
 }
+
+const BorrowedApp = struct {
+    pub const ConnState = void;
+    pub const StreamState = struct {};
+    const C = quic.app.ConnectionDriver(@This());
+    echo: bool,
+    read_limit: usize = 0,
+    received: std.ArrayListUnmanaged(u8) = .empty,
+    handshakes: usize = 0,
+    ends: usize = 0,
+    disconnects: usize = 0,
+
+    fn handshake(app: *BorrowedApp, _: *C) anyerror!void {
+        app.handshakes += 1;
+    }
+    fn opened(app: *BorrowedApp, d: *C, e: *C.StreamEntry, _: bool) anyerror!void {
+        if (app.echo) d.conn.stream(e.id).?.send.max_buffered = 3;
+    }
+    fn data(app: *BorrowedApp, d: *C, e: *C.StreamEntry, bytes: []const u8) anyerror!usize {
+        const n = @min(app.read_limit, bytes.len);
+        if (n == 0) return 0;
+        if (app.echo and app.received.items.len == 0) {
+            // Force Connection.streams to rehash from inside a receive
+            // callback. The driver iterates its stable registry instead.
+            for (0..24) |_| _ = try d.conn.openNextUni();
+        }
+        if (app.echo) try d.outbox.push(d.conn, e.id, bytes[0..n]);
+        try app.received.appendSlice(std.testing.allocator, bytes[0..n]);
+        return n;
+    }
+    fn ended(app: *BorrowedApp, d: *C, e: *C.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
+        if (end != .fin) return;
+        app.ends += 1;
+        if (app.echo) try d.outbox.finish(d.conn, e.id);
+    }
+    fn disconnect(app: *BorrowedApp, _: *C) void {
+        app.disconnects += 1;
+    }
+    fn hooks() C.Hooks {
+        return .{ .on_handshake = handshake, .on_stream_open = opened, .on_stream_data = data, .on_stream_end = ended, .on_disconnect = disconnect };
+    }
+};
+
+test "ConnectionDriver: borrowed accepted and dialed connections share partial read and write lifecycle" {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"borrowed-test"};
+    var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = common.defaultParams() });
+    defer server.deinit();
+    var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = common.defaultParams(), .insecure_skip_verify = true });
+    defer client.deinit();
+    var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+    defer loop.deinit();
+    try loop.handshake(&quic.testing.NullDriver{});
+    // The owner already consumed handshake events before delegation.
+    while (server.iterator()[0].conn.pollEvent()) |_| {}
+    while (client.conn.pollEvent()) |_| {}
+    var server_app: BorrowedApp = .{ .echo = true };
+    defer server_app.received.deinit(allocator);
+    var client_app: BorrowedApp = .{ .echo = false, .read_limit = 5 };
+    defer client_app.received.deinit(allocator);
+    var receiver = try BorrowedApp.C.init(.{ .allocator = allocator, .app = &server_app, .conn = server.iterator()[0].conn, .hooks = BorrowedApp.hooks(), .outbox_limits = .{ .max_bytes = 128, .max_streams = 2 } });
+    defer receiver.deinit();
+    var sender = try BorrowedApp.C.init(.{ .allocator = allocator, .app = &client_app, .conn = client.conn, .hooks = BorrowedApp.hooks() });
+    defer sender.deinit();
+    const stream = try client.conn.openNextBidi();
+    try sender.trackStream(stream.id);
+    const payload = "a request that spans several service passes";
+    try sender.outbox.push(client.conn, stream.id, payload);
+    try sender.outbox.finish(client.conn, stream.id);
+    for (0..3) |_| {
+        _ = try loop.pumpClientToServer();
+        try receiver.service();
+        _ = try loop.pumpServerToClient();
+        try sender.service();
+        try server.tick(loop.now_us);
+        try client.conn.tick(loop.now_us);
+        loop.now_us += 1_000;
+    }
+    try std.testing.expectEqual(@as(usize, 0), server_app.received.items.len);
+    try std.testing.expectEqual(@as(u64, 0), receiver.conn.streamRecvState(stream.id).?.read_offset);
+    server_app.read_limit = 7;
+    for (0..256) |i| {
+        _ = try loop.pumpClientToServer();
+        try receiver.service();
+        if (i == 2) {
+            try std.testing.expect(receiver.outbox.pendingBytes() > 0);
+            receiver.conn.stream(stream.id).?.send.max_buffered = 256;
+        }
+        _ = try loop.pumpServerToClient();
+        try sender.service();
+        try server.tick(loop.now_us);
+        try client.conn.tick(loop.now_us);
+        loop.now_us += 1_000;
+        if (client_app.ends == 1) break;
+    }
+    try std.testing.expectEqualStrings(payload, server_app.received.items);
+    try std.testing.expectEqualStrings(payload, client_app.received.items);
+    try std.testing.expectEqual(@as(usize, 1), server_app.handshakes);
+    try std.testing.expectEqual(@as(usize, 1), client_app.handshakes);
+    try std.testing.expectEqual(@as(usize, 1), server_app.ends);
+    try std.testing.expectEqual(@as(usize, 1), client_app.ends);
+    receiver.deinit();
+    sender.deinit();
+    try std.testing.expectEqual(@as(usize, 1), server_app.disconnects);
+    try std.testing.expectEqual(@as(usize, 1), client_app.disconnects);
+}
+
+test "Driver: automatic attachment preserves foreign user data and chains teardown" {
+    const Observer = struct {
+        calls: usize = 0,
+        fn close(context: ?*anyopaque, slot: *quic.Server.Slot) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            std.debug.assert(slot.user_data == @as(?*anyopaque, self));
+            self.calls += 1;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hook-compose"};
+    var observer: Observer = .{};
+    var app: RefuseApp = .{};
+    var driver = try RD.init(.{ .allocator = allocator, .app = &app, .hooks = .{ .on_stream_data = RefuseApp.onStreamData } });
+    defer driver.deinit();
+    var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = common.defaultParams(), .on_connection_will_close = Observer.close, .on_connection_will_close_user_data = &observer });
+    var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = common.defaultParams(), .insecure_skip_verify = true });
+    defer client.deinit();
+    var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+    defer loop.deinit();
+    try loop.handshake(&quic.testing.NullDriver{});
+    server.iterator()[0].user_data = &observer;
+    try driver.service(&server);
+    try std.testing.expect(driver.sessionOn(server.iterator()[0]) != null);
+    try std.testing.expect(server.iterator()[0].user_data == @as(?*anyopaque, &observer));
+    server.deinit();
+    try std.testing.expectEqual(@as(usize, 1), observer.calls);
+}
+
+const ServerProgressApp = struct {
+    pub const ConnState = void;
+    pub const StreamState = void;
+    const PD = quic.app.Driver(@This());
+    consumed: usize = 0,
+    ends: usize = 0,
+    fn data(app: *@This(), _: *PD.Session, _: *PD.StreamEntry, bytes: []const u8) anyerror!usize {
+        const n = @min(bytes.len, 2);
+        app.consumed += n;
+        return n;
+    }
+    fn ended(app: *@This(), _: *PD.Session, _: *PD.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
+        if (end == .fin) app.ends += 1;
+    }
+};
+
+test "Driver: consumed-byte hook preserves partial reads on the server adapter" {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"partial-server"};
+    var app: ServerProgressApp = .{};
+    var driver = try ServerProgressApp.PD.init(.{ .allocator = allocator, .app = &app, .hooks = .{ .on_stream_data_consumed = ServerProgressApp.data, .on_stream_end = ServerProgressApp.ended } });
+    defer driver.deinit();
+    var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = common.defaultParams() });
+    defer server.deinit();
+    var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = common.defaultParams(), .insecure_skip_verify = true });
+    defer client.deinit();
+    var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+    defer loop.deinit();
+    try loop.handshake(&driver);
+    const stream = try client.conn.openNextUni();
+    _ = try client.conn.streamWrite(stream.id, "abcdef");
+    try client.conn.streamFinish(stream.id);
+    try loop.step(&driver);
+    try std.testing.expectEqual(@as(usize, 2), app.consumed);
+    try std.testing.expectEqual(@as(usize, 0), app.ends);
+    try loop.step(&driver);
+    try loop.step(&driver);
+    try std.testing.expectEqual(@as(usize, 6), app.consumed);
+    try std.testing.expectEqual(@as(usize, 1), app.ends);
+}

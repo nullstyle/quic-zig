@@ -1,4 +1,4 @@
-//! quic.app - opt-in application-layer helpers for server embedders.
+//! quic.app - opt-in application-layer helpers for connection embedders.
 //!
 //! Everything here sits strictly *above* the transport: it wires the
 //! raw `Connection` event/stream API into typed callbacks and the
@@ -9,7 +9,10 @@
 //!
 //! The pieces, usable together or apart:
 //!
-//!   - `Driver(App)` — a comptime-generic dispatcher you hand to
+//!   - `ConnectionDriver(App)` — a borrowing per-connection dispatcher,
+//!     for accepted or dialed connections, with explicit consumption and
+//!     pause support. It leaves transport ownership and timers to the caller.
+//!   - `Driver(App)` — the compatible server convenience dispatcher you hand to
 //!     `transport.runUdpServer` (or service yourself from a
 //!     hand-rolled loop). It walks slots, drains `pollEvent`, tracks
 //!     peer streams, pumps reads, and calls *typed* application
@@ -176,7 +179,7 @@ pub fn StreamTable(comptime State: type) type {
 
 /// Iteration-resumable stream writes: whatever `Connection.streamWrite`
 /// refuses (its short-write backpressure) is staged here and retried
-/// on later passes, so application writes are fire-and-forget.
+/// on later passes. Admission is bounded; QueueFull accepts no bytes.
 ///
 /// One `Outbox` per connection. Data order per stream is preserved —
 /// a later `push` never jumps a staged tail. Memory is proportional
@@ -184,6 +187,16 @@ pub fn StreamTable(comptime State: type) type {
 pub const Outbox = struct {
     allocator: std.mem.Allocator,
     tails: std.AutoHashMapUnmanaged(u64, Tail) = .empty,
+    limits: Limits = .{},
+    pending_bytes: usize = 0,
+    reserved_bytes: usize = 0,
+
+    /// Admission reserves room for the complete push before touching the
+    /// connection. QueueFull therefore always means zero bytes accepted.
+    pub const Limits = struct {
+        max_streams: usize = 128,
+        max_bytes: usize = 16 * 1024 * 1024,
+    };
 
     /// One stream's staged bytes, plus whether a `finish` arrived
     /// while they were staged (delivered by `flush` after the last
@@ -194,7 +207,19 @@ pub const Outbox = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator) Outbox {
-        return .{ .allocator = allocator };
+        return initWithLimits(allocator, .{});
+    }
+
+    pub fn initWithLimits(allocator: std.mem.Allocator, limits: Limits) Outbox {
+        return .{ .allocator = allocator, .limits = limits };
+    }
+
+    pub fn pendingBytes(self: *const Outbox) usize {
+        return self.pending_bytes;
+    }
+
+    pub fn pendingStreams(self: *const Outbox) usize {
+        return self.tails.count();
     }
 
     pub fn deinit(self: *Outbox) void {
@@ -213,17 +238,42 @@ pub const Outbox = struct {
     pub fn push(self: *Outbox, conn: *Connection, id: u64, data: []const u8) !void {
         if (self.tails.getPtr(id)) |tail| {
             if (tail.fin) return error.StreamClosed;
-            // Order: a live tail means the connection is already
-            // backpressured — a direct write would jump the queue.
-            try tail.data.appendSlice(self.allocator, data);
+            if (data.len > self.limits.max_bytes -| self.reserved_bytes) return error.QueueFull;
+            // Charge backing capacity as well as live bytes: if the
+            // allocator cannot shrink a drained prefix, its retained memory
+            // must not become unaccounted queue headroom.
+            const before = tail.data.capacity;
+            try tail.data.ensureTotalCapacityPrecise(self.allocator, tail.data.items.len + data.len);
+            self.reserved_bytes += tail.data.capacity - before;
+            tail.data.appendSliceAssumeCapacity(data);
+            self.pending_bytes += data.len;
             return;
         }
-        const n = try conn.streamWrite(id, data);
-        if (n == data.len) return;
+        if (data.len == 0) {
+            _ = try conn.streamWrite(id, data);
+            return;
+        }
+        if (self.tails.count() >= self.limits.max_streams or
+            data.len > self.limits.max_bytes -| self.reserved_bytes) return error.QueueFull;
+        // Reserve the complete write before streamWrite: an allocation
+        // failure after a short write must never make a retry duplicate its
+        // already-accepted prefix.
         var tail: Tail = .{};
         errdefer tail.data.deinit(self.allocator);
-        try tail.data.appendSlice(self.allocator, data[n..]);
-        try self.tails.put(self.allocator, id, tail);
+        try tail.data.ensureTotalCapacityPrecise(self.allocator, data.len);
+        tail.data.appendSliceAssumeCapacity(data);
+        try self.tails.ensureUnusedCapacity(self.allocator, 1);
+        const n = try conn.streamWrite(id, data);
+        if (n == data.len) {
+            tail.data.deinit(self.allocator);
+            return;
+        }
+        const remaining = data.len - n;
+        std.mem.copyForwards(u8, tail.data.items[0..remaining], tail.data.items[n..]);
+        tail.data.shrinkAndFree(self.allocator, remaining);
+        self.tails.putAssumeCapacity(id, tail);
+        self.pending_bytes += remaining;
+        self.reserved_bytes += tail.data.capacity;
     }
 
     /// Queue the FIN for stream `id`. With nothing staged this is
@@ -261,7 +311,7 @@ pub const Outbox = struct {
         const n = conn.streamWrite(id, tail.data.items) catch |err| switch (err) {
             // The stream was reaped (fully closed + GC'd); staged
             // bytes can never ship. Drop the tail.
-            error.StreamNotFound => {
+            error.StreamNotFound, error.StreamClosed => {
                 self.forget(id);
                 return true;
             },
@@ -269,7 +319,10 @@ pub const Outbox = struct {
         };
         const remaining = tail.data.items.len - n;
         std.mem.copyForwards(u8, tail.data.items[0..remaining], tail.data.items[n..]);
-        tail.data.items.len = remaining;
+        self.pending_bytes -= n;
+        const capacity_before = tail.data.capacity;
+        tail.data.shrinkAndFree(self.allocator, remaining);
+        self.reserved_bytes -= capacity_before - tail.data.capacity;
         if (remaining != 0) return false;
         const fin = tail.fin;
         self.forget(id);
@@ -286,27 +339,14 @@ pub const Outbox = struct {
     /// Flush every staged tail once. Called by `Driver` at the end of
     /// each service pass; call it yourself from hand-rolled loops.
     pub fn flushAll(self: *Outbox, conn: *Connection) !void {
-        // Key snapshot first: a successful flush removes entries,
-        // which would invalidate an in-place map iterator.
-        var ids: [128]u64 = undefined;
-        while (true) {
-            var n: usize = 0;
-            var it = self.tails.keyIterator();
-            while (it.next()) |id| {
-                if (n == ids.len) break;
-                ids[n] = id.*;
-                n += 1;
-            }
-            if (n == 0) return;
-            var progress = false;
-            for (ids[0..n]) |id| {
-                if (!try self.flush(conn, id)) continue;
-                progress = true;
-            }
-            // Everything still staged refused to move: backpressured
-            // across the board — retry on the next pass.
-            if (!progress) return;
-        }
+        // Snapshot ALL keys before removals. A fixed first-128 snapshot
+        // starves later streams when those first entries stay blocked.
+        const ids = try self.allocator.alloc(u64, self.tails.count());
+        defer self.allocator.free(ids);
+        var it = self.tails.keyIterator();
+        var n: usize = 0;
+        while (it.next()) |id| : (n += 1) ids[n] = id.*;
+        for (ids) |id| _ = try self.flush(conn, id);
     }
 
     /// Bytes staged for `id` (0 when none).
@@ -320,10 +360,240 @@ pub const Outbox = struct {
     pub fn forget(self: *Outbox, id: u64) void {
         if (self.tails.fetchRemove(id)) |removed| {
             var tail = removed.value;
+            self.pending_bytes -= tail.data.items.len;
+            self.reserved_bytes -= tail.data.capacity;
             tail.data.deinit(self.allocator);
         }
     }
 };
+
+/// A stream/event pump borrowing one Connection, independent of its role,
+/// socket, or owner. It never advances, ticks, reaps, or destroys the
+/// connection. Call service before the owner's transport tick, and deinit
+/// before destroying the connection. The driver and App must remain at
+/// stable addresses while callbacks run; init itself stores no self pointer.
+///
+/// App declares ConnState and StreamState (void, optional, or a struct with
+/// default fields). `state` belongs to the caller. All hooks are optional and
+/// registered explicitly. A successful data hook returns the number of bytes
+/// consumed; zero pauses that stream until the next service pass. Partial
+/// consumption also yields, preserving QUIC receive credit for unread bytes.
+/// Borrowed bytes expire when the hook returns. Hooks must not read/consume,
+/// reset, or tick this same receive stream, or recursively call service.
+///
+/// Peer streams are discovered from connection events. Register a locally
+/// opened bidirectional stream with trackStream to receive its response.
+/// One driver owns event consumption for a connection; callers compose their
+/// protocol dispatch in the hooks, rather than installing competing pumps.
+pub fn ConnectionDriver(comptime App: type) type {
+    return struct {
+        const Self = @This();
+        pub const Table = StreamTable(App.StreamState);
+        pub const StreamEntry = Table.Entry;
+        pub const Datagram = struct { bytes: []const u8, arrived_in_early_data: bool };
+        pub const Hooks = struct {
+            on_connect: ?*const fn (*App, *Self) anyerror!void = null,
+            on_handshake: ?*const fn (*App, *Self) anyerror!void = null,
+            on_stream_open: ?*const fn (*App, *Self, *StreamEntry, bool) anyerror!void = null,
+            on_stream_data: ?*const fn (*App, *Self, *StreamEntry, []const u8) anyerror!usize = null,
+            on_stream_end: ?*const fn (*App, *Self, *StreamEntry, StreamEnd) anyerror!void = null,
+            on_datagram: ?*const fn (*App, *Self, Datagram) anyerror!void = null,
+            on_close: ?*const fn (*App, *Self, CloseEvent) anyerror!void = null,
+            on_event: ?*const fn (*App, *Self, ConnectionEvent) anyerror!void = null,
+            on_disconnect: ?*const fn (*App, *Self) void = null,
+        };
+        pub const Options = struct {
+            allocator: std.mem.Allocator,
+            app: *App,
+            conn: *Connection,
+            max_tracked_streams: usize = 128,
+            datagram_buf_bytes: usize = 1200,
+            stream_refusal_code: u64 = 0,
+            outbox_limits: Outbox.Limits = .{},
+            hooks: Hooks = .{},
+        };
+
+        allocator: std.mem.Allocator,
+        app: *App,
+        conn: *Connection,
+        state: App.ConnState = initialState(App.ConnState),
+        table: Table,
+        outbox: Outbox,
+        datagram_buf: []u8,
+        stream_refusal_code: u64,
+        hooks: Hooks,
+        started: bool = false,
+        handshake_notified: bool = false,
+        servicing: bool = false,
+        active: bool = true,
+        streams_refused: u64 = 0,
+
+        pub fn streamsServiced(self: *const Self) bool {
+            return self.hooks.on_stream_data != null;
+        }
+
+        pub fn refusedStreams(self: *const Self) u64 {
+            return self.streams_refused;
+        }
+
+        fn consumeChunk(self: *Self, session: *Self, entry: *StreamEntry, bytes: []const u8) anyerror!usize {
+            return self.hooks.on_stream_data.?(self.app, session, entry, bytes);
+        }
+
+        pub fn init(options: Options) !Self {
+            var table = try Table.init(options.allocator, options.max_tracked_streams);
+            errdefer table.deinit();
+            const buf = try options.allocator.alloc(u8, @max(options.datagram_buf_bytes, 1));
+            return .{
+                .allocator = options.allocator,
+                .app = options.app,
+                .conn = options.conn,
+                .table = table,
+                .outbox = Outbox.initWithLimits(options.allocator, options.outbox_limits),
+                .datagram_buf = buf,
+                .stream_refusal_code = options.stream_refusal_code,
+                .hooks = options.hooks,
+            };
+        }
+
+        /// Exactly-once teardown for tracked streams, then connection state.
+        /// The owner still owns conn and may continue its graceful close.
+        pub fn deinit(self: *Self) void {
+            if (!self.active) return;
+            std.debug.assert(!self.servicing);
+            self.active = false;
+            endTrackedStreams(self, self);
+            if (self.hooks.on_disconnect) |f| f(self.app, self);
+            self.table.deinit();
+            self.outbox.deinit();
+            self.allocator.free(self.datagram_buf);
+        }
+
+        pub fn trackStream(self: *Self, id: u64) !void {
+            if (!self.active) return error.DriverClosed;
+            if (self.conn.streamRecvState(id) == null) return error.StreamNotReadable;
+            if (!self.streamsServiced()) return error.StreamConsumerMissing;
+            if (self.table.get(id) == null and self.table.count() == self.table.entries.len) return error.StreamTableFull;
+            try trackConnectionStream(self, self, .{ .stream_id = id, .bidi = (id & 2) == 0 });
+        }
+
+        pub fn service(self: *Self) !void {
+            if (!self.active) return error.DriverClosed;
+            if (self.servicing) return error.ReentrantService;
+            self.servicing = true;
+            defer self.servicing = false;
+            self.serviceInner() catch |err| switch (err) {
+                error.ExcessiveLoad => self.conn.close(true, Connection.transport_error_excessive_load, "excessive resource use"),
+                else => return err,
+            };
+        }
+
+        fn serviceInner(self: *Self) !void {
+            if (!self.started) {
+                if (self.hooks.on_connect) |f| try f(self.app, self);
+                self.started = true;
+            }
+            // An owner may hand us an already-authenticated connection after
+            // observing its handshake event. Synthesize the notification once.
+            if (self.conn.handshakeDone()) try self.dispatchHandshake(self);
+            try pumpConnection(self, self);
+        }
+
+        fn dispatchHandshake(self: *Self, session: *Self) !void {
+            if (self.handshake_notified) return;
+            if (self.hooks.on_handshake) |f| try f(self.app, session);
+            self.handshake_notified = true;
+        }
+    };
+}
+
+fn initialState(comptime T: type) T {
+    return switch (@typeInfo(T)) {
+        .void => {},
+        .optional => null,
+        .@"struct" => .{},
+        else => @compileError("application state must be void, optional, or a default-constructible struct"),
+    };
+}
+
+// Shared by the borrowed ConnectionDriver and the Server convenience Driver.
+// The server adapter also bridges its historical void hook to full
+// consumption. All transport ordering lives in this one pump.
+fn pumpConnection(owner: anytype, session: anytype) anyerror!void {
+    while (session.conn.pollEvent()) |ev| switch (ev) {
+        .handshake_established => try owner.dispatchHandshake(session),
+        .stream_opened => |info| try trackConnectionStream(owner, session, info),
+        .close => |ev_close| if (owner.hooks.on_close) |f| try f(owner.app, session, ev_close),
+        else => if (owner.hooks.on_event) |f| try f(owner.app, session, ev),
+    };
+    if (owner.streamsServiced()) {
+        // This table has fixed storage: callbacks may open send streams
+        // without invalidating our iterator over the receive registry.
+        var it = session.table.iterator();
+        while (it.next()) |entry| try pumpStream(owner, session, entry);
+    }
+    while (session.conn.receiveDatagramInfo(owner.datagram_buf)) |info| {
+        if (owner.hooks.on_datagram) |f| {
+            if (info.payload_len > info.len) return error.DatagramBufferTooSmall;
+            try f(owner.app, session, .{
+                .bytes = owner.datagram_buf[0..info.len],
+                .arrived_in_early_data = info.arrived_in_early_data,
+            });
+        }
+    }
+    try session.outbox.flushAll(session.conn);
+}
+
+fn trackConnectionStream(owner: anytype, session: anytype, info: quic.StreamOpenedInfo) !void {
+    if (session.table.get(info.stream_id) != null) return;
+    if (!owner.streamsServiced()) {
+        owner.streams_refused +|= 1;
+        session.conn.streamStopSending(info.stream_id, owner.stream_refusal_code) catch {};
+        return;
+    }
+    const entry = session.table.track(info.stream_id) orelse {
+        owner.streams_refused +|= 1;
+        session.conn.streamStopSending(info.stream_id, owner.stream_refusal_code) catch {};
+        return;
+    };
+    entry.state = initialState(@TypeOf(entry.state));
+    entry.bidi = info.bidi;
+    if (owner.hooks.on_stream_open) |f| try f(owner.app, session, entry, info.bidi);
+}
+
+fn pumpStream(owner: anytype, session: anytype, entry: anytype) anyerror!void {
+    var ended: ?StreamEnd = null;
+    while (true) {
+        const chunk = session.conn.streamPeek(entry.id) catch |err| switch (err) {
+            error.StreamNotFound => {
+                ended = .reaped;
+                break;
+            },
+            else => return err,
+        };
+        if (chunk.len == 0) break;
+        const n = try owner.consumeChunk(session, entry, chunk);
+        if (n > chunk.len) return error.InvalidConsumedCount;
+        if (n != 0) try session.conn.streamConsume(entry.id, n);
+        if (n < chunk.len) return;
+    }
+    if (ended == null) {
+        if (session.conn.streamRecvState(entry.id)) |st| {
+            if (st.terminal) ended = if (st.reset_seen) .reset else .fin;
+        } else ended = .reaped;
+    }
+    const end = ended orelse return;
+    defer session.table.release(entry.id);
+    if (owner.hooks.on_stream_end) |f| try f(owner.app, session, entry, end);
+}
+
+fn endTrackedStreams(owner: anytype, session: anytype) void {
+    var it = session.table.iterator();
+    while (it.next()) |entry| {
+        if (owner.hooks.on_stream_end) |f| f(owner.app, session, entry, .reaped) catch {};
+        session.table.release(entry.id);
+    }
+}
 
 /// Comptime-generic application dispatcher: walks the server's slots,
 /// drains each connection's event queue, tracks and services peer
@@ -431,8 +701,8 @@ pub const Outbox = struct {
 ///
 /// Timing consequence of that order: `onStreamOpen` fires during the
 /// event drain, before the same pass's stream reads — so a freshly
-/// opened stream has ZERO readable bytes at open time even when data
-/// is already buffered; the read pump delivers it moments later in
+/// opened stream has no driver-delivered bytes at open time even when
+/// the connection already buffers data; the read pump delivers it later in
 /// the same pass, or in a later pass when the first bytes have not
 /// arrived yet. Per-stream state armed in `onStreamOpen` must mean
 /// "open, nothing observed yet" — never "data is available" or "the
@@ -490,8 +760,8 @@ pub fn Driver(comptime App: type) type {
         /// sight of the slot, freed in the will-close hook. Callbacks
         /// receive a pointer to this as their context.
         pub const Session = struct {
-            /// The slot this session rides on (`slot_id`, `peer_addr`,
-            /// `user_data` = this session's allocation).
+            /// The slot this session rides on. Its user_data remains
+            /// available to the embedding application's other hooks.
             slot: *quic.Server.Slot,
             /// The QUIC connection — same object as `slot.conn`.
             conn: *Connection,
@@ -530,6 +800,7 @@ pub fn Driver(comptime App: type) type {
             /// Application error code sent as STOP_SENDING when the
             /// stream table is full and a peer stream must be refused.
             stream_refusal_code: u64 = 0,
+            outbox_limits: Outbox.Limits = .{},
         };
 
         allocator: std.mem.Allocator,
@@ -539,10 +810,17 @@ pub fn Driver(comptime App: type) type {
         stream_refusal_code: u64,
         /// Per-connection stream-table capacity, from `Options`.
         tracked_streams: usize,
+        outbox_limits: Outbox.Limits,
         datagram_buf: []u8,
         /// Callbacks registered at `init` (see the module docs'
         /// "Hook registration" section).
         hooks: Hooks,
+        sessions: std.AutoHashMapUnmanaged(*quic.Server.Slot, *Session) = .empty,
+        previous_close_hook: ?quic.Server.ConnectionWillCloseCallback = null,
+        previous_close_context: ?*anyopaque = null,
+        attached_server: ?*quic.Server = null,
+        servicing: bool = false,
+        streams_refused: u64 = 0,
 
         // ---- runtime hook table --------------------------------------
         //
@@ -561,6 +839,7 @@ pub fn Driver(comptime App: type) type {
         pub const HandshakeFn = *const fn (*App, *Session) anyerror!void;
         pub const StreamOpenFn = *const fn (*App, *Session, *StreamEntry, bool) anyerror!void;
         pub const StreamDataFn = *const fn (*App, *Session, *StreamEntry, []const u8) anyerror!void;
+        pub const StreamDataConsumedFn = *const fn (*App, *Session, *StreamEntry, []const u8) anyerror!usize;
         pub const StreamEndFn = *const fn (*App, *Session, *StreamEntry, StreamEnd) anyerror!void;
         pub const DatagramFn = *const fn (*App, *Session, Datagram) anyerror!void;
         pub const CloseFn = *const fn (*App, *Session, CloseEvent) anyerror!void;
@@ -587,15 +866,18 @@ pub fn Driver(comptime App: type) type {
             on_connect: ?ConnectFn = null,
             on_handshake: ?HandshakeFn = null,
             /// Fires from the event drain, BEFORE the same pass's
-            /// stream reads: a freshly opened stream has zero
-            /// readable bytes at open time even when data is already
-            /// buffered — `onStreamData` delivers it later in the
+            /// stream reads: a freshly opened entry has no delivered
+            /// bytes, even when the connection already buffers data —
+            /// `onStreamData` delivers it later in the
             /// same pass (or a later one). Arm per-stream state as
             /// "open, nothing observed yet", not "data available";
             /// treat an empty peek/read at open as expected, not
             /// EOF. See the module docs' "Ordering guarantees".
             on_stream_open: ?StreamOpenFn = null,
             on_stream_data: ?StreamDataFn = null,
+            /// Optional partial-consumption hook. Takes precedence over the
+            /// legacy void hook; zero or partial progress yields this stream.
+            on_stream_data_consumed: ?StreamDataConsumedFn = null,
             on_stream_end: ?StreamEndFn = null,
             on_datagram: ?DatagramFn = null,
             on_close: ?CloseFn = null,
@@ -610,24 +892,35 @@ pub fn Driver(comptime App: type) type {
                 .allocator = options.allocator,
                 .app = options.app,
                 .stream_refusal_code = options.stream_refusal_code,
-                .tracked_streams = @max(options.max_tracked_streams, 1),
+                .tracked_streams = options.max_tracked_streams,
+                .outbox_limits = options.outbox_limits,
                 .datagram_buf = datagram_buf,
                 .hooks = options.hooks,
             };
         }
 
+        /// The server must be destroyed before the driver. service attaches
+        /// teardown automatically; no manual session sweep is required.
         pub fn deinit(self: *Self) void {
+            std.debug.assert(self.sessions.count() == 0);
+            self.sessions.deinit(self.allocator);
             self.allocator.free(self.datagram_buf);
             self.* = undefined;
         }
 
-        /// Wire this driver's teardown hook into `server` after both
-        /// exist — for wrapper stacks (embedder → transport wrapper →
-        /// Server) that cannot thread `Config.on_connection_will_close`
-        /// through every intermediate layer. Equivalent to setting the
-        /// Config field to `willCloseHook` + this driver; without ONE
-        /// of the two, sessions leak on teardown (see `willCloseHook`).
+        /// Install teardown without replacing the embedder's existing hook.
+        /// The prior hook runs after driver cleanup with slot.user_data
+        /// unchanged. A driver may attach to one server, and must outlive it.
         pub fn attach(self: *Self, server: *quic.Server) void {
+            if (self.attached_server) |attached| {
+                std.debug.assert(attached == server);
+                return;
+            }
+            self.attached_server = server;
+            if (server.on_connection_will_close == willCloseHook and
+                server.on_connection_will_close_user_data == @as(?*anyopaque, self)) return;
+            self.previous_close_hook = server.on_connection_will_close;
+            self.previous_close_context = server.on_connection_will_close_user_data;
             server.setConnectionWillCloseHook(willCloseHook, self);
         }
 
@@ -637,7 +930,17 @@ pub fn Driver(comptime App: type) type {
         /// `try std.testing.expect(driver.streamsServiced());` — so a
         /// callback that was never registered fails loudly.
         pub fn streamsServiced(self: *const Self) bool {
-            return self.hooks.on_stream_data != null;
+            return self.hooks.on_stream_data != null or self.hooks.on_stream_data_consumed != null;
+        }
+
+        pub fn refusedStreams(self: *const Self) u64 {
+            return self.streams_refused;
+        }
+
+        fn consumeChunk(self: *Self, session: *Session, entry: *StreamEntry, bytes: []const u8) anyerror!usize {
+            if (self.hooks.on_stream_data_consumed) |f| return f(self.app, session, entry, bytes);
+            try self.hooks.on_stream_data.?(self.app, session, entry, bytes);
+            return bytes.len;
         }
 
         /// Whether an `on_datagram` hook was registered at `init` and
@@ -681,19 +984,15 @@ pub fn Driver(comptime App: type) type {
         /// obligation.)
         pub fn willCloseHook(ctx: ?*anyopaque, slot: *quic.Server.Slot) void {
             const self: *Self = @ptrCast(@alignCast(ctx.?));
-            const session = sessionOf(slot) orelse return;
-            if (self.hooks.on_stream_end) |f| {
-                var it = session.table.iterator();
-                while (it.next()) |entry| {
-                    f(self.app, session, entry, .reaped) catch {};
-                    session.table.release(entry.id);
-                }
+            if (self.sessions.fetchRemove(slot)) |removed| {
+                const session = removed.value;
+                endTrackedStreams(self, session);
+                if (self.hooks.on_disconnect) |f| f(self.app, session);
+                session.table.deinit();
+                session.outbox.deinit();
+                self.allocator.destroy(session);
             }
-            if (self.hooks.on_disconnect) |f| f(self.app, session);
-            session.table.deinit();
-            session.outbox.deinit();
-            self.allocator.destroy(session);
-            slot.user_data = null;
+            if (self.previous_close_hook) |f| f(self.previous_close_context, slot);
         }
 
         /// One full service pass over every live slot.
@@ -706,6 +1005,10 @@ pub fn Driver(comptime App: type) type {
         /// connection and the pass continues. One overloaded peer
         /// must not tear down the whole server.
         pub fn service(self: *Self, server: *quic.Server) anyerror!void {
+            if (self.servicing) return error.ReentrantService;
+            self.servicing = true;
+            defer self.servicing = false;
+            self.attach(server);
             for (server.iterator()) |slot| {
                 self.serviceSlot(slot) catch |err| switch (err) {
                     error.ExcessiveLoad => slot.conn.close(
@@ -720,171 +1023,38 @@ pub fn Driver(comptime App: type) type {
 
         fn serviceSlot(self: *Self, slot: *quic.Server.Slot) anyerror!void {
             const session = try self.ensureSession(slot);
-            try self.drainEvents(session);
-            if (self.hooks.on_stream_data != null) try self.serviceStreams(session);
-            try self.serviceDatagrams(session);
-            try session.outbox.flushAll(session.conn);
-        }
-
-        fn sessionOf(slot: *quic.Server.Slot) ?*Session {
-            const ptr = slot.user_data orelse return null;
-            return @ptrCast(@alignCast(ptr));
+            try pumpConnection(self, session);
         }
 
         fn ensureSession(self: *Self, slot: *quic.Server.Slot) !*Session {
-            if (sessionOf(slot)) |session| return session;
+            if (self.sessions.get(slot)) |session| return session;
             const session = try self.allocator.create(Session);
             errdefer self.allocator.destroy(session);
             session.* = .{
                 .slot = slot,
                 .conn = slot.conn,
                 .table = try Table.init(self.allocator, self.tracked_streams),
-                .outbox = Outbox.init(self.allocator),
+                .outbox = Outbox.initWithLimits(self.allocator, self.outbox_limits),
             };
-            // A failing on_connect must unwind COMPLETELY: table and
-            // outbox freed, slot pointer cleared — otherwise
-            // `willCloseHook` (or the next pass) dereferences a freed
-            // session through the stale `user_data`.
             errdefer {
                 session.table.deinit();
                 session.outbox.deinit();
-                slot.user_data = null;
             }
-            slot.user_data = session;
+            try self.sessions.put(self.allocator, slot, session);
+            errdefer _ = self.sessions.remove(slot);
             if (self.hooks.on_connect) |f| try f(self.app, session);
             return session;
         }
 
-        fn drainEvents(self: *Self, session: *Session) anyerror!void {
-            while (session.conn.pollEvent()) |ev| switch (ev) {
-                .handshake_established => {
-                    if (self.hooks.on_handshake) |f| try f(self.app, session);
-                },
-                .stream_opened => |info| {
-                    try self.onStreamOpened(session, info);
-                },
-                .close => |close_ev| {
-                    if (self.hooks.on_close) |f| try f(self.app, session, close_ev);
-                },
-                else => {
-                    if (self.hooks.on_event) |f| try f(self.app, session, ev);
-                },
-            };
-        }
-
-        fn onStreamOpened(self: *Self, session: *Session, info: quic.StreamOpenedInfo) !void {
-            // With neither stream hook registered nothing can ever
-            // read, observe, or release this stream — tracking it
-            // would be the silent black hole this module bans. Refuse
-            // loudly instead, exactly like a full table. (Datagram- or
-            // event-only apps get wire-visible refusals for free.)
-            if (self.hooks.on_stream_data == null and self.hooks.on_stream_open == null) {
-                session.conn.streamStopSending(info.stream_id, self.stream_refusal_code) catch {};
-                return;
-            }
-            // Fresh-only state init: `track` is idempotent, and a
-            // re-track of a live stream must not wipe its state.
-            const fresh = session.table.get(info.stream_id) == null;
-            const entry = session.table.track(info.stream_id) orelse {
-                // Loud refusal: a stream we cannot service must be
-                // told to stop, or the peer waits forever on bytes we
-                // will never read. A queueing failure here is almost
-                // certainly OOM — the connection is doomed regardless
-                // — so the frame is best-effort.
-                session.conn.streamStopSending(info.stream_id, self.stream_refusal_code) catch {};
-                return;
-            };
-            if (fresh) {
-                entry.state = default_stream_state;
-                entry.bidi = info.bidi;
-            }
-            if (self.hooks.on_stream_open) |f| try f(self.app, session, entry, info.bidi);
-        }
-
-        fn serviceStreams(self: *Self, session: *Session) anyerror!void {
-            var it = session.table.iterator();
-            while (it.next()) |entry| {
-                try self.serviceStream(session, entry);
-            }
-        }
-
-        fn serviceStream(self: *Self, session: *Session, entry: *StreamEntry) anyerror!void {
-            var ended: ?StreamEnd = null;
-
-            read_loop: while (true) {
-                // Zero-copy pump: the hook borrows the connection's
-                // own reassembly buffer (`streamPeek`), and the bytes
-                // are consumed only AFTER the hook returns — so a
-                // failing hook redelivers the same chunk on the next
-                // pass instead of losing it. The borrow is valid for
-                // the duration of the hook call; an app that keeps
-                // bytes past the hook copies what it keeps.
-                const chunk = session.conn.streamPeek(entry.id) catch |err| switch (err) {
-                    // The stream already left the live table (reaped
-                    // after both halves went terminal). Done.
-                    error.StreamNotFound => {
-                        ended = .reaped;
-                        break :read_loop;
-                    },
-                    else => return err,
-                };
-                // An empty peek means "nothing readable right now" —
-                // including a reordering hole below the read offset.
-                // Never an EOF signal; the terminal test below is.
-                if (chunk.len == 0) break :read_loop;
-                try self.hooks.on_stream_data.?(self.app, session, entry, chunk);
-                try session.conn.streamConsume(entry.id, chunk.len);
-            }
-
-            if (ended == null) {
-                if (session.conn.streamRecvState(entry.id)) |st| {
-                    if (st.terminal) ended = if (st.reset_seen) .reset else .fin;
-                } else {
-                    ended = .reaped;
-                }
-            }
-
-            const end = ended orelse return; // more to come on a later pass
-            // Deferred so the release happens even when the hook
-            // errors: "onStreamEnd exactly once" must hold — a resumed
-            // loop or the teardown sweep must never deliver a second
-            // end for this stream. The recv half is done; any staged
-            // *send* tail lives on in the Outbox until it drains (the
-            // response to this stream's request is typically still in
-            // flight) — which is why the table and the Outbox release
-            // at different times.
-            defer session.table.release(entry.id);
-            if (self.hooks.on_stream_end) |f| try f(self.app, session, entry, end);
-        }
-
-        fn serviceDatagrams(self: *Self, session: *Session) anyerror!void {
-            while (true) {
-                const info = session.conn.receiveDatagramInfo(self.datagram_buf) orelse break;
-                if (self.hooks.on_datagram) |f| {
-                    // With `Options.datagram_buf_bytes` sized to the
-                    // advertised `max_datagram_frame_size` this is
-                    // unreachable; anything less fails loudly instead
-                    // of silently dropping the tail.
-                    if (info.payload_len > info.len) return error.DatagramBufferTooSmall;
-                    try f(self.app, session, .{
-                        .bytes = self.datagram_buf[0..info.len],
-                        .arrived_in_early_data = info.arrived_in_early_data,
-                    });
-                }
-                // Without an `onDatagram` callback the payload is
-                // dropped by design — but it is still popped: a full
-                // inbound DATAGRAM queue makes the *transport* close
-                // the connection (protocol violation), so draining is
-                // mandatory even for datagram-agnostic applications.
-            }
+        fn dispatchHandshake(self: *Self, session: *Session) !void {
+            if (self.hooks.on_handshake) |f| try f(self.app, session);
         }
 
         /// The session riding on `slot`, for applications that keep
         /// their own slot references. Null before the first service
         /// pass reaches the slot.
         pub fn sessionOn(self: *const Self, slot: *quic.Server.Slot) ?*Session {
-            _ = self;
-            return sessionOf(slot);
+            return self.sessions.get(slot);
         }
     };
 }
@@ -1110,4 +1280,189 @@ test "Outbox: finish with a staged tail defers the FIN until the tail drains" {
 
     const chunk = stream.send.peekChunk(64).?;
     try std.testing.expectEqualStrings("0123456789ABCDEF", stream.send.chunkBytes(chunk));
+}
+
+const ProgressApp = struct {
+    pub const ConnState = ?*u8;
+    pub const StreamState = struct { received: usize = 0 };
+    const C = ConnectionDriver(@This());
+    limit: usize = 0,
+    received: usize = 0,
+    opens: usize = 0,
+    ends: usize = 0,
+    disconnects: usize = 0,
+    last_end: ?StreamEnd = null,
+
+    fn data(app: *ProgressApp, driver: *C, entry: *C.StreamEntry, bytes: []const u8) anyerror!usize {
+        try std.testing.expectError(error.ReentrantService, driver.service());
+        const n = @min(bytes.len, app.limit);
+        entry.state.received += n;
+        app.received += n;
+        return n;
+    }
+    fn opened(app: *ProgressApp, _: *C, _: *C.StreamEntry, _: bool) anyerror!void {
+        app.opens += 1;
+    }
+    fn ended(app: *ProgressApp, _: *C, _: *C.StreamEntry, end: StreamEnd) anyerror!void {
+        app.ends += 1;
+        app.last_end = end;
+    }
+    fn disconnected(app: *ProgressApp, _: *C) void {
+        app.disconnects += 1;
+    }
+    fn hooks() C.Hooks {
+        return .{ .on_stream_open = opened, .on_stream_data = data, .on_stream_end = ended, .on_disconnect = disconnected };
+    }
+};
+
+fn receivingTestConn(allocator: std.mem.Allocator) !TestConnCtx {
+    const ctx = try testConn(allocator);
+    try ctx.conn.setTransportParams(quic.Server.Config.defaultTransportParams());
+    return ctx;
+}
+
+test "ConnectionDriver: paused and partial reads retain receive credit and FIN until consumed" {
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var app: ProgressApp = .{};
+    var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = ProgressApp.hooks() });
+    defer driver.deinit();
+    try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 0, .data = "abcdef", .fin = true });
+    try driver.service();
+    try std.testing.expectEqual(@as(u64, 0), ctx.conn.streamRecvState(3).?.read_offset);
+    try std.testing.expectEqual(@as(u64, 0), ctx.conn.recv_stream_bytes_read);
+    try std.testing.expectEqual(@as(usize, 0), app.ends);
+    try std.testing.expectEqual(@as(usize, 1), driver.table.count());
+    app.limit = 2;
+    try driver.service();
+    try std.testing.expectEqual(@as(u64, 2), ctx.conn.streamRecvState(3).?.read_offset);
+    try std.testing.expectEqual(@as(usize, 0), app.ends);
+    try driver.service();
+    try driver.service();
+    try std.testing.expectEqual(@as(usize, 6), app.received);
+    try std.testing.expectEqual(@as(usize, 1), app.ends);
+    try std.testing.expectEqual(StreamEnd.fin, app.last_end.?);
+    try std.testing.expectEqual(@as(usize, 0), driver.table.count());
+    try driver.service();
+    try std.testing.expectEqual(@as(usize, 1), app.ends);
+}
+
+test "ConnectionDriver: local bidi receive tracking, reset and teardown each end once" {
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var app: ProgressApp = .{};
+    var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = ProgressApp.hooks() });
+    const local = try ctx.conn.openNextBidi();
+    try driver.trackStream(local.id);
+    try driver.trackStream(local.id);
+    try std.testing.expectEqual(@as(usize, 1), app.opens);
+    try ctx.conn.handleStream(.application, .{ .stream_id = local.id, .offset = 0, .data = "reply", .fin = false });
+    try driver.service();
+    try ctx.conn.handleResetStream(.{ .stream_id = local.id, .application_error_code = 4, .final_size = 5 });
+    try driver.service();
+    try std.testing.expectEqual(StreamEnd.reset, app.last_end.?);
+    try std.testing.expectEqual(@as(usize, 1), app.ends);
+    try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 0, .data = "pending", .fin = false });
+    try driver.service();
+    driver.deinit();
+    driver.deinit();
+    try std.testing.expectEqual(@as(usize, 2), app.ends);
+    try std.testing.expectEqual(StreamEnd.reaped, app.last_end.?);
+    try std.testing.expectEqual(@as(usize, 1), app.disconnects);
+    try std.testing.expectError(error.DriverClosed, driver.service());
+    // Borrowing the connection never transfers its ownership.
+    try std.testing.expect(ctx.conn.stream(3) != null);
+}
+
+test "Outbox: admission is bounded and rejected writes never accept a prefix" {
+    var ctx = try testConn(std.testing.allocator);
+    defer ctx.deinit();
+    var outbox = Outbox.initWithLimits(std.testing.allocator, .{ .max_streams = 1, .max_bytes = 8 });
+    defer outbox.deinit();
+    const first = try ctx.conn.openNextBidi();
+    first.send.max_buffered = 2;
+    try outbox.push(ctx.conn, first.id, "abcd");
+    try std.testing.expectEqual(@as(usize, 2), outbox.pendingBytes());
+    try std.testing.expectError(error.QueueFull, outbox.push(ctx.conn, first.id, "1234567"));
+    try std.testing.expectEqual(@as(u64, 2), first.send.writtenBytes());
+    const second = try ctx.conn.openNextBidi();
+    try std.testing.expectError(error.QueueFull, outbox.push(ctx.conn, second.id, "x"));
+    try std.testing.expectEqual(@as(u64, 0), second.send.writtenBytes());
+    try std.testing.expectEqual(@as(usize, 1), outbox.pendingStreams());
+    first.send.max_buffered = 32;
+    try outbox.flushAll(ctx.conn);
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingBytes());
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingStreams());
+    try outbox.push(ctx.conn, second.id, "x");
+    try std.testing.expectEqual(@as(u64, 1), second.send.writtenBytes());
+}
+
+test "Outbox: blocked early entries never starve later streams beyond 128" {
+    var ctx = try testConn(std.testing.allocator);
+    defer ctx.deinit();
+    var outbox = Outbox.initWithLimits(std.testing.allocator, .{ .max_streams = 256, .max_bytes = 256 });
+    defer outbox.deinit();
+    for (0..160) |_| {
+        const stream = try ctx.conn.openNextBidi();
+        stream.send.max_buffered = 0;
+        try outbox.push(ctx.conn, stream.id, "x");
+    }
+    var last: u64 = undefined;
+    var it = outbox.tails.keyIterator();
+    while (it.next()) |id| last = id.*;
+    ctx.conn.stream(last).?.send.max_buffered = 1;
+    try outbox.flushAll(ctx.conn);
+    try std.testing.expectEqual(@as(usize, 0), outbox.staged(last));
+    try std.testing.expectEqual(@as(usize, 159), outbox.pendingBytes());
+}
+
+test "ConnectionDriver: capacity refusal is visible and isolated to the incoming stream" {
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var app: ProgressApp = .{};
+    var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .max_tracked_streams = 1, .stream_refusal_code = 42, .hooks = ProgressApp.hooks() });
+    defer driver.deinit();
+    try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 0, .data = "first", .fin = false });
+    try ctx.conn.handleStream(.application, .{ .stream_id = 7, .offset = 0, .data = "second", .fin = false });
+    try driver.service();
+    try std.testing.expectEqual(@as(usize, 1), driver.table.count());
+    try std.testing.expectEqual(@as(u64, 1), driver.refusedStreams());
+    try std.testing.expectEqual(@as(usize, 1), ctx.conn.pending_frames.stop_sending.items.len);
+    try std.testing.expectEqual(@as(u64, 7), ctx.conn.pending_frames.stop_sending.items[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 42), ctx.conn.pending_frames.stop_sending.items[0].application_error_code);
+    try std.testing.expect(!ctx.conn.isClosed());
+}
+
+test "Outbox: allocation failure before a short write leaves the stream unchanged" {
+    var ctx = try testConn(std.testing.allocator);
+    defer ctx.deinit();
+    const stream = try ctx.conn.openNextBidi();
+    stream.send.max_buffered = 2;
+    // The old write-first implementation accepted two bytes before this
+    // allocation failed, so blindly retrying the same push duplicated them.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var outbox = Outbox.init(failing.allocator());
+    defer outbox.deinit();
+    try std.testing.expectError(error.OutOfMemory, outbox.push(ctx.conn, stream.id, "abcd"));
+    try std.testing.expectEqual(@as(u64, 0), stream.send.writtenBytes());
+    try std.testing.expectEqual(@as(usize, 0), outbox.pendingBytes());
+}
+
+test "ConnectionDriver: invalid consumption never advances the receive cursor" {
+    const InvalidApp = struct {
+        pub const ConnState = void;
+        pub const StreamState = void;
+        const C = ConnectionDriver(@This());
+        fn data(_: *@This(), _: *C, _: *C.StreamEntry, bytes: []const u8) anyerror!usize {
+            return bytes.len + 1;
+        }
+    };
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var app: InvalidApp = .{};
+    var driver = try InvalidApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = .{ .on_stream_data = InvalidApp.data } });
+    defer driver.deinit();
+    try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 0, .data = "abc", .fin = true });
+    try std.testing.expectError(error.InvalidConsumedCount, driver.service());
+    try std.testing.expectEqual(@as(u64, 0), ctx.conn.streamRecvState(3).?.read_offset);
 }

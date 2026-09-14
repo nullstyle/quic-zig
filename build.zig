@@ -297,6 +297,20 @@ pub fn build(b: *std.Build) void {
     const run_integration_tests = b.addRunArtifact(integration_tests);
     test_step.dependOn(&run_integration_tests.step);
 
+    // A hermetic contract loop for application-driver work: real QUIC/TLS
+    // integration plus bounded queue and consumption tests, with no sockets.
+    const app_test_step = b.step("test-app", "Run application driver and outbox contract tests");
+    const app_unit_tests = b.addTest(.{
+        .root_module = quic_mod,
+        .filters = &.{ "Driver:", "Outbox:", "StreamTable:" },
+    });
+    const app_integration_tests = b.addTest(.{
+        .root_module = tests_mod,
+        .filters = &.{ "Driver:", "Outbox:" },
+    });
+    app_test_step.dependOn(&b.addRunArtifact(app_unit_tests).step);
+    app_test_step.dependOn(&b.addRunArtifact(app_integration_tests).step);
+
     // RFC-traceable conformance suites under tests/conformance/. Each
     // file mirrors a section of an RFC and uses BCP 14 keywords plus
     // `[RFC#### §X.Y ¶N]` citations in test names so failures point an

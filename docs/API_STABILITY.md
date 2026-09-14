@@ -72,7 +72,8 @@ suite.
   negotiation knobs (RFC 9369) are RFC-anchored on the wire but their
   surface here is still maturing, so they also sit in this tier.
 - **`quic.app`** (added 0.14.0): the application-layer helpers —
-  `app.Driver(App)` with its explicit `Hooks` registration,
+  `app.ConnectionDriver(App)` and the server `app.Driver(App)` with explicit
+  `Hooks` registration,
   `app.StreamTable`, `app.Outbox`, `app.StreamEnd`. Sits strictly above
   the Stable transport surface (no wire behavior of its own), but the
   callback inventory and hook signatures may see minor refinement as

@@ -2650,6 +2650,12 @@ pub const peekNextUni = conn_streams.peekNextUni;
 
 pub const streamIndex = conn_streams.streamIndex;
 
+/// Whether this endpoint initiated the stream, derived from its id and role.
+pub const streamInitiatedByLocal = conn_streams.streamInitiatedByLocal;
+
+/// Whether the stream id denotes a bidirectional stream.
+pub const streamIsBidi = conn_streams.streamIsBidi;
+
 pub const initialRecvStreamLimit = conn_streams.initialRecvStreamLimit;
 
 pub const initialSendStreamLimit = conn_streams.initialSendStreamLimit;

@@ -312,6 +312,66 @@ Worked examples: `examples/echo_server.zig` (streaming echo),
 `examples/request_response_server.zig` (length-prefixed
 request/response — the pattern most protocols build on).
 
+### Borrowing accepted and dialed connections
+
+`quic.app.ConnectionDriver(App)` runs the same stream/event machinery for
+one borrowed `Connection`. It works with either `Server.Slot.conn` or
+`Client.conn`, without taking ownership of the socket, connection, timers,
+or application protocol. One driver consumes each connection's events.
+
+```zig
+const Pump = quic.app.ConnectionDriver(MyApp);
+var pump = try Pump.init(.{
+    .allocator = allocator,
+    .app = &app,
+    .conn = conn,
+    .max_tracked_streams = 128,
+    .outbox_limits = .{ .max_streams = 16, .max_bytes = 1 << 20 },
+    .hooks = .{
+        .on_stream_data = MyApp.onData,
+        .on_stream_end = MyApp.onEnd,
+    },
+});
+// MyApp declares ConnState and StreamState; pump.state is its ConnState.
+// Call pump.deinit() BEFORE the owner destroys conn.
+try pump.service(); // after inbound packets, before conn.tick(now_us)
+```
+
+The data hook has type
+`fn (*MyApp, *Pump, *Pump.StreamEntry, []const u8) anyerror!usize`.
+Return the number of bytes accepted. Zero pauses the stream until the next
+service pass; partial consumption also yields. Unconsumed bytes stay in
+QUIC's receive buffer and retain their flow-control charge. A successful
+hook must not consume, reset, or otherwise mutate that same receive half.
+It may open other streams or queue responses. Returning an error consumes
+nothing, so commit application side effects only with successful progress.
+
+Peer streams are discovered automatically. After opening a local bidi
+stream, call `pump.trackStream(id)` to receive its response. `refusedStreams()`
+counts incoming streams rejected because the table is full or no data hook
+is installed; rejection sends STOP_SENDING. FIN is delivered
+only after all bytes have been consumed; RESET and teardown deliver a single
+terminal hook. `deinit` is idempotent and delivers remaining stream ends
+before `on_disconnect`, without destroying the borrowed connection.
+`on_handshake` also works when an owner delegates an already-established
+connection after consuming its original handshake event.
+
+Both drivers' outboxes have bounded pending stream and byte limits. A push
+reserves capacity for the complete payload before writing any prefix;
+`error.QueueFull` or allocation failure therefore accepts no bytes and is
+safe to retry. Check `pendingBytes()` and `pendingStreams()` for pressure.
+The defaults are 128 pending streams and 16 MiB. The legacy server Driver
+retains its `!void` data callback, which accepts the entire supplied chunk.
+To apply the same pause contract on that adapter, provide
+`on_stream_data_consumed` with a `!usize` result; it takes precedence over
+`on_stream_data`.
+
+Server `Driver.service` attaches teardown automatically. Explicit `attach`
+is still supported and chains the server's previous will-close hook after
+driver cleanup. `slot.user_data` remains available to the embedder; retrieve
+driver state through `driver.sessionOn(slot)`. Destroy the server before the
+driver so every accepted session receives its terminal callbacks.
+
 ### Raw: the `on_iteration` switch
 
 Everything the Driver does is expressible directly; the callback
