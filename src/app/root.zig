@@ -566,6 +566,10 @@ fn pumpStream(owner: anytype, session: anytype, entry: anytype) anyerror!void {
     while (true) {
         const chunk = session.conn.streamPeek(entry.id) catch |err| switch (err) {
             error.StreamNotFound => {
+                // A higher stream implicitly opens lower IDs before their
+                // first frame materializes receive state. Only the connection
+                // can distinguish that absence from actual terminal GC.
+                if (!session.conn.streamRecvWasReaped(entry.id)) return;
                 ended = .reaped;
                 break;
             },
@@ -1372,6 +1376,75 @@ test "ConnectionDriver: local bidi receive tracking, reset and teardown each end
     try std.testing.expectError(error.DriverClosed, driver.service());
     // Borrowing the connection never transfers its ownership.
     try std.testing.expect(ctx.conn.stream(3) != null);
+}
+
+test "ConnectionDriver: implicit lower streams wait for reordered first data" {
+    for ([_]u64{ 1, 3 }) |first_id| {
+        var ctx = try receivingTestConn(std.testing.allocator);
+        defer ctx.deinit();
+        var app: ProgressApp = .{ .limit = 100 };
+        var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = ProgressApp.hooks() });
+        defer driver.deinit();
+        // A higher peer stream implicitly opens every lower stream of its
+        // type, but their Stream allocations need not exist before data lands.
+        try ctx.conn.handleStream(.application, .{ .stream_id = first_id + 4, .data = "later", .fin = true });
+        try driver.service();
+        try std.testing.expectEqual(@as(usize, 2), app.opens);
+        try std.testing.expectEqual(@as(usize, 1), app.ends);
+        try std.testing.expectEqual(@as(usize, 1), driver.table.count());
+        try ctx.conn.tick(1000);
+        try driver.service();
+        try std.testing.expectEqual(@as(usize, 1), app.ends);
+        try ctx.conn.handleStream(.application, .{ .stream_id = first_id, .data = "first", .fin = true });
+        try driver.service();
+        try std.testing.expectEqual(@as(usize, 10), app.received);
+        try std.testing.expectEqual(@as(usize, 2), app.ends);
+        try std.testing.expectEqual(StreamEnd.fin, app.last_end.?);
+        try std.testing.expectEqual(@as(usize, 0), driver.table.count());
+    }
+}
+
+test "ConnectionDriver: an observed receive stream still ends once when its owner reaps it" {
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var app: ProgressApp = .{ .limit = 100 };
+    var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = ProgressApp.hooks() });
+    defer driver.deinit();
+    const stream = try ctx.conn.openNextBidi();
+    const sid = stream.id;
+    try driver.trackStream(sid);
+    try ctx.conn.streamFinish(sid);
+    stream.send.fin_acked = true;
+    stream.send.state = .data_recvd;
+    try ctx.conn.handleResetStream(.{ .stream_id = sid, .application_error_code = 0, .final_size = 0 });
+    try ctx.conn.tick(1000);
+    try std.testing.expect(ctx.conn.stream(sid) == null);
+    try driver.service();
+    try std.testing.expectEqual(@as(usize, 1), app.ends);
+    try std.testing.expectEqual(StreamEnd.reaped, app.last_end.?);
+    try std.testing.expectEqual(@as(usize, 0), driver.table.count());
+    try driver.service();
+    try std.testing.expectEqual(@as(usize, 1), app.ends);
+}
+
+test "ConnectionDriver: an implicit unobserved stream ends if terminal input is reaped before service" {
+    for ([_]bool{ false, true }) |reset| {
+        var ctx = try receivingTestConn(std.testing.allocator);
+        defer ctx.deinit();
+        var app: ProgressApp = .{ .limit = 100 };
+        var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = ProgressApp.hooks() });
+        defer driver.deinit();
+        try ctx.conn.handleStream(.application, .{ .stream_id = 7, .data = "later", .fin = true });
+        try driver.service();
+        try std.testing.expectEqual(@as(usize, 1), app.ends);
+        if (reset) try ctx.conn.handleResetStream(.{ .stream_id = 3, .application_error_code = 0, .final_size = 0 }) else try ctx.conn.handleStream(.application, .{ .stream_id = 3, .data = "", .fin = true });
+        try ctx.conn.tick(1000);
+        try std.testing.expect(ctx.conn.stream(3) == null);
+        try driver.service();
+        try std.testing.expectEqual(@as(usize, 2), app.ends);
+        try std.testing.expectEqual(StreamEnd.reaped, app.last_end.?);
+        try std.testing.expectEqual(@as(usize, 0), driver.table.count());
+    }
 }
 
 test "Outbox: admission is bounded and rejected writes never accept a prefix" {

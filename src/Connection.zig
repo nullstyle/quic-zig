@@ -2797,6 +2797,12 @@ pub const collectSendableStreamsByPriority = conn_streams.collectSendableStreams
 /// RESET, and holds no `*Stream` the caller must keep valid across a reap.
 pub const streamRecvState = conn_streams.streamRecvState;
 
+/// Whether this readable stream actually reached terminal state and was
+/// reclaimed. Distinguishes a GC'd receive stream from an implicitly opened
+/// lower ID whose first frame has not arrived. False for send-only local uni
+/// streams; their receive direction is invalid regardless of lifecycle.
+pub const streamRecvWasReaped = conn_streams.streamRecvWasReaped;
+
 /// Convenience: write `data` to the send half of stream `id`.
 ///
 /// Returns the number of bytes accepted — which may be fewer than

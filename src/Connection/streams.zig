@@ -303,6 +303,12 @@ fn localBidiStreamAlreadyReaped(conn: *const Connection, id: u64) bool {
     return idx < max_streams_per_connection and conn.local_reaped_bits_bidi.isSet(@intCast(idx));
 }
 
+// Doc comment lives on the Connection.streamRecvWasReaped thunk.
+pub fn streamRecvWasReaped(conn: *const Connection, id: u64) bool {
+    if (!peerMaySendOnStream(conn, id)) return false;
+    return if (streamInitiatedByLocal(conn, id)) localBidiStreamAlreadyReaped(conn, id) else peerStreamAlreadyReaped(conn, id);
+}
+
 /// Record that a peer-initiated stream was reaped, advancing the
 /// contiguous reaped watermark. Local bidi reaps use their own bitmap;
 /// send-only local uni streams cannot receive STREAM/RESET_STREAM frames.
