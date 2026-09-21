@@ -1,12 +1,12 @@
 .{
     .name = .quic,
-    .version = "0.21.1",
+    .version = "0.21.2",
     .fingerprint = 0xc0795252bd98740e,
     .minimum_zig_version = "0.17.0-dev.1683+5ceec001b",
     .dependencies = .{
         .boringssl = .{
-            .url = "https://github.com/nullstyle/boringssl-zig/archive/87d15bf7cdd7a65687d5921d3389dea7982b2c2d.tar.gz",
-            .hash = "boringssl-0.6.6-Vv5DNx8KAgCi6qYllvBlOXf0DwfFhk8OJ_sY5HGR7Kqh",
+            .url = "https://github.com/nullstyle/boringssl-zig/archive/ff30fe9953b07f838d7ac09ace84dacfb1e896ca.tar.gz",
+            .hash = "boringssl-0.6.7-Vv5DN8RMAgDGST3F3NpoMjez8Z_J60megIom9Ru9XqD2",
         },
     },
     // Consumer-facing archive only. The dev trees (bench/,
