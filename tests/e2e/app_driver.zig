@@ -115,13 +115,12 @@ const RefuseApp = struct {
 
 const RD = quic.app.Driver(RefuseApp);
 
-comptime {
-    // Canary: if EchoApp's callbacks are invisible to comptime here,
-    // every stream assertion below would silently test a datagram-only
-    // server. Fail the build instead.
-    if (!@hasDecl(EchoApp, "onStreamData")) @compileError("EchoApp decls invisible at Driver instantiation");
-    if (!@hasDecl(EchoApp, "onStreamEnd")) @compileError("EchoApp decls invisible at Driver instantiation");
-}
+// No comptime @hasDecl guard on these App types: this file's Apps are
+// entangled with their Driver (callbacks take *D.Session), and comptime
+// decl probes against such types report false negatives on 0.17-dev —
+// the reason Driver bans them (see its hook-registration docs). The
+// loud canary is runtime: `driver.streamsServiced()` right after init
+// in the echo test below.
 
 /// One c2s→service→s2c→tick iteration. Plain helper functions below
 /// mirror the shape `runUdpServer` runs, with the Driver's service

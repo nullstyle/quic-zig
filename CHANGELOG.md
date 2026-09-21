@@ -21,6 +21,16 @@ exercised end-to-end downstream under 0.17.0-dev.1978 via nest's
 
 ## [Unreleased]
 
+- Test suites (`test`, `test-app`) run green under 0.17.0-dev.1978 and
+  current master, closing the toolchain drift that kept main red: the
+  e2e comptime `@hasDecl` canary on Driver-entangled App types reported
+  false negatives on 0.17-dev (the reason Driver bans decl probes), so
+  the guard is now the runtime `driver.streamsServiced()` assertion the
+  Driver docs prescribe; and the SentPacket size pin re-baselines
+  184 -> 200 — the field inventory is unchanged, `std.ArrayList` grew
+  24 -> 32 in std and SentPacket holds two (tracker 736 -> 800 KB, raw
+  churn +8.7% by memcpy ratio).
+
 - Application drivers keep implicitly opened lower stream IDs pending until
   their first receive state arrives. Reordering a higher stream ahead of a
   lower stream no longer causes a false teardown and lost request delivery.

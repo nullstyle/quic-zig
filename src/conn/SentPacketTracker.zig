@@ -807,7 +807,7 @@ test "SentPacket.stream_ref defaults to empty sentinel" {
 }
 
 test "SentPacket size stays pinned (tracker footprint = 4096 of these)" {
-    // 184 = 176 bytes of 8-aligned fields (including the five u64
+    // 200 = 192 bytes of 8-aligned fields (including the five u64
     // delivery-rate stamps added for rate-based congestion control)
     // + 7 one-byte tail fields (`is_app_limited` and `dead` ride in
     // tail padding) + 1 pad byte. Every +8 here costs 32 KB per
@@ -823,7 +823,15 @@ test "SentPacket size stays pinned (tracker footprint = 4096 of these)" {
     // its old number but keeps the ack-path stamping cost, and adds
     // collision semantics once a live PN span exceeds the slot
     // count — silent sample corruption traded for a synthetic win).
-    try std.testing.expectEqual(@as(usize, 184), @sizeOf(SentPacket));
+    //
+    // 184 -> 200 (0.17.0-dev.1978) is not field growth: the inventory
+    // is unchanged (verified by diff) — `std.ArrayList` grew 24 -> 32
+    // in std and SentPacket holds two of them (retransmit_frames,
+    // extra_stream_refs). Tracker footprint 736 -> 800 KB, raw churn
+    // +8.7% by memcpy ratio; no layout decision changed, so the A/B
+    // has nothing to judge. The pin follows the verified toolchain:
+    // re-measure whenever it moves again.
+    try std.testing.expectEqual(@as(usize, 200), @sizeOf(SentPacket));
 }
 
 test "compaction triggers inside record and preserves order + search" {
