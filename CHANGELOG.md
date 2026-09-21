@@ -5,21 +5,20 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [0.21.2] - 2026-09-20
+## [0.22.0] - 2026-09-20
 
-A dependency release: no quic code changes. The boringssl-zig pin
-moves 0.6.6 -> 0.6.7, which adds `crypto.pkey`, `crypto.x509`, and
-`crypto.pem` — key generation, a certificate builder for self-signed
-CAs and the leaves they sign, and PEM encode/decode through memory
-BIOs. Consumers that mint development PKIs (nest's mesh identity, for
-one) now do it through the wrapper instead of hand-written externs;
-quic itself does not touch the new modules and behaves exactly as
-0.21.1. The stream-driver work on main stays unreleased for a future
-0.22.0. Verified toolchain: 0.17.0-dev.1683+5ceec001b (macOS); also
-exercised end-to-end downstream under 0.17.0-dev.1978 via nest's
-658-scenario kill suite.
+The stream-lifecycle hardening release. Two correctness fixes in the
+application stream machinery — reordered stream opens no longer tear
+down live requests, and late replies after local stream reclamation no
+longer reset the connection — plus the bounded application stream
+drivers those fixes motivated, an Outbox that bounds what it accepts,
+and a test-suite re-baseline onto current 0.17-dev toolchains. Anyone
+running request/reply workloads over connections with reordering or
+aggressive stream GC should upgrade. Verified toolchain:
+0.17.0-dev.1978+c961124d9 and zvm master 0.17.0-dev.2151+2ec5523d5
+(macOS); also exercised end-to-end downstream via nest's 658-scenario
+kill suite.
 
-## [Unreleased]
 
 - Test suites (`test`, `test-app`) run green under 0.17.0-dev.1978 and
   current master, closing the toolchain drift that kept main red: the
@@ -55,6 +54,20 @@ exercised end-to-end downstream under 0.17.0-dev.1978 via nest's
   stream, including those beyond a blocked first 128 entries.
 - Exposed `Connection.streamInitiatedByLocal` and `streamIsBidi`. Added the
   socket-free `zig build test-app` contract suite, including real TLS pairs.
+
+## [0.21.2] - 2026-09-20
+
+A dependency release: no quic code changes. The boringssl-zig pin
+moves 0.6.6 -> 0.6.7, which adds `crypto.pkey`, `crypto.x509`, and
+`crypto.pem` — key generation, a certificate builder for self-signed
+CAs and the leaves they sign, and PEM encode/decode through memory
+BIOs. Consumers that mint development PKIs (nest's mesh identity, for
+one) now do it through the wrapper instead of hand-written externs;
+quic itself does not touch the new modules and behaves exactly as
+0.21.1. The stream-driver work on main stays unreleased for a future
+0.22.0. Verified toolchain: 0.17.0-dev.1683+5ceec001b (macOS); also
+exercised end-to-end downstream under 0.17.0-dev.1978 via nest's
+658-scenario kill suite.
 
 ## [0.21.1] - 2026-09-07
 
