@@ -2,7 +2,7 @@
     .name = .quic,
     .version = "0.22.0",
     .fingerprint = 0xc0795252bd98740e,
-    .minimum_zig_version = "0.17.0-dev.1683+5ceec001b",
+    .minimum_zig_version = "0.17.0-dev.1978+c961124d9",
     .dependencies = .{
         .boringssl = .{
             .url = "https://github.com/nullstyle/boringssl-zig/archive/ff30fe9953b07f838d7ac09ace84dacfb1e896ca.tar.gz",

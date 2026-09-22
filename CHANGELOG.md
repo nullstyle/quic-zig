@@ -5,6 +5,13 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+- Toolchain pin: mise + zon floor move to 0.17.0-dev.1978+c961124d9,
+  the toolchain the 0.22.0 test re-baseline was verified under — the
+  SentPacket size pin (200) and the e2e suite cannot pass under the
+  old dev.1683 pin.
+
 ## [0.22.0] - 2026-09-20
 
 The stream-lifecycle hardening release. Two correctness fixes in the
