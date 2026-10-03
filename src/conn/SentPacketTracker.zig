@@ -824,13 +824,18 @@ test "SentPacket size stays pinned (tracker footprint = 4096 of these)" {
     // collision semantics once a live PN span exceeds the slot
     // count — silent sample corruption traded for a synthetic win).
     //
-    // 184 -> 200 (0.17.0-dev.1978) is not field growth: the inventory
-    // is unchanged (verified by diff) — `std.ArrayList` grew 24 -> 32
-    // in std and SentPacket holds two of them (retransmit_frames,
-    // extra_stream_refs). Tracker footprint 736 -> 800 KB, raw churn
-    // +8.7% by memcpy ratio; no layout decision changed, so the A/B
-    // has nothing to judge. The pin follows the verified toolchain:
-    // re-measure whenever it moves again.
+    // 184 -> 200 (0.17.0-dev.1978, unchanged on 0.17.0) is not field
+    // growth: the inventory is unchanged (verified by diff) —
+    // `std.ArrayList` grew 24 -> 32 in std and SentPacket holds two of
+    // them (retransmit_frames, extra_stream_refs). The extra word is
+    // its `pointer_stability` safety lock, which exists only in the
+    // safe optimize modes: Debug and ReleaseSafe (the modes this test
+    // runs in, and ReleaseSafe is the supported production mode) see
+    // 200; ReleaseFast and ReleaseSmall still see 184. Tracker
+    // footprint 736 -> 800 KB, raw churn +8.7% by memcpy ratio; no
+    // layout decision changed, so the A/B has nothing to judge. The
+    // pin follows the verified toolchain: re-measure whenever it moves
+    // again.
     try std.testing.expectEqual(@as(usize, 200), @sizeOf(SentPacket));
 }
 

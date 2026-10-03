@@ -25,6 +25,26 @@ changes.
   verified under; the SentPacket size pin and the e2e suite cannot
   pass under the older dev.1683 pin).
 
+### Documentation
+
+- **Compiler notes re-measured on Zig 0.17.0.** Every in-tree note that
+  cited a 0.17-dev build was re-tested against the release and either
+  re-stamped or corrected. The one correction that matters to
+  embedders: the `quic.app` Driver docs blamed "`@hasDecl` unreliable
+  on 0.17-dev" for explicit hook registration. It is a language rule,
+  not a quirk — `@hasDecl` sees only `pub` declarations (and as of
+  0.17.0 that holds for a probe written in the declaring file too), so
+  method detection would silently skip every callback an embedder did
+  not mark `pub`. The design is unchanged; the stated reason is now the
+  real one. Still true on the release and re-stamped: the Windows
+  bundled-loop gap (std has no overlapped `net_receive`), x86_64
+  needing the LLVM backend for fuzz coverage, the `SentPacket` size
+  pin (`std.ArrayList` carries a `pointer_stability` lock in the safe
+  optimize modes: 200 bytes there, 184 in ReleaseFast/ReleaseSmall),
+  and `bench-io`'s evented backends needing the fork std (stock
+  0.17.0's `Io.Dispatch` and `Io.Kqueue` do not compile). No longer
+  true: a filtered test binary fuzzes cleanly again.
+
 ### CI and tests
 
 - **The CID-lifecycle fuzz harness had a stale close-code invariant.**

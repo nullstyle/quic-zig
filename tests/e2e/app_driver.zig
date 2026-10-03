@@ -115,12 +115,12 @@ const RefuseApp = struct {
 
 const RD = quic.app.Driver(RefuseApp);
 
-// No comptime @hasDecl guard on these App types: this file's Apps are
-// entangled with their Driver (callbacks take *D.Session), and comptime
-// decl probes against such types report false negatives on 0.17-dev —
-// the reason Driver bans them (see its hook-registration docs). The
-// loud canary is runtime: `driver.streamsServiced()` right after init
-// in the echo test below.
+// No comptime @hasDecl guard on these App types: their callbacks are
+// private (`fn`, not `pub fn`), and since Zig 0.17.0 `@hasDecl` answers
+// true only for `pub` declarations, from this file too — the reason
+// Driver registers hooks explicitly (see its hook-registration docs).
+// The loud canary is runtime: `driver.streamsServiced()` right after
+// init in the echo test below.
 
 /// One c2s→service→s2c→tick iteration. Plain helper functions below
 /// mirror the shape `runUdpServer` runs, with the Driver's service

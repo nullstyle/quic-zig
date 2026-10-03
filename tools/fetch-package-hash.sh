@@ -7,10 +7,12 @@ if [ "$#" -ne 1 ]; then
 fi
 
 # `zig fetch` also writes a recompressed copy to the global package cache.
-# On the current 0.17 development series, URL fetches can retain the
-# downloaded archive's top-level directory inside that recompressed copy.
-# A later `zig build` strips only the cache archive's own root, sees no
-# build.zig.zon, and reports an unrelated-looking N-V hash mismatch.
+# A standalone URL fetch (no `--save`) retains the downloaded archive's
+# top-level directory inside that recompressed copy. A later `zig build`
+# strips only the cache archive's own root, sees no build.zig.zon, and
+# reports an unrelated-looking N-V hash mismatch. First seen on the
+# 0.17-dev series; re-measured on the 0.17.0 release, where it still
+# happens (`zig fetch --save` and `zig build --fetch` write a good entry).
 #
 # Hash calculation is a one-shot operation, so isolate and discard its cache
 # instead of risking the package cache used by normal builds.

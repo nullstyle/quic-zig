@@ -670,10 +670,10 @@ fn endTrackedStreams(owner: anytype, session: anytype) void {
 /// ## Hook registration (read this if callbacks silently don't fire)
 ///
 /// Hooks are registered in `init`, explicitly — there is no method
-/// detection, on purpose (comptime `@hasDecl` against App types from
-/// dependent modules proved unreliable on 0.17-dev, and a callback
-/// that silently fails to register is exactly the class of bug this
-/// module exists to prevent):
+/// detection, on purpose (`@hasDecl` sees only `pub` declarations, so
+/// detection would silently skip every callback an embedder did not
+/// mark `pub`, and a callback that silently fails to register is
+/// exactly the class of bug this module exists to prevent):
 ///
 /// ```zig
 /// var driver = try D.init(.{
@@ -831,13 +831,17 @@ pub fn Driver(comptime App: type) type {
         // Callbacks are typed function pointers the EMBEDDER lists in
         // `init`, and the service path dispatches on them at runtime.
         // There is no `@hasDecl`-based detection anywhere in this
-        // module: evaluating it against App types from dependent
-        // modules was observed (0.17-dev) to answer false regardless
-        // of where it ran — struct consts, `init`, `service`, or even
-        // a user-called helper — while the identical expression in the
-        // embedder's own module answered true. A missed callback must
-        // be a compile error or a loud registration list, never a
-        // silently-false probe; explicit hooks are that list.
+        // module. `@hasDecl` answers true only for `pub` declarations,
+        // so a probe from here answers false for every callback an
+        // embedder declared without `pub`, wherever in this module it
+        // runs — struct consts, `init`, `service`, or a user-called
+        // helper. Before Zig 0.17.0 the identical probe written in the
+        // embedder's own file answered true, because a same-file probe
+        // also saw private declarations; that asymmetry is what made
+        // this look like a compiler quirk (measured on 0.16.0 and
+        // 0.17.0). A missed callback must be a compile error or a loud
+        // registration list, never a silently-false probe; explicit
+        // hooks are that list.
         //
         pub const ConnectFn = *const fn (*App, *Session) anyerror!void;
         pub const HandshakeFn = *const fn (*App, *Session) anyerror!void;

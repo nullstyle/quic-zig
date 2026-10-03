@@ -32,7 +32,9 @@ The one documented exception is the **bundled convenience event loop**:
 `transport.runUdpServer` / `runUdpClient` cannot run on native Windows
 at the pinned toolchain. This was measured, not inferred — the skips
 that used to hide it were deleted and the `windows-latest` leg was
-read (2026-08-12).
+read (2026-08-12). The Zig 0.17.0 release still has the gap: the std
+source cited below is unchanged, and the asserting tests still pass on
+`windows-latest`.
 
 Cause: every timed receive lowers to `Io.operateTimeout` ->
 `Batch.awaitConcurrent`, and std's Windows `net_receive` arm has no

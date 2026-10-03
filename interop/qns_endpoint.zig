@@ -2526,7 +2526,11 @@ fn sockaddrFromHandle(handle: std.posix.socket_t) quic.conn.path.Address {
     if (std.c.getsockname(handle, @ptrCast(&sa), &sa_len) != 0) return .unspecified;
     if (sa.family == std.posix.AF.INET) {
         const v4: *const std.posix.sockaddr.in = @ptrCast(@alignCast(&sa));
-        const ip_bytes: [4]u8 = @bitCast(v4.addr);
+        // `addr` holds the address in network byte order in memory, and
+        // the in-memory bytes are what we want. `@bitCast` to an array
+        // means "logical bits, least significant first" as of Zig 0.17.0,
+        // which is the same thing only on a little-endian target.
+        const ip_bytes: [4]u8 = std.mem.toBytes(v4.addr);
         return .{ .ipv4 = .{
             .addr = ip_bytes,
             .port = std.mem.bigToNative(u16, v4.port),

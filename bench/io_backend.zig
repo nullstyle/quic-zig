@@ -20,11 +20,17 @@
 //! ```
 //!
 //! `--io evented` and `--io ev-thread` need the fork std: a fork release
-//! from `0.17.0-dev.1994+96ced66cf` (2026-09-03) or later, or the checkout
-//! passed via `ZIG_LIB_DIR`/`--zig-lib-dir`. Stock upstream Zig fails to
-//! build the evented branch (its `Io.Dispatch` does not compile on the
-//! batch path) — build with `-Dbench-io-threaded-only` to drop the evented
-//! backends and get a Threaded-only bench that compiles on stock Zig.
+//! that carries the evented work first shipped in
+//! `0.17.0-dev.1994+96ced66cf` (2026-09-03), or the checkout passed via
+//! `ZIG_LIB_DIR`/`--zig-lib-dir`. The fork release must be versioned
+//! `0.17.0` or later: `minimum_zig_version` is the tagged release, so
+//! build.zig refuses every `0.17.0-dev` build, the fork's included.
+//! Stock upstream Zig fails to build the evented branch — on the 0.17.0
+//! release `std.Io.Dispatch` and `std.Io.Kqueue` both initialize
+//! `Io.VTable` fields that do not exist (`processReplacePath`,
+//! `fileWriteStreaming`) — so build with `-Dbench-io-threaded-only` to
+//! drop the evented backends and get a Threaded-only bench that compiles
+//! on stock Zig.
 //! `--leeway-ms` sets `std.Io.Evented.InitOptions.leeway` (std default
 //! 10 ms), the timer slack libdispatch is allowed on every timed wait.
 //!
