@@ -99,12 +99,16 @@ jobs:
         run: |
           zig build external-interop -- build-image --image "${QUIC_ZIG_IMAGE}"
 
-      # `--assume-compliant quic-zig`: the pinned runner's server-side
-      # unknown-testcase preflight fails in CI for any server image, which
-      # skipped every client. The endpoint does exit 127 for an unknown
-      # TESTCASE (interop/qns/run_endpoint.sh; checked by hand against
-      # this runner ref), so the preflight is skipped for our own image
-      # only; the client implementations are still checked.
+      # `--assume-compliant`: the pinned runner's unknown-testcase
+      # preflight fails in CI for every implementation, server or client
+      # ("<name> server not compliant" / "<name> client not compliant"),
+      # and a failed preflight skips the pair without failing anything.
+      # The preflight is not a test of quic-zig: it only asks whether an
+      # image exits 127 for an unknown TESTCASE, which ours does
+      # (interop/qns/run_endpoint.sh; checked by hand against this
+      # runner ref) and which the per-test "unsupported" handling covers
+      # for the peers anyway. So it is skipped for all of them, as
+      # quic-go-interop.yml has done for its peer since 0.7.3.
       # The runner owns and recreates the log directory, so the JSON
       # result lives outside it.
       - name: Run QNS interop (server role)
@@ -119,9 +123,26 @@ jobs:
             --clients "${CLIENTS}" \
             --tests "${TESTS}" \
             --quic-go-image "${QUIC_GO_IMAGE}" \
-            --assume-compliant quic-zig \
+            --assume-compliant "quic-zig,${CLIENTS}" \
             --log-dir "${{ github.workspace }}/interop-logs/matrix" \
             --json "${{ github.workspace }}/interop-results/matrix.json"
+
+      # A matrix in which every pair was skipped exits 0 and writes an
+      # empty result. That is how this job ran zero tests for ten weeks,
+      # so count the cells: no executed test or measurement is a failure.
+      - name: The matrix actually ran
+        run: |
+          RESULT="${{ github.workspace }}/interop-results/matrix.json"
+          if [ ! -f "$RESULT" ]; then
+            echo "::error::no result file: the matrix did not run"
+            exit 1
+          fi
+          cells=$(jq '[.results[]?[]?, .measurements[]?[]?] | length' "$RESULT")
+          echo "executed cells: $cells"
+          if [ "$cells" -eq 0 ]; then
+            echo "::error::the interop matrix ran zero tests (every pair was skipped)"
+            exit 1
+          fi
 
       # Surface the pass/fail matrix and the goodput measurements in
       # the job summary so nobody has to download artifacts to see the
