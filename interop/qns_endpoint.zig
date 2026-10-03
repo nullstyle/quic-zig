@@ -60,23 +60,43 @@ const endpoint_udp_payload_size = 1350;
 const endpoint_connection_receive_window: u64 = 16 * 1024 * 1024;
 const endpoint_stream_receive_window: u64 = 16 * 1024 * 1024;
 const endpoint_uni_stream_receive_window: u64 = 1024 * 1024;
-// Capped at 1000 because the quic-interop-runner's `multiplexing`
-// testcase asserts `initial_max_streams_bidi <= 1000`
-// (`testcases_quic.py:286-288`: "Server set a stream limit > 1000.").
-// Raising the initial cap to absorb quiche's 2000-stream pipelined
-// burst was tried briefly (commit 77e6bed) and reverted after the
-// 2026-05-09 verification matrix showed it broke server ×
-// multiplexing × {quic-go, ngtcp2} — the runner deliberately
-// validates that servers issue `MAX_STREAMS` dynamically rather
-// than statically advertising a huge floor. The change made for
-// that at the time lowered the watermark of the old credit rule from
-// "1/2 consumed" to "1/4 consumed", so MAX_STREAMS reached the peer
-// before quiche's pipelined burst exhausted the initial allotment.
-// It did not fix that cell (see the MEASURED note above
-// `stalled_peer_keepalive_idle_us`), and that rule is gone: stream
-// credit now comes back as streams close
-// (`maybeAdvertiseStreamCredit` in `src/Connection/flow.zig`).
-const endpoint_bidi_stream_limit: u64 = 1000;
+// The stream window of the interop server. 100 is also what the
+// quic-go and ngtcp2 interop servers advertise (read from their
+// transport parameters in a client log, 2026-10-03). The runner's
+// `multiplexing` test case opens 2000 streams and asserts
+// `initial_max_streams_bidi <= 1000` (`testcases_quic.py:286-288`:
+// "Server set a stream limit > 1000."): it checks that a server gives
+// stream credit back as streams close.
+//
+// This was 1000 from 2026-05 until 0.24.0, and that value alone made
+// `server x quiche x multiplexing` fail in every run. MEASURED
+// 2026-10-03, 10 runs each, with this library (credit comes back when
+// a stream is closed: `maybeAdvertiseStreamCredit` in
+// `src/Connection/flow.zig`):
+//   window 1000: 0 of 10 pass; 18 to 31 of the 1999 requests are cut
+//   window 100:  6 of 10 pass; 1 to 4 requests are cut in a failed run
+// The quic-go and ngtcp2 clients pass at both (5 of 5 each).
+//
+// Why 1000 cannot pass: quiche's test client drops what a short
+// request write did not take (see the note above
+// `stalled_peer_keepalive_idle_us`), and its send window starts at its
+// first congestion window, 13,500 bytes. A request is about 28 bytes,
+// so a first flight of 1000 requests runs past that at request 486 or
+// so. In each of the 10 runs the first cut request was the one that
+// crossed byte 13,500 (stream index 481 to 488). With a window of 100
+// the first flight is under 3,000 bytes. What is left at 100 is the
+// client's own flakiness: it sends one request per packet, the
+// simulator's 25-packet queue drops 3 to 6% of them, and a request
+// write that meets the shrunken window is cut. The same client fails
+// 4 of 8 runs against a quic-go server and 2 of 8 against an ngtcp2
+// server.
+//
+// A window of 100 did NOT help while the limit doubled (the credit
+// rule through 0.23.0): the grants were 200, 400, 800, 1600, 3200, the
+// bursts as large as before, and 3 of 3 runs failed with 25 to 36
+// requests cut. A limit above 1000 was tried in 2026-05 (commit
+// 77e6bed) and reverted: the runner refuses it.
+const endpoint_bidi_stream_limit: u64 = 100;
 const endpoint_uni_stream_limit: u64 = 64;
 // Higher than the RFC 9000 §18.2 ¶22 minimum of 2 so peers (quiche
 // especially) keep issuing fresh NEW_CONNECTION_ID frames as we
@@ -153,12 +173,27 @@ const endpoint_server_cid_desired_last_seq: u8 = 1;
 // quic-zig 0.23.0: 8 of 8). quiche emits exactly one STREAM frame per
 // packet (2427 packets for 2427 frames), so every burst of requests is
 // a burst of small packets, and the 25-packet queue drops 4 to 8% of
-// them whatever the server does. A server only changes the odds. One
-// thing that differs on our side and is not understood yet: we send
-// about one response per packet (1899 packets for 1984 STREAM frames;
-// quic-go 1107 for 2116, ngtcp2 249 for 1999). The weekly matrix lists
-// this cell under `--known-failures`, which is right only while it
-// fails every time.
+// them whatever the server does. A server only changes the odds.
+//
+// MEASURED again with the 0.24.0 library, and the last part of the
+// story: why it was "every time" for us and "some of the time" for the
+// others. It was the stream window of this endpoint (1000; theirs are
+// 100). The numbers and the mechanism are above
+// `endpoint_bidi_stream_limit`. At a window of 100 the cell fails 4 of
+// 10 runs, the same class as quic-go's 4 of 8 and ngtcp2's 2 of 8, so
+// the weekly matrix now lists it under `--flaky` (run, counted, named,
+// decides nothing) and no longer under `--known-failures`.
+//
+// One difference that is left, and now understood: this server sends
+// about one response per packet to this client (2021 datagrams for
+// 2000 responses; quic-go 1107 packets for 2116 STREAM frames, ngtcp2
+// 249 for 1999). The server loop below reads ONE datagram, answers it
+// and sends, so a client that puts one request in each packet gets one
+// response in each packet. With the quic-go client, which puts about
+// 2.6 requests in a packet, the same loop sends 680 datagrams for
+// 2000 responses. It is a property of this test loop, not of the
+// library's send path. A loop that empties the socket before it sends
+// would pack more; whether that changes this cell is not measured.
 const stalled_peer_keepalive_idle_us: u64 = 2_000_000;
 const stalled_peer_keepalive_min_period_us: u64 = 1_000_000;
 // Lifetime cap on extra client-issued SCIDs the qns driver feeds

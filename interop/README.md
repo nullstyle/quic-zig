@@ -110,7 +110,7 @@ process). Both CI workflows install a host `tshark`.
 A run ends with the evidence line:
 
 ```text
-interop evidence: pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0 skipped=0
+interop evidence: pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0 skipped=0 flaky_passed=0 flaky_failed=0
 ```
 
 A cell is one test case or one measurement for one client/server pair.
@@ -123,10 +123,20 @@ when a cell was skipped, or when no cell succeeded. With `--strict`, an
 (the test by runner name, or by a short selector from the list below).
 A listed cell that fails is counted as `known_failed` and does not fail
 the run. A listed cell that passes does fail the run, with a message to
-take it off the list, so the list cannot go stale. The weekly matrix
-lists `quiche:multiplexing`; the comment above
-`stalled_peer_keepalive_idle_us` in `interop/qns_endpoint.zig` has the
-measured cause.
+take it off the list, so the list cannot go stale. Use it only for a
+cell that fails every time. No cell is on it today.
+
+`--flaky peer:test,...` (same format) lists cells that fail some of the
+time for a reason that is not ours to fix. A listed cell is run,
+counted as `flaky_passed` or `flaky_failed`, and named below the
+evidence line. It decides nothing: a failure does not fail the run, and
+a pass is not counted in `succeeded` (a run in which only flaky cells
+passed is still "no cell succeeded"). A cell on both lists is an error.
+The weekly matrix lists `quiche:multiplexing`: measured 2026-10-03, it
+fails 4 of 10 runs against quic-zig, and with no quic-zig in the pair 4
+of 8 against a quic-go server and 2 of 8 against an ngtcp2 server. The
+comment above `endpoint_bidi_stream_limit` in `interop/qns_endpoint.zig`
+has the cause, and why the cell failed every time through 0.23.0.
 
 Read that line. Do not read the runner's exit code, or the colour of a
 CI run. The runner's exit code is its count of failed test cases, so

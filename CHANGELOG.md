@@ -318,8 +318,10 @@ changes.
     ngtcp2, 9.11 to quiche. A run on a developer machine, with peer
     images five months older, gave the same cells and 9.29, 9.10, and
     9.07 Mbps.
-- **`server x quiche x multiplexing` fails, every time, and has for
-  months.** It fails the same way against server images built on
+- **`server x quiche x multiplexing` failed, every time, for months;
+  now it passes 6 runs of 10.** The story is in the order it was
+  found; the last paragraph is what it was. It failed the same way
+  against server images built on
   2026-05-11 and 2026-08-12, so it comes from neither Zig 0.17.0, nor
   0.23.0, nor the BBRv3 default; the blind matrix just never showed
   it. quiche's HTTP/0.9 test client ignores how many bytes a request
@@ -345,15 +347,55 @@ changes.
   puts exactly one STREAM frame in each packet, so every burst of
   requests is a burst of small packets, and the simulator's 25-packet
   queue drops 4 to 8% of them whatever the server does. A server only
-  changes the odds, and ours are the worst of the three. So this cell
-  cannot be a pass/fail signal for quic-zig. For now the weekly
-  matrix lists it with the wrapper's new `--known-failures`: a
-  listed cell that fails does not fail the job, and a listed cell
-  that passes does, so the list cannot go stale. That holds only
-  while the cell fails every time. The endpoint's
+  changes the odds, and ours were the worst of the three. So this
+  cell cannot be a pass/fail signal for quic-zig. The endpoint's
   "stalled-peer keepalive" for this cell rests on a theory the logs
   do not support (nothing is parked on the quiche side); the
   measurement is recorded next to it in `interop/qns_endpoint.zig`.
+
+  What made ours the worst, measured with the finished library: the
+  stream window of the interop SERVER. Ours was 1000 (the most the
+  runner allows); quic-go's and ngtcp2's are 100. quiche's send
+  window starts at its first congestion window, 13,500 bytes, and a
+  request is about 28 bytes, so a first flight of 1000 requests runs
+  past it near request 486. In each of 10 runs at a window of 1000
+  the first request cut was the one that crossed byte 13,500 (stream
+  index 481 to 488). So at 1000 the cell could not pass under any
+  credit rule: 0 of 10 with credit on close, 18 to 31 requests cut.
+  At a window of 100, where the first flight is under 3,000 bytes:
+
+  | interop server window | credit rule | runs passed | requests cut per run |
+  | --- | --- | --- | --- |
+  | 1000 | limit doubles (0.23.0) | 0 of 10 | 12 to 25 |
+  | 100 | limit doubles (0.23.0) | 0 of 3 | 25 to 36 |
+  | 1000 | credit on close (0.24.0) | 0 of 10 | 18 to 31 |
+  | 100 | credit on close (0.24.0) | 6 of 10 | 0, or 1 to 4 in a failed run |
+
+  It took both changes. The interop endpoint's window is 100 now
+  (`endpoint_bidi_stream_limit` in `interop/qns_endpoint.zig`, with
+  the measurements). The quic-go and ngtcp2 clients pass the test at
+  either window, 5 of 5 each.
+- **Interop wrapper: `--flaky peer:test`.** 6 of 10 is the same class
+  as the other servers (4 of 8, 6 of 8), and the fault is in the
+  client, so the cell fits neither class the wrapper had: as a plain
+  cell it fails the matrix 4 runs in 10 for no fault of ours, and as
+  a `--known-failures` cell it fails the matrix the 6 runs in 10 it
+  passes (that list is a ratchet, right only for a cell that fails
+  every time). A `--flaky` cell is run, counted on the evidence line
+  (`flaky_passed=N flaky_failed=N`, two new fields at its end) and
+  named. It decides nothing: a failure does not fail the run, a pass
+  is not counted as a success, and a run in which only flaky cells
+  passed is still "no cell succeeded". The runner's exit code is
+  checked against known failures plus flaky failures. A cell on both
+  lists is an error. The weekly matrix lists `quiche:multiplexing`
+  there; `--known-failures` stays, with no cell on it. Unit-tested on
+  the real result file of the first matrix; 7 mutants, all killed.
+- **`quic-go x retry` (server role) failed once in CI and is not
+  reproduced.** The wide matrix dispatched on the 0.23.0 code
+  (16 tests x 3 clients, run 37137087184: `pairs=3 cells=48
+  succeeded=42 failed=1 known_failed=1 unsupported=4 skipped=0`) had
+  that one new failure. On a developer machine the same cell passes 5
+  of 5 on the 0.23.0 code and 5 of 5 on this code.
 
 ## [0.23.0] - 2026-10-03
 
