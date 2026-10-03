@@ -64,6 +64,9 @@ pub const recv_stream = @import("RecvStream.zig");
 /// Sorted-disjoint half-open byte ranges shared by `send_stream` /
 /// `recv_stream` (`Range` + merge-on-insert).
 pub const range_list = @import("range_list.zig");
+/// RFC 9000 §2.1 / §3.2 / §4.6 stream-id accounting for one stream-id
+/// space: which ids were used, skipped, or closed, and the limit.
+pub const stream_id_space = @import("StreamIdSpace.zig");
 /// Per-path 4-tuple bundle: CIDs, anti-amp, validation, RTT, congestion.
 pub const path = @import("path.zig");
 /// RFC 9000 §8.1.2 stateless Retry token mint/validate.
@@ -261,6 +264,7 @@ test {
     _ = send_stream;
     _ = recv_stream;
     _ = range_list;
+    _ = stream_id_space;
     _ = path;
     _ = retry_token;
     _ = new_token;
