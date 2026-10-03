@@ -198,9 +198,8 @@ RELEASE_READINESS.md, not an open item.)
   the package hash instead of a silent same-version surface change.
 - **Breaking changes go under `### Changed (BREAKING)`** in
   CHANGELOG.md, with a migration note. A `minimum_zig_version` bump is
-  a breaking change: both this project and its consumers chase Zig
-  master, and a floor move is exactly as build-breaking as an API
-  rename.
+  a breaking change: consumers pin their own toolchain, and a floor
+  move is exactly as build-breaking for them as an API rename.
 - **When a config field's meaning changes incompatibly, rename it**
   (or add a new field and deprecate the old one) so consumers get a
   compile error, not a silent behavior change. Avoid `?T` where `null`

@@ -9,11 +9,9 @@ const manifest = @import("build.zig.zon");
 // dependency, from a consumer's point of view. This assert is the
 // enforcement, and it runs for dependency builds too, so downstream
 // projects get the same diagnostic. Floor bumps are recorded as
-// breaking changes in CHANGELOG.md. NOTE: `SemanticVersion.order`
-// ignores build metadata, so the exact toolchain commit (+5ceec001b
-// etc.) is enforced only for maintainers and CI via mise.toml and the
-// QNS Dockerfile; downstream consumers get the semver floor
-// (0.17.0-dev.1683), not the commit pin.
+// breaking changes in CHANGELOG.md. The floor is the tagged 0.17.0
+// release, which is also the exact toolchain mise.toml and the QNS
+// Dockerfile pin, so every 0.17.0-dev master build is below it.
 comptime {
     const required = std.SemanticVersion.parse(manifest.minimum_zig_version) catch
         @compileError("build.zig.zon minimum_zig_version is not valid semver: " ++
@@ -252,9 +250,9 @@ pub fn build(b: *std.Build) void {
     // Coverage-guided fuzzing needs the LLVM backend. Zig's fuzzer reads
     // its program-counter range from the linker-provided `__sancov_pcs*`
     // / `__sancov_cntrs` sections, and only the LLVM backend emits them:
-    // measured on 0.17.0-dev.1252, an x86_64-linux test binary has 0
-    // sancov sections (0 bytes) on the self-hosted backend and 2
-    // (~87 KB) with `-fllvm`. Since 0.17 defaults x86_64 to
+    // measured on 0.17.0 (and before it on 0.17.0-dev.1252), an
+    // x86_64-linux `-ffuzz` test binary has 0 sancov sections on the
+    // self-hosted backend and 2 with `-fllvm`. Since 0.17 defaults x86_64 to
     // `stage2_x86_64` while aarch64 defaults to `stage2_llvm`, `--fuzz`
     // silently collected zero coverage on x86_64 CI while working fine
     // on aarch64 — the fuzzer still executed the full budget, so the run
@@ -758,21 +756,20 @@ pub fn build(b: *std.Build) void {
     //
     // Deep coverage-guided fuzzing uses the build-system flag on the
     // UNFILTERED unit-test binary. This is what CI runs
-    // (.github/workflows/fuzz.yml) and, on 0.17.0-dev.1158, the only
-    // invocation that works:
+    // (.github/workflows/fuzz.yml):
     //
-    //     zig build test --fuzz=1M    # limit mode (1M inputs)
+    //     zig build test --fuzz=1M    # limit mode (1M inputs per site)
     //     zig build test --fuzz       # forever (until Ctrl-C) + web UI
     //
-    // There is deliberately NO per-site or `-j<N>` parallel fuzz step. The
-    // runner hard-codes n_instances = 1 (ziglang/zig#25352), so a run
-    // saturates one core and the fuzzer rotates across the binary's sites
-    // by weighted selection. The obvious workaround — one
-    // `addTest(.filters = ...)` binary per site, run in parallel — does NOT
-    // work: a *filtered* test binary under `--fuzz` aborts the build-runner
-    // ("reached unreachable code") on this Zig, while the unfiltered binary
-    // fuzzes cleanly. Confirmed on Linux: unfiltered `zig build test --fuzz`
-    // exits 0 (750k+ runs); a single filtered site exits 1 on the same
-    // tree. So we ship no filtered fuzz binaries; `just fuzz` /
-    // `mise run fuzz` call the unfiltered command above.
+    // There is no per-site or `-j<N>` parallel fuzz step. Limit mode runs
+    // one instance (`n_instances = 1` in Zig's fuzz runner; forever mode
+    // uses every core), so a limit run saturates one core and gives each
+    // of the binary's sites its own budget. One
+    // `addTest(.filters = ...)` binary per site, run in parallel, used
+    // to be impossible: on 0.17.0-dev.1158 a *filtered* test binary
+    // under `--fuzz` aborted the build runner ("reached unreachable
+    // code", ziglang/zig#25352). On 0.17.0 a filtered binary fuzzes
+    // cleanly (measured with a three-site probe), so per-site steps are
+    // possible now; none exist yet, and `just fuzz` / `mise run fuzz`
+    // call the unfiltered command above.
 }

@@ -20,6 +20,13 @@ check-tools:
     @command -v zig >/dev/null || { echo "missing zig"; exit 1; }
     @echo "tools ok: $(zig version)"
 
+# The Zig toolchain is named in four places (see mise.toml); fail when
+# they disagree. `online=--online` also checks the Dockerfile's per-arch
+# SHA-256 against the digests ziglang.org publishes. Run before pushing
+# any toolchain change.
+check-pins online="":
+    sh tools/check-zig-pins.sh {{online}}
+
 # Run the full quic-zig test suite (currently: smoke).
 test:
     zig build test

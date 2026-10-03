@@ -78,6 +78,14 @@ jobs:
           zig version
           uname -a
 
+      # The four toolchain pin sites (mise.toml lists them) must agree, or
+      # this job tests with a different compiler than the QNS image and
+      # the declared floor. Offline check; pin-lint.yml also verifies the
+      # Dockerfile digests against ziglang.org.
+      - name: Toolchain pins agree
+        if: matrix.os == 'ubuntu-latest'
+        run: sh tools/check-zig-pins.sh
+
       - name: zig build
         run: zig build --summary all
 

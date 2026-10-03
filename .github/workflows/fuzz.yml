@@ -34,7 +34,7 @@ jobs:
       - name: Checkout quic-zig
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Set up mise (zig master + project tools)
+      - name: Set up mise (project tools)
         uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
         with:
           install: true

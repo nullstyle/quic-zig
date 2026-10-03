@@ -1,23 +1,28 @@
 [tools]
-# Zig 0.17 is unreleased, so we track master — but we PIN an exact master
-# build rather than resolving `master` at install time. `zig = "master"`
-# made CI non-reproducible: every job silently got whatever master was
-# published that morning, which is not the compiler any release was
-# verified against, and a Zig-side behaviour change then looked like a
-# flake in our own code.
+# Pinned to the tagged Zig 0.17.0 release. Tagged tarballs are served from
+# https://ziglang.org/download/<version>/ and are retained, unlike the
+# master builds this project pinned while 0.17 was unreleased — those were
+# garbage-collected upstream, so every such pin eventually 404ed.
 #
-# That is not hypothetical. The blocking `rc-fuzz` gate failed for two
-# weeks with "corrupted coverage file ... pcs_len was zero" because CI had
-# drifted to 0.17.0-dev.1282+c0f9b51d8, where `--fuzz` no longer
-# instruments the root module on its own. On the pinned build below the
-# identical 1M-budget run (37.1M executions) completes clean with real
-# coverage — verified on both aarch64-linux and aarch64-macos.
+# Never write `zig = "master"` here. It made CI non-reproducible: every job
+# silently got whatever master was published that morning, which is not the
+# compiler any release was verified against, and a Zig-side behaviour
+# change then looked like a flake in our own code. That is not
+# hypothetical: the blocking `rc-fuzz` gate failed for two weeks with
+# "corrupted coverage file ... pcs_len was zero" because CI had drifted to a
+# master build where `--fuzz` no longer instrumented the root module.
 #
-# To move: bump this, re-verify (full test suite + examples + echo smoke +
-# consumer smoke + a deep fuzz run), then update the floor in
-# build.zig.zon `minimum_zig_version` (currently 0.17.0-dev.1683) and the
-# "Verified toolchain" line in the CHANGELOG entry together.
-zig = "0.17.0-dev.1978+c961124d9"
+# The toolchain is named in four places that must agree. `just check-pins`
+# and the `zig-pin` job in .github/workflows/pin-lint.yml enforce it:
+#   - this file
+#   - build.zig.zon `minimum_zig_version`
+#   - tools/consumer-smoke/build.zig.zon `minimum_zig_version`
+#   - interop/qns/Dockerfile `ZIG_VERSION` (plus its two per-arch SHA-256)
+#
+# To move: bump all four together, re-verify (full test suite + examples +
+# echo smoke + consumer smoke + `just check-windows` + a fuzz run), and
+# name the verified toolchain in the CHANGELOG entry.
+zig = "0.17.0"
 just = "1.49.0"
 python = "3.12.13"
 uv = "0.11.3"
@@ -30,14 +35,12 @@ description = "Run the quic-zig Zig test suite"
 run = "zig build test"
 
 [tasks.fuzz]
-# Deep coverage-guided fuzzing on the unfiltered test binary — a *filtered*
-# test binary under --fuzz still aborts the build-runner (ziglang/zig#25352),
-# so there are deliberately no per-site steps. Single-instance
-# (n_instances = 1), so it saturates one core and rotates across sites.
-# Matches CI (.github/workflows/fuzz.yml) in command and budget: 1M/target
-# ~= 37M executions ~= 5 h. Works on macOS as of the pinned 0.17.0-dev.1252
-# (the dev.1158 macOS abort is fixed; see CONTRIBUTING.md "Fuzzing"), but
-# prefer Linux for long runs since that is what CI exercises.
+# Deep coverage-guided fuzzing on the unfiltered test binary. Limit mode is
+# single-instance (n_instances = 1), so it saturates one core and gives
+# each site its own budget. Matches CI (.github/workflows/fuzz.yml) in
+# command and budget: 1M/target ~= 40M executions. Works on macOS (verified
+# on 0.17.0; see CONTRIBUTING.md "Fuzzing"), but prefer Linux for long runs
+# since that is what CI exercises.
 description = "Deep coverage-guided fuzzing (single-instance, unfiltered)"
 run = "zig build test -Duse-llvm=true --fuzz=1M"
 

@@ -124,26 +124,30 @@ is safe to embed in production. The gates:
       repin to the tag, and http3-zig's `tools/check-boringssl-pin.sh`
       again lints a tag pin.
 
-- [x] **Toolchain pinning policy is decided.** quic-zig **tracks Zig
-      master** during development and will **pin the `0.17.0` tag once
-      it is released**. This is a deliberate choice, not an open gate.
+- [x] **Toolchain pinning policy is decided and executed.** quic-zig
+      tracked Zig master while 0.17 was in development and **pins the
+      tagged `0.17.0` release as of v0.23.0**. It stays on tagged
+      releases from here; tagged tarballs are retained upstream, so
+      the pin no longer has a shelf life.
 
-      The consequence to be aware of: ziglang.org garbage-collects
-      older master dev tarballs, so a master pin has a finite shelf
-      life and will eventually 404. Retention is not one-deep —
-      measured 2026-08-12, `dev.1683` (then current) and `dev.1509`
-      (174 commits back) both served, while `dev.1252` and `dev.1158`
-      were gone — so this is a periodic bump, not a cliff.
+      The toolchain is named in four places that must agree:
+      `mise.toml`, `build.zig.zon` `minimum_zig_version`,
+      `tools/consumer-smoke/build.zig.zon`, and the version + per-arch
+      SHA-256 in `interop/qns/Dockerfile`. `just check-pins` and the
+      `zig-pin` job in `.github/workflows/pin-lint.yml` fail when they
+      disagree. That lint exists because they did: in 2026-09 `main`
+      sat red for eleven days on a pin that had moved in one place and
+      not the others.
 
-      When a pin does expire it presents misleadingly: the Docker jobs
-      go red first because they have no toolchain cache, while every
-      other leg keeps passing off `jdx/mise-action`'s warm cache. If
-      CI ever looks broken *only* in containers, check whether the pin
-      still exists upstream before debugging the container. Bump the
-      pin (mise.toml, `build.zig.zon` `minimum_zig_version`, and the
-      version + per-arch SHA-256 in `interop/qns/Dockerfile`) and
-      re-run. `interop/qns/Dockerfile` also walks Zig's community
-      mirror list, so it tolerates the source vanishing mid-cycle.
+      History worth keeping from the master-pin era: ziglang.org
+      garbage-collects older master tarballs, and an expired pin
+      presents misleadingly — the Docker jobs go red first because
+      they have no toolchain cache, while every other leg keeps
+      passing off `jdx/mise-action`'s warm cache. If CI ever looks
+      broken *only* in containers, check the pin and its digests
+      before debugging the container. `interop/qns/Dockerfile` still
+      walks Zig's community mirror list, so it tolerates one source
+      being down.
 
 ### Platforms
 - [x] Windows `windows-latest` job is green and `continue-on-error` is

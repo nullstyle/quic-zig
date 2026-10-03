@@ -7,10 +7,35 @@ changes.
 
 ## [Unreleased]
 
-- Toolchain pin: mise + zon floor move to 0.17.0-dev.1978+c961124d9,
-  the toolchain the 0.22.0 test re-baseline was verified under — the
-  SentPacket size pin (200) and the e2e suite cannot pass under the
-  old dev.1683 pin.
+### Changed (BREAKING)
+
+- **The toolchain floor is the tagged Zig `0.17.0` release.**
+  `minimum_zig_version` moves from the `0.17.0-dev` master builds this
+  project tracked while 0.17 was in development to `0.17.0`, and
+  `mise.toml` and the QNS Dockerfile pin the same release. Every
+  `0.17.0-dev.*` build orders below `0.17.0`, so a consumer still on a
+  master build gets the floor diagnostic from `build.zig` instead of a
+  build. Migration: pin Zig `0.17.0` (`zig = "0.17.0"` in `mise.toml`).
+  quic-zig itself needed no source change for the move — the tree as
+  it stood at the previous pin (`0.17.0-dev.1978+c961124d9`) builds and
+  passes unmodified on the release — so a consumer already on a late
+  0.17-dev build should need none either; the 0.17.0 release notes
+  list what changed for older ones. This supersedes the never-released
+  dev.1978 pin move (the toolchain the 0.22.0 test re-baseline was
+  verified under; the SentPacket size pin and the e2e suite cannot
+  pass under the older dev.1683 pin).
+
+### CI
+
+- **Toolchain pin agreement lint.** The Zig toolchain is named in four
+  places — `mise.toml`, `build.zig.zon`, `tools/consumer-smoke/build.zig.zon`,
+  and `interop/qns/Dockerfile` — and they had drifted apart: `main`
+  tested against one compiler, declared another as its floor, and built
+  the QNS image with a third. `tools/check-zig-pins.sh` (`just
+  check-pins`) fails on any disagreement; `test.yml` runs it on every
+  push, and the new `zig-pin` job in `pin-lint.yml` additionally checks
+  the Dockerfile's per-arch SHA-256 against the digests ziglang.org
+  publishes.
 
 ## [0.22.0] - 2026-09-20
 

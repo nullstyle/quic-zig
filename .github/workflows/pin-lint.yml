@@ -11,16 +11,28 @@ name: pin-lint
 # The extractor still recognizes the old `.boringssl_zig` key so a
 # one-sided back-pin fails loudly instead of as an unparseable
 # manifest.
+#
+# The `zig-pin` job is the in-repo half: the Zig toolchain is named in
+# four places (mise.toml lists them) and they must agree, including the
+# QNS Dockerfile's per-arch digests against what ziglang.org publishes.
 on:
   push:
     branches: [main]
     paths:
       - build.zig.zon
+      - mise.toml
+      - tools/consumer-smoke/build.zig.zon
+      - interop/qns/Dockerfile
+      - tools/check-zig-pins.sh
       - .github/workflows/pin-lint.yml
   pull_request:
     branches: [main]
     paths:
       - build.zig.zon
+      - mise.toml
+      - tools/consumer-smoke/build.zig.zon
+      - interop/qns/Dockerfile
+      - tools/check-zig-pins.sh
       - .github/workflows/pin-lint.yml
   schedule:
     # Weekly Monday sweep: catches drift introduced on the http3-zig side,
@@ -29,6 +41,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  zig-pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout quic-zig
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Zig toolchain pins agree (four sites + published digests)
+        run: sh tools/check-zig-pins.sh --online
+
   boringssl-pin:
     runs-on: ubuntu-latest
     timeout-minutes: 5

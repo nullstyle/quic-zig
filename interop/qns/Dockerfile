@@ -1,41 +1,32 @@
 FROM martenseemann/quic-network-simulator-endpoint:latest AS build
 
 ARG TARGETPLATFORM
-# Pinned to a 0.17.0-dev master tarball because mise.toml tracks Zig master
-# and HEAD uses 0.17-only forms; tagged 0.16.0 is no longer ABI-compatible.
-# Keep this in step with `mise.toml` — that is the compiler `zig build`
-# actually runs, so a stale pin here builds the image with a *different*
-# compiler than the tree was tested with, and a locally-green checkout can
-# produce a red or unrepresentative interop image. (This previously said
-# to track `build.zig.zon`'s `minimum_zig_version`, which is a floor, not
-# the toolchain; following it had already let this drift a version behind.)
-# Dev tarballs live under /builds/ (no per-version subdirectory), unlike
-# tagged releases which are served from /download/<version>/.
+# Pinned to the tagged Zig 0.17.0 release, the same toolchain `mise.toml`
+# pins. Keep the two in step — that is the compiler `zig build` actually
+# runs, so a stale pin here builds the image with a *different* compiler
+# than the tree was tested with, and a locally-green checkout can produce
+# a red or unrepresentative interop image. `just check-pins` and the
+# `zig-pin` job in .github/workflows/pin-lint.yml fail when the two (or
+# the `minimum_zig_version` floors) disagree.
 #
-# ziglang.org garbage-collects older master dev tarballs, so any pin
-# here eventually 404s. Retention is finite but not one-deep: measured
-# 2026-08-12, dev.1683 (then current) and dev.1509 (174 commits back)
-# both served, while dev.1252 and dev.1158 were gone. So a pin survives
-# some hundreds of commits of master, then dies.
+# Tagged releases are served from /download/<version>/ and are retained.
+# While 0.17 was unreleased this pinned master tarballs from /builds/,
+# which ziglang.org garbage-collects. An expired pin turned this image —
+# and the interop gate that builds it — red, while the rest of CI stayed
+# green purely because jdx/mise-action restores a warm cache and never
+# re-downloads. The Docker jobs, having no such cache, were the canary
+# rather than the cause: if the toolchain ever looks broken only in
+# containers, check this pin and its digests before the container.
 #
-# That is not a hypothetical: dev.1252 outlived its shelf life, which
-# turned this image — and the interop gate that builds it — red, while
-# the rest of CI stayed green purely because jdx/mise-action restores a
-# warm cache and never re-downloads. The Docker jobs, having no such
-# cache, were the canary rather than the cause.
-#
-# Tracking current master (as this pin now does) makes the tarball
-# available again but does not make it durable; it only restarts the
-# same clock. So the fetch below does not trust any single source: it
-# walks the Zig project's own community mirror list and pins the exact
-# bytes. The digests were verified locally against Zig's well-known
-# minisign public key
+# The fetch below still does not trust any single source: it walks the
+# Zig project's community mirrors and pins the exact bytes. The digests
+# were verified locally against Zig's well-known minisign public key
 # (RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U), so the
 # check needs no signing tooling in the image and still fails closed on
 # a bad mirror as well as a missing one.
-ARG ZIG_VERSION=0.17.0-dev.1683+5ceec001b
-ARG ZIG_SHA256_X86_64=e6e5c7e0834626bded90cd786d148bebf211dc80b013afefd631472b57b41f77
-ARG ZIG_SHA256_AARCH64=b18bd9c61b751ec64982359f85c3d4aec3347f4988b9edbfc15a14c055452eee
+ARG ZIG_VERSION=0.17.0
+ARG ZIG_SHA256_X86_64=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+ARG ZIG_SHA256_AARCH64=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils cmake ninja-build clang git python3 perl \
@@ -47,7 +38,7 @@ RUN case "$TARGETPLATFORM" in \
     esac \
     && tarball="zig-${zig_arch}-${ZIG_VERSION}.tar.xz" \
     && for base in \
-            "https://ziglang.org/builds" \
+            "https://ziglang.org/download/${ZIG_VERSION}" \
             "https://zig.squirl.dev" \
             "https://pkg.hexops.org/zig" \
             "https://zigmirror.com"; do \

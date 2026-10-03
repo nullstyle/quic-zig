@@ -118,11 +118,12 @@ capture, keylog wiring, or any posture the PEM config fields don't
 express — private-CA pinning and mTLS themselves need only
 `ca_pem` / `client_cert_pem` / `client_ca_pem`, no BoringSSL types).
 
-**Toolchain**: quic-zig requires Zig `0.17.0-dev` — it tracks Zig
-master. [`mise.toml`](https://github.com/nullstyle/quic-zig/blob/main/mise.toml)
-is the source of truth for the
-verified toolchain; `minimum_zig_version` in `build.zig.zon` records
-the floor. On macOS, run `zig` commands with `COPYFILE_DISABLE=1` in
+**Toolchain**: quic-zig requires the tagged Zig `0.17.0` release.
+[`mise.toml`](https://github.com/nullstyle/quic-zig/blob/main/mise.toml)
+is the source of truth for the verified toolchain, and
+`minimum_zig_version` in `build.zig.zon` records the same version as
+the floor — `0.17.0-dev` master builds are below it and are refused
+with a clear message. On macOS, run `zig` commands with `COPYFILE_DISABLE=1` in
 the environment so AppleDouble (`._*`) metadata files stay out of
 archives and cache hashes.
 
