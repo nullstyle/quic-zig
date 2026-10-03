@@ -7,6 +7,21 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A lost MAX_STREAMS frame was never sent again.** RFC 9000 §13.3
+  says the current stream limit is sent again when the packet with the
+  most recent MAX_STREAMS is lost. The loss path asked
+  `queueMaxStreams` to queue the lost value, and that function ignores
+  a value that does not raise the limit, which the lost value never
+  does: the limit was raised when the frame was first queued. The path
+  also reported a requeue that had not happened, so a PTO whose only
+  content was that frame sent no probe at all. The next grant usually
+  hid the loss, because the limit doubled as the peer opened streams;
+  the last grant before the 4096 cap could not be recovered. Found by
+  reading the code on the way to "credit on close", where the same
+  loss would stop a peer that is out of stream credit for good.
+
 ### CI and tests
 
 - **Both interop workflows ran zero tests in CI and showed green — the

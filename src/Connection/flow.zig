@@ -160,6 +160,26 @@ pub fn queueMaxStreams(conn: *Connection, bidi: bool, maximum_streams: u64) void
     }
 }
 
+/// A packet that carried MAX_STREAMS(`lost_limit`) was declared lost.
+/// RFC 9000 §13.3: the current limit is sent again when the packet
+/// with the most recent MAX_STREAMS for that stream type is lost.
+/// Returns whether a frame was queued.
+///
+/// `queueMaxStreams` cannot do this job: it ignores a value that does
+/// not raise the limit, and the limit was raised when the lost frame
+/// was first queued. A lost frame with an older, lower limit needs
+/// nothing: a later frame superseded it, and that frame has its own
+/// loss event. Under graceful shutdown the peer's limit is frozen at
+/// what it has seen, so nothing is sent again.
+pub fn requeueLostMaxStreams(conn: *Connection, bidi: bool, lost_limit: u64) bool {
+    if (conn.graceful_shutdown) return false;
+    const current = localMaxStreamsSlot(conn, bidi).*;
+    if (lost_limit < current) return false;
+    const pending = pendingMaxStreamsSlot(conn, bidi);
+    if (pending.* == null or current > pending.*.?) pending.* = current;
+    return true;
+}
+
 /// Debit the receive-side flow budgets for a peer frame that raises
 /// `s`'s high-water mark to `new_end`. RFC 9000 §4.1 / §4.5: a
 /// RESET_STREAM final size counts against stream and connection flow

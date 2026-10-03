@@ -216,6 +216,101 @@ test "PTO requeues retransmittable control frames" {
     try std.testing.expect(!conn.pendingPingForLevel(.application).*);
 }
 
+test "a lost MAX_STREAMS frame is sent again while it carries the current limit" {
+    // RFC 9000 §13.3: the current limit is sent again when the packet
+    // with the most recent MAX_STREAMS for that stream type is lost.
+    // Without that, a peer that is out of stream credit never learns
+    // of the credit it was given.
+    const allocator = std.testing.allocator;
+    for ([_]bool{ true, false }) |bidi| {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        try conn.setTransportParams(.{ .initial_max_streams_bidi = 4, .initial_max_streams_uni = 4 });
+        const pending = if (bidi) &conn.pending_frames.max_streams_bidi else &conn.pending_frames.max_streams_uni;
+
+        // The limit goes to 8, and the frame leaves in packet 8.
+        conn.queueMaxStreams(bidi, 8);
+        try std.testing.expectEqual(@as(?u64, 8), pending.*);
+        pending.* = null; // what the send path does once the frame is in a packet
+        var packet: SentPacketTracker.SentPacket = .{
+            .pn = 8,
+            .sent_time_us = 0,
+            .bytes = 90,
+            .ack_eliciting = true,
+            .in_flight = true,
+        };
+        try packet.addRetransmitFrame(allocator, .{ .max_streams = .{ .bidi = bidi, .maximum_streams = 8 } });
+        try conn.sentForLevel(.application).record(packet);
+
+        try conn.tick(conn.ptoDurationForLevel(.application));
+
+        try std.testing.expectEqual(@as(?u64, 8), pending.*);
+        // The frame itself is the probe: no extra PING.
+        try std.testing.expect(!conn.pendingPingForLevel(.application).*);
+    }
+}
+
+test "a lost MAX_STREAMS frame with an older limit is not sent again" {
+    // A later frame carries a higher limit. That frame has its own
+    // loss event; the old value must not go out again.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try conn.setTransportParams(.{ .initial_max_streams_bidi = 4 });
+
+    conn.queueMaxStreams(true, 8);
+    conn.queueMaxStreams(true, 12);
+    conn.pending_frames.max_streams_bidi = null; // both frames were sent
+    var packet: SentPacketTracker.SentPacket = .{
+        .pn = 8,
+        .sent_time_us = 0,
+        .bytes = 90,
+        .ack_eliciting = true,
+        .in_flight = true,
+    };
+    try packet.addRetransmitFrame(allocator, .{ .max_streams = .{ .bidi = true, .maximum_streams = 8 } });
+    try conn.sentForLevel(.application).record(packet);
+
+    try conn.tick(conn.ptoDurationForLevel(.application));
+
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_bidi);
+    // Nothing was requeued, so the probe is a PING.
+    try std.testing.expect(conn.pendingPingForLevel(.application).*);
+}
+
+test "a lost MAX_STREAMS frame is not sent again under graceful shutdown" {
+    // Graceful shutdown freezes the peer's stream limit at what the
+    // peer has seen. A limit it never saw stays unseen.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try conn.setTransportParams(.{ .initial_max_streams_bidi = 4 });
+
+    conn.queueMaxStreams(true, 8);
+    conn.pending_frames.max_streams_bidi = null; // the frame was sent
+    var packet: SentPacketTracker.SentPacket = .{
+        .pn = 8,
+        .sent_time_us = 0,
+        .bytes = 90,
+        .ack_eliciting = true,
+        .in_flight = true,
+    };
+    try packet.addRetransmitFrame(allocator, .{ .max_streams = .{ .bidi = true, .maximum_streams = 8 } });
+    try conn.sentForLevel(.application).record(packet);
+    conn.beginGracefulShutdown();
+
+    try conn.tick(conn.ptoDurationForLevel(.application));
+
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_bidi);
+    try std.testing.expect(conn.pendingPingForLevel(.application).*);
+}
+
 test "PTO arms PING when no retransmittable data can be requeued" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

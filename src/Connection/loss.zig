@@ -269,8 +269,7 @@ pub fn dispatchLostControlFramesOnPath(
                 any = true;
             },
             .max_streams => |ms| {
-                conn.queueMaxStreams(ms.bidi, ms.maximum_streams);
-                any = true;
+                any = conn_flow.requeueLostMaxStreams(conn, ms.bidi, ms.maximum_streams) or any;
             },
             .data_blocked => |db| {
                 any = conn_flow.requeueDataBlocked(conn, db.maximum_data) or any;
