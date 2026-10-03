@@ -102,10 +102,20 @@ Then wire the module in `build.zig`:
 ```zig
 const quic_dep = b.dependency("quic", .{
     .target = target,
-    .optimize = optimize,
+    .release = optimize != .debug,
 });
 exe.root_module.addImport("quic", quic_dep.module("quic"));
 ```
+
+Pass `release`, not `optimize`. quic-zig has two build modes, Debug
+and ReleaseSafe (it refuses ReleaseFast and ReleaseSmall: they remove
+the safety checks on the code that parses network input), so its
+option is the boolean `release`. This page said `.optimize = optimize`
+through 0.24.0, and that was wrong: the package has no such option, so
+the build printed `error: invalid option: "optimize"` and went on, and
+quic-zig and its BoringSSL were compiled in **Debug** inside a release
+build of the application. To check what you get, run `zig build
+--verbose` and read the `-O` flag in front of `-Mquic=`.
 
 Application code imports it as:
 

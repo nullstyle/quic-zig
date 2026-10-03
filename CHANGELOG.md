@@ -7,6 +7,30 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documented way to depend on this package built it in Debug.**
+  README.md and EMBEDDING.md told consumers to pass
+  `.optimize = optimize` to `b.dependency("quic", ...)`. The package
+  has no `optimize` option: it builds in Debug or in ReleaseSafe, so
+  its option is the boolean `release`. Zig reports the unknown option
+  (`error: invalid option: "optimize"`, with a stack trace) and goes
+  on, and quic-zig then takes its default. Measured on the 0.24.0
+  tarball with `zig build --verbose -Doptimize=ReleaseSafe` in a fresh
+  consumer: `-Osafe` for the application's module, `-Odebug` for
+  `quic` and for `boringssl`. So an application that followed the
+  docs shipped a Debug QUIC stack and Debug BoringSSL inside its
+  release build, unless it was built with `zig build --release`. The
+  snippet is now `.release = optimize != .debug` (`-Osafe` for all
+  three, and no error). The in-tree consumer smoke had the same line,
+  and printed that error in every CI run of its step, which passed;
+  it now uses the right option and stops the build when the `quic`
+  module is not in the mode the build asked for. Found by building a
+  fresh consumer of the published 0.24.0 tarball and reading its
+  whole output, not its last line. If you depend on quic-zig, check
+  your own build: `zig build --verbose`, and read the `-O` flag in
+  front of `-Mquic=`.
+
 ### CI and tests
 
 - **The interop server's stream window is 20, and `server x quiche x
