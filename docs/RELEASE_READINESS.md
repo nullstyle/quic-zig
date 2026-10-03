@@ -496,6 +496,20 @@ packet to a client that sends one request per packet. The bench
 harness makes its handshake without packets. Each is a candidate for
 the next sprint; none is new in this release.
 
+Found after the tag, and also not new: `server x quic-go x
+handshakecorruption` fails about 2 runs in 5. A second run of the wide
+matrix on the release's server code (run 37155539640) had that one
+failed cell (`succeeded=42 failed=1`), where the first had none. On a
+developer machine the cell failed 2 runs of 5 on the v0.24.0 code and
+2 of 5 on the v0.23.0 code: quic-go's client gives up on one of the 50
+handshakes the test makes through 30% packet corruption. One green run
+of the wide matrix was read as "no failed cell", which was true of the
+run and not of the code. It is the same kind of fault as the long tail
+above, with a cheaper way to see it. Also after the tag, a stream
+window of 20 for the interop server was tried and taken back the same
+day: it made the quiche cell pass 15 runs of 15 and made `zerortt`
+fail for every client (the CHANGELOG has both stories).
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig

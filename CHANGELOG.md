@@ -54,6 +54,23 @@ changes.
   (`endpoint_bidi_stream_limit`) has the three windows side by side,
   and what could serve both tests (a window per test case, or 40):
   not measured.
+- **`server x quic-go x handshakecorruption` fails about 2 runs in 5,
+  and did so before this release.** The wide matrix (16 tests) ran
+  green on the 0.24.0 code once (run 37149418254). A second run on the
+  same server code (run 37155539640) had one failed cell, this one:
+  `succeeded=42 failed=1`. The test makes 50 connections through a
+  link that damages 30% of the packets in each direction, in bursts of
+  three, and quic-go's client gives up on one of them ("handshake did
+  not complete in time", or "no recent network activity"). On a
+  developer machine the cell failed 2 runs of 5 on the 0.24.0 code and
+  2 runs of 5 on the 0.23.0 code, with the same two messages. So the
+  release did not cause it, and one green run of that matrix did not
+  mean the cell was sound. It belongs with the long tail the loss and
+  reorder bench cells show (recovery that sometimes takes far too
+  long), and it is the cheapest way to see that fault: 75 s per run,
+  2 failures in 5. It is not put in the wrapper's `--flaky` class: that
+  class is for a fault that is not ours, and this one may be. The
+  weekly matrix does not run this test.
 - **Measured and not adopted: an interop server loop that empties its
   socket before it sends.** The loop reads one datagram per pass, so
   it answers a client that sends one request per packet with one
