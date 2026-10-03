@@ -72,8 +72,13 @@ is safe to embed in production. The gates:
 - [x] Foreign-peer interop is a **hard** CI gate, not advisory: the
       `quic-go-interop` workflow is authored and blocking on push / PR,
       using a pinned quic-interop-runner ref and pinned quic-go image for
-      QNS client `H,D`. Verified green on `main` at commit
-      `6bbc43280383df2f901528a426d6698e78446308`.
+      QNS client `H,D`. This box was first checked on 2026-07-05 against
+      a green run at `6bbc432` that had run zero tests, as had every run
+      of the gate until 2026-10-03 (see "v0.23.0 toolchain release").
+      It is checked now on evidence: the first real pass is run
+      37114532615 at `fe6b5b8` (`interop evidence: pairs=1 cells=2
+      succeeded=2 failed=0 unsupported=0 skipped=0`), and the wrapper
+      fails the gate when that line shows a skipped or failed cell.
 - [x] RFC 9000 §10.2 closing/draining edge-case coverage audited and
       backfilled (roadmap H1 #16). Audited; all 7 verified gaps are now
       covered in `tests/conformance/rfc9000_streams_flow.zig`: closing→draining
@@ -285,6 +290,79 @@ The first full-budget gate run since v0.13.1, on the tagged toolchain:
 `n_runs=2,075,711 unique_runs=9,326 pcs_len=40,982` across 40 sites,
 coverage 3546/40982 (8.65%), no failing site (Linux x86_64, Zig
 0.17.0).
+
+**Tagged 2026-10-03 at `d4ba4d9`.** Four of the five gates were real
+on that commit: `test` (Linux x86-64 and aarch64, macOS 15 and 26,
+Windows, `-Dsanitize-c=full`), rc-fuzz (`n_runs=2,249,381
+unique_runs=9,268 pcs_len=40,969`, no failing site), the QNS image
+build, and pin-lint. A fresh project then consumed the release tarball
+on Zig 0.17.0.
+
+**The fifth gate was empty, and always had been.** `quic-go-interop`
+showed green on `d4ba4d9` and had run zero tests. Its log says
+"quic-zig client not compliant", then "Not compliant, skipping". Of
+its 111 runs since the gate was added on 2026-07-05, 96 reached the
+runner, every one of those skipped its only pair, and 93 showed green.
+The advisory weekly matrix (`interop.yml`, quic-zig as server) never
+had a green job: each of its 21 scheduled runs since the first on
+2026-05-10 failed at the matrix step or before it, and
+`continue-on-error` showed every one as a green run. Every run whose
+log still exists (2026-07-26 on) ran zero tests; that includes the
+dispatched run on the commit that made BBRv3 the default (v0.16.0).
+
+The cause is one line in the runner's log bundle: `interface_name
+requires Docker Engine v28.1 or later`. The pinned runner's compose
+file names the simulator's interfaces. GitHub's ubuntu image carries
+Engine 28.0.4. So no container ever started in CI, the runner's
+compliance preflight reported that as "not compliant", skipped the
+pair, and exited 0. The runner's own workflow installs a newer Engine
+for this reason; ours never did. Local runs were real all along,
+because the local Engine was newer.
+
+So no tag made since the gate was added carries a real result from
+it, v0.23.0 included, and the advisory matrix never passed. Two
+release notes cite a CI interop result and are wrong as written: 0.11.0 (CUBIC,
+pacing, and HyStart++ as defaults, "validated by the blocking quic-go
+interop gate and the weekly matrix") and 0.16.0 (BBRv3 as the default,
+"plus the full cross-implementation interop matrix"). 0.7.3 added
+`--assume-compliant quic-go` for what it called a stale preflight; the
+preflight was not stale. No tag is withdrawn: the code of the v0.23.0
+tag is the code the repaired gates then ran on (only CI files, the
+wrapper tool, and docs differ), and the results are below.
+
+Repaired after the tag (`fe6b5b8` and the commits that follow it):
+both workflows install a current Engine and a host `tshark`; the
+wrapper refuses an Engine that is too old, prints what
+`docker compose` said when a preflight fails, and reads the runner's
+result file after the run, so a skipped cell, a failed cell, or a run
+in which nothing succeeded is a failed step. Its tests use the v0.23.0
+gate's own result file and the first real matrix result, and 17
+mutants of its rules all die. The first attempt at this (`06f3354`)
+added a guard that counted cells; a skipped pair is written as cells
+with a null result, so that guard could not fail either, and it had
+not been mutation-checked.
+
+**The first real results, on the code of the tag.** The release gate
+passed in CI for the first time (run 37114532615): quic-zig as client
+against the pinned quic-go, handshake and transfer, with the real
+preflight. The first real matrix in CI (run 37115312707, quic-zig as
+server): quic-go and ngtcp2 passed handshake, transfer, chacha20,
+multiplexing, transferloss, and blackhole; quiche passed four, does
+not support chacha20, and failed multiplexing (`pairs=3 cells=21
+succeeded=19 failed=1 unsupported=1 skipped=0`); goodput was 9.30,
+9.16, and 9.11 Mbps on the runner's 10 Mbps link. A local run gave
+the same cells. The one failure is old (it is the
+same against server images built in May and in August) and its cause
+is known: quiche's test client cuts a request short when its send
+window is full, and this library's doubling stream credit lets it
+burst into that state. The CHANGELOG entry after 0.23.0 has the
+detail. The weekly matrix lists that cell as a known failure, in a
+list that fails the job when a listed cell passes.
+
+The pattern across all four (the fuzz gate, the weekly fuzz job, the
+interop matrix, the interop hard gate) is the same, and it is the rule
+this project now applies to its own gates: a run's conclusion is not
+evidence. Read the line that counts what ran.
 
 ### RC/soak criterion toward 1.0
 

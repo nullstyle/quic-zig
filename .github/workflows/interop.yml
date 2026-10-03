@@ -46,6 +46,20 @@ jobs:
       # pair in result.json, summarized below.
       TESTS: ${{ github.event.inputs.tests || 'H,D,C,M,L2,B,G' }}
       CLIENTS: ${{ github.event.inputs.clients || 'quic-go,quiche,ngtcp2' }}
+      # Cells that fail for a known reason (`peer:test`). A listed cell
+      # that fails does not fail the job. A listed cell that passes
+      # does, with a message to take it off this list, so the list
+      # cannot go stale; a cell that is not in a given run is ignored.
+      #
+      # quiche:multiplexing — quiche's test client cuts a request short
+      # when its send window is full and never finishes it, and this
+      # library's stream credit (doubled each time a quarter is opened)
+      # lets it burst into that state. Fails every time, against server
+      # images back to 2026-05-11. Measured 2026-10-03; the detail is
+      # above `stalled_peer_keepalive_idle_us` in
+      # interop/qns_endpoint.zig. The fix is credit returned as streams
+      # close, in the library.
+      KNOWN_FAILURES: quiche:multiplexing
     steps:
       - name: Checkout quic-zig
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -145,6 +159,7 @@ jobs:
             --clients "${CLIENTS}" \
             --tests "${TESTS}" \
             --quic-go-image "${QUIC_GO_IMAGE}" \
+            --known-failures "${KNOWN_FAILURES}" \
             --log-dir "${{ github.workspace }}/interop-logs/matrix" \
             --json "${{ github.workspace }}/interop-results/matrix.json"
 

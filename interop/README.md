@@ -110,18 +110,29 @@ process). Both CI workflows install a host `tshark`.
 The last line of a run is the evidence:
 
 ```text
-interop evidence: pairs=1 cells=2 succeeded=2 failed=0 unsupported=0 skipped=0
+interop evidence: pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0 skipped=0
 ```
 
 A cell is one test case or one measurement for one client/server pair.
-The wrapper exits non-zero when a cell failed, when a cell was skipped,
-or when no cell succeeded. With `--strict`, an `unsupported` cell is a
-failure too; the quic-go hard gate uses it.
+Each cell that is not a plain success is named on a line of its own
+below the evidence line. The wrapper exits non-zero when a cell failed,
+when a cell was skipped, or when no cell succeeded. With `--strict`, an
+`unsupported` cell is a failure too; the quic-go hard gate uses it.
+
+`--known-failures peer:test,...` lists cells that are expected to fail
+(the test by runner name, or by a short selector from the list below).
+A listed cell that fails is counted as `known_failed` and does not fail
+the run. A listed cell that passes does fail the run, with a message to
+take it off the list, so the list cannot go stale. The weekly matrix
+lists `quiche:multiplexing`; the comment above
+`stalled_peer_keepalive_idle_us` in `interop/qns_endpoint.zig` has the
+measured cause.
 
 Read that line. Do not read the runner's exit code, or the colour of a
 CI run. The runner's exit code is its count of failed test cases, so
 the runner exits 0 when a compliance preflight fails and it skips the
-pair. From 2026-07-05 to 2026-10-03 both interop workflows ran on an
+pair. (The wrapper also checks that the runner's exit code and the
+result file agree, and deletes any old result file before a run.) From 2026-07-05 to 2026-10-03 both interop workflows ran on an
 Engine that was too old, skipped every pair that way, ran zero tests,
 and showed green.
 

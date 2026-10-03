@@ -325,9 +325,11 @@ live only in the git repository.
   [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md)
   for the platform tiers and graduation checklist.
 - BBRv3 congestion control (draft-ietf-ccwg-bbr-06) is the default as
-  of 0.16.0, gated on the in-tree multi-flow fairness cells and the
-  interop battery; `congestion_control = .cubic` is the one-line
-  rollback. Large-scale performance tuning remains future work.
+  of 0.16.0, gated on the in-tree multi-flow fairness cells;
+  `congestion_control = .cubic` is the one-line rollback. The interop
+  battery cited for that change had not run in CI; the first real
+  cross-implementation matrix ran on 2026-10-03 (see the CHANGELOG).
+  Large-scale performance tuning remains future work.
 
 ## License
 

@@ -94,7 +94,8 @@ pub const Config = struct {
     max_datagram_size: u64 = 1200,
     /// Which controller `CongestionController.init` builds. BBRv3 is
     /// the default as of 0.16.0 (gated on the multi-flow fairness
-    /// cells + interop battery — see congestion/Bbr.zig's flip note);
+    /// cells — see congestion/Bbr.zig's flip note, and its correction
+    /// about the interop battery);
     /// CUBIC (RFC 9438, the 0.11–0.15 default) is the one-line
     /// rollback, NewReno the conservative floor.
     algorithm: Algorithm = .bbr,

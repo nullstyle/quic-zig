@@ -121,6 +121,27 @@ const endpoint_server_cid_desired_last_seq: u8 = 1;
 // 10× that floor). A larger value would risk leaving the runner's
 // 30s deadline with too few wake-up attempts to land one before
 // quiche idle-times out.
+//
+// MEASURED 2026-10-03, and it corrects the theory above: this
+// keepalive does not rescue the cell, and nothing is parked. `server x
+// quiche x multiplexing` fails every time (4 of 4 on this tree, and 2
+// of 2 each against server images built 2026-05-11 and 2026-08-12),
+// with the PINGs going out. In quiche's log the 12 to 25 requests that
+// never complete were each written short and without FIN (`tx frm
+// STREAM id=1960 off=0 len=20 fin=false`, never followed up). quiche's
+// HTTP/0.9 test client discards the byte count `stream_send` returns
+// (`apps/src/common.rs`, `send_requests`: `Ok(v) => v`), so a request
+// that meets an exhausted send window is cut and never finished. What
+// exhausts the window: this library grants stream credit when a
+// quarter of the limit has been OPENED and doubles it (1000, 2000,
+// 4000, 4096), so quiche sends its 1999 one-packet requests in large
+// bursts, the simulator's 25-packet queue drops about 8% of them, and
+// quiche's congestion window collapses mid-burst. An initial limit of
+// 100 does not help (200, 400, 800, ...: 25 cut requests). A server
+// that returns credit as streams CLOSE keeps the bursts small; that is
+// library work (it is also what lifting the lifetime stream cap
+// needs), not an endpoint knob. Until then the weekly matrix lists
+// this cell under `--known-failures`.
 const stalled_peer_keepalive_idle_us: u64 = 2_000_000;
 const stalled_peer_keepalive_min_period_us: u64 = 1_000_000;
 // Lifetime cap on extra client-issued SCIDs the qns driver feeds

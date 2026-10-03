@@ -219,6 +219,14 @@ zig build external-interop -- runner --role client --servers quic-go --tests H,D
 See [interop/README.md](https://github.com/nullstyle/quic-zig/blob/main/interop/README.md) for the full command surface
 and generated-artifact locations.
 
+A run ends with one `interop evidence:` line that counts the cells
+that succeeded, failed, were unsupported, and were skipped. That line
+is the result. The runner itself exits 0 when it skips a pair, and both
+interop workflows showed green on zero tests for three months that way
+(the CI machine's Docker Engine was older than the 28.1 the runner
+needs). The wrapper now fails on a skipped cell and refuses an Engine
+that is too old; see "Reading a Run" in the interop README.
+
 ## Releases
 
 Downstream projects pin quic-zig by version and hash; these rules exist

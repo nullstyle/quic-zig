@@ -70,6 +70,10 @@ const Config = struct {
     /// failure too. For a gate whose cells this implementation is
     /// required to pass.
     strict: bool = false,
+    /// A comma list of `peer:test` cells that are expected to fail. A
+    /// listed cell that fails does not fail the run; one that passes
+    /// does, so the list cannot go stale.
+    known_failures: []const u8 = "",
 };
 
 const RunnerRole = enum {
@@ -135,7 +139,7 @@ fn usage() void {
         \\usage:
         \\  zig build external-interop -- preflight [--image quic-zig-qns:local] [--dry-run]
         \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version <ver> (also needs matching --build-arg hashes)] [--dry-run]
-        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--assume-compliant quic-go] [--strict] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
+        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--assume-compliant quic-go] [--strict] [--known-failures quiche:multiplexing] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
         \\
     , .{});
 }
@@ -236,6 +240,11 @@ fn parseRunner(allocator: std.mem.Allocator, args: []const []const u8, cfg: *Con
             i += 1;
         } else if (std.mem.eql(u8, arg, "--strict")) {
             cfg.strict = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--known-failures")) {
+            i += 1;
+            if (i >= args.len) return error.MissingKnownFailures;
+            cfg.known_failures = args[i];
             i += 1;
         } else {
             std.debug.print("unknown runner argument: {s}\n", .{arg});
@@ -445,12 +454,11 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     const code = try runCommandCode(io, cmd.items, overlay, cfg.dry_run);
     if (cfg.dry_run) return;
 
-    // The runner's exit code is its count of failed test cells, so a
+    // The runner's exit code is its count of failed test cases, so a
     // run that skipped every pair exits 0. The result file is the
     // evidence; a clean exit code alone is not a pass.
-    const proven = reportEvidence(allocator, io, cfg.json_path.?, cfg.strict);
-    if (code != 0) std.process.exit(code);
-    if (!proven) std.process.exit(1);
+    const proven = reportEvidence(allocator, io, cfg.json_path.?, cfg.strict, cfg.known_failures, code);
+    if (!proven) std.process.exit(if (code != 0) code else 1);
 }
 
 /// What the runner's result file says happened, cell by cell. A cell is
@@ -458,7 +466,15 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
 const Evidence = struct {
     pairs: usize = 0,
     succeeded: usize = 0,
+    /// Failed, and not on the `--known-failures` list.
     failed: usize = 0,
+    /// Failed, and on the list.
+    known_failed: usize = 0,
+    /// The part of `known_failed` that is test cases, not measurements:
+    /// the runner's exit code counts those and nothing else.
+    known_failed_tests: usize = 0,
+    /// On the list, and succeeded: the list is out of date.
+    fixed: usize = 0,
     unsupported: usize = 0,
     /// Cells the runner never ran. When a compliance preflight fails,
     /// the runner skips the pair, writes `"result": null` for each of
@@ -467,29 +483,43 @@ const Evidence = struct {
     skipped: usize = 0,
 
     fn cells(ev: Evidence) usize {
-        return ev.succeeded + ev.failed + ev.unsupported + ev.skipped;
-    }
-
-    fn count(ev: *Evidence, cell: std.json.Value) !void {
-        if (cell != .object) return error.InvalidResultJson;
-        const result = cell.object.get("result") orelse return error.InvalidResultJson;
-        switch (result) {
-            .null => ev.skipped += 1,
-            .string => |s| {
-                if (std.mem.eql(u8, s, "succeeded")) {
-                    ev.succeeded += 1;
-                } else if (std.mem.eql(u8, s, "failed")) {
-                    ev.failed += 1;
-                } else if (std.mem.eql(u8, s, "unsupported")) {
-                    ev.unsupported += 1;
-                } else return error.InvalidResultJson;
-            },
-            else => return error.InvalidResultJson,
-        }
+        return ev.succeeded + ev.failed + ev.known_failed + ev.unsupported + ev.skipped;
     }
 };
 
-fn summarizeResults(allocator: std.mem.Allocator, bytes: []const u8) !Evidence {
+/// The implementation on the other side of quic-zig in a pair.
+fn peerOf(client: []const u8, server: []const u8) []const u8 {
+    return if (std.mem.eql(u8, client, "quic-zig")) server else client;
+}
+
+/// True when `known` (a comma list of `peer:test`, the test by runner
+/// name or by this wrapper's short selector) names this cell.
+fn isKnownFailure(known: []const u8, peer: []const u8, test_name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, known, ',');
+    while (it.next()) |raw| {
+        const entry = std.mem.trim(u8, raw, " \t\r\n");
+        const colon = std.mem.findScalar(u8, entry, ':') orelse continue;
+        if (!std.mem.eql(u8, entry[0..colon], peer)) continue;
+        if (std.mem.eql(u8, aliasCase(entry[colon + 1 ..]), test_name)) return true;
+    }
+    return false;
+}
+
+fn stringItems(value: std.json.Value) ![]const std.json.Value {
+    if (value != .array) return error.InvalidResultJson;
+    for (value.array.items) |item| if (item != .string) return error.InvalidResultJson;
+    return value.array.items;
+}
+
+/// Counts the cells of a runner result file. `known` is the
+/// `--known-failures` list. Each cell that is not a plain success is
+/// also named, one per line, in `notes` when it is given.
+fn summarizeResults(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    known: []const u8,
+    notes: ?*std.ArrayList(u8),
+) !Evidence {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidResultJson;
@@ -499,27 +529,69 @@ fn summarizeResults(allocator: std.mem.Allocator, bytes: []const u8) !Evidence {
     const measurements = root.get("measurements") orelse return error.InvalidResultJson;
     const tests = root.get("tests") orelse return error.InvalidResultJson;
     if (results != .array or measurements != .array or tests != .object) return error.InvalidResultJson;
+    const clients = try stringItems(root.get("clients") orelse return error.InvalidResultJson);
+    const servers = try stringItems(root.get("servers") orelse return error.InvalidResultJson);
 
-    var ev: Evidence = .{ .pairs = results.array.items.len };
-    var tests_per_pair: usize = 0;
-    for (results.array.items) |row| {
-        if (row != .array) return error.InvalidResultJson;
-        tests_per_pair = row.array.items.len;
-        for (row.array.items) |cell| try ev.count(cell);
-    }
+    // The runner writes one row per pair: for each client, each server.
+    const pairs = results.array.items.len;
+    if (pairs != clients.len * servers.len) return error.InvalidResultJson;
+    var ev: Evidence = .{ .pairs = pairs };
 
     // `tests` names the test cases and the measurements together, and a
     // pair's `results` row always has one cell per test case, so the
     // difference is how many measurements each pair owes. A measurement
     // that did not run is absent, not null.
-    const measurements_per_pair = tests.object.count() -| tests_per_pair;
+    var tests_per_pair: usize = 0;
     var measurement_cells: usize = 0;
-    for (measurements.array.items) |row| {
-        if (row != .array) return error.InvalidResultJson;
-        measurement_cells += row.array.items.len;
-        for (row.array.items) |cell| try ev.count(cell);
+    for ([_]std.json.Value{ results, measurements }, [_]bool{ true, false }) |table, is_test| {
+        for (table.array.items, 0..) |row, r| {
+            if (row != .array) return error.InvalidResultJson;
+            if (r >= pairs) return error.InvalidResultJson;
+            const peer = peerOf(clients[r / servers.len].string, servers[r % servers.len].string);
+            if (is_test) tests_per_pair = row.array.items.len else measurement_cells += row.array.items.len;
+            for (row.array.items) |cell| {
+                if (cell != .object) return error.InvalidResultJson;
+                const abbr = cell.object.get("abbr") orelse return error.InvalidResultJson;
+                if (abbr != .string) return error.InvalidResultJson;
+                const described = tests.object.get(abbr.string) orelse return error.InvalidResultJson;
+                if (described != .object) return error.InvalidResultJson;
+                const name = described.object.get("name") orelse return error.InvalidResultJson;
+                if (name != .string) return error.InvalidResultJson;
+                const listed = isKnownFailure(known, peer, name.string);
+
+                const result = cell.object.get("result") orelse return error.InvalidResultJson;
+                const outcome: []const u8 = switch (result) {
+                    .null => "skipped",
+                    .string => |s| s,
+                    else => return error.InvalidResultJson,
+                };
+                var label: []const u8 = outcome;
+                if (std.mem.eql(u8, outcome, "succeeded")) {
+                    ev.succeeded += 1;
+                    if (!listed) continue;
+                    ev.fixed += 1;
+                    label = "succeeded, but is on the known-failures list";
+                } else if (std.mem.eql(u8, outcome, "failed")) {
+                    if (listed) {
+                        ev.known_failed += 1;
+                        if (is_test) ev.known_failed_tests += 1;
+                        label = "failed (known)";
+                    } else ev.failed += 1;
+                } else if (std.mem.eql(u8, outcome, "unsupported")) {
+                    ev.unsupported += 1;
+                } else if (std.mem.eql(u8, outcome, "skipped")) {
+                    ev.skipped += 1;
+                } else return error.InvalidResultJson;
+                if (notes) |out| {
+                    const line = try allocator.print("  {s}:{s}: {s}\n", .{ peer, name.string, label });
+                    defer allocator.free(line);
+                    try out.appendSlice(allocator, line);
+                }
+            }
+        }
     }
-    ev.skipped += (ev.pairs * measurements_per_pair) -| measurement_cells;
+    const measurements_per_pair = tests.object.count() -| tests_per_pair;
+    ev.skipped += (pairs * measurements_per_pair) -| measurement_cells;
     return ev;
 }
 
@@ -529,28 +601,52 @@ fn evidenceProblem(ev: Evidence, strict: bool) ?[]const u8 {
     if (ev.skipped != 0) return "the runner skipped cells: a failed compliance preflight skips the pair and still exits 0";
     if (ev.failed != 0) return "cells failed";
     if (ev.succeeded == 0) return "no cell succeeded";
+    if (ev.fixed != 0) return "a known failure passed: remove it from --known-failures";
     if (strict and ev.unsupported != 0) return "--strict needs every cell to succeed, and some were unsupported";
     return null;
 }
 
-/// Prints the one line that says what the run proved, and returns
-/// whether it is a pass.
-fn reportEvidence(allocator: std.mem.Allocator, io: std.Io, json_path: []const u8, strict: bool) bool {
+/// The runner exits with its count of failed test cases (modulo 256).
+/// The result file must account for that number: none, or exactly the
+/// known failures. Anything else means the two disagree.
+fn exitCodeExplained(ev: Evidence, runner_exit_code: u8) bool {
+    return runner_exit_code == @as(u8, @truncate(ev.known_failed_tests));
+}
+
+/// Prints the line that says what the run proved, names each cell that
+/// is not a plain success, and returns whether the run is a pass.
+fn reportEvidence(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    json_path: []const u8,
+    strict: bool,
+    known: []const u8,
+    runner_exit_code: u8,
+) bool {
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, json_path, allocator, .limited(64 * 1024 * 1024)) catch |err| {
         std.debug.print("interop evidence: NOT A PASS: no result file at {s} ({s})\n", .{ json_path, @errorName(err) });
         return false;
     };
     defer allocator.free(bytes);
-    const ev = summarizeResults(allocator, bytes) catch |err| {
+    var notes: std.ArrayList(u8) = .empty;
+    defer notes.deinit(allocator);
+    const ev = summarizeResults(allocator, bytes, known, &notes) catch |err| {
         std.debug.print("interop evidence: NOT A PASS: cannot read {s} ({s})\n", .{ json_path, @errorName(err) });
         return false;
     };
     std.debug.print(
-        "interop evidence: pairs={d} cells={d} succeeded={d} failed={d} unsupported={d} skipped={d}\n",
-        .{ ev.pairs, ev.cells(), ev.succeeded, ev.failed, ev.unsupported, ev.skipped },
+        "interop evidence: pairs={d} cells={d} succeeded={d} failed={d} known_failed={d} unsupported={d} skipped={d}\n{s}",
+        .{ ev.pairs, ev.cells(), ev.succeeded, ev.failed, ev.known_failed, ev.unsupported, ev.skipped, notes.items },
     );
     if (evidenceProblem(ev, strict)) |problem| {
         std.debug.print("interop evidence: NOT A PASS: {s}\n", .{problem});
+        return false;
+    }
+    if (!exitCodeExplained(ev, runner_exit_code)) {
+        std.debug.print(
+            "interop evidence: NOT A PASS: the runner exited {d}, and the result file accounts for {d} failed test cases\n",
+            .{ runner_exit_code, ev.known_failed_tests },
+        );
         return false;
     }
     return true;
@@ -692,6 +788,14 @@ fn prepareRunnerOutputs(io: std.Io, cfg: Config) !void {
     if (cfg.dry_run) return;
     try std.Io.Dir.cwd().deleteTree(io, cfg.log_dir.?);
     try ensureParentDir(io, cfg.log_dir.?);
+
+    // The result file is read back as the evidence of this run. One
+    // left over from an earlier run would be read as this run's result
+    // if the runner stopped before it wrote a new one.
+    std.Io.Dir.cwd().deleteFile(io, cfg.json_path.?) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 
     // The interop runner owns the log directory and fails fast if it
     // already exists. Only prepare the JSON parent when doing so does not
@@ -1147,7 +1251,7 @@ test "evidence: a skipped pair is not a pass" {
     const skipped_run =
         \\{"start_time": 1791017942.8862, "end_time": 1791017946.71258, "log_dir": "/home/runner/work/quic-zig/quic-zig/interop-logs/quic-go-hard", "servers": ["quic-go"], "clients": ["quic-zig"], "urls": {"quic-zig": "https://github.com/nullstyle/quic-zig", "quic-go": "https://github.com/quic-go/quic-go"}, "tests": {"H": {"name": "handshake", "desc": "Handshake completes successfully."}, "DC": {"name": "transfer", "desc": "Stream data is being sent and received correctly. Connection close completes with a zero error code."}}, "quic_version": "0x1", "results": [[{"abbr": "H", "name": "handshake", "result": null}, {"abbr": "DC", "name": "transfer", "result": null}]], "measurements": [[]]}
     ;
-    const ev = try summarizeResults(std.testing.allocator, skipped_run);
+    const ev = try summarizeResults(std.testing.allocator, skipped_run, "", null);
     try std.testing.expectEqual(@as(usize, 1), ev.pairs);
     try std.testing.expectEqual(@as(usize, 2), ev.cells());
     try std.testing.expectEqual(@as(usize, 2), ev.skipped);
@@ -1167,7 +1271,7 @@ test "evidence: a skipped measurement is absent, and still counted" {
         \\             [{"abbr": "H", "name": "handshake", "result": null}]],
         \\ "measurements": [[{"name": "goodput", "abbr": "G", "result": "succeeded", "details": "9000 kbps"}], []]}
     ;
-    const ev = try summarizeResults(std.testing.allocator, half_run);
+    const ev = try summarizeResults(std.testing.allocator, half_run, "", null);
     try std.testing.expectEqual(@as(usize, 2), ev.pairs);
     try std.testing.expectEqual(@as(usize, 4), ev.cells());
     try std.testing.expectEqual(@as(usize, 2), ev.succeeded);
@@ -1184,7 +1288,7 @@ test "evidence: a pass needs every cell run and none failed" {
         \\              {"abbr": "DC", "name": "transfer", "result": "succeeded"}]],
         \\ "measurements": [[]]}
     ;
-    const ok = try summarizeResults(allocator, passed);
+    const ok = try summarizeResults(allocator, passed, "", null);
     try std.testing.expectEqual(@as(usize, 2), ok.succeeded);
     try std.testing.expectEqual(@as(usize, 0), ok.skipped);
     try std.testing.expectEqual(@as(?[]const u8, null), evidenceProblem(ok, false));
@@ -1198,7 +1302,7 @@ test "evidence: a pass needs every cell run and none failed" {
         \\ "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"}]],
         \\ "measurements": [[{"name": "goodput", "abbr": "G", "result": "failed", "details": ""}]]}
     ;
-    const bad = try summarizeResults(allocator, failed_measurement);
+    const bad = try summarizeResults(allocator, failed_measurement, "", null);
     try std.testing.expectEqual(@as(usize, 1), bad.failed);
     try std.testing.expect(evidenceProblem(bad, false) != null);
 
@@ -1211,7 +1315,7 @@ test "evidence: a pass needs every cell run and none failed" {
         \\              {"abbr": "DC", "name": "transfer", "result": "unsupported"}]],
         \\ "measurements": [[]]}
     ;
-    const partial = try summarizeResults(allocator, unsupported);
+    const partial = try summarizeResults(allocator, unsupported, "", null);
     try std.testing.expectEqual(@as(?[]const u8, null), evidenceProblem(partial, false));
     try std.testing.expect(evidenceProblem(partial, true) != null);
 
@@ -1219,7 +1323,96 @@ test "evidence: a pass needs every cell run and none failed" {
     try std.testing.expect(evidenceProblem(.{ .pairs = 1, .unsupported = 2 }, false) != null);
     // No cells at all proves nothing, and says so.
     try std.testing.expectEqualStrings("the result file has no cells: nothing ran", evidenceProblem(.{}, false).?);
-    try std.testing.expectError(error.InvalidResultJson, summarizeResults(allocator, "{}"));
+    try std.testing.expectError(error.InvalidResultJson, summarizeResults(allocator, "{}", "", null));
+}
+
+test "evidence: a known failure does not fail the run, and cannot go stale" {
+    const allocator = std.testing.allocator;
+    // The first real matrix (2026-10-03, quic-zig as server), with the
+    // descriptions cut: 19 cells succeeded, quiche does not support
+    // chacha20, and quiche x multiplexing failed.
+    const matrix =
+        \\{"servers": ["quic-zig"], "clients": ["quic-go", "ngtcp2", "quiche"], "tests": {"H": {"name": "handshake", "desc": ""}, "DC": {"name": "transfer", "desc": ""}, "C20": {"name": "chacha20", "desc": ""}, "M": {"name": "multiplexing", "desc": ""}, "L2": {"name": "transferloss", "desc": ""}, "B": {"name": "blackhole", "desc": ""}, "G": {"name": "goodput", "desc": ""}}, "quic_version": "0x1", "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"}, {"abbr": "DC", "name": "transfer", "result": "succeeded"}, {"abbr": "C20", "name": "chacha20", "result": "succeeded"}, {"abbr": "M", "name": "multiplexing", "result": "succeeded"}, {"abbr": "L2", "name": "transferloss", "result": "succeeded"}, {"abbr": "B", "name": "blackhole", "result": "succeeded"}], [{"abbr": "H", "name": "handshake", "result": "succeeded"}, {"abbr": "DC", "name": "transfer", "result": "succeeded"}, {"abbr": "C20", "name": "chacha20", "result": "succeeded"}, {"abbr": "M", "name": "multiplexing", "result": "succeeded"}, {"abbr": "L2", "name": "transferloss", "result": "succeeded"}, {"abbr": "B", "name": "blackhole", "result": "succeeded"}], [{"abbr": "H", "name": "handshake", "result": "succeeded"}, {"abbr": "DC", "name": "transfer", "result": "succeeded"}, {"abbr": "C20", "name": "chacha20", "result": "unsupported"}, {"abbr": "M", "name": "multiplexing", "result": "failed"}, {"abbr": "L2", "name": "transferloss", "result": "succeeded"}, {"abbr": "B", "name": "blackhole", "result": "succeeded"}]], "measurements": [[{"name": "goodput", "abbr": "G", "result": "succeeded", "details": "9287 kbps"}], [{"name": "goodput", "abbr": "G", "result": "succeeded", "details": "9096 kbps"}], [{"name": "goodput", "abbr": "G", "result": "succeeded", "details": "9073 kbps"}]]}
+    ;
+
+    // No list: the failed cell fails the run, and the runner's exit
+    // code of 1 says the same.
+    const plain = try summarizeResults(allocator, matrix, "", null);
+    try std.testing.expectEqual(@as(usize, 3), plain.pairs);
+    try std.testing.expectEqual(@as(usize, 21), plain.cells());
+    try std.testing.expectEqual(@as(usize, 19), plain.succeeded);
+    try std.testing.expectEqual(@as(usize, 1), plain.failed);
+    try std.testing.expectEqual(@as(usize, 1), plain.unsupported);
+    try std.testing.expect(evidenceProblem(plain, false) != null);
+
+    // Listed, by runner name or by the wrapper's short selector: the
+    // run passes, the cell is still counted and named, and the runner's
+    // exit code of 1 is accounted for.
+    for ([_][]const u8{ "quiche:multiplexing", "ngtcp2:ecn, quiche:M" }) |known| {
+        var notes: std.ArrayList(u8) = .empty;
+        defer notes.deinit(allocator);
+        const ev = try summarizeResults(allocator, matrix, known, &notes);
+        try std.testing.expectEqual(@as(usize, 21), ev.cells());
+        try std.testing.expectEqual(@as(usize, 0), ev.failed);
+        try std.testing.expectEqual(@as(usize, 1), ev.known_failed);
+        try std.testing.expectEqual(@as(usize, 1), ev.known_failed_tests);
+        try std.testing.expectEqual(@as(?[]const u8, null), evidenceProblem(ev, false));
+        try std.testing.expect(exitCodeExplained(ev, 1));
+        try std.testing.expect(!exitCodeExplained(ev, 0));
+        try std.testing.expect(!exitCodeExplained(ev, 2));
+        try std.testing.expectEqualStrings(
+            "  quiche:chacha20: unsupported\n  quiche:multiplexing: failed (known)\n",
+            notes.items,
+        );
+    }
+
+    // The same test for another peer is not covered by the entry.
+    const other_peer = try summarizeResults(allocator, matrix, "ngtcp2:multiplexing", null);
+    try std.testing.expectEqual(@as(usize, 1), other_peer.failed);
+    try std.testing.expectEqual(@as(usize, 1), other_peer.fixed);
+
+    // A listed cell that passes fails the run: take it off the list.
+    const stale = try summarizeResults(allocator, matrix, "quiche:multiplexing,quic-go:handshake", null);
+    try std.testing.expectEqual(@as(usize, 1), stale.fixed);
+    try std.testing.expectEqualStrings(
+        "a known failure passed: remove it from --known-failures",
+        evidenceProblem(stale, false).?,
+    );
+
+    // With no list, the runner's exit code must be 0 for a pass.
+    try std.testing.expect(exitCodeExplained(.{ .pairs = 1, .succeeded = 2 }, 0));
+    try std.testing.expect(!exitCodeExplained(.{ .pairs = 1, .succeeded = 2 }, 3));
+}
+
+test "evidence: the peer of a pair is the side that is not quic-zig" {
+    try std.testing.expectEqualStrings("quiche", peerOf("quiche", "quic-zig"));
+    try std.testing.expectEqualStrings("quic-go", peerOf("quic-zig", "quic-go"));
+
+    // Client role: the known failure names the server.
+    const client_role =
+        \\{"servers": ["quic-go", "ngtcp2"], "clients": ["quic-zig"],
+        \\ "tests": {"H": {"name": "handshake", "desc": ""}, "G": {"name": "goodput", "desc": ""}},
+        \\ "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"}],
+        \\             [{"abbr": "H", "name": "handshake", "result": "failed"}]],
+        \\ "measurements": [[{"name": "goodput", "abbr": "G", "result": "succeeded", "details": ""}],
+        \\                  [{"name": "goodput", "abbr": "G", "result": "failed", "details": ""}]]}
+    ;
+    const ev = try summarizeResults(std.testing.allocator, client_role, "ngtcp2:H,ngtcp2:G", null);
+    try std.testing.expectEqual(@as(usize, 0), ev.failed);
+    try std.testing.expectEqual(@as(usize, 2), ev.known_failed);
+    // The failed measurement is not in the runner's exit code.
+    try std.testing.expectEqual(@as(usize, 1), ev.known_failed_tests);
+    try std.testing.expectEqual(@as(?[]const u8, null), evidenceProblem(ev, false));
+
+    // A row count that does not match clients x servers is not a result
+    // this code can attribute.
+    const short =
+        \\{"servers": ["quic-go", "ngtcp2"], "clients": ["quic-zig"],
+        \\ "tests": {"H": {"name": "handshake", "desc": ""}},
+        \\ "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"}]],
+        \\ "measurements": [[]]}
+    ;
+    try std.testing.expectError(error.InvalidResultJson, summarizeResults(std.testing.allocator, short, "", null));
 }
 
 test "engine version gate for the runner's compose file" {

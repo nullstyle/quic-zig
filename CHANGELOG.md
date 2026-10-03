@@ -5,6 +5,103 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### CI and tests
+
+- **Both interop workflows ran zero tests in CI and showed green — the
+  quic-go release gate from its first run.** The pinned
+  quic-interop-runner names the simulator's interfaces with
+  `interface_name` in its `docker-compose.yml`, which needs Docker
+  Engine 28.1 or later. GitHub's ubuntu image carries 28.0.4, so in CI
+  no container ever started. The runner's compliance preflight
+  reported that as "not compliant", skipped the pair, and exited 0.
+  - `quic-go-interop.yml`, one of the five release gates: 111 runs
+    from 2026-07-05 to 2026-10-03. 96 reached the runner, every one of
+    those skipped its only pair, and 93 showed green. Every release
+    tagged in that window counted this gate as passed, 0.23.0
+    included.
+  - `interop.yml`, the advisory weekly matrix: its job failed in each
+    of its 21 scheduled runs since 2026-05-10, and `continue-on-error`
+    showed each as a green run. Every run whose log still exists
+    (2026-07-26 on) ran zero tests, including the run dispatched on
+    the commit that made BBRv3 the default.
+
+  Two earlier entries in this file cite a CI interop result and are
+  wrong as written: 0.11.0 ("validated by the blocking quic-go interop
+  gate and the weekly matrix", for CUBIC, pacing, and HyStart++ as
+  defaults) and 0.16.0 ("plus the full cross-implementation interop
+  matrix", for BBRv3 as the default). 0.7.3 added
+  `--assume-compliant quic-go` for what it called a stale preflight;
+  the preflight was not stale, the Engine was too old. Interop runs on
+  a developer machine were real all along, because the Engine there
+  was newer.
+
+  The repair has three parts. Both workflows install a current Engine,
+  as the runner's own workflow does, and no longer skip the preflight.
+  `tools/external_interop.zig` refuses to start the runner on an
+  Engine that is too old, and prints what `docker compose` said when a
+  preflight fails. And it reads the runner's result file after the run
+  and prints one `interop evidence:` line: a skipped cell, a failed
+  cell (a failed measurement too, which the runner's exit code does
+  not count), or a run in which nothing succeeded fails the step, and
+  `--strict` (the release gate) also refuses `unsupported`.
+  `continue-on-error` is gone from the matrix. The first repair
+  attempt added a guard that counted result cells; the runner writes a
+  skipped pair as cells with a null result, so that guard could not
+  fail either. The rules now in the wrapper are tested against the
+  0.23.0 gate's own result file and the first real matrix result, and
+  17 mutants of them all die (a mutant that does not compile is not
+  counted as killed).
+
+  Once tests ran in CI, two more things showed. The CI machine has no
+  `tshark`, so the wrapper used its fallback, `tshark` in a Docker
+  image; the runner's Python library then loses track of the
+  `docker run` process and the runner stops with
+  `TSharkCrashException`. Both workflows now install a host `tshark`
+  (4.5 or later, from the Wireshark PPA), as the runner's own workflow
+  does. And the wrapper now deletes an old result file before a run,
+  and checks that the runner's exit code and the result file agree.
+
+- **First real interop results, on the code of the 0.23.0 tag** (only
+  CI files, the wrapper tool, docs, and comments differ from the tag):
+  - Release gate (quic-zig client against the pinned quic-go server),
+    in CI for the first time (run 37114532615): handshake and transfer
+    passed, with the real preflight. `interop evidence: pairs=1 cells=2
+    succeeded=2 failed=0 unsupported=0 skipped=0`.
+  - Matrix in CI (run 37115312707; quic-zig server; handshake,
+    transfer, chacha20, multiplexing, transferloss, blackhole, and the
+    goodput measurement): quic-go and ngtcp2 passed all six tests.
+    quiche passed four, does not support chacha20, and failed
+    multiplexing. `interop evidence: pairs=3 cells=21 succeeded=19
+    failed=1 unsupported=1 skipped=0`. Goodput on the runner's 10 Mbps
+    link, with BBRv3 as the default: 9.30 Mbps to quic-go, 9.16 to
+    ngtcp2, 9.11 to quiche. A run on a developer machine, with peer
+    images five months older, gave the same cells and 9.29, 9.10, and
+    9.07 Mbps.
+- **`server x quiche x multiplexing` fails, every time, and has for
+  months.** It fails the same way against server images built on
+  2026-05-11 and 2026-08-12, so it comes from neither Zig 0.17.0, nor
+  0.23.0, nor the BBRv3 default; the blind matrix just never showed
+  it. quiche's HTTP/0.9 test client ignores how many bytes a request
+  write accepted, so a request that meets a full send window is cut
+  short, sent without FIN, and never finished: 12 to 25 of the 1999
+  requests in each run whose log was read. Its window fills because
+  quic-zig returns
+  stream credit when a quarter of the limit has been opened, and
+  doubles it (1000, 2000, 4000, 4096): quiche then sends one request
+  per packet in large bursts, the simulator's 25-packet queue drops
+  about 8% of them, and its congestion window collapses mid-burst. A
+  lower initial limit on the test endpoint does not help (the credit
+  still doubles). Returning credit as streams close would, and that
+  is library work that is not in this change. Until then the weekly
+  matrix lists the cell with the wrapper's new `--known-failures`: a
+  listed cell that fails does not fail the job, and a listed cell
+  that passes does, so the list cannot go stale. The endpoint's
+  "stalled-peer keepalive" for this cell rests on a theory the logs
+  do not support (nothing is parked on the quiche side); the
+  measurement is recorded next to it in `interop/qns_endpoint.zig`.
+
 ## [0.23.0] - 2026-10-03
 
 The tagged-toolchain release. quic-zig now builds on the tagged Zig

@@ -51,6 +51,23 @@
 //! flip; the fairness cells are the regression instrument. Rollback
 //! is one line at any layer: `congestion_control = .cubic`.
 //!
+//! CORRECTION (2026-10-03): the "full interop battery" above did not
+//! run. The fairness cells were real; the interop evidence was not.
+//! Both CI interop workflows had run zero tests since they were added
+//! and had shown green (the CI machine's Docker Engine was too old for
+//! the pinned runner; the record is in
+//! `.github/workflows/quic-go-interop.yml`). The first real
+//! cross-implementation matrix with `.bbr` as the default ran on
+//! 2026-10-03 (CI run 37115312707), on the code of v0.23.0, quic-zig
+//! as server on the runner's 10 Mbps link: quic-go and ngtcp2 passed
+//! handshake, transfer, chacha20, multiplexing, transferloss, and
+//! blackhole; quiche passed four of those, does not support chacha20,
+//! and failed multiplexing. That failure is older than the flip and is
+//! not a congestion-control matter: it is the same against a server
+//! built on 2026-05-11, and its cause is on the stream-credit path
+//! (see `interop/qns_endpoint.zig`). Goodput: 9.30 Mbps to quic-go,
+//! 9.16 to ngtcp2, 9.11 to quiche.
+//!
 //! External evidence (capnp-zig, 2026-08-21, post-flip, repeat-run
 //! qualified): their RPC churn soak A/B on identical v0.16.0 code —
 //! 60 s / 8 workers, connect/bootstrap/call/close loops + chaos
