@@ -709,94 +709,309 @@ test "inbound blocked frames update peer state and pollable events" {
     try std.testing.expectEqual(@as(?bool, false), event.flow_blocked.bidi);
 }
 
-test "draining a peer-initiated stream returns MAX_STREAMS credit" {
-    const allocator = std.testing.allocator;
-    var ctx = try boringssl.tls.Context.initServer(.{});
-    defer ctx.deinit();
-    const conn = try Connection.createServer(allocator, ctx);
-    defer conn.destroy();
-
+/// A server with a window of `uni` peer-opened unidirectional streams
+/// and `bidi` bidirectional ones.
+fn windowServer(ctx: boringssl.tls.Context, bidi: u64, uni: u64) !*Connection {
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    errdefer conn.destroy();
     try conn.setTransportParams(.{
-        .initial_max_data = 16,
-        .initial_max_stream_data_bidi_remote = 16,
-        .initial_max_streams_bidi = 1,
+        .initial_max_data = 1 << 16,
+        .initial_max_stream_data_bidi_remote = 64,
+        .initial_max_stream_data_uni = 64,
+        .initial_max_streams_bidi = bidi,
+        .initial_max_streams_uni = uni,
     });
-    try conn.handleStream(.application, .{
-        .stream_id = 0,
-        .offset = 0,
-        .data = "x",
-        .has_length = true,
-        .fin = true,
-    });
-
-    var buf: [1]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(0, &buf));
-    try std.testing.expectEqual(@as(?u64, 17), conn.pending_frames.max_streams_bidi);
-    try std.testing.expectEqual(@as(u64, 17), conn.peer_bidi_ids.limit);
+    return conn;
 }
 
-test "MAX_STREAMS replenishes early enough for pipelining peers" {
-    // Regression test: with `initial_max_streams_bidi = 1000` (the cap the
-    // interop `multiplexing` testcase enforces), a peer that pipelines
-    // streams aggressively (notably quiche) must observe a MAX_STREAMS
-    // increase well before it has consumed the full initial allotment.
-    // The previous 1/2 watermark held credit until the peer had drained
-    // 500 streams, by which point quiche's RTT-windowed burst could
-    // already exhaust the cap. The 1/4 watermark issues credit after the
-    // peer has drained ~250 streams, leaving headroom for the in-flight
-    // burst before it actually hits the limit.
-    const allocator = std.testing.allocator;
+/// The id of the client-initiated unidirectional stream at `index`.
+fn peerUni(index: u64) u64 {
+    return index * 4 + 2;
+}
+
+/// One byte and FIN arrive on the peer's uni stream at `index`, the
+/// application reads it, and a tick reaps the stream.
+fn openReadReapPeerUni(conn: *Connection, index: u64) !void {
+    const sid = peerUni(index);
+    try conn.handleStream(.application, .{ .stream_id = sid, .offset = 0, .data = "x", .has_length = true, .fin = true });
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(sid, &buf));
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(sid) == null);
+}
+
+test "stream credit: a window of one is one stream at a time, for as long as you like" {
+    // The limit is the window plus the streams that closed. Under the
+    // rule this replaces, a limit of 1 became 17 after one close, so
+    // `initial_max_streams_*` did not bound concurrency.
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    const conn = try Connection.createServer(allocator, ctx);
+    const conn = try windowServer(ctx, 0, 1);
     defer conn.destroy();
 
-    const initial_limit: u64 = 1000;
-    try conn.setTransportParams(.{
-        .initial_max_data = 64 * 1024,
-        .initial_max_stream_data_bidi_remote = 16,
-        .initial_max_streams_bidi = initial_limit,
-    });
-
-    // Drain peer-initiated bidi streams 0, 4, 8, ... one at a time and
-    // capture the stream count at the moment the first MAX_STREAMS frame
-    // gets queued.
-    var first_grant_at: ?u64 = null;
-    var first_grant_limit: ?u64 = null;
     var i: u64 = 0;
-    while (i < initial_limit) : (i += 1) {
-        const sid = i * 4; // client-initiated bidi: 4n
-        try conn.handleStream(.application, .{
-            .stream_id = sid,
-            .offset = 0,
-            .data = "x",
-            .has_length = true,
-            .fin = true,
-        });
-        var buf: [1]u8 = undefined;
-        try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(sid, &buf));
-        if (first_grant_at == null) {
-            if (conn.pending_frames.max_streams_bidi) |new_limit| {
-                first_grant_at = i + 1;
-                first_grant_limit = new_limit;
-                break;
-            }
-        }
+    while (i < 20) : (i += 1) {
+        try std.testing.expectEqual(i + 1, conn.peer_uni_ids.limit);
+        try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+        try openReadReapPeerUni(conn, i);
+        // One stream closed: one more id, and the peer has none left,
+        // so it is told at once.
+        try std.testing.expectEqual(@as(?u64, i + 2), conn.pending_frames.max_streams_uni);
+        try std.testing.expectEqual(i + 2, conn.peer_uni_ids.limit);
+        conn.pending_frames.max_streams_uni = null; // the frame was sent
     }
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+}
 
-    // Credit must arrive while the peer still has substantial pipelining
-    // headroom: strictly before half the initial allotment is consumed.
-    // The previous 1/2 watermark only fired AT 500 streams drained, which
-    // was too late for quiche's RTT-windowed burst — we now fire by ~250
-    // (i.e. once a quarter of the cap is consumed).
-    try std.testing.expect(first_grant_at != null);
-    try std.testing.expect(first_grant_at.? < initial_limit / 2);
-    // And the new advertised limit must strictly advance past the cap so
-    // an in-flight pipelined burst beyond `initial_limit` has somewhere
-    // to land.
-    try std.testing.expect(first_grant_limit != null);
-    try std.testing.expect(first_grant_limit.? > initial_limit);
-    try std.testing.expectEqual(first_grant_limit.?, conn.peer_bidi_ids.limit);
+test "stream credit: half a window at a time while the peer still has ids" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 8);
+    defer conn.destroy();
+
+    // Three streams open and close, one after the other. Three ids of
+    // credit is less than half the window of eight, and the peer has
+    // five unused ids: nothing is sent yet.
+    for (0..3) |i| try openReadReapPeerUni(conn, i);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 8), conn.peer_uni_ids.limit);
+
+    // The fourth close makes half a window: one frame returns all four.
+    try openReadReapPeerUni(conn, 3);
+    try std.testing.expectEqual(@as(?u64, 12), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 12), conn.peer_uni_ids.limit);
+}
+
+test "stream credit: given at once when the peer has used every id" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 4);
+    defer conn.destroy();
+
+    // The peer opens all four streams and keeps them open.
+    for (0..4) |i| {
+        try conn.handleStream(.application, .{ .stream_id = peerUni(i), .offset = 0, .data = "x", .has_length = true });
+    }
+    try std.testing.expectEqual(@as(usize, 4), conn.streamCount());
+    // A fifth is over the limit. (Checked on a second connection below;
+    // here the connection must stay open.)
+
+    // One of them finishes. One id of credit is less than half a
+    // window, but the peer has no id left: it is told at once.
+    try conn.handleStream(.application, .{ .stream_id = peerUni(0), .offset = 1, .data = "", .has_length = true, .fin = true });
+    var buf: [1]u8 = undefined;
+    _ = try conn.streamRead(peerUni(0), &buf);
+    try conn.tick(1_000_000);
+    try std.testing.expectEqual(@as(?u64, 5), conn.pending_frames.max_streams_uni);
+    // Three live streams and one free id: the window of four.
+    try std.testing.expectEqual(@as(usize, 3), conn.streamCount());
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_uni_ids.inUse());
+    try std.testing.expectEqual(@as(u64, 5), conn.peer_uni_ids.limit);
+}
+
+test "stream credit: the window bounds the streams that are open at once" {
+    // With W streams open, stream W + 1 is STREAM_LIMIT_ERROR, however
+    // many streams the connection has closed before.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 2);
+    defer conn.destroy();
+
+    for (0..10) |i| try openReadReapPeerUni(conn, i);
+    try std.testing.expectEqual(@as(u64, 12), conn.peer_uni_ids.limit);
+    // Two open at once: fine.
+    try conn.handleStream(.application, .{ .stream_id = peerUni(10), .offset = 0, .data = "x", .has_length = true });
+    try conn.handleStream(.application, .{ .stream_id = peerUni(11), .offset = 0, .data = "x", .has_length = true });
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+    // A third, with two still open: the peer broke the limit.
+    try conn.handleStream(.application, .{ .stream_id = peerUni(12), .offset = 0, .data = "x", .has_length = true });
+    try std.testing.expectEqual(transport_error_stream_limit, conn.closeEvent().?.error_code);
+}
+
+test "stream credit: a bidirectional stream returns its id when both directions are done" {
+    // The window counts a stream until it is fully closed. If the id
+    // came back when only the peer's side was done, a peer could keep
+    // any number of half-open streams alive here.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 2, 0);
+    defer conn.destroy();
+
+    // The request arrives complete, and the application reads it.
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = "x", .has_length = true, .fin = true });
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(0, &buf));
+    try conn.tick(1_000_000);
+    // Our side is still open: the stream is live and holds its id.
+    try std.testing.expect(conn.stream(0) != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 2), conn.peer_bidi_ids.limit);
+
+    // The reply is finished and its FIN is acknowledged.
+    try conn.streamFinish(0);
+    const s = conn.stream(0).?;
+    s.send.fin_acked = true;
+    s.send.state = .data_recvd;
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(0) == null);
+    try std.testing.expectEqual(@as(?u64, 3), conn.pending_frames.max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_bidi_ids.limit);
+}
+
+test "stream credit: a FIN that arrives after the data was read still returns the id" {
+    // The credit used to be returned from two call sites (after a read,
+    // and on RESET_STREAM). A FIN-only frame that arrived after the
+    // application had read every byte passed through neither.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 1);
+    defer conn.destroy();
+
+    const sid = peerUni(0);
+    try conn.handleStream(.application, .{ .stream_id = sid, .offset = 0, .data = "x", .has_length = true });
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(sid, &buf));
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(sid) != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+
+    // The FIN comes alone, and nobody reads again.
+    try conn.handleStream(.application, .{ .stream_id = sid, .offset = 1, .data = "", .has_length = true, .fin = true });
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(sid) == null);
+    try std.testing.expectEqual(@as(?u64, 2), conn.pending_frames.max_streams_uni);
+}
+
+test "stream credit: a peer RESET_STREAM returns the id" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 1);
+    defer conn.destroy();
+
+    const sid = peerUni(0);
+    try conn.handleStream(.application, .{ .stream_id = sid, .offset = 0, .data = "x", .has_length = true });
+    try conn.handleResetStream(.{ .stream_id = sid, .application_error_code = 7, .final_size = 1 });
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(sid) == null);
+    try std.testing.expectEqual(@as(?u64, 2), conn.pending_frames.max_streams_uni);
+}
+
+test "stream credit: STREAMS_BLOCKED at the current limit releases held credit" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 8);
+    defer conn.destroy();
+
+    // One id of credit is held back: less than half a window, and by
+    // our count the peer has seven ids left.
+    try openReadReapPeerUni(conn, 0);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+
+    // A STREAMS_BLOCKED below the limit is stale: it answers a limit
+    // the peer has since passed. Nothing to do.
+    conn.handleStreamsBlocked(.{ .bidi = false, .maximum_streams = 7 });
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+    // And one for the other kind of stream does not release this kind.
+    conn.handleStreamsBlocked(.{ .bidi = true, .maximum_streams = 0 });
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+
+    // The peer says it is blocked at the limit we gave it. It knows
+    // better than our count: the credit goes out now.
+    conn.handleStreamsBlocked(.{ .bidi = false, .maximum_streams = 8 });
+    try std.testing.expectEqual(@as(?u64, 9), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 9), conn.peer_uni_ids.limit);
+}
+
+test "stream credit: none under graceful shutdown" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 1);
+    defer conn.destroy();
+
+    conn.beginGracefulShutdown();
+    try openReadReapPeerUni(conn, 0);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_uni_ids.limit);
+}
+
+test "stream credit: a skipped id holds its place in the window" {
+    // The peer uses stream 3 first. Streams 0 to 2 are open too
+    // (RFC 9000 §2.1) and have not closed, so all four units are in
+    // use; closing stream 3 frees one.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 4);
+    defer conn.destroy();
+
+    // While stream 3 is open, a fifth stream is over the limit: the
+    // three skipped ids count. (The limit check is on the id, so this
+    // is just `limit == 4`.)
+    try std.testing.expectEqual(@as(u64, 4), conn.peer_uni_ids.limit);
+    try openReadReapPeerUni(conn, 3);
+    // One unit came back, the three skipped ids keep theirs, and the
+    // peer has used every id it had: it is told at once.
+    try std.testing.expectEqual(@as(?u64, 5), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_uni_ids.inUse());
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_uni_ids.holeCount());
+
+    // The skipped streams arrive late and close: their units come back.
+    conn.pending_frames.max_streams_uni = null;
+    for (0..3) |i| try openReadReapPeerUni(conn, i);
+    try std.testing.expectEqual(@as(u64, 0), conn.peer_uni_ids.holeCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.peer_uni_ids.inUse());
+    try std.testing.expectEqual(@as(u64, 8), conn.peer_uni_ids.target());
+    // Half a window (two ids) went out in one frame; the last id waits
+    // for its own half window, since the peer now has ids to spare.
+    try std.testing.expectEqual(@as(?u64, 7), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 7), conn.peer_uni_ids.limit);
+}
+
+test "stream credit: credit held for batching goes out when the peer uses its last id" {
+    // One stream of four closed while the peer still had ids to spare:
+    // one id of credit, less than half the window, is held back. Then
+    // the peer opens the rest. It now has three streams live in a
+    // window of four, and no id to open the fourth with. An endpoint
+    // must not wait for STREAMS_BLOCKED before it gives credit (RFC
+    // 9000 §4.6), and these three streams may stay open for a long
+    // time: the id goes out when the last one is used.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 4);
+    defer conn.destroy();
+
+    try openReadReapPeerUni(conn, 0);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+    try conn.handleStream(.application, .{ .stream_id = peerUni(1), .offset = 0, .data = "x", .has_length = true });
+    try conn.handleStream(.application, .{ .stream_id = peerUni(2), .offset = 0, .data = "x", .has_length = true });
+    // The peer still has one id.
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+    try conn.handleStream(.application, .{ .stream_id = peerUni(3), .offset = 0, .data = "x", .has_length = true });
+    try std.testing.expectEqual(@as(?u64, 5), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 5), conn.peer_uni_ids.limit);
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_uni_ids.inUse());
+}
+
+test "stream credit: the last id can be used by a jump over lower ids, or by RESET_STREAM" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    {
+        // Stream 3 arrives first. Streams 1 and 2 are open with it
+        // (RFC 9000 §2.1), so every id is used.
+        const conn = try windowServer(ctx, 0, 4);
+        defer conn.destroy();
+        try openReadReapPeerUni(conn, 0);
+        try conn.handleStream(.application, .{ .stream_id = peerUni(3), .offset = 0, .data = "x", .has_length = true });
+        try std.testing.expectEqual(@as(?u64, 5), conn.pending_frames.max_streams_uni);
+    }
+    {
+        // The frame that opens the last stream is a RESET_STREAM.
+        const conn = try windowServer(ctx, 0, 4);
+        defer conn.destroy();
+        try openReadReapPeerUni(conn, 0);
+        try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+        try conn.handleResetStream(.{ .stream_id = peerUni(3), .application_error_code = 0, .final_size = 0 });
+        try std.testing.expectEqual(@as(?u64, 5), conn.pending_frames.max_streams_uni);
+    }
 }
 
 test "draining at stream cap does not queue duplicate MAX_STREAMS" {

@@ -69,12 +69,13 @@ const endpoint_uni_stream_receive_window: u64 = 1024 * 1024;
 // multiplexing × {quic-go, ngtcp2} — the runner deliberately
 // validates that servers issue `MAX_STREAMS` dynamically rather
 // than statically advertising a huge floor. The change made for
-// that lives in `maybeQueueBatchedMaxStreams` in
-// `src/Connection/flow.zig`, which lowered the credit-return
-// watermark from "1/2 consumed" to "1/4 consumed" so MAX_STREAMS
-// reaches the peer before quiche's pipelined burst exhausts the
-// initial allotment. It did not fix that cell (see the MEASURED
-// note above `stalled_peer_keepalive_idle_us`).
+// that at the time lowered the watermark of the old credit rule from
+// "1/2 consumed" to "1/4 consumed", so MAX_STREAMS reached the peer
+// before quiche's pipelined burst exhausted the initial allotment.
+// It did not fix that cell (see the MEASURED note above
+// `stalled_peer_keepalive_idle_us`), and that rule is gone: stream
+// credit now comes back as streams close
+// (`maybeAdvertiseStreamCredit` in `src/Connection/flow.zig`).
 const endpoint_bidi_stream_limit: u64 = 1000;
 const endpoint_uni_stream_limit: u64 = 64;
 // Higher than the RFC 9000 §18.2 ¶22 minimum of 2 so peers (quiche
@@ -134,12 +135,13 @@ const endpoint_server_cid_desired_last_seq: u8 = 1;
 // HTTP/0.9 test client discards the byte count `stream_send` returns
 // (`apps/src/common.rs`, `send_requests`: `Ok(v) => v`), so a request
 // that meets an exhausted send window is cut and never finished. What
-// exhausts the window: this library grants stream credit when a
-// quarter of the limit has been OPENED and doubles it (1000, 2000,
-// 4000, 4096), so quiche sends its 1999 one-packet requests in large
-// bursts, the simulator's 25-packet queue drops about 8% of them, and
-// quiche's congestion window collapses mid-burst. An initial limit of
-// 100 does not help (200, 400, 800, ...: 25 cut requests).
+// exhausted the window in these runs: this library then granted
+// stream credit when a quarter of the limit had been OPENED, and
+// doubled it (1000, 2000, 4000, 4096), so quiche sent its 1999
+// one-packet requests in large bursts, the simulator's 25-packet
+// queue dropped about 8% of them, and quiche's congestion window
+// collapsed mid-burst. An initial limit of 100 did not help (200,
+// 400, 800, ...: 25 cut requests).
 //
 // CORRECTED the same day. This note first said that a server that
 // returns credit as streams CLOSE would fix the cell. A trial of that

@@ -1409,6 +1409,67 @@ test "ConnectionDriver: a long-lived connection keeps answering requests" {
     try std.testing.expectEqual(@as(u64, 0), receiver.refusedStreams());
 }
 
+test "ConnectionDriver: a stream table the size of the stream window never refuses a stream" {
+    // The stream limit is a window (RFC 9000 §4.6): the peer gets a
+    // stream id back only when one of its streams is fully closed
+    // here, so it never has more than `initial_max_streams_bidi` open
+    // at once. A table of that size cannot overflow, however greedy
+    // the peer is. (When the limit doubled each time a stream ended, a
+    // greedy peer overran any table sized to it, and the driver
+    // refused the extra streams with STOP_SENDING.)
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"long-lived"};
+    for ([_]u64{ 1, 2, 16 }) |window| {
+        var params = common.defaultParams();
+        params.initial_max_streams_bidi = window;
+        var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = params });
+        defer server.deinit();
+        var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = params, .insecure_skip_verify = true });
+        defer client.deinit();
+        var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+        defer loop.deinit();
+        try loop.handshake(&quic.testing.NullDriver{});
+        while (server.iterator()[0].conn.pollEvent()) |_| {}
+        while (client.conn.pollEvent()) |_| {}
+        var server_app: LongLivedApp = .{ .reply = true };
+        var client_app: LongLivedApp = .{ .reply = false };
+        var receiver = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &server_app, .conn = server.iterator()[0].conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = @intCast(window) });
+        defer receiver.deinit();
+        var sender = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &client_app, .conn = client.conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = @intCast(window) });
+        defer sender.deinit();
+
+        // The asking side opens a request whenever it is allowed to.
+        const total: usize = 300;
+        var opened: usize = 0;
+        var steps: usize = 0;
+        while (client_app.ends < total) : (steps += 1) {
+            while (opened < total) {
+                const stream = client.conn.openNextBidi() catch |err| switch (err) {
+                    error.StreamLimitExceeded => break,
+                    else => return err,
+                };
+                try sender.trackStream(stream.id);
+                try sender.outbox.push(client.conn, stream.id, "request");
+                try sender.outbox.finish(client.conn, stream.id);
+                opened += 1;
+            }
+            _ = try loop.pumpClientToServer();
+            try receiver.service();
+            _ = try loop.pumpServerToClient();
+            try sender.service();
+            try server.tick(loop.now_us);
+            try client.conn.tick(loop.now_us);
+            loop.now_us += 1_000;
+            // Checked every pass, so that a refusal is reported as a
+            // refusal and not as the stall it causes.
+            try std.testing.expectEqual(@as(u64, 0), receiver.refusedStreams());
+            try std.testing.expect(steps < 10 * total);
+        }
+        try std.testing.expectEqual(total, server_app.ends);
+        try std.testing.expectEqual(@as(u64, 0), sender.refusedStreams());
+    }
+}
+
 test "ConnectionDriver: the lifetime stream cap ends a long-lived session, and waiting does not help" {
     // A connection can open `Connection.max_streams_per_connection`
     // streams of each type over its WHOLE LIFE, not at a time: the

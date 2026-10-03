@@ -204,7 +204,12 @@ pub fn ensurePeerStream(conn: *Connection, id: u64, frame: PeerStreamFrame) Erro
     }
     // A peer space needs no cap of its own on skipped ranges: every
     // skipped id is below the limit we advertised.
-    return try materializeStream(conn, id, std.math.maxInt(usize));
+    const s = try materializeStream(conn, id, std.math.maxInt(usize));
+    // This open may have used the peer's last id while credit is held
+    // back for batching. The peer must not have to ask for it (RFC
+    // 9000 §4.6).
+    conn_flow.maybeAdvertiseStreamCredit(conn, streamIsBidi(id));
+    return s;
 }
 
 /// The id space of `id`: by who initiated it, and its kind.
@@ -292,11 +297,6 @@ pub fn initialSendStreamLimit(conn: *const Connection, id: u64) u64 {
         return params.initial_max_stream_data_bidi_remote;
     }
     return params.initial_max_stream_data_bidi_local;
-}
-
-// INTERNAL: pub for direct sibling import (flow.zig).
-pub fn peerOpenedStreamsSlot(conn: *Connection, bidi: bool) *u64 {
-    return if (bidi) &conn.peer_bidi_ids.opened else &conn.peer_uni_ids.opened;
 }
 
 /// True if `id` has no live stream because its stream was driven to a
@@ -504,7 +504,11 @@ pub fn gcClosedStreams(conn: *Connection) void {
         // Count the close only for an id the space knows: a stream put
         // straight into the table (test setup) never went through it.
         const ids = idSpace(conn, id);
-        if (ids.classify(streamIndex(id)) == .used) ids.noteClosed();
+        if (ids.classify(streamIndex(id)) == .used) {
+            ids.noteClosed();
+            // A closed peer stream is one more id the peer may open.
+            if (!streamInitiatedByLocal(conn, id)) conn_flow.maybeAdvertiseStreamCredit(conn, streamIsBidi(id));
+        }
         const held = s.send.bytes.items.len + s.recv.bytes.items.len;
         if (held > 0) conn.releaseResidentBytes(held);
         conn_qlog.emitQlog(conn, .{
@@ -723,7 +727,6 @@ fn afterStreamConsume(
             conn_flow.queueMaxData(conn, conn.recv_stream_bytes_read +| default_connection_receive_window);
         }
     }
-    conn_flow.maybeReturnPeerStreamCredit(conn, s);
 }
 
 // Doc comment lives on the `Connection.streamReadFin` thunk in Connection.zig.

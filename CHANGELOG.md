@@ -34,6 +34,35 @@ changes.
 
 ### Changed
 
+- **The stream limit is a window, and stream credit comes back when a
+  stream is closed (wire behaviour).** `initial_max_streams_bidi` /
+  `_uni` is now the number of streams the peer may have open AT ONCE.
+  The limit we advertise is that window plus the number of the peer's
+  streams that are fully closed here. MAX_STREAMS goes out when half a
+  window of credit has built up, and at once when the peer has used
+  every id it has or says STREAMS_BLOCKED (RFC 9000 §4.6).
+  - Before, the limit DOUBLED. When the receive side of a peer stream
+    ended and the peer had used a quarter of its ids, the limit grew by
+    `max(16, limit)`. A limit of 1 was 17 after the first stream, so
+    the parameter did not bound concurrency, and a stream table sized
+    to it could overflow.
+  - "Closed" means reaped. For a bidirectional stream both directions
+    are finished: the peer's data is read to its end, and our side is
+    finished and acknowledged (or reset). A peer-opened bidirectional
+    stream that the application never answers and never finishes keeps
+    its place in the window for the life of the connection.
+  - The cost: a request/reply stream gives its id back two round trips
+    after it opens (request and reply, then the acknowledgement and
+    the credit). A window of W carries about W / (2 x RTT) such streams
+    per second. Measured with the new `churn` bench cells on a 30 ms
+    round trip: 16.6, 66.2 and 221.5 per second for windows of 1, 4
+    and 16.
+  - Removed with the old rule: the public constants
+    `Connection.min_stream_credit_return_batch` and
+    `Connection.stream_credit_return_divisor`, and the field
+    `Stream.stream_count_credit_returned`.
+  - The 4096 lifetime cap is still in place at this point: a
+    connection still stops at 4096 streams of each type.
 - **Closed-stream memory is no longer indexed by stream id.** The three
   fixed 4096-bit sets that recorded which streams had been reaped are
   gone. Each of the four stream-id spaces (peer or local, bidi or uni)
@@ -59,6 +88,43 @@ changes.
 
 ### CI and tests
 
+- **Stream-window tests at three levels.** End to end
+  (`tests/e2e/stream_window.zig`, a real `Server` / `Client` pair):
+  the live peer streams never pass a window of 1, 2, 16 or 100, in
+  either direction, for either stream type, while a greedy peer still
+  fills it; and with the first copy of every MAX_STREAMS frame lost,
+  2,000 streams through a window of 1 still finish. Through the app
+  driver: a stream table the size of the window never refuses a
+  stream. And a fuzz harness (`fuzz: Connection stream window ...`),
+  the first one that calls `tick`: frames in any order, reads, replies
+  and ticks, with "no credit is owed" checked after every operation.
+  Writing that invariant down found a gap before the harness had run
+  once: credit held back for batching was not sent when the peer then
+  used its last id.
+- **Bench: `churn` cells, and two faults in the bench harness.**
+  `zig build bench-e2e -- --scenario churn` runs 2,000 request/reply
+  streams through windows of 1, 4 and 16 in virtual time
+  (`bench-compare` knows the new kind). They were the first cells where
+  the server sends more than it receives, and the first to run longer
+  than 30 virtual seconds, and each property exposed a fault in
+  `bench/e2e/harness.zig`, whose handshake is a shortcut without
+  packets: the server stayed under the anti-amplification limit for
+  the whole run (3 bytes out for each byte in), and its handshake was
+  never confirmed, so the 30 s handshake backstop closed it. Neither
+  touched the older cells, where the client sends the data; all 14 are
+  byte-identical except `impairment_bottleneck_10mbit_mux8`, which no
+  longer carries the two MAX_STREAMS frames the old rule sent for its
+  eight streams (they are never answered, so under the window rule no
+  credit is due): one datagram fewer.
+- **Two things the benchmarks cannot say, now written where they are
+  run.** `goodput_bulk_64mib` moves by about 4% with code position
+  alone (no-op instructions in a branch that never runs; note in
+  `bench/e2e_main.zig`). And the loss and reorder cells have a long
+  tail that one seed cannot show: over 12 seeds
+  `impairment_reorder10pct` took about 100 to 280 ms, but more than a
+  second in 4 of 24 runs (note on `PairOptions.server_path_validated`).
+  `bench-compare` also no longer reports every `fairness` cell as
+  absent from the new report.
 - **Both interop workflows ran zero tests in CI and showed green — the
   quic-go release gate from its first run.** The pinned
   quic-interop-runner names the simulator's interfaces with

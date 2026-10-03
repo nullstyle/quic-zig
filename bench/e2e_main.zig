@@ -5,6 +5,17 @@
 //!                over a memory shuttle); wall-clock MB/s = stack CPU
 //!                efficiency, plus allocation counts and per-poll
 //!                latency percentiles.
+//!                MEASURED 2026-10-03 (M5 Max, Zig 0.17.0): this cell
+//!                moves by about 4% with code POSITION alone. Sixteen
+//!                no-op instructions in a branch that never runs
+//!                during the transfer took one tree from 497.7 to
+//!                476.1 MB/s; 32 of them took a tree that looked "4%
+//!                slower" from 477.6 back to 497.9. Same datagram
+//!                count, same allocations, runs interleaved. So a
+//!                wall-clock delta under about 5% between two commits
+//!                proves nothing until a padding control (the same
+//!                change plus no-ops) agrees. The virtual-time
+//!                impairment cells are the exact instrument.
 //!  - handshakes: full TLS 1.3 handshakes per second + allocations
 //!                per handshake.
 //!  - impairment: goodput through a seeded loss/reorder net measured
@@ -16,8 +27,14 @@
 //!                DEFAULT-FLIP GATE instrument (see
 //!                src/conn/congestion/Bbr.zig).
 //!
+//!  - churn:      many short request/reply streams through a small
+//!                stream window, in VIRTUAL time: requests per second
+//!                as a function of `initial_max_streams_bidi` and the
+//!                round-trip time. The number an embedder sizes its
+//!                stream window from (docs/EMBEDDING.md).
+//!
 //! Run with `zig build bench-e2e` (`-- --scenario goodput|handshakes|
-//! impairment|fairness|all`, `--samples N`, `--json path` /
+//! impairment|fairness|churn|all`, `--samples N`, `--json path` /
 //! `--json-dir dir`).
 //! Same ReleaseSafe default and `-Dbench-unsafe-release-fast` escape
 //! hatch as `zig build bench`; reports share the schema-v3 envelope
@@ -54,6 +71,7 @@ const Entries = struct {
     handshakes: ?HandshakesEntry = null,
     impairment: std.ArrayList(harness.ImpairmentResult) = .empty,
     fairness: std.ArrayList(fairness.FairnessResult) = .empty,
+    churn: std.ArrayList(harness.ChurnResult) = .empty,
 };
 
 fn stats(samples: []const f64) struct { median: f64, mad: f64 } {
@@ -208,6 +226,41 @@ const fairness_cells = [_]fairness.FairnessOptions{
     },
 };
 
+// Stream churn: 2,000 request/reply streams (64-byte request, 256-byte
+// reply) over a clean path with a 30 ms round trip, through stream
+// windows of 1, 4 and 16. The asking side opens a request whenever it
+// may. A stream id comes back only when the stream is fully closed on
+// the answering side, so the window is the pipeline depth: the cells
+// say what each depth carries. They follow --cc like the impairment
+// cells, but nothing here is congestion limited, so the controllers
+// must agree: a difference between them is a finding.
+const churn_cells = [_]harness.ChurnOptions{
+    .{ .name = "churn_window1_rtt30ms", .window = 1 },
+    .{ .name = "churn_window4_rtt30ms", .window = 4 },
+    .{ .name = "churn_window16_rtt30ms", .window = 16 },
+};
+
+fn runChurn(allocator: std.mem.Allocator, out: *Entries, cc: quic.CongestionAlgorithm) !void {
+    for (churn_cells) |cell| {
+        var cc_cell = cell;
+        cc_cell.congestion_control = cc;
+        const result = try harness.runChurnOnce(allocator, cc_cell);
+        try out.churn.append(allocator, result);
+        std.debug.print(
+            "{s}: {d:.1} streams/vs (virtual {d} ms, window {d}, peak live {d}, limit at end {d}, datagrams {d})\n",
+            .{
+                result.name,
+                result.streams_per_virtual_sec,
+                result.virtual_us / std.time.us_per_ms,
+                result.window,
+                result.peak_live_streams,
+                result.final_limit,
+                result.enqueued,
+            },
+        );
+    }
+}
+
 fn runFairness(allocator: std.mem.Allocator, out: *Entries) !void {
     for (fairness_cells) |cell| {
         const result = try fairness.runFairnessOnce(allocator, cell);
@@ -343,9 +396,25 @@ fn writeE2eEntries(out: *std.ArrayList(u8), allocator: std.mem.Allocator, entrie
         try out.print(allocator, "      \"seed\": {d}\n", .{cell.seed});
         try out.appendSlice(allocator, "    }\n");
     }
+    for (entries.churn.items) |cell| {
+        try writeEntrySeparator(out, allocator, &first);
+        try out.appendSlice(allocator, "    {\n      \"name\": ");
+        try report_mod.appendJsonString(out, allocator, cell.name);
+        try out.appendSlice(allocator, ",\n      \"kind\": \"churn\",\n");
+        try out.print(allocator, "      \"streams\": {d},\n", .{cell.streams});
+        try out.print(allocator, "      \"window\": {d},\n", .{cell.window});
+        try out.print(allocator, "      \"one_way_delay_us\": {d},\n", .{cell.one_way_delay_us});
+        try out.print(allocator, "      \"virtual_us\": {d},\n", .{cell.virtual_us});
+        try out.print(allocator, "      \"streams_per_virtual_sec\": {d:.4},\n", .{cell.streams_per_virtual_sec});
+        try out.print(allocator, "      \"wall_ns\": {d},\n", .{cell.wall_ns});
+        try out.print(allocator, "      \"enqueued\": {d},\n", .{cell.enqueued});
+        try out.print(allocator, "      \"peak_live_streams\": {d},\n", .{cell.peak_live_streams});
+        try out.print(allocator, "      \"final_limit\": {d}\n", .{cell.final_limit});
+        try out.appendSlice(allocator, "    }\n");
+    }
 }
 
-const Scenario = enum { all, goodput, handshakes, impairment, fairness };
+const Scenario = enum { all, goodput, handshakes, impairment, fairness, churn };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -408,6 +477,7 @@ pub fn main(init: std.process.Init) !void {
     var entries: Entries = .{};
     defer entries.impairment.deinit(allocator);
     defer entries.fairness.deinit(allocator);
+    defer entries.churn.deinit(allocator);
 
     if (scenario == .all or scenario == .goodput) {
         entries.goodput = try runGoodput(allocator, samples, cc);
@@ -420,6 +490,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (scenario == .all or scenario == .fairness) {
         try runFairness(allocator, &entries);
+    }
+    if (scenario == .all or scenario == .churn) {
+        try runChurn(allocator, &entries, cc);
     }
 
     std.debug.print("---------------------------------------------------------------\n", .{});

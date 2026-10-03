@@ -998,9 +998,6 @@ pub const Stream = struct {
     send_flow_highest: u64 = 0,
     /// True once any byte for this stream arrived in a 0-RTT packet.
     arrived_in_early_data: bool = false,
-    /// True once this peer-initiated stream has returned one stream
-    /// count credit through MAX_STREAMS.
-    stream_count_credit_returned: bool = false,
 
     /// RFC 9218 send priority. Default urgency 3 / non-incremental, so a
     /// connection with no explicit priorities schedules ready streams in
@@ -1008,9 +1005,9 @@ pub const Stream = struct {
     priority: StreamPriority = .{},
 
     /// True if the recv side has reached one of the four "no further
-    /// peer bytes will land" states. Mirrors `maybeReturnPeerStreamCredit`'s
-    /// definition: FIN-with-bytes-drained (data_recvd / data_read) or
-    /// peer RESET (reset_recvd / reset_read). Used by the connection-
+    /// peer bytes will land" states: FIN-with-bytes-drained
+    /// (data_recvd / data_read) or peer RESET (reset_recvd /
+    /// reset_read). Used by the connection-
     /// level stream GC to decide whether the receive half is structurally
     /// dead.
     pub fn recvFullyTerminated(self: *const Stream) bool {
@@ -1223,10 +1220,6 @@ pub const default_stream_receive_window: u64 = 1024 * 1024;
 pub const default_connection_receive_window: u64 = 16 * 1024 * 1024;
 /// Hard ceiling on `initial_max_streams_*` we will ever advertise.
 pub const max_stream_count_limit: u64 = @as(u64, 1) << 60;
-/// Minimum number of stream credits to accumulate before sending MAX_STREAMS.
-pub const min_stream_credit_return_batch: u64 = 16;
-/// Divisor controlling the watermark at which MAX_STREAMS replenishment fires.
-pub const stream_credit_return_divisor: u64 = 1;
 
 /// Minimum interval between path-validation probes (PATH_CHALLENGE
 /// emissions) for the same path. Hardens against a peer that

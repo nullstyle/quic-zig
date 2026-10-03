@@ -48,6 +48,22 @@ pub const PairOptions = struct {
     server_congestion_control: ?quic.CongestionAlgorithm = null,
     /// RFC 9406 HyStart++ on both endpoints (A/B lever).
     hystart: bool = true,
+    /// Mark the server's path validated, as a real handshake does.
+    /// Without it the server may send only 3 bytes for each byte it
+    /// receives (see `Pair.create`), so a cell where the SERVER sends
+    /// the data must set it.
+    ///
+    /// It is off by default only to keep the older cells byte-
+    /// identical to their baselines: a validated server sends two
+    /// more datagrams, and in a cell with random loss or reordering
+    /// that shifts every later draw. MEASURED 2026-10-03 over 12
+    /// seeds, the lossy cells finish in about the same time either
+    /// way; what the sweep did show is that their time has a long
+    /// tail in BOTH states (`impairment_reorder10pct`: about 100 to
+    /// 280 ms, but more than a second for 4 of 24 runs). One seed
+    /// cannot see that. Turn this on for every cell when the
+    /// baselines are next rebuilt.
+    server_path_validated: bool = false,
 };
 
 /// Heap-allocated so the `peer` cross-pointers stay valid.
@@ -112,6 +128,31 @@ pub const Pair = struct {
         try pair.client.setLocalScid(&client_cid);
         try pair.server.setPeerDcid(&client_cid);
         try pair.server.setLocalScid(&server_cid);
+
+        // The handshake above is a shortcut (`advance` on both ends, no
+        // packets). Two things a real handshake does from PACKETS are
+        // therefore missing on the server. Both were MEASURED
+        // 2026-10-03 with the stream churn cells: the first cells where
+        // the server sends more than it receives, and the first that
+        // run longer than 30 virtual seconds.
+        //
+        // 1. The client's Finished never arrives in a packet, so the
+        //    confirmation latch (`handshake_keys_discarded`) never
+        //    sets, and the 30 s handshake backstop closes the server
+        //    with `handshake_timeout` (the window-1 churn cell stopped
+        //    at stream 497). The fairness stagger cell ends AT 30 s.
+        //    So: no handshake timeout in a bench pair. Every older
+        //    cell is byte-identical with and without this.
+        pair.client.handshake_timeout_us = 0;
+        pair.server.handshake_timeout_us = 0;
+        // 2. The client's address is never validated, so the server
+        //    stays under the anti-amplification limit (RFC 9000 §8.1)
+        //    for the whole run. In a churn cell it sent exactly 3
+        //    bytes for each byte received (314 B out for 105 B in):
+        //    one reply per round trip, with twelve more queued.
+        //    See `PairOptions.server_path_validated` for why this is
+        //    an option and not simply done.
+        if (opts.server_path_validated) pair.server.primaryPath().path.markValidated();
 
         pair.client.setCongestionAlgorithm(opts.congestion_control);
         pair.server.setCongestionAlgorithm(opts.server_congestion_control orelse opts.congestion_control);
@@ -501,7 +542,190 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
     };
 }
 
+// -- stream churn ------------------------------------------------------------
+
+pub const ChurnOptions = struct {
+    name: []const u8,
+    /// Request/reply streams to complete. The asking side opens one
+    /// whenever the stream limit allows it.
+    streams: u32 = 2_000,
+    /// `initial_max_streams_bidi` of the answering side: how many
+    /// requests may be open at once (RFC 9000 §4.6).
+    window: u64 = 16,
+    request_bytes: usize = 64,
+    reply_bytes: usize = 256,
+    /// One-way path delay. The round trip is twice this.
+    one_way_delay_us: u64 = 15_000,
+    tick_us: u64 = 100,
+    congestion_control: quic.CongestionAlgorithm = .bbr,
+    seed: u64 = 0xc4a12,
+    /// Safety bound on virtual time: a run that needs more returns
+    /// error.ChurnStalled.
+    max_virtual_us: u64 = 3_600 * std.time.us_per_s,
+};
+
+pub const ChurnResult = struct {
+    name: []const u8,
+    streams: u32,
+    window: u64,
+    one_way_delay_us: u64,
+    virtual_us: u64,
+    streams_per_virtual_sec: f64,
+    wall_ns: u64,
+    /// Datagrams, both directions.
+    enqueued: u64,
+    /// Most requests live on the answering side at one moment.
+    peak_live_streams: u64,
+    /// The answering side's stream limit at the end.
+    final_limit: u64,
+};
+
+/// The ids of the client-initiated bidirectional streams that are live
+/// on `conn`, lowest first (so the run does not depend on hash-map
+/// iteration order).
+fn liveRequestStreams(conn: *const quic.Connection, out: []u64) []u64 {
+    var n: usize = 0;
+    var it = conn.streams.iterator();
+    while (it.next()) |entry| {
+        const id = entry.key_ptr.*;
+        if ((id & 0b11) != 0) continue;
+        out[n] = id;
+        n += 1;
+    }
+    std.mem.sort(u64, out[0..n], {}, std.sort.asc(u64));
+    return out[0..n];
+}
+
+/// Many short request/reply streams through a small stream window,
+/// measured in VIRTUAL time — deterministic for a given option set.
+///
+/// The number it gives is requests per second as a function of the
+/// window and the round-trip time: what an embedder needs to size
+/// `initial_max_streams_bidi`. A request's id comes back only after the
+/// stream is fully closed on the answering side (its reply is
+/// acknowledged) and the MAX_STREAMS frame has crossed the path. That
+/// is two round trips: one for the request and its reply, one for the
+/// acknowledgement and the credit. So a window of W carries about
+/// W / (2 x RTT) requests per second (MEASURED 2026-10-03 at 30 ms:
+/// 16.6, 66.2 and 221.5 for windows of 1, 4 and 16).
+pub fn runChurnOnce(allocator: std.mem.Allocator, opts: ChurnOptions) !ChurnResult {
+    const pair = try Pair.create(allocator, .{
+        .congestion_control = opts.congestion_control,
+        .initial_max_streams_bidi = opts.window,
+        .server_path_validated = true,
+    });
+    defer pair.destroy(allocator);
+
+    var net = sim_net.SimNet.init(allocator, .{
+        .seed = opts.seed,
+        .base_delay_us = opts.one_way_delay_us,
+    });
+    defer net.deinit();
+
+    const request = try allocator.alloc(u8, opts.request_bytes);
+    defer allocator.free(request);
+    @memset(request, 'q');
+    const reply = try allocator.alloc(u8, opts.reply_bytes);
+    defer allocator.free(reply);
+    @memset(reply, 'r');
+
+    var rbuf: [4096]u8 = undefined;
+    var pkt: [2048]u8 = undefined;
+    var id_buf: [256]u64 = undefined;
+    std.debug.assert(opts.window <= id_buf.len);
+
+    const virtual_start: u64 = 1_000_000;
+    var now_us: u64 = virtual_start;
+    var opened: u32 = 0;
+    var peak_live: u64 = 0;
+
+    const wall_start = nowNanos();
+    while (pair.client.local_bidi_ids.closed < opts.streams) {
+        if (now_us - virtual_start > opts.max_virtual_us) return error.ChurnStalled;
+
+        // The asking side: a whole request on every stream it may open.
+        while (opened < opts.streams) {
+            const s = pair.client.openNextBidi() catch |err| switch (err) {
+                error.StreamLimitExceeded => break,
+                else => return err,
+            };
+            if (try pair.client.streamWrite(s.id, request) != request.len) return error.ChurnShortWrite;
+            try pair.client.streamFinish(s.id);
+            opened += 1;
+        }
+
+        var progressed = true;
+        while (progressed) {
+            progressed = false;
+            if (try pair.client.poll(&pkt, now_us)) |n| {
+                try net.enqueue(true, pkt[0..n], now_us);
+                progressed = true;
+            }
+            if (try pair.server.poll(&pkt, now_us)) |n| {
+                try net.enqueue(false, pkt[0..n], now_us);
+                progressed = true;
+            }
+        }
+
+        try net.deliverDue(&pair.client, &pair.server, now_us);
+
+        // The answering side: read each request to its end, then reply.
+        const requests = liveRequestStreams(&pair.server, &id_buf);
+        peak_live = @max(peak_live, requests.len);
+        for (requests) |id| {
+            while (try pair.server.streamRead(id, &rbuf) != 0) {}
+            const st = pair.server.streamRecvState(id) orelse continue;
+            if (!st.terminal or pair.server.stream(id).?.send.fin_marked) continue;
+            if (try pair.server.streamWrite(id, reply) != reply.len) return error.ChurnShortWrite;
+            try pair.server.streamFinish(id);
+        }
+        // The asking side reads the replies.
+        for (liveRequestStreams(&pair.client, &id_buf)) |id| {
+            while (try pair.client.streamRead(id, &rbuf) != 0) {}
+        }
+
+        now_us += opts.tick_us;
+        try pair.client.tick(now_us);
+        try pair.server.tick(now_us);
+    }
+    const wall_ns = nowNanos() - wall_start;
+    const virtual_us = now_us - virtual_start;
+
+    return .{
+        .name = opts.name,
+        .streams = opts.streams,
+        .window = opts.window,
+        .one_way_delay_us = opts.one_way_delay_us,
+        .virtual_us = virtual_us,
+        .streams_per_virtual_sec = @as(f64, @floatFromInt(opts.streams)) * 1e6 / @as(f64, @floatFromInt(virtual_us)),
+        .wall_ns = wall_ns,
+        .enqueued = net.enqueued,
+        .peak_live_streams = peak_live,
+        .final_limit = pair.server.peer_bidi_ids.limit,
+    };
+}
+
 // -- tests -------------------------------------------------------------------
+
+test "churn run is deterministic in virtual time, and the window holds" {
+    var first: ?ChurnResult = null;
+    for (0..2) |_| {
+        const result = try runChurnOnce(std.testing.allocator, .{
+            .name = "churn-det-test",
+            .streams = 64,
+            .window = 4,
+            .one_way_delay_us = 2_000,
+        });
+        try std.testing.expectEqual(@as(u64, 4), result.peak_live_streams);
+        try std.testing.expect(result.final_limit <= 4 + 64);
+        if (first) |f| {
+            try std.testing.expectEqual(f.virtual_us, result.virtual_us);
+            try std.testing.expectEqual(f.enqueued, result.enqueued);
+        } else {
+            first = result;
+        }
+    }
+}
 
 test "pair handshakes and a mini goodput run completes clean" {
     var counting = CountingAllocator.init(std.testing.allocator);

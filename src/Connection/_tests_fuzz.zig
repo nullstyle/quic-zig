@@ -1143,3 +1143,350 @@ fn fuzzConnHandleAssembledPacketImpl(_: void, smith: *std.testing.Smith) anyerro
 test "fuzz: Connection assembled-packet receive pipeline invariants" {
     try std.testing.fuzz({}, fuzzConnHandleAssembledPacketImpl, .{});
 }
+
+// Stream-window fuzz harness — the life of peer streams under frames in
+// any order, application reads and replies, and `tick` (the only place
+// a stream is reaped). It is the one harness that calls `tick`, so it
+// is the one that sees stream GC, late frames for a reaped id, and the
+// credit rule together.
+//
+// The connection is a server with small stream windows (0 to 6 of each
+// type). Each operation is four draws (operation, type, id pick,
+// argument); the id is one the peer may use (`pick % limit`), except
+// for the operation that asks for the first id it may NOT use.
+//
+// After every operation, for each stream type:
+//
+// - Window: the live peer streams, and `opened - closed` (which counts
+//   skipped ids too), are at most `initial_max_streams_*`.
+// - Limit: `opened <= limit <= window + closed`, and the limit never
+//   goes down.
+// - No credit is owed: `creditToAdvertise` has nothing to give. This is
+//   what holds `maybeAdvertiseStreamCredit` to a call at every place
+//   the answer can change (reap, peer open, STREAMS_BLOCKED). A peer
+//   must never have to wait at its limit while we hold ids back.
+// - A pending MAX_STREAMS carries the current limit.
+// - A stream leaves the table in `tick` only, and each one that leaves
+//   is counted as closed exactly once.
+// - A reaped id is never live again, whatever arrives for it, and a
+//   frame for it is ignored: no error, no close (RFC 9000 §3.2).
+// - An id over the limit closes the connection with STREAM_LIMIT_ERROR;
+//   any other close has a code from the documented set.
+const WindowOp = enum(u8) {
+    /// One byte at a small offset, no FIN.
+    stream_data,
+    /// FIN at the bytes received so far: always a valid final size.
+    stream_fin,
+    /// Offset, length and FIN straight from the argument: may be a
+    /// final-size violation.
+    stream_any,
+    /// RESET_STREAM with a valid final size.
+    reset,
+    /// STOP_SENDING (bidirectional streams only).
+    stop_sending,
+    /// STREAMS_BLOCKED at the current limit, or one below it.
+    streams_blocked,
+    /// The application reads everything that has arrived.
+    app_read,
+    /// The application finishes its side of a bidirectional stream and
+    /// the peer acknowledges it (or acknowledges our RESET_STREAM).
+    app_finish_acked,
+    tick,
+    /// One byte on the first id over the limit.
+    over_limit,
+};
+
+const window_fuzz_max_index = 128;
+
+fn fuzzConnStreamWindow(_: void, smith: *std.testing.Smith) anyerror!void {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // [0] bidirectional, [1] unidirectional.
+    const windows = [2]u64{
+        smith.valueRangeAtMost(u64, 0, 6),
+        smith.valueRangeAtMost(u64, 0, 6),
+    };
+    try conn.setTransportParams(.{
+        .initial_max_data = 1 << 16,
+        .initial_max_stream_data_bidi_remote = 64,
+        .initial_max_stream_data_uni = 64,
+        .initial_max_streams_bidi = windows[0],
+        .initial_max_streams_uni = windows[1],
+    });
+    const num_ops = smith.valueRangeAtMost(u32, 0, 96);
+
+    // What the harness has seen happen, per stream type and index.
+    var live: [2][window_fuzz_max_index]bool = @splat(@splat(false));
+    var reaped: [2][window_fuzz_max_index]bool = @splat(@splat(false));
+    var reaps = [2]u64{ 0, 0 };
+    var last_limit = windows;
+
+    var now_us: u64 = 1_000_000;
+    var frame_buf: [64]u8 = undefined;
+    const one = [_]u8{'x'};
+
+    var i: u32 = 0;
+    while (i < num_ops) : (i += 1) {
+        const op: WindowOp = @fromBackingInt(@intCast(smith.valueRangeAtMost(u8, 0, 9)));
+        const bidi = smith.valueRangeAtMost(u8, 0, 1) == 0;
+        const pick = smith.valueRangeAtMost(u64, 0, window_fuzz_max_index - 1);
+        const arg = smith.valueRangeAtMost(u8, 0, 15);
+
+        const ids = if (bidi) &conn.peer_bidi_ids else &conn.peer_uni_ids;
+        // With a limit of zero there is no id the peer may use.
+        const usable = ids.limit != 0;
+        const index = if (op == .over_limit) ids.limit else if (usable) pick % ids.limit else 0;
+        if (index >= window_fuzz_max_index) return;
+        const sid = index * 4 + @as(u64, if (bidi) 0 else 2);
+        const known_end: ?u64 = if (conn.streams.get(sid)) |s| (s.recv.final_size orelse s.recv.end_offset) else null;
+
+        const frame: ?frame_types.Frame = switch (op) {
+            .stream_data => if (!usable) null else .{ .stream = .{
+                .stream_id = sid,
+                .offset = arg & 7,
+                .data = &one,
+                .has_offset = true,
+                .has_length = true,
+            } },
+            .stream_fin => if (!usable) null else .{ .stream = .{
+                .stream_id = sid,
+                .offset = known_end orelse 0,
+                .data = "",
+                .has_offset = true,
+                .has_length = true,
+                .fin = true,
+            } },
+            .stream_any => if (!usable) null else .{ .stream = .{
+                .stream_id = sid,
+                .offset = arg & 3,
+                .data = one[0 .. (arg >> 2) & 1],
+                .has_offset = true,
+                .has_length = true,
+                .fin = (arg & 8) != 0,
+            } },
+            .reset => if (!usable) null else .{ .reset_stream = .{
+                .stream_id = sid,
+                .application_error_code = 0,
+                .final_size = known_end orelse arg & 7,
+            } },
+            .stop_sending => if (!usable or !bidi) null else .{ .stop_sending = .{
+                .stream_id = sid,
+                .application_error_code = 0,
+            } },
+            .streams_blocked => .{ .streams_blocked = .{
+                .bidi = bidi,
+                .maximum_streams = ids.limit -| (arg & 1),
+            } },
+            .over_limit => .{ .stream = .{
+                .stream_id = sid,
+                .offset = 0,
+                .data = &one,
+                .has_offset = true,
+                .has_length = true,
+            } },
+            .app_read, .app_finish_acked, .tick => null,
+        };
+        if (frame) |f| {
+            const payload_len = frame_mod.encode(&frame_buf, f) catch return;
+            // A frame for a reaped stream is post-terminal: it is
+            // ignored (RFC 9000 §3.2). No error, no close.
+            const late = op != .streams_blocked and reaped[@intFromBool(!bidi)][index];
+            conn.dispatchFrames(.application, frame_buf[0..payload_len], now_us) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => try std.testing.expect(!late),
+            };
+            if (late) try std.testing.expect(conn.lifecycle.pending_close == null);
+        }
+        switch (op) {
+            .app_read => if (usable) {
+                var buf: [16]u8 = undefined;
+                while (true) {
+                    const n = conn.streamRead(sid, &buf) catch break;
+                    if (n == 0) break;
+                }
+            },
+            .app_finish_acked => if (usable and bidi) {
+                if (conn.streams.get(sid)) |s| {
+                    conn.streamFinish(sid) catch {};
+                    if (s.send.state == .reset_sent) {
+                        s.send.state = .reset_recvd;
+                    } else if (s.send.fin_marked) {
+                        s.send.fin_acked = true;
+                        s.send.state = .data_recvd;
+                    }
+                }
+            },
+            .tick => {
+                now_us += 1_000;
+                try conn.tick(now_us);
+            },
+            else => {},
+        }
+
+        if (conn.lifecycle.pending_close) |info| {
+            const code = info.error_code;
+            if (op == .over_limit) {
+                try std.testing.expectEqual(transport_error_stream_limit, code);
+            } else {
+                try std.testing.expect(
+                    code == transport_error_flow_control or
+                        code == transport_error_stream_state or
+                        code == transport_error_final_size or
+                        code == transport_error_excessive_load or
+                        code == transport_error_protocol_violation or
+                        code == transport_error_frame_encoding,
+                );
+            }
+            break;
+        }
+        // The peer used an id it does not have, and nothing happened.
+        try std.testing.expect(op != .over_limit);
+
+        for (0..2) |k| {
+            const space = if (k == 0) &conn.peer_bidi_ids else &conn.peer_uni_ids;
+            const blocked_at = if (k == 0) conn.peer_streams_blocked_bidi else conn.peer_streams_blocked_uni;
+            const pending = if (k == 0) conn.pending_frames.max_streams_bidi else conn.pending_frames.max_streams_uni;
+
+            var live_now: u64 = 0;
+            for (0..window_fuzz_max_index) |idx| {
+                const id = @as(u64, idx) * 4 + @as(u64, if (k == 0) 0 else 2);
+                if (conn.streams.contains(id)) {
+                    live_now += 1;
+                    try std.testing.expect(!reaped[k][idx]);
+                    try std.testing.expect(space.classify(idx) == .used);
+                    live[k][idx] = true;
+                } else if (live[k][idx]) {
+                    try std.testing.expect(op == .tick);
+                    live[k][idx] = false;
+                    reaped[k][idx] = true;
+                    reaps[k] += 1;
+                }
+                if (reaped[k][idx]) {
+                    try std.testing.expect(conn.streamRecvWasReaped(id));
+                }
+            }
+            try std.testing.expect(live_now <= windows[k]);
+            try std.testing.expect(space.inUse() <= windows[k]);
+            try std.testing.expectEqual(reaps[k], space.closed);
+            try std.testing.expect(space.opened <= space.limit);
+            try std.testing.expect(space.limit <= windows[k] + space.closed);
+            try std.testing.expect(space.limit >= last_limit[k]);
+            last_limit[k] = space.limit;
+            try std.testing.expectEqual(@as(?u64, null), space.creditToAdvertise(blocked_at));
+            if (pending) |p| try std.testing.expectEqual(space.limit, p);
+        }
+    }
+}
+
+/// One operation of the stream-window harness, as its four draws.
+const WindowSeedOp = struct {
+    op: WindowOp,
+    uni: bool = true,
+    pick: u64 = 0,
+    arg: u8 = 0,
+};
+
+/// A seed for the stream-window harness. With no fuzzer attached,
+/// `Smith` reads every integer draw as an 8-byte little-endian word, in
+/// harness draw order: the two windows, the operation count, then four
+/// words per operation.
+fn windowSeed(
+    comptime window_bidi: u64,
+    comptime window_uni: u64,
+    comptime ops: []const WindowSeedOp,
+) [(3 + 4 * ops.len) * 8]u8 {
+    var buf: [(3 + 4 * ops.len) * 8]u8 = undefined;
+    var at: usize = 0;
+    const put = struct {
+        fn word(b: []u8, pos: *usize, v: u64) void {
+            std.mem.writeInt(u64, b[pos.*..][0..8], v, .little);
+            pos.* += 8;
+        }
+    }.word;
+    put(&buf, &at, window_bidi);
+    put(&buf, &at, window_uni);
+    put(&buf, &at, ops.len);
+    for (ops) |o| {
+        put(&buf, &at, @backingInt(o.op));
+        put(&buf, &at, @intFromBool(o.uni));
+        put(&buf, &at, o.pick);
+        put(&buf, &at, o.arg);
+    }
+    return buf;
+}
+
+// A window of one, used again and again: each stream ends, is reaped,
+// and its id comes back. Then a frame arrives late for a reaped id,
+// and the peer tries one id too many.
+const window_seed_churn = windowSeed(0, 1, &.{
+    .{ .op = .stream_fin, .pick = 0 },
+    .{ .op = .tick },
+    .{ .op = .stream_data, .pick = 1 },
+    .{ .op = .stream_fin, .pick = 1 },
+    .{ .op = .app_read, .pick = 1 },
+    .{ .op = .tick },
+    .{ .op = .stream_data, .pick = 0 }, // late, for reaped stream 0
+    .{ .op = .reset, .pick = 1 }, // late, for reaped stream 1
+    .{ .op = .tick },
+    .{ .op = .over_limit },
+});
+
+// Credit held for batching, then the peer uses its last id (by a jump
+// over two lower ids): the held id must go out without a
+// STREAMS_BLOCKED. The skipped ids then arrive, one as a RESET_STREAM.
+const window_seed_last_id = windowSeed(0, 4, &.{
+    .{ .op = .stream_fin, .pick = 0 },
+    .{ .op = .tick },
+    .{ .op = .stream_data, .pick = 3 },
+    .{ .op = .reset, .pick = 1 },
+    .{ .op = .stream_fin, .pick = 2 },
+    .{ .op = .tick },
+    .{ .op = .streams_blocked, .arg = 0 },
+    .{ .op = .stream_any, .pick = 4, .arg = 0b1100 },
+    .{ .op = .app_read, .pick = 4 },
+    .{ .op = .tick },
+});
+
+// Bidirectional: a stream is not closed until our side is done too.
+// One is answered and acknowledged, one is stopped by the peer and our
+// reset acknowledged, one stays half open through every tick.
+const window_seed_bidi = windowSeed(3, 0, &.{
+    .{ .op = .stream_any, .uni = false, .pick = 0, .arg = 0b1100 },
+    .{ .op = .stream_any, .uni = false, .pick = 1, .arg = 0b1100 },
+    .{ .op = .stream_any, .uni = false, .pick = 2, .arg = 0b1100 },
+    .{ .op = .app_read, .uni = false, .pick = 0 },
+    .{ .op = .app_read, .uni = false, .pick = 1 },
+    .{ .op = .app_read, .uni = false, .pick = 2 },
+    .{ .op = .tick },
+    .{ .op = .app_finish_acked, .uni = false, .pick = 0 },
+    .{ .op = .stop_sending, .uni = false, .pick = 1 },
+    .{ .op = .app_finish_acked, .uni = false, .pick = 1 },
+    .{ .op = .tick },
+    .{ .op = .streams_blocked, .uni = false, .arg = 0 },
+    .{ .op = .stream_data, .uni = false, .pick = 3 },
+    .{ .op = .stream_data, .uni = false, .pick = 0 }, // late, for reaped stream 0
+    .{ .op = .tick },
+});
+
+// Credit held for batching (one id of a window of six), then the peer
+// says it is blocked at the limit: the held id goes out at once. A
+// stale STREAMS_BLOCKED, one below the limit, came first and changed
+// nothing.
+const window_seed_blocked = windowSeed(0, 6, &.{
+    .{ .op = .stream_fin, .pick = 0 },
+    .{ .op = .tick },
+    .{ .op = .streams_blocked, .arg = 1 },
+    .{ .op = .streams_blocked, .arg = 0 },
+    .{ .op = .stream_fin, .pick = 6 },
+    .{ .op = .tick },
+});
+
+test "fuzz: Connection stream window under frames, reads, replies and ticks" {
+    try std.testing.fuzz({}, fuzzConnStreamWindow, .{
+        .corpus = &.{ &window_seed_churn, &window_seed_last_id, &window_seed_bidi, &window_seed_blocked },
+    });
+}

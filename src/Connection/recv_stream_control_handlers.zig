@@ -43,5 +43,4 @@ pub fn handleResetStream(conn: *Connection, rs: frame_types.ResetStream) Error!v
         conn.releaseResidentBytes(recv_before - ptr.recv.bytes.items.len);
     }
     conn.peer_sent_stream_data += delta;
-    conn_flow.maybeReturnPeerStreamCredit(conn, ptr);
 }

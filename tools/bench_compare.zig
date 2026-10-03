@@ -67,6 +67,14 @@ const metric_table = [_]Metric{
         .higher_is_worse = false,
         .unit = "vMbps",
     },
+    .{
+        .kind = "churn",
+        .field = "streams_per_virtual_sec",
+        .fallback_field = null,
+        .mad_field = "mad_streams_per_virtual_sec",
+        .higher_is_worse = false,
+        .unit = "streams/vs",
+    },
 };
 
 fn metricForKind(kind: []const u8) ?*const Metric {
@@ -200,13 +208,15 @@ pub fn compareReports(
         if (entry != .object) return error.MalformedNewReport;
         const obj = entry.object;
         const name = strField(obj, "name") orelse return error.MalformedNewReport;
+        // Present in the new report, whether or not its kind has a
+        // headline metric to compare. (Marked only after the metric
+        // lookup, every `fairness` cell was reported as absent.)
+        try seen.put(name, {});
         // Entries without a kind predate schema v3; treat them as micro.
         const kind = strField(obj, "kind") orelse "micro";
         const metric = metricForKind(kind) orelse continue; // unknown kind: skip, never fail
         const new_median = numField(obj, metric.field) orelse
             (if (metric.fallback_field) |f| numField(obj, f) else null) orelse continue;
-
-        try seen.put(name, {});
 
         if (baseline_by_name.get(name)) |base_obj| {
             const base_median = numField(base_obj, metric.field) orelse
@@ -266,7 +276,8 @@ test "compareReports: full verdict matrix from inline reports" {
         \\  {"name":"noisy","kind":"micro","median_ns_per_op":100.0,"mad_ns_per_op":10.0},
         \\  {"name":"legacy_v2","ns_per_op":50.0},
         \\  {"name":"removed","kind":"micro","median_ns_per_op":1.0,"mad_ns_per_op":0.1},
-        \\  {"name":"pipe","kind":"goodput","median_mb_per_sec":1000.0,"mad_mb_per_sec":5.0}
+        \\  {"name":"pipe","kind":"goodput","median_mb_per_sec":1000.0,"mad_mb_per_sec":5.0},
+        \\  {"name":"mystery","kind":"unknown_kind","median_ns_per_op":1.0}
         \\]}
     ;
     const new_json =
@@ -307,6 +318,8 @@ test "compareReports: full verdict matrix from inline reports" {
     try std.testing.expectEqual(Verdict.regression, by_name.get("pipe").?);
     try std.testing.expect(by_name.get("mystery") == null);
 
+    // "mystery" has no row (its kind has no headline metric), but it IS
+    // in the new report: only "removed" is missing.
     try std.testing.expectEqual(@as(usize, 1), cmp.missing.items.len);
     try std.testing.expectEqualStrings("removed", cmp.missing.items[0]);
 }

@@ -16,8 +16,6 @@ const max_stream_count_limit = state_mod.max_stream_count_limit;
 const max_streams_per_connection = state_mod.max_streams_per_connection;
 const Stream = state_mod.Stream;
 const FlowBlockedInfo = state_mod.FlowBlockedInfo;
-const min_stream_credit_return_batch = state_mod.min_stream_credit_return_batch;
-const stream_credit_return_divisor = state_mod.stream_credit_return_divisor;
 const max_tracked_stream_data_blocked = state_mod.max_tracked_stream_data_blocked;
 const transport_error_flow_control = state_mod.transport_error_flow_control;
 
@@ -217,48 +215,33 @@ pub fn creditPeerStreamHighWater(
     return delta;
 }
 
-pub fn maybeReturnPeerStreamCredit(conn: *Connection, s: *Stream) void {
-    if (conn_streams.streamInitiatedByLocal(conn, s.id)) return;
-    if (s.stream_count_credit_returned) return;
-    if (!(s.recv.state == .data_recvd or
-        s.recv.state == .data_read or
-        s.recv.state == .reset_recvd or
-        s.recv.state == .reset_read))
-    {
-        return;
-    }
-    s.stream_count_credit_returned = true;
-    maybeQueueBatchedMaxStreams(conn, conn_streams.streamIsBidi(s.id));
-}
-
-fn maybeQueueBatchedMaxStreams(conn: *Connection, bidi: bool) void {
-    const current = localMaxStreamsSlot(conn, bidi).*;
-    if (current >= max_streams_per_connection) return;
-
-    const opened = conn_streams.peerOpenedStreamsSlot(conn, bidi).*;
-    const remaining = current -| opened;
-    // Fire MAX_STREAMS once the peer has consumed at least a quarter of
-    // the current limit (i.e. <= 3/4 of the cap remains). The previous
-    // 1/2 watermark waited until the peer had drained 50% of the cap
-    // before granting more, which left no room for an aggressively
-    // pipelining peer (notably quiche) to keep going — by the time our
-    // credit reached them they had already exhausted the 1000-stream
-    // initial allotment the multiplexing interop testcase requires
-    // (`initial_max_streams_bidi <= 1000`,
-    // `quic-interop-runner/testcases_quic.py:286-288`). Dropping the
-    // watermark to 1/4-consumed gives ~3 RTTs of headroom at typical
-    // burst rates before the peer actually hits the cap, while still
-    // batching enough closes per frame to keep MAX_STREAMS traffic low.
-    const watermark = (current * 3) / 4;
-    if (remaining > watermark) return;
-
-    const batch = streamCreditReturnBatch(current);
-    const grant = @min(batch, max_streams_per_connection - current);
-    queueMaxStreams(conn, bidi, current + grant);
-}
-
-fn streamCreditReturnBatch(current_limit: u64) u64 {
-    return @max(min_stream_credit_return_batch, current_limit / stream_credit_return_divisor);
+/// Give the peer the stream credit it is entitled to, if now is the
+/// time (RFC 9000 §4.6).
+///
+/// The stream limit is a CONCURRENCY window: the peer may have
+/// `initial_max_streams_*` streams open at once, and gets one id back
+/// for each stream that is fully closed, so `limit = window + closed`.
+/// `StreamIdSpace.creditToAdvertise` decides when a MAX_STREAMS frame
+/// is worth sending: when half a window of credit has built up, or at
+/// once when the peer has used every id it has, or says it is blocked.
+///
+/// Called from the three places where that answer can change: a peer
+/// stream is reaped (`gcClosedStreams`), the peer opens a stream
+/// (`ensurePeerStream`: it may have used its last id), and a
+/// STREAMS_BLOCKED frame arrives. The fuzz harness in `_tests_fuzz.zig`
+/// holds this to "after any operation, no credit is owed".
+///
+/// "Closed" means REAPED: both directions terminal for a
+/// bidirectional stream. Credit that came back when only the receive
+/// side was done would let a peer hold any number of half-open
+/// streams, each with a live `Stream` here.
+///
+/// INTERNAL: pub for direct sibling import (streams.zig,
+/// recv_flow_handlers.zig).
+pub fn maybeAdvertiseStreamCredit(conn: *Connection, bidi: bool) void {
+    const ids = if (bidi) &conn.peer_bidi_ids else &conn.peer_uni_ids;
+    const new_limit = ids.creditToAdvertise(peerStreamsBlockedSlot(conn, bidi).*) orelse return;
+    queueMaxStreams(conn, bidi, new_limit);
 }
 
 pub fn recordFlowBlockedEvent(conn: *Connection, info: FlowBlockedInfo) void {

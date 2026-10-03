@@ -163,10 +163,10 @@
       "name": "impairment_bottleneck_10mbit_mux8",
       "kind": "impairment",
       "total_bytes": 4194304,
-      "virtual_us": 3456000,
-      "virtual_goodput_mbps": 9.7090,
+      "virtual_us": 3455900,
+      "virtual_goodput_mbps": 9.7093,
       "wall_ns": 72199000,
-      "enqueued": 7320,
+      "enqueued": 7319,
       "dropped": 0,
       "loss_permille": 0,
       "reorder_permille": 0,
@@ -291,6 +291,48 @@
       "queue_dropped": 410,
       "peak_queue_delay_us": 24996,
       "seed": 780740
+    }
+    ,
+    {
+      "name": "churn_window1_rtt30ms",
+      "kind": "churn",
+      "streams": 2000,
+      "window": 1,
+      "one_way_delay_us": 15000,
+      "virtual_us": 120769800,
+      "streams_per_virtual_sec": 16.5604,
+      "wall_ns": 1757484000,
+      "enqueued": 8000,
+      "peak_live_streams": 1,
+      "final_limit": 2000
+    }
+    ,
+    {
+      "name": "churn_window4_rtt30ms",
+      "kind": "churn",
+      "streams": 2000,
+      "window": 4,
+      "one_way_delay_us": 15000,
+      "virtual_us": 30200000,
+      "streams_per_virtual_sec": 66.2252,
+      "wall_ns": 456932000,
+      "enqueued": 2002,
+      "peak_live_streams": 4,
+      "final_limit": 2003
+    }
+    ,
+    {
+      "name": "churn_window16_rtt30ms",
+      "kind": "churn",
+      "streams": 2000,
+      "window": 16,
+      "one_way_delay_us": 15000,
+      "virtual_us": 9029800,
+      "streams_per_virtual_sec": 221.4888,
+      "wall_ns": 133772000,
+      "enqueued": 999,
+      "peak_live_streams": 16,
+      "final_limit": 2001
     }
   ]
 }

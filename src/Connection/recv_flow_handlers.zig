@@ -121,6 +121,9 @@ pub fn handleStreamsBlocked(conn: *Connection, sb: frame_types.StreamsBlocked) v
     } else {
         conn.peer_streams_blocked_uni = sb.maximum_streams;
     }
+    // The peer is out of ids. If any credit is held back for batching,
+    // it goes out now.
+    conn_flow.maybeAdvertiseStreamCredit(conn, sb.bidi);
     conn_flow.recordFlowBlockedEvent(conn, .{
         .source = .peer,
         .kind = .streams,
