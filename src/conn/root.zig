@@ -16,7 +16,8 @@
 //!    bookkeeping that drives ACK emission and loss detection.
 //!  - `rtt` / `congestion` / `loss_recovery` — RFC 9002 recovery
 //!    and NewReno congestion control.
-//!  - `flow_control` — stream and connection MAX_DATA accounting.
+//!  - `flow_control` — the two flow-control error names (the
+//!    accounting itself is in `Connection`).
 //!  - `path` / `path_validator` — multipath, migration, and
 //!    PATH_CHALLENGE/PATH_RESPONSE validation.
 //!  - `send_stream` / `recv_stream` — half-stream send/receive

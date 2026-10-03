@@ -728,29 +728,6 @@
    "min_ns_per_op": 20.831728
   },
   {
-   "name": "flow_control_credit_update",
-   "kind": "micro",
-   "iterations": 4536192,
-   "total_ns": 897915000,
-   "ns_per_op": 21.986503,
-   "ops_per_sec": 45482448.488495,
-   "sample_count": 9,
-   "samples_ns_per_op": [
-    21.985401,
-    21.977465,
-    21.986503,
-    22.008769,
-    22.049993,
-    21.987605,
-    22.022216,
-    21.958065,
-    21.968647
-   ],
-   "median_ns_per_op": 21.986503,
-   "mad_ns_per_op": 0.017856,
-   "min_ns_per_op": 21.958065
-  },
-  {
    "name": "path_validator_challenge_response",
    "kind": "micro",
    "iterations": 45757694,

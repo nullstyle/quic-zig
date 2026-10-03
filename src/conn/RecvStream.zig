@@ -13,9 +13,9 @@
 //! dropped and the buffer shrinks.
 //!
 //! Stream-level flow control (§4) is enforced *outside* this
-//! module by `flow_control.StreamData`; the recv buffer surfaces
-//! `bufferedBytes` and `peerHighestOffset` so the caller can feed
-//! them in.
+//! module, by `Connection` (`creditPeerStreamHighWater` in
+//! `Connection/flow.zig`); the recv buffer surfaces `bufferedBytes`
+//! and `peerHighestOffset` so the caller can feed them in.
 
 // Consumers spell `<module>.RecvStream`; the pub self-alias keeps
 // that path resolving now that the file IS the type.

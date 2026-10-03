@@ -147,6 +147,11 @@ changes.
   that use `catch {}` need no change.
 - **`Connection.handleMaxStreamData` returns `Error!void`** (it can
   create a stream now).
+- **Removed: the `quic.conn.flow_control` bookkeeping types**
+  (`DataWindow`, `ConnectionData`, `StreamData`, `StreamCount`), their
+  fuzz harness, and the `flow_control_credit_update` microbenchmark.
+  `Connection` never used them; see "CI and tests". The namespace and
+  its `Error` set stay (the set is part of `Connection.Error`).
 - **Closed-stream memory is no longer indexed by stream id.** The three
   fixed 4096-bit sets that recorded which streams had been reaped are
   gone. Each of the four stream-id spaces (peer or local, bidi or uni)
@@ -172,6 +177,20 @@ changes.
 
 ### CI and tests
 
+- **Ten RFC conformance tests tested code that no connection runs.**
+  The §4.1, §4.2 and §4.6 tests in
+  `tests/conformance/rfc9000_streams_flow.zig` drove
+  `quic.conn.flow_control`, a set of bookkeeping types with the right
+  names and the right rules that `Connection` never called (it keeps
+  its own counters). Their comments said `Connection` used them. They
+  now drive a real `Connection` pair: frames are sealed and injected,
+  and the assertions read the connection's counters and close events.
+  Seven mutants of the real flow-control code are each killed by the
+  rewritten test for their rule. For three of them (a stale MAX_DATA,
+  MAX_STREAM_DATA or MAX_STREAMS that LOWERS a limit) that test is the
+  only one in `zig build test` that fails: before, nothing did.
+  Six new conformance tests cover §19.5, §19.10, §3.2 and the terminal
+  state of §3.1.
 - **One connection, 20,000 streams of each type, each way.** The test
   that pinned the lifetime cap (4096 requests, then a refusal that
   waiting did not cure) is now the test that there is none:

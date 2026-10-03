@@ -1,11 +1,18 @@
 //! RFC 9000 §3-5, §10 — Streams, flow control, connection IDs, and
 //! connection termination.
 //!
-//! This suite exercises the small, pure helper modules that QUIC's
-//! data-plane invariants compose into:
+//! Flow control (§4.1 connection data, §4.2 stream data, §4.6 stream
+//! count) and the stream-control frames (§19.5 STOP_SENDING, §19.10
+//! MAX_STREAM_DATA) are exercised on a real `Connection` pair: frames
+//! are sealed and injected through `_handshake_fixture.zig`, and the
+//! assertions read the connection's own counters and close events.
+//! (Until 0.24.0 the §4 tests drove `quic.conn.flow_control`, a set of
+//! bookkeeping types that `Connection` never used. They passed, and
+//! said nothing about the code that runs. Those types are gone.)
 //!
-//!   - `quic.conn.flow_control` — connection-level data limit (§4.1),
-//!     stream-level data limit (§4.2), and stream-count limit (§4.6).
+//! The rest of the suite exercises the small, pure helper modules that
+//! QUIC's data-plane invariants compose into:
+//!
 //!   - `quic.conn.send_stream` — send-side stream state machine
 //!     (§3.1) plus FIN/RESET coordination.
 //!   - `quic.conn.recv_stream` — receive-side state machine (§3.2),
@@ -29,6 +36,8 @@
 //!   RFC9000 §3.1     MUST     SendStream transitions ready→send→data_sent→data_recvd
 //!   RFC9000 §3.1     MUST NOT send STREAM data after a local RESET_STREAM
 //!   RFC9000 §3.1     MUST     RESET_STREAM transitions reset_sent→reset_recvd on ACK
+//!   RFC9000 §3.1     MUST NOT leave Data Recvd for a later reset (terminal state)
+//!   RFC9000 §3.2     MUST     STOP_SENDING / MAX_STREAM_DATA create a peer bidirectional stream
 //!   RFC9000 §3.2     MUST     RecvStream FIN locks final size and reaches data_recvd
 //!   RFC9000 §3.2     MUST     RESET_STREAM transitions recv→reset_recvd
 //!   RFC9000 §4.1     MUST     reject peer bytes that exceed connection MAX_DATA
@@ -46,6 +55,10 @@
 //!   RFC9000 §4.6     MUST     reject peer streams beyond locally-advertised limit (STREAM_LIMIT_ERROR)
 //!   RFC9000 §4.6     MUST     ignore stale (lower) MAX_STREAMS values
 //!   RFC9000 §4.6     MUST     stream open beyond local limit emits STREAM_LIMIT_ERROR CONNECTION_CLOSE
+//!   RFC9000 §19.5    MUST     STOP_SENDING for a receive-only stream is STREAM_STATE_ERROR
+//!   RFC9000 §19.5    MUST     STOP_SENDING for an uncreated local stream is STREAM_STATE_ERROR
+//!   RFC9000 §19.10   MUST     MAX_STREAM_DATA for an uncreated local stream is STREAM_STATE_ERROR
+//!   RFC9000 §19.11   MUST     ignore stale (lower) MAX_STREAMS values
 //!   RFC9000 §19.11   MAY      withhold MAX_STREAMS credit on graceful shutdown (monotonicity preserved)
 //!   RFC9000 §5.1.1   MUST     active_connection_id_limit honoured on NEW_CONNECTION_ID issuance
 //!   RFC9000 §10.1    MUST     idle timeout uses min(local, peer) idle parameter
@@ -71,7 +84,6 @@
 
 const std = @import("std");
 const quic = @import("quic");
-const flow_control = quic.conn.flow_control;
 const send_stream = quic.conn.send_stream;
 const recv_stream = quic.conn.recv_stream;
 const lifecycle = quic.conn.lifecycle;
@@ -288,6 +300,27 @@ test "MUST advance a send stream to reset_recvd once the peer ACKs RESET_STREAM 
     try std.testing.expect(s.isTerminal());
 }
 
+test "MUST NOT leave Data Recvd when the stream is reset after every byte was acknowledged [RFC9000 §3.1 ¶9]" {
+    // §3.1: "Data Recvd" is a terminal state, and Figure 2 has no edge
+    // out of it. RESET_STREAM is sent from "Ready", "Send" or "Data
+    // Sent". A reset that comes after the peer acknowledged every byte
+    // and the FIN (the application's own, or the one a late
+    // STOP_SENDING asks for) has nothing left to abandon.
+    var s = send_stream.SendStream.init(test_alloc);
+    defer s.deinit();
+    _ = try s.write("abc");
+    try s.finish();
+    const c = s.peekChunk(100).?;
+    try s.recordSent(0, c);
+    try s.onPacketAcked(0);
+    try std.testing.expectEqual(send_stream.State.data_recvd, s.state);
+
+    try s.resetStream(7);
+    try std.testing.expectEqual(send_stream.State.data_recvd, s.state);
+    try std.testing.expect(s.reset == null);
+    try std.testing.expect(!s.hasPendingChunk());
+}
+
 // ---------------------------------------------------------------- §3.2 receiving stream states
 
 test "MUST advance a recv stream to data_recvd once FIN is seen and all bytes are delivered [RFC9000 §3.2 ¶3]" {
@@ -339,59 +372,111 @@ test "MUST transition a recv stream to reset_recvd when RESET_STREAM is processe
 
 test "MUST refuse to send more bytes than the peer-advertised connection MAX_DATA [RFC9000 §4.1 ¶1]" {
     // §4.1 ¶1: "A receiver advertises the maximum amount of data it
-    // is willing to receive on the connection." The send side's
-    // bookkeeping must reject any `recordSent` that crosses
-    // `peer_max`. This is the same invariant that, in the wire layer,
-    // means we never frame a STREAM whose absolute end > peer's
-    // advertised connection limit.
-    var c = flow_control.ConnectionData.init(0, 100);
-    try c.recordSent(60);
-    try c.recordSent(40); // exactly at the cap
-    try std.testing.expectError(
-        flow_control.Error.FlowControlExceeded,
-        c.recordSent(1),
-    );
+    // is willing to receive on the connection." The server advertises
+    // 100 bytes. The client's application writes 300 on one stream:
+    // 100 go on the wire, and the rest waits for a MAX_DATA that this
+    // test never sends.
+    var server_params = fixture.defaultParams();
+    server_params.initial_max_data = 100;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, server_params, fixture.defaultParams());
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const client = pair.clientConn();
+    const server = try pair.serverConn();
+
+    const s = try client.openNextBidi();
+    const payload: [300]u8 = @splat('x');
+    try std.testing.expectEqual(@as(usize, 300), try client.streamWrite(s.id, &payload));
+    for (0..4) |_| try pair.step();
+
+    try std.testing.expectEqual(@as(u64, 100), client.we_sent_stream_data);
+    try std.testing.expectEqual(@as(u64, 100), server.peer_sent_stream_data);
+    try std.testing.expect(client.closeEvent() == null);
+    try std.testing.expect(server.closeEvent() == null);
 }
 
 test "MUST reject peer bytes that exceed advertised connection-level MAX_DATA [RFC9000 §4.1 ¶3]" {
     // §4.1 ¶3: "An endpoint MUST terminate a connection with an error
     // of type FLOW_CONTROL_ERROR if it receives more data than the
-    // maximum data value that it has sent." `ConnectionData.recordPeerSent`
-    // is the bookkeeping primitive — `Connection` calls it on every
-    // STREAM ingress and closes with FLOW_CONTROL_ERROR on the error.
-    var c = flow_control.ConnectionData.init(50, 0);
-    try c.recordPeerSent(50); // exactly at cap
-    try std.testing.expectError(
-        flow_control.Error.PeerExceededLimit,
-        c.recordPeerSent(1),
-    );
+    // maximum data value that it has sent." The connection window is
+    // 50 bytes and the stream window is far larger, so only the
+    // connection-level check can fire: 50 bytes are at the limit and
+    // are accepted, one more is not.
+    var server_params = fixture.defaultParams();
+    server_params.initial_max_data = 50;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, server_params, fixture.defaultParams());
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const fifty: [50]u8 = @splat('x');
+    var buf: [128]u8 = undefined;
+    var n = try frame.encode(&buf, .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = &fifty,
+        .has_offset = true,
+        .has_length = true,
+    } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+
+    n = try frame.encode(&buf, .{ .stream = .{
+        .stream_id = 0,
+        .offset = 50,
+        .data = "x",
+        .has_offset = true,
+        .has_length = true,
+    } });
+    const ev = (try pair.injectFrameAtServer(buf[0..n])) orelse return error.TestExpectedClose;
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(fixture.TRANSPORT_ERROR_FLOW_CONTROL_ERROR, ev.error_code);
 }
 
 test "MUST ignore a MAX_DATA whose value is at or below the current peer_max [RFC9000 §4.1 ¶6]" {
     // §4.1 ¶6: "A sender MUST ignore any MAX_DATA or MAX_STREAM_DATA
-    // frames that do not increase flow control limits." Stale MAX_DATA
-    // can arrive due to reordering; treating it as authoritative
-    // would shrink the window and create a head-of-line deadlock.
-    var c = flow_control.ConnectionData.init(0, 100);
-    c.onMaxData(50); // lower → ignored
-    try std.testing.expectEqual(@as(u64, 100), c.peer_max);
-    c.onMaxData(100); // equal → ignored
-    try std.testing.expectEqual(@as(u64, 100), c.peer_max);
-    c.onMaxData(200); // higher → wins
-    try std.testing.expectEqual(@as(u64, 200), c.peer_max);
+    // frames that do not increase flow control limits." A stale
+    // MAX_DATA can arrive late through reordering; if it were taken,
+    // the send window would shrink.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const server = try pair.serverConn();
+    // What the client advertised in its transport parameters.
+    const initial: u64 = 1 << 20;
+    try std.testing.expectEqual(initial, server.peer_max_data);
+
+    var buf: [16]u8 = undefined;
+    var n = try frame.encode(&buf, .{ .max_data = .{ .maximum_data = initial / 2 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(initial, server.peer_max_data); // lower: ignored
+    n = try frame.encode(&buf, .{ .max_data = .{ .maximum_data = initial } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(initial, server.peer_max_data); // equal: ignored
+    n = try frame.encode(&buf, .{ .max_data = .{ .maximum_data = initial * 2 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(initial * 2, server.peer_max_data); // higher: taken
 }
 
-test "MUST reject a peer-sent total that overflows u64 against our connection limit [RFC9000 §4.1 ¶3]" {
-    // Edge-case companion to the §4.1 receive-side rule above: a
-    // malicious peer could, in principle, drive `peer_sent + n` past
-    // 2^64. The bookkeeping must surface that as a flow-control
-    // violation rather than wrap silently.
-    var c = flow_control.ConnectionData.init(std.math.maxInt(u64), 0);
-    c.peer_sent = std.math.maxInt(u64) - 1;
-    try std.testing.expectError(
-        flow_control.Error.PeerExceededLimit,
-        c.recordPeerSent(2),
-    );
+test "MUST reject a STREAM frame at the top of the offset space without wrapping [RFC9000 §4.1 ¶3]" {
+    // Edge-case companion to the receive-side rule above. The largest
+    // offset the wire can carry is 2^62 - 1; one byte there ends at
+    // 2^62, far past every window. The accounting must say so (and
+    // must not wrap, or trap): FLOW_CONTROL_ERROR, which §19.8 names
+    // for exactly this frame.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    var buf: [32]u8 = undefined;
+    const n = try frame.encode(&buf, .{ .stream = .{
+        .stream_id = 0,
+        .offset = (1 << 62) - 1,
+        .data = "x",
+        .has_offset = true,
+        .has_length = true,
+    } });
+    const ev = (try pair.injectFrameAtServer(buf[0..n])) orelse return error.TestExpectedClose;
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(fixture.TRANSPORT_ERROR_FLOW_CONTROL_ERROR, ev.error_code);
 }
 
 test "MUST emit a FLOW_CONTROL_ERROR CONNECTION_CLOSE on connection-data overflow [RFC9000 §4.1 ¶3]" {
@@ -438,41 +523,86 @@ test "MUST emit a FLOW_CONTROL_ERROR CONNECTION_CLOSE on connection-data overflo
 // ---------------------------------------------------------------- §4.2 stream-level flow control
 
 test "MUST refuse to send more bytes on a stream than peer-advertised MAX_STREAM_DATA [RFC9000 §4.2 ¶1]" {
-    // §4.2 ¶1: per-stream limit applies independently of the
-    // connection-level limit. This is what makes one slow consumer
-    // unable to starve other streams.
-    var s = flow_control.StreamData.init(0, 32);
-    try s.recordSent(20);
-    try s.recordSent(12); // exactly at cap
-    try std.testing.expectError(
-        flow_control.Error.FlowControlExceeded,
-        s.recordSent(1),
-    );
+    // §4.2 ¶1: the per-stream limit applies independently of the
+    // connection-level limit. The server gives streams the client
+    // opens 32 bytes each; the client's application writes 100.
+    var server_params = fixture.defaultParams();
+    server_params.initial_max_stream_data_bidi_remote = 32;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, server_params, fixture.defaultParams());
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const client = pair.clientConn();
+    const server = try pair.serverConn();
+
+    const s = try client.openNextBidi();
+    const payload: [100]u8 = @splat('x');
+    try std.testing.expectEqual(@as(usize, 100), try client.streamWrite(s.id, &payload));
+    for (0..4) |_| try pair.step();
+
+    try std.testing.expectEqual(@as(u64, 32), client.we_sent_stream_data);
+    try std.testing.expectEqual(@as(u64, 32), server.stream(s.id).?.recv.end_offset);
+    try std.testing.expectEqual(@as(?u64, 32), client.localStreamDataBlockedAt(s.id));
+    try std.testing.expect(client.closeEvent() == null);
+    try std.testing.expect(server.closeEvent() == null);
 }
 
 test "MUST reject peer bytes on a stream that exceed MAX_STREAM_DATA [RFC9000 §4.2 ¶3]" {
     // §4.2 ¶3: a peer that sends bytes past the stream-level limit
-    // gets a FLOW_CONTROL_ERROR close. The bookkeeping primitive is
-    // `StreamData.recordPeerSent`; the mapping to FLOW_CONTROL_ERROR
-    // happens in `Connection.handleStream`.
-    var s = flow_control.StreamData.init(16, 0);
-    try s.recordPeerSent(16); // exactly at cap
-    try std.testing.expectError(
-        flow_control.Error.PeerExceededLimit,
-        s.recordPeerSent(1),
-    );
+    // gets a FLOW_CONTROL_ERROR close. The stream window is 16 bytes
+    // and the connection window is far larger, so only the
+    // stream-level check can fire.
+    var server_params = fixture.defaultParams();
+    server_params.initial_max_stream_data_bidi_remote = 16;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, server_params, fixture.defaultParams());
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    const sixteen: [16]u8 = @splat('x');
+    var buf: [64]u8 = undefined;
+    var n = try frame.encode(&buf, .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = &sixteen,
+        .has_offset = true,
+        .has_length = true,
+    } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+
+    n = try frame.encode(&buf, .{ .stream = .{
+        .stream_id = 0,
+        .offset = 16,
+        .data = "x",
+        .has_offset = true,
+        .has_length = true,
+    } });
+    const ev = (try pair.injectFrameAtServer(buf[0..n])) orelse return error.TestExpectedClose;
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(fixture.TRANSPORT_ERROR_FLOW_CONTROL_ERROR, ev.error_code);
 }
 
 test "MUST ignore a MAX_STREAM_DATA whose value is at or below the current peer_max [RFC9000 §4.2 ¶6]" {
     // §4.2 ¶6: identical to MAX_DATA, MAX_STREAM_DATA must be
-    // monotonic from the receiver's point of view.
-    var s = flow_control.StreamData.init(0, 64);
-    s.onMaxStreamData(32); // lower → ignored
-    try std.testing.expectEqual(@as(u64, 64), s.peer_max);
-    s.onMaxStreamData(64); // equal → ignored
-    try std.testing.expectEqual(@as(u64, 64), s.peer_max);
-    s.onMaxStreamData(128); // higher → wins
-    try std.testing.expectEqual(@as(u64, 128), s.peer_max);
+    // monotonic from the receiver's point of view. Stream 1 is a
+    // bidirectional stream the server opens; its send limit starts at
+    // the client's `initial_max_stream_data_bidi_remote`.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const server = try pair.serverConn();
+    const s = try server.openBidi(1);
+    const initial: u64 = 1 << 18;
+    try std.testing.expectEqual(initial, s.send_max_data);
+
+    var buf: [16]u8 = undefined;
+    var n = try frame.encode(&buf, .{ .max_stream_data = .{ .stream_id = 1, .maximum_stream_data = initial / 2 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(initial, s.send_max_data); // lower: ignored
+    n = try frame.encode(&buf, .{ .max_stream_data = .{ .stream_id = 1, .maximum_stream_data = initial } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(initial, s.send_max_data); // equal: ignored
+    n = try frame.encode(&buf, .{ .max_stream_data = .{ .stream_id = 1, .maximum_stream_data = initial * 2 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(initial * 2, s.send_max_data); // higher: taken
 }
 
 // ---------------------------------------------------------------- §4.5 final size
@@ -573,45 +703,69 @@ test "MUST account RESET_STREAM final_size toward connection flow control [RFC90
 // ---------------------------------------------------------------- §4.6 stream concurrency limit
 
 test "MUST refuse to open a stream beyond the peer's advertised stream concurrency [RFC9000 §4.6 ¶2]" {
-    // §4.6 ¶2: peer's `initial_max_streams_bidi` /
-    // `initial_max_streams_uni` plus subsequent MAX_STREAMS frames
-    // bound how many streams of each direction we may have open. The
-    // bookkeeping primitive raises FlowControlExceeded;
-    // `Connection.openBidi` maps that to `Error.StreamLimitExceeded`.
-    var sc = flow_control.StreamCount.init(0, 2);
-    try sc.recordWeOpened();
-    try sc.recordWeOpened();
-    try std.testing.expectError(
-        flow_control.Error.FlowControlExceeded,
-        sc.recordWeOpened(),
-    );
+    // §4.6 ¶2: the peer's `initial_max_streams_bidi` /
+    // `initial_max_streams_uni`, plus later MAX_STREAMS frames, bound
+    // the streams of each type we may open. The server allows two.
+    var server_params = fixture.defaultParams();
+    server_params.initial_max_streams_bidi = 2;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, server_params, fixture.defaultParams());
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const client = pair.clientConn();
+
+    _ = try client.openNextBidi();
+    _ = try client.openNextBidi();
+    try std.testing.expectError(error.StreamLimitExceeded, client.openNextBidi());
+    // The refused open consumed no id, and the peer is to be told
+    // (STREAMS_BLOCKED at the limit).
+    try std.testing.expectEqual(@as(u64, 8), client.peekNextBidi());
+    try std.testing.expectEqual(@as(?u64, 2), client.localStreamsBlockedAt(true));
 }
 
 test "MUST reject a peer-opened stream whose index meets or exceeds local_max [RFC9000 §4.6 ¶2]" {
-    // §4.6 ¶2: a peer that opens stream N where N >= local_max gets
-    // a STREAM_LIMIT_ERROR close. `StreamCount.recordPeerOpened` is
-    // the receive-side primitive; the Connection layer turns
-    // `PeerExceededLimit` into transport_error_stream_limit.
-    var sc = flow_control.StreamCount.init(2, 0);
-    try sc.recordPeerOpened(0);
-    try sc.recordPeerOpened(1);
-    try std.testing.expectError(
-        flow_control.Error.PeerExceededLimit,
-        sc.recordPeerOpened(2), // == local_max, refused
-    );
+    // §4.6 ¶2: with a limit of two, the peer may use stream indices 0
+    // and 1 (ids 0 and 4). Index 2 (id 8) MEETS the limit, and that is
+    // already one too many: STREAM_LIMIT_ERROR.
+    var server_params = fixture.defaultParams();
+    server_params.initial_max_streams_bidi = 2;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, server_params, fixture.defaultParams());
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    var buf: [32]u8 = undefined;
+    for ([_]u64{ 0, 4 }) |id| {
+        const n = try frame.encode(&buf, .{ .stream = .{ .stream_id = id, .data = "x", .has_offset = false, .has_length = true } });
+        try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    }
+    const n = try frame.encode(&buf, .{ .stream = .{ .stream_id = 8, .data = "x", .has_offset = false, .has_length = true } });
+    const ev = (try pair.injectFrameAtServer(buf[0..n])) orelse return error.TestExpectedClose;
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(fixture.TRANSPORT_ERROR_STREAM_LIMIT_ERROR, ev.error_code);
 }
 
 test "MUST ignore MAX_STREAMS that does not raise the current limit [RFC9000 §19.11 ¶6]" {
     // §19.11 ¶6 (final paragraph): "A receiver MUST ignore any
     // MAX_STREAMS frame that does not increase the stream limit."
-    // Same monotonic property as MAX_DATA / MAX_STREAM_DATA.
-    var sc = flow_control.StreamCount.init(0, 4);
-    sc.onMaxStreams(2); // lower → ignored
-    try std.testing.expectEqual(@as(u64, 4), sc.peer_max);
-    sc.onMaxStreams(4); // equal → ignored
-    try std.testing.expectEqual(@as(u64, 4), sc.peer_max);
-    sc.onMaxStreams(8); // higher → wins
-    try std.testing.expectEqual(@as(u64, 8), sc.peer_max);
+    // Same monotonic property as MAX_DATA / MAX_STREAM_DATA. The
+    // client advertised 100 bidirectional streams.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const server = try pair.serverConn();
+    try std.testing.expectEqual(@as(u64, 100), server.local_bidi_ids.limit);
+
+    var buf: [16]u8 = undefined;
+    var n = try frame.encode(&buf, .{ .max_streams = .{ .bidi = true, .maximum_streams = 50 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(@as(u64, 100), server.local_bidi_ids.limit); // lower: ignored
+    n = try frame.encode(&buf, .{ .max_streams = .{ .bidi = true, .maximum_streams = 100 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(@as(u64, 100), server.local_bidi_ids.limit); // equal: ignored
+    n = try frame.encode(&buf, .{ .max_streams = .{ .bidi = true, .maximum_streams = 200 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    try std.testing.expectEqual(@as(u64, 200), server.local_bidi_ids.limit); // higher: taken
+    // The unidirectional limit is its own number.
+    try std.testing.expectEqual(@as(u64, 100), server.local_uni_ids.limit);
 }
 
 test "MUST emit STREAM_LIMIT_ERROR CONNECTION_CLOSE when peer opens above the local limit [RFC9000 §4.6 ¶2]" {
@@ -676,6 +830,90 @@ test "graceful shutdown withholds MAX_STREAMS credit without violating monotonic
     srv.beginGracefulShutdown();
     srv.queueMaxStreams(true, frozen + 100);
     try std.testing.expectEqual(frozen, srv.peer_bidi_ids.limit);
+}
+
+// ---------------------------------------------------------------- §19.5 / §19.10 frames for our sending part
+
+test "MUST treat STOP_SENDING for a receive-only stream as STREAM_STATE_ERROR [RFC9000 §19.5 ¶2]" {
+    // §19.5: "An endpoint that receives a STOP_SENDING frame for a
+    // receive-only stream MUST terminate the connection with error
+    // STREAM_STATE_ERROR." Stream 2 is a unidirectional stream of the
+    // client: the server has no sending part on it to stop.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    var buf: [16]u8 = undefined;
+    const n = try frame.encode(&buf, .{ .stop_sending = .{ .stream_id = 2, .application_error_code = 0 } });
+    const ev = (try pair.injectFrameAtServer(buf[0..n])) orelse return error.TestExpectedClose;
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(@as(u64, 0x05), ev.error_code);
+}
+
+test "MUST treat STOP_SENDING for a local stream that was never created as STREAM_STATE_ERROR [RFC9000 §19.5 ¶2]" {
+    // §19.5: "Receiving a STOP_SENDING frame for a locally initiated
+    // stream that has not yet been created MUST be treated as a
+    // connection error of type STREAM_STATE_ERROR." Stream 1 is the
+    // server's first bidirectional stream, and the server has not
+    // opened it.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    var buf: [16]u8 = undefined;
+    const n = try frame.encode(&buf, .{ .stop_sending = .{ .stream_id = 1, .application_error_code = 0 } });
+    const ev = (try pair.injectFrameAtServer(buf[0..n])) orelse return error.TestExpectedClose;
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(@as(u64, 0x05), ev.error_code);
+}
+
+test "MUST treat MAX_STREAM_DATA for a local stream that was never created as STREAM_STATE_ERROR [RFC9000 §19.10 ¶2]" {
+    // §19.10: "An endpoint that receives a MAX_STREAM_DATA frame for a
+    // locally initiated stream that has not yet been created MUST treat
+    // this as a connection error of type STREAM_STATE_ERROR."
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+
+    var buf: [16]u8 = undefined;
+    const n = try frame.encode(&buf, .{ .max_stream_data = .{ .stream_id = 1, .maximum_stream_data = 1 << 20 } });
+    const ev = (try pair.injectFrameAtServer(buf[0..n])) orelse return error.TestExpectedClose;
+    try std.testing.expectEqual(quic.CloseErrorSpace.transport, ev.error_space);
+    try std.testing.expectEqual(@as(u64, 0x05), ev.error_code);
+}
+
+test "MUST create a peer bidirectional stream when STOP_SENDING or MAX_STREAM_DATA names it first [RFC9000 §3.2 ¶2]" {
+    // §3.2: "For bidirectional streams initiated by a peer, receipt of
+    // a MAX_STREAM_DATA or STOP_SENDING frame for the sending part of
+    // the stream also creates the receiving part." Neither frame is an
+    // error, and neither is dropped: the stream exists afterwards, the
+    // STOP_SENDING is answered with a RESET_STREAM (§3.5), and the
+    // MAX_STREAM_DATA credit is kept.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const server = try pair.serverConn();
+    // The client has opened both streams and sent nothing on them, so
+    // the server has not heard of either. (It must really have opened
+    // them: the server's RESET_STREAM for a stream the client never
+    // opened would be a STREAM_STATE_ERROR on the client's side.)
+    const client = pair.clientConn();
+    _ = try client.openBidi(0);
+    _ = try client.openBidi(4);
+    try std.testing.expect(server.stream(0) == null);
+
+    var buf: [16]u8 = undefined;
+    var n = try frame.encode(&buf, .{ .stop_sending = .{ .stream_id = 0, .application_error_code = 9 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    const first = server.stream(0) orelse return error.StreamNotCreated;
+    try std.testing.expect(first.send.reset != null);
+    try std.testing.expectEqual(@as(u64, 9), first.send.reset.?.error_code);
+
+    n = try frame.encode(&buf, .{ .max_stream_data = .{ .stream_id = 4, .maximum_stream_data = 1 << 20 } });
+    try std.testing.expect((try pair.injectFrameAtServer(buf[0..n])) == null);
+    const second = server.stream(4) orelse return error.StreamNotCreated;
+    try std.testing.expectEqual(@as(u64, 1 << 20), second.send_max_data);
+    try std.testing.expectEqual(@as(u64, 2), server.peer_bidi_ids.opened);
 }
 
 // ---------------------------------------------------------------- §5 connection IDs

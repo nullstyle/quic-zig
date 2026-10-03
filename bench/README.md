@@ -97,7 +97,6 @@ rsync -a host-b:/path/to/quic-zig/benchmark-reports/ aggregate-benchmarks/
 | `new_token_mint_validate` | NEW_TOKEN mint and validation |
 | `stateless_reset_token_derive` | Stateless reset token derivation over fixed CID fixtures |
 | `quic_lb_cid_generate` | QUIC-LB plaintext, AES single-pass, and four-pass CID generation |
-| `flow_control_credit_update` | Connection, stream, and stream-count credit update state transitions |
 | `path_validator_challenge_response` | PATH_CHALLENGE/PATH_RESPONSE match, stray response, and timeout transitions |
 | `path_set_schedule_round_robin` | Public path-set round-robin scheduling with skipped non-sendable paths |
 

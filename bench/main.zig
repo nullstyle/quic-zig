@@ -768,17 +768,7 @@ pub fn main(init: std.process.Init) !void {
         tokens_lb_bench.runQuicLbCidGenerate,
     );
 
-    // Flow-control, path-validation, and path scheduling helpers
-    var flow_control_ctx = path_flow_bench.initFlowControlCreditUpdateCtx();
-    defer flow_control_ctx.deinit();
-    recordBenchmark(
-        &results,
-        &result_count,
-        path_flow_bench.flow_control_credit_update_name,
-        *const path_flow_bench.FlowControlCreditUpdateCtx,
-        &flow_control_ctx,
-        path_flow_bench.runFlowControlCreditUpdate,
-    );
+    // Path-validation and path scheduling helpers
     var path_validator_ctx = path_flow_bench.initPathValidatorChallengeResponseCtx();
     defer path_validator_ctx.deinit();
     recordBenchmark(

@@ -1,174 +1,27 @@
-//! Deterministic flow-control and path-validation benchmark helpers.
+//! Deterministic path-validation and path-scheduling benchmark helpers.
 //!
 //! Fixtures allocate only during context setup. Hot loops stay on the
 //! public state-machine surfaces used by Connection.
+//!
+//! (A `flow_control_credit_update` cell lived here until 0.24.0. It
+//! timed `quic.conn.flow_control` types that `Connection` never used,
+//! so its number described no code path of a connection. It went with
+//! those types.)
 
 const std = @import("std");
 const quic = @import("quic");
 
-const flow_control = quic.conn.flow_control;
 const path_mod = quic.conn.path;
 const path_validator_mod = quic.conn.path_validator;
 
-const ConnectionData = flow_control.ConnectionData;
-const StreamCount = flow_control.StreamCount;
-const StreamData = flow_control.StreamData;
 const PathSet = path_mod.PathSet;
 const PathValidator = path_validator_mod.PathValidator;
 
-pub const flow_control_credit_update_name = "flow_control_credit_update";
 pub const path_validator_challenge_response_name = "path_validator_challenge_response";
 pub const path_set_schedule_round_robin_name = "path_set_schedule_round_robin";
 
-pub const flow_control_step_count: usize = 8;
 pub const path_validator_token_count: usize = 8;
 pub const path_set_round_robin_path_count: usize = 5;
-
-pub const FlowControlCreditUpdateCtx = struct {
-    conn_local_initial: u64 = 64 * 1024,
-    conn_peer_initial: u64 = 64 * 1024,
-    stream_local_initial: u64 = 16 * 1024,
-    stream_peer_initial: u64 = 16 * 1024,
-    stream_count_local_initial: u64 = 32,
-    stream_count_peer_initial: u64 = 32,
-
-    conn_sent_chunks: [flow_control_step_count]u64 = .{
-        211, 377, 89, 610, 144, 512, 233, 377,
-    },
-    conn_peer_chunks: [flow_control_step_count]u64 = .{
-        313, 127, 449, 251, 337, 181, 397, 223,
-    },
-    conn_peer_max_updates: [flow_control_step_count]u64 = .{
-        64 * 1024,
-        66 * 1024,
-        65 * 1024,
-        70 * 1024,
-        69 * 1024,
-        72 * 1024,
-        72 * 1024,
-        80 * 1024,
-    },
-    conn_local_max_updates: [flow_control_step_count]u64 = .{
-        65 * 1024,
-        64 * 1024,
-        68 * 1024,
-        68 * 1024,
-        73 * 1024,
-        72 * 1024,
-        76 * 1024,
-        82 * 1024,
-    },
-
-    stream_sent_chunks: [flow_control_step_count]u64 = .{
-        53, 97, 211, 31, 144, 89, 233, 55,
-    },
-    stream_peer_chunks: [flow_control_step_count]u64 = .{
-        67, 131, 41, 173, 59, 199, 83, 157,
-    },
-    stream_peer_max_updates: [flow_control_step_count]u64 = .{
-        16 * 1024,
-        17 * 1024,
-        17 * 1024 - 64,
-        18 * 1024,
-        19 * 1024,
-        18 * 1024,
-        20 * 1024,
-        24 * 1024,
-    },
-    stream_local_max_updates: [flow_control_step_count]u64 = .{
-        16 * 1024,
-        16 * 1024 + 512,
-        16 * 1024 + 128,
-        17 * 1024,
-        18 * 1024,
-        18 * 1024 - 256,
-        20 * 1024,
-        23 * 1024,
-    },
-
-    peer_stream_indices: [flow_control_step_count]u64 = .{
-        0, 2, 1, 4, 3, 7, 6, 5,
-    },
-    stream_count_updates: [flow_control_step_count]u64 = .{
-        32, 34, 33, 40, 39, 48, 48, 64,
-    },
-
-    pub fn init() FlowControlCreditUpdateCtx {
-        return .{};
-    }
-
-    pub fn deinit(_: *FlowControlCreditUpdateCtx) void {}
-};
-
-pub fn initFlowControlCreditUpdateCtx() FlowControlCreditUpdateCtx {
-    return FlowControlCreditUpdateCtx.init();
-}
-
-pub fn deinitFlowControlCreditUpdateCtx(ctx: *FlowControlCreditUpdateCtx) void {
-    ctx.deinit();
-}
-
-/// One operation rotates a fixed fixture through connection data,
-/// stream data, and stream-count credit updates. The rotation prevents
-/// the hot loop from being a single constant state transition while
-/// keeping every operation under the advertised limits.
-pub fn runFlowControlCreditUpdate(
-    ctx: *const FlowControlCreditUpdateCtx,
-    iters: u64,
-) u64 {
-    var sum: u64 = 0;
-    var i: u64 = 0;
-    while (i < iters) : (i += 1) {
-        sum +%= runFlowControlCreditUpdateOnce(ctx, @intCast(i & (flow_control_step_count - 1)));
-    }
-    return sum;
-}
-
-fn runFlowControlCreditUpdateOnce(
-    ctx: *const FlowControlCreditUpdateCtx,
-    rotate: usize,
-) u64 {
-    var conn = ConnectionData.init(ctx.conn_local_initial, ctx.conn_peer_initial);
-    var stream = StreamData.init(ctx.stream_local_initial, ctx.stream_peer_initial);
-    var stream_count = StreamCount.init(ctx.stream_count_local_initial, ctx.stream_count_peer_initial);
-    var sum: u64 = 0;
-
-    var step: usize = 0;
-    while (step < flow_control_step_count) : (step += 1) {
-        const idx = (rotate + step) & (flow_control_step_count - 1);
-
-        conn.onMaxData(ctx.conn_peer_max_updates[idx]);
-        tryOrUnreachable(conn.recordSent(ctx.conn_sent_chunks[idx]));
-        conn.raiseLocalMax(ctx.conn_local_max_updates[idx]);
-        tryOrUnreachable(conn.recordPeerSent(ctx.conn_peer_chunks[idx]));
-        sum +%= conn.allowance();
-        sum +%= conn.peer_max;
-        sum +%= conn.local_max;
-        sum +%= conn.we_sent;
-        sum +%= conn.peer_sent;
-
-        stream.onMaxStreamData(ctx.stream_peer_max_updates[idx]);
-        tryOrUnreachable(stream.recordSent(ctx.stream_sent_chunks[idx]));
-        stream.raiseLocalMax(ctx.stream_local_max_updates[idx]);
-        tryOrUnreachable(stream.recordPeerSent(ctx.stream_peer_chunks[idx]));
-        sum +%= stream.allowance();
-        sum +%= stream.peer_max;
-        sum +%= stream.local_max;
-        sum +%= stream.we_sent;
-        sum +%= stream.peer_sent;
-
-        stream_count.onMaxStreams(ctx.stream_count_updates[idx]);
-        tryOrUnreachable(stream_count.recordWeOpened());
-        tryOrUnreachable(stream_count.recordPeerOpened(ctx.peer_stream_indices[idx]));
-        sum +%= stream_count.peer_max;
-        sum +%= stream_count.local_max;
-        sum +%= stream_count.we_opened;
-        sum +%= stream_count.peer_opened;
-        sum +%= @intFromBool(stream_count.weCanOpen());
-    }
-
-    return sum;
-}
 
 pub const PathValidatorChallengeResponseCtx = struct {
     tokens: [path_validator_token_count][8]u8 = .{
@@ -335,10 +188,6 @@ pub fn runPathSetScheduleRoundRobin(
     return sum;
 }
 
-fn tryOrUnreachable(result: flow_control.Error!void) void {
-    result catch unreachable;
-}
-
 fn statusInt(status: path_validator_mod.Status) u64 {
     return @backingInt(status);
 }
@@ -360,39 +209,6 @@ fn testAddress(seed: u8) path_mod.Address {
         .addr = .{ seed, seed +% 1, seed +% 2, seed +% 3 },
         .port = @as(u16, seed +% 4) << 8 | @as(u16, seed +% 5),
     } };
-}
-
-test "flow_control_credit_update helper preserves flow invariants" {
-    var ctx = FlowControlCreditUpdateCtx.init();
-    defer ctx.deinit();
-
-    const sum = runFlowControlCreditUpdate(&ctx, 4);
-    try std.testing.expect(sum != 0);
-
-    var conn = ConnectionData.init(ctx.conn_local_initial, ctx.conn_peer_initial);
-    var stream = StreamData.init(ctx.stream_local_initial, ctx.stream_peer_initial);
-    var stream_count = StreamCount.init(ctx.stream_count_local_initial, ctx.stream_count_peer_initial);
-    for (0..flow_control_step_count) |idx| {
-        conn.onMaxData(ctx.conn_peer_max_updates[idx]);
-        try conn.recordSent(ctx.conn_sent_chunks[idx]);
-        conn.raiseLocalMax(ctx.conn_local_max_updates[idx]);
-        try conn.recordPeerSent(ctx.conn_peer_chunks[idx]);
-        try std.testing.expect(conn.we_sent <= conn.peer_max);
-        try std.testing.expect(conn.peer_sent <= conn.local_max);
-
-        stream.onMaxStreamData(ctx.stream_peer_max_updates[idx]);
-        try stream.recordSent(ctx.stream_sent_chunks[idx]);
-        stream.raiseLocalMax(ctx.stream_local_max_updates[idx]);
-        try stream.recordPeerSent(ctx.stream_peer_chunks[idx]);
-        try std.testing.expect(stream.we_sent <= stream.peer_max);
-        try std.testing.expect(stream.peer_sent <= stream.local_max);
-
-        stream_count.onMaxStreams(ctx.stream_count_updates[idx]);
-        try stream_count.recordWeOpened();
-        try stream_count.recordPeerOpened(ctx.peer_stream_indices[idx]);
-        try std.testing.expect(stream_count.we_opened <= stream_count.peer_max);
-        try std.testing.expect(stream_count.peer_opened <= stream_count.local_max);
-    }
 }
 
 test "path_validator_challenge_response helper reaches matched and timeout paths" {
