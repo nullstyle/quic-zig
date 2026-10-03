@@ -49,8 +49,8 @@ test "beginGracefulShutdown refuses local opens but stays open" {
     defer ctx.deinit();
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
-    conn.peer_max_streams_bidi = 100;
-    conn.peer_max_streams_uni = 100;
+    conn.local_bidi_ids.limit = 100;
+    conn.local_uni_ids.limit = 100;
 
     _ = try conn.openNextBidi(); // fine before shutdown
     try std.testing.expect(!conn.gracefulShutdownActive());

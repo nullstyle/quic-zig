@@ -80,6 +80,7 @@ pub const path_mod = @import("conn/path.zig");
 pub const congestion_mod = @import("conn/congestion.zig");
 pub const RttEstimator = @import("conn/RttEstimator.zig");
 pub const flow_control_mod = @import("conn/flow_control.zig");
+const StreamIdSpace = @import("conn/StreamIdSpace.zig");
 pub const event_queue_mod = @import("conn/event_queue.zig");
 pub const PendingFrameQueues = @import("conn/PendingFrameQueues.zig");
 pub const lifecycle_mod = @import("conn/lifecycle.zig");
@@ -543,19 +544,23 @@ peer_sent_stream_data: u64 = 0,
 peer_max_data: u64 = std.math.maxInt(u64),
 /// Sum of new stream bytes we have put on the wire.
 we_sent_stream_data: u64 = 0,
-/// Stream-count limits. `local_*` governs peer-created streams;
-/// `peer_*` governs streams opened through the public API. Unknown
-/// peer limits are permissive until peer transport params arrive.
-local_max_streams_bidi: u64 = 0,
-local_max_streams_uni: u64 = 0,
-peer_max_streams_bidi: u64 = std.math.maxInt(u64),
-peer_max_streams_uni: u64 = std.math.maxInt(u64),
-peer_opened_streams_bidi: u64 = 0,
-peer_opened_streams_uni: u64 = 0,
-local_opened_streams_bidi: u64 = 0,
-local_opened_streams_uni: u64 = 0,
+/// Stream-id accounting, one space per initiator and kind (see
+/// `conn/StreamIdSpace.zig`).
+///
+/// `peer_*_ids` are the streams the PEER opens. We advertise their
+/// limit: `limit` is the highest MAX_STREAMS value we have queued (or
+/// the `initial_max_streams_*` we sent), and `opened` counts the ids
+/// the peer has used or skipped.
+///
+/// `local_*_ids` are the streams opened through the public API. The
+/// peer advertises their limit. Until the peer's transport parameters
+/// arrive the limit is permissive (the wire maximum).
+peer_bidi_ids: StreamIdSpace = .initAdvertised(0),
+peer_uni_ids: StreamIdSpace = .initAdvertised(0),
+local_bidi_ids: StreamIdSpace = .initGranted(std.math.maxInt(u64)),
+local_uni_ids: StreamIdSpace = .initGranted(std.math.maxInt(u64)),
 /// `pollEvent` watermarks for `stream_opened` emission: peer-opened
-/// stream indices in [surfaced, peer_opened_streams_*) have not been
+/// stream indices in [surfaced, `peer_*_ids.opened`) have not been
 /// surfaced to the embedder yet. Peer indices open contiguously
 /// (RFC 9000 §3.2), so chasing the count is lossless — no queue, no
 /// overflow, O(1) state.
@@ -582,12 +587,12 @@ priority_rr_cursor: u64 = 0,
 // and is ignored rather than resurrecting the stream (which would
 // forget its locked final size / reset state). The bitset records
 // reaped-but-not-yet-coalesced indices in the bounded window
-// [peer_reaped_below_*, peer_opened_streams_*); the watermark only
+// [peer_reaped_below_*, peer_*_ids.opened); the watermark only
 // ever advances across a contiguous run of reaped indices from the
 // bottom, so an implicitly-opened-but-never-created lower index
 // (whose bit is never set) permanently halts the run and its later
 // first data still flows to the normal create path. Bounded: every
-// creatable peer index is < local_max_streams_* <=
+// creatable peer index is < peer_*_ids.limit <=
 // max_streams_per_connection (4096), so the fixed bitset is always
 // in range and adds a constant 2×512 B per connection.
 peer_reaped_below_bidi: u64 = 0,
@@ -2150,6 +2155,9 @@ pub fn deinit(self: *Connection) void {
         self.allocator.destroy(s);
     }
     self.streams.deinit(self.allocator);
+    for ([_]*StreamIdSpace{ &self.peer_bidi_ids, &self.peer_uni_ids, &self.local_bidi_ids, &self.local_uni_ids }) |ids| {
+        ids.deinit(self.allocator);
+    }
     self.pending_frames.deinit(self.allocator);
     for (&self.sent) |*tracker| tracker.deinit(self.allocator);
     self.paths.deinit(self.allocator);
@@ -2303,8 +2311,10 @@ fn normalizeLocalTransportParams(params: TransportParams) transport_params_mod.E
 fn applyLocalFlowTransportParams(self: *Connection) void {
     const params = self.local_transport_params;
     self.local_max_data = params.initial_max_data;
-    self.local_max_streams_bidi = params.initial_max_streams_bidi;
-    self.local_max_streams_uni = params.initial_max_streams_uni;
+    self.peer_bidi_ids.limit = params.initial_max_streams_bidi;
+    self.peer_bidi_ids.window = params.initial_max_streams_bidi;
+    self.peer_uni_ids.limit = params.initial_max_streams_uni;
+    self.peer_uni_ids.window = params.initial_max_streams_uni;
     var it = self.streams.iterator();
     while (it.next()) |entry| {
         const s = entry.value_ptr.*;
@@ -3304,8 +3314,8 @@ pub fn validatePeerTransportRole(self: *Connection) void {
 
 fn applyPeerFlowTransportParams(self: *Connection, params: TransportParams) void {
     self.peer_max_data = params.initial_max_data;
-    self.peer_max_streams_bidi = @min(params.initial_max_streams_bidi, max_streams_per_connection);
-    self.peer_max_streams_uni = @min(params.initial_max_streams_uni, max_streams_per_connection);
+    self.local_bidi_ids.limit = @min(params.initial_max_streams_bidi, max_streams_per_connection);
+    self.local_uni_ids.limit = @min(params.initial_max_streams_uni, max_streams_per_connection);
     var it = self.streams.iterator();
     while (it.next()) |entry| {
         const s = entry.value_ptr.*;
@@ -4183,13 +4193,13 @@ pub fn pollEvent(self: *Connection) ?ConnectionEvent {
             },
         }
     }
-    if (self.surfaced_peer_streams_bidi < self.peer_opened_streams_bidi) {
+    if (self.surfaced_peer_streams_bidi < self.peer_bidi_ids.opened) {
         const stream_type: StreamType = if (self.role == .client) .server_bidi else .client_bidi;
         const id = stream_type.streamId(self.surfaced_peer_streams_bidi);
         self.surfaced_peer_streams_bidi += 1;
         return .{ .stream_opened = .{ .stream_id = id, .bidi = true } };
     }
-    if (self.surfaced_peer_streams_uni < self.peer_opened_streams_uni) {
+    if (self.surfaced_peer_streams_uni < self.peer_uni_ids.opened) {
         const stream_type: StreamType = if (self.role == .client) .server_uni else .client_uni;
         const id = stream_type.streamId(self.surfaced_peer_streams_uni);
         self.surfaced_peer_streams_uni += 1;

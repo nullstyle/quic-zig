@@ -621,7 +621,7 @@ test "MUST emit STREAM_LIMIT_ERROR CONNECTION_CLOSE when peer opens above the lo
     // bookkeeping hook called from `handleStream` on the first frame
     // for a previously-unseen stream; it closes with
     // `transport_error_stream_limit` (0x04) when the stream's
-    // `streamIndex(id) >= local_max_streams_bidi`.
+    // `streamIndex(id) >= peer_bidi_ids.limit`.
     //
     // Default `initial_max_streams_bidi = 100`; client-initiated bidi
     // stream IDs are 0, 4, 8, …, 396 (indices 0..99). Stream id 400
@@ -666,16 +666,16 @@ test "graceful shutdown withholds MAX_STREAMS credit without violating monotonic
     const srv = try pair.serverConn();
 
     // Before shutdown, granting more credit advances the advertised limit.
-    const before = srv.local_max_streams_bidi;
+    const before = srv.peer_bidi_ids.limit;
     srv.queueMaxStreams(true, before + 10);
-    try std.testing.expectEqual(before + 10, srv.local_max_streams_bidi);
+    try std.testing.expectEqual(before + 10, srv.peer_bidi_ids.limit);
 
     // After shutdown, credit is frozen: the limit neither rises nor falls,
     // so the peer's concurrency is capped at what it already holds.
-    const frozen = srv.local_max_streams_bidi;
+    const frozen = srv.peer_bidi_ids.limit;
     srv.beginGracefulShutdown();
     srv.queueMaxStreams(true, frozen + 100);
-    try std.testing.expectEqual(frozen, srv.local_max_streams_bidi);
+    try std.testing.expectEqual(frozen, srv.peer_bidi_ids.limit);
 }
 
 // ---------------------------------------------------------------- §5 connection IDs

@@ -581,8 +581,8 @@ fn fuzzConnFlowControlWindow(_: void, smith: *std.testing.Smith) anyerror!void {
     defer conn.destroy();
 
     conn.peer_max_data = 0;
-    conn.peer_max_streams_bidi = 0;
-    conn.peer_max_streams_uni = 0;
+    conn.local_bidi_ids.limit = 0;
+    conn.local_uni_ids.limit = 0;
 
     const num_frames = smith.valueRangeAtMost(u8, 0, 32);
     var frame_buf: [64]u8 = undefined;
@@ -611,8 +611,8 @@ fn fuzzConnFlowControlWindow(_: void, smith: *std.testing.Smith) anyerror!void {
         const payload_len = frame_mod.encode(&frame_buf, frame) catch return;
 
         const before_max_data = conn.peer_max_data;
-        const before_streams_bidi = conn.peer_max_streams_bidi;
-        const before_streams_uni = conn.peer_max_streams_uni;
+        const before_streams_bidi = conn.local_bidi_ids.limit;
+        const before_streams_uni = conn.local_uni_ids.limit;
 
         conn.dispatchFrames(.application, frame_buf[0..payload_len], 1_000_000) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -620,10 +620,10 @@ fn fuzzConnFlowControlWindow(_: void, smith: *std.testing.Smith) anyerror!void {
         };
 
         try std.testing.expect(conn.peer_max_data >= before_max_data);
-        try std.testing.expect(conn.peer_max_streams_bidi >= before_streams_bidi);
-        try std.testing.expect(conn.peer_max_streams_uni >= before_streams_uni);
-        try std.testing.expect(conn.peer_max_streams_bidi <= max_streams_per_connection);
-        try std.testing.expect(conn.peer_max_streams_uni <= max_streams_per_connection);
+        try std.testing.expect(conn.local_bidi_ids.limit >= before_streams_bidi);
+        try std.testing.expect(conn.local_uni_ids.limit >= before_streams_uni);
+        try std.testing.expect(conn.local_bidi_ids.limit <= max_streams_per_connection);
+        try std.testing.expect(conn.local_uni_ids.limit <= max_streams_per_connection);
 
         switch (conn.lifecycle.state()) {
             .open, .closing, .draining, .closed => {},
@@ -979,7 +979,7 @@ test "fuzz: Connection PATH_CHALLENGE / PATH_RESPONSE handler invariants" {
 // flow-control window-update frames and asserts:
 //
 // - `peer_max_data` is monotonic non-decreasing (handler only widens).
-// - `peer_max_streams_bidi` and `peer_max_streams_uni` are monotonic
+// - `local_bidi_ids.limit` and `local_uni_ids.limit` are monotonic
 //   non-decreasing AND bounded above by `max_streams_per_connection`
 //   (the handler clamps with `@min`).
 // - MAX_STREAM_DATA on a peer-to-local-only stream id (e.g. peer-uni

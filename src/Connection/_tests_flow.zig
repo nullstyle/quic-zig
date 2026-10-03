@@ -125,17 +125,17 @@ test "bounded policy clamps MAX_STREAMS MAX_PATH_ID and peer CID fanout" {
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
-    conn.peer_max_streams_bidi = 0;
-    conn.peer_max_streams_uni = 0;
+    conn.local_bidi_ids.limit = 0;
+    conn.local_uni_ids.limit = 0;
     conn.handleMaxStreams(.{ .bidi = true, .maximum_streams = max_streams_per_connection + 100 });
     conn.handleMaxStreams(.{ .bidi = false, .maximum_streams = max_streams_per_connection + 100 });
-    try std.testing.expectEqual(max_streams_per_connection, conn.peer_max_streams_bidi);
-    try std.testing.expectEqual(max_streams_per_connection, conn.peer_max_streams_uni);
+    try std.testing.expectEqual(max_streams_per_connection, conn.local_bidi_ids.limit);
+    try std.testing.expectEqual(max_streams_per_connection, conn.local_uni_ids.limit);
 
     conn.queueMaxStreams(true, max_streams_per_connection + 100);
     conn.queueMaxStreams(false, max_streams_per_connection + 100);
-    try std.testing.expectEqual(max_streams_per_connection, conn.local_max_streams_bidi);
-    try std.testing.expectEqual(max_streams_per_connection, conn.local_max_streams_uni);
+    try std.testing.expectEqual(max_streams_per_connection, conn.peer_bidi_ids.limit);
+    try std.testing.expectEqual(max_streams_per_connection, conn.peer_uni_ids.limit);
     try std.testing.expectEqual(max_streams_per_connection, conn.pending_frames.max_streams_bidi.?);
     try std.testing.expectEqual(max_streams_per_connection, conn.pending_frames.max_streams_uni.?);
 
@@ -258,7 +258,7 @@ test "MAX_DATA MAX_STREAM_DATA and MAX_STREAMS raise send-side limits" {
     defer conn.destroy();
 
     conn.peer_max_data = 4;
-    conn.peer_max_streams_bidi = 1;
+    conn.local_bidi_ids.limit = 1;
     const s0 = try conn.openBidi(0);
     s0.send_max_data = 4;
 
@@ -331,7 +331,7 @@ test "sendWindow / streamSendWindow report credit, backlog, and net writable" {
 
     // A second stream draws on the SAME connection credit: its
     // generous stream window is capped by the shared 8_000.
-    conn.peer_max_streams_bidi = 4;
+    conn.local_bidi_ids.limit = 4;
     const s4 = try conn.openBidi(4);
     s4.send_max_data = 100_000;
     const w4 = conn.streamSendWindow(4).?;
@@ -356,8 +356,8 @@ test "openNextBidi / openNextUni choose client-initiated ids automatically" {
     defer ctx.deinit();
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
-    conn.peer_max_streams_bidi = 100;
-    conn.peer_max_streams_uni = 100;
+    conn.local_bidi_ids.limit = 100;
+    conn.local_uni_ids.limit = 100;
 
     try std.testing.expectEqual(@as(u64, 0), (try conn.openNextBidi()).id);
     try std.testing.expectEqual(@as(u64, 4), (try conn.openNextBidi()).id);
@@ -375,8 +375,8 @@ test "openNext* choose server-initiated ids for a server" {
     defer ctx.deinit();
     const conn = try Connection.createServer(allocator, ctx);
     defer conn.destroy();
-    conn.peer_max_streams_bidi = 100;
-    conn.peer_max_streams_uni = 100;
+    conn.local_bidi_ids.limit = 100;
+    conn.local_uni_ids.limit = 100;
 
     try std.testing.expectEqual(@as(u64, 1), (try conn.openNextBidi()).id);
     try std.testing.expectEqual(@as(u64, 5), (try conn.openNextBidi()).id);
@@ -390,8 +390,8 @@ test "peekNextBidi / peekNextUni return the next id without consuming it" {
     defer ctx.deinit();
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
-    conn.peer_max_streams_bidi = 100;
-    conn.peer_max_streams_uni = 100;
+    conn.local_bidi_ids.limit = 100;
+    conn.local_uni_ids.limit = 100;
 
     // Peek is idempotent — it never advances the counter.
     try std.testing.expectEqual(@as(u64, 0), conn.peekNextBidi());
@@ -414,17 +414,17 @@ test "beginGracefulShutdown withholds MAX_STREAMS credit" {
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
-    conn.local_max_streams_bidi = 10;
+    conn.peer_bidi_ids.limit = 10;
     // Normally, granting more credit advances the limit and queues a frame.
     conn.queueMaxStreams(true, 20);
-    try std.testing.expectEqual(@as(u64, 20), conn.local_max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 20), conn.peer_bidi_ids.limit);
     try std.testing.expectEqual(@as(?u64, 20), conn.pending_frames.max_streams_bidi);
     conn.pending_frames.max_streams_bidi = null;
 
     // After graceful shutdown, credit freezes: no advance, no queued frame.
     conn.beginGracefulShutdown();
     conn.queueMaxStreams(true, 50);
-    try std.testing.expectEqual(@as(u64, 20), conn.local_max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 20), conn.peer_bidi_ids.limit);
     try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_bidi);
 }
 
@@ -436,7 +436,7 @@ test "send-side STREAM emission is capped by flow-control allowance" {
     defer conn.destroy();
 
     conn.peer_max_data = 4;
-    conn.peer_max_streams_bidi = 1;
+    conn.local_bidi_ids.limit = 1;
     const s = try conn.openBidi(0);
     s.send_max_data = 8;
     _ = try s.send.write("abcdefgh");
@@ -520,7 +520,7 @@ test "stream flow block queues STREAM_DATA_BLOCKED and clears on MAX_STREAM_DATA
     defer conn.destroy();
 
     conn.peer_max_data = 16;
-    conn.peer_max_streams_bidi = 1;
+    conn.local_bidi_ids.limit = 1;
     const s = try conn.openBidi(0);
     s.send_max_data = 4;
     _ = try s.send.write("abcdefgh");
@@ -551,7 +551,7 @@ test "STREAMS_BLOCKED is queued when local stream opening hits peer limit" {
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
-    conn.peer_max_streams_bidi = 0;
+    conn.local_bidi_ids.limit = 0;
     try std.testing.expectError(Error.StreamLimitExceeded, conn.openBidi(0));
     try std.testing.expectEqual(@as(?u64, 0), conn.localStreamsBlockedAt(true));
     try std.testing.expectEqual(@as(?u64, 0), conn.pending_frames.streams_blocked_bidi);
@@ -574,7 +574,7 @@ test "uni STREAMS_BLOCKED is queued, requeued on loss, and cleared by MAX_STREAM
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
-    conn.peer_max_streams_uni = 0;
+    conn.local_uni_ids.limit = 0;
     try std.testing.expectError(Error.StreamLimitExceeded, conn.openUni(2));
     try std.testing.expectEqual(@as(?u64, 0), conn.localStreamsBlockedAt(false));
     try std.testing.expectEqual(@as(?u64, 0), conn.pending_frames.streams_blocked_uni);
@@ -732,7 +732,7 @@ test "draining a peer-initiated stream returns MAX_STREAMS credit" {
     var buf: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(0, &buf));
     try std.testing.expectEqual(@as(?u64, 17), conn.pending_frames.max_streams_bidi);
-    try std.testing.expectEqual(@as(u64, 17), conn.local_max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 17), conn.peer_bidi_ids.limit);
 }
 
 test "MAX_STREAMS replenishes early enough for pipelining peers" {
@@ -796,7 +796,7 @@ test "MAX_STREAMS replenishes early enough for pipelining peers" {
     // to land.
     try std.testing.expect(first_grant_limit != null);
     try std.testing.expect(first_grant_limit.? > initial_limit);
-    try std.testing.expectEqual(first_grant_limit.?, conn.local_max_streams_bidi);
+    try std.testing.expectEqual(first_grant_limit.?, conn.peer_bidi_ids.limit);
 }
 
 test "draining at stream cap does not queue duplicate MAX_STREAMS" {
@@ -822,7 +822,7 @@ test "draining at stream cap does not queue duplicate MAX_STREAMS" {
     var buf: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(0, &buf));
     try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_bidi);
-    try std.testing.expectEqual(max_streams_per_connection, conn.local_max_streams_bidi);
+    try std.testing.expectEqual(max_streams_per_connection, conn.peer_bidi_ids.limit);
 }
 
 test "PATH_CIDS_BLOCKED cannot skip local cid sequence numbers" {

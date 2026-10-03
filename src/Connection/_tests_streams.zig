@@ -248,7 +248,7 @@ test "peer-created streams respect advertised stream count" {
         .data = "a",
         .has_length = true,
     });
-    try std.testing.expectEqual(@as(u64, 1), conn.peer_opened_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_bidi_ids.opened);
     try std.testing.expect(conn.lifecycle.pending_close == null);
 
     try conn.handleStream(.application, .{
@@ -293,11 +293,11 @@ test "openNextBidi surfaces StreamLimitExceeded without consuming the id" {
     defer ctx.deinit();
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
-    conn.peer_max_streams_bidi = 0;
+    conn.local_bidi_ids.limit = 0;
 
     try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextBidi());
     // Not consumed: after the peer raises the limit the next open reuses index 0.
-    conn.peer_max_streams_bidi = 1;
+    conn.local_bidi_ids.limit = 1;
     try std.testing.expectEqual(@as(u64, 0), (try conn.openNextBidi()).id);
 }
 
@@ -526,7 +526,7 @@ test "gcClosedStreams: a reaped peer stream is not resurrected by a replayed fra
         .fin = true,
     });
     try std.testing.expect(conn.streams.get(sid) != null);
-    try std.testing.expectEqual(@as(u64, 1), conn.peer_opened_streams_uni);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_uni_ids.opened);
 
     // Consume all bytes so the recv half is fully terminal, then reap.
     var buf: [8]u8 = undefined;
@@ -590,7 +590,7 @@ test "gcClosedStreams: an out-of-order reaped peer stream above the watermark is
             .fin = true,
         });
     }
-    try std.testing.expectEqual(@as(u64, 3), conn.peer_opened_streams_uni);
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_uni_ids.opened);
 
     // Read + reap indices 0 and 2, but leave index 1 ALIVE — its bytes stay
     // unread, so its recv half is not terminal and gcClosedStreams keeps it.
@@ -797,7 +797,7 @@ test "recv-side reads on a local-initiated uni stream fail fast with StreamNotRe
     // Reads used to return 0 forever — indistinguishable from "nothing
     // readable right now" — the receive-side twin of the send black
     // hole above. They must fail fast instead.
-    conn.peer_max_streams_uni = 4;
+    conn.local_uni_ids.limit = 4;
     const uni = try conn.openNextUni();
     var buf: [16]u8 = undefined;
     try std.testing.expectError(Error.StreamNotReadable, conn.streamRead(uni.id, &buf));

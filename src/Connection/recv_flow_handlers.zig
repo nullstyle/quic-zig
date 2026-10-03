@@ -53,13 +53,13 @@ pub fn handleMaxStreams(conn: *Connection, ms: frame_types.MaxStreams) void {
     }
     const bounded_maximum_streams = @min(ms.maximum_streams, max_streams_per_connection);
     if (ms.bidi) {
-        if (bounded_maximum_streams > conn.peer_max_streams_bidi) {
-            conn.peer_max_streams_bidi = bounded_maximum_streams;
+        if (bounded_maximum_streams > conn.local_bidi_ids.limit) {
+            conn.local_bidi_ids.limit = bounded_maximum_streams;
             conn.clearLocalStreamsBlocked(true, bounded_maximum_streams);
         }
     } else {
-        if (bounded_maximum_streams > conn.peer_max_streams_uni) {
-            conn.peer_max_streams_uni = bounded_maximum_streams;
+        if (bounded_maximum_streams > conn.local_uni_ids.limit) {
+            conn.local_uni_ids.limit = bounded_maximum_streams;
             conn.clearLocalStreamsBlocked(false, bounded_maximum_streams);
         }
     }

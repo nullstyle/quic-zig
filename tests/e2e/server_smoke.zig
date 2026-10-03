@@ -1731,7 +1731,7 @@ test "Stream recv reassembly past max_connection_memory closes the connection" {
     // and stream-count limits must not gate before the resident-bytes
     // cap fires.
     conn.local_max_data = 1 << 20;
-    conn.local_max_streams_bidi = 100;
+    conn.peer_bidi_ids.limit = 100;
     // For peer-initiated bidi streams (client side: id&1==1), the
     // initial stream-level recv credit comes from
     // `initial_max_stream_data_bidi_remote`; default zero would close

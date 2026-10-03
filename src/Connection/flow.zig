@@ -114,7 +114,7 @@ pub fn shouldQueueReceiveCredit(consumed: u64, advertised: u64, window: u64) boo
 
 // INTERNAL: pub for direct sibling import (streams.zig).
 pub fn localMaxStreamsSlot(conn: *Connection, bidi: bool) *u64 {
-    return if (bidi) &conn.local_max_streams_bidi else &conn.local_max_streams_uni;
+    return if (bidi) &conn.peer_bidi_ids.limit else &conn.peer_uni_ids.limit;
 }
 
 fn peerStreamsBlockedSlot(conn: *Connection, bidi: bool) *?u64 {

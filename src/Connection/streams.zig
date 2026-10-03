@@ -59,12 +59,12 @@ pub fn localStreamType(conn: *const Connection, uni: bool) StreamType {
 
 // Doc comment lives on the `Connection.openNextBidi` thunk in Connection.zig.
 pub fn openNextBidi(conn: *Connection) Error!*Stream {
-    return openBidi(conn, localStreamType(conn, false).streamId(conn.local_opened_streams_bidi));
+    return openBidi(conn, localStreamType(conn, false).streamId(conn.local_bidi_ids.opened));
 }
 
 // Doc comment lives on the `Connection.openNextUni` thunk in Connection.zig.
 pub fn openNextUni(conn: *Connection) Error!*Stream {
-    return openUni(conn, localStreamType(conn, true).streamId(conn.local_opened_streams_uni));
+    return openUni(conn, localStreamType(conn, true).streamId(conn.local_uni_ids.opened));
 }
 
 /// The stream id `openNextBidi` would use next, without opening anything
@@ -74,13 +74,13 @@ pub fn openNextUni(conn: *Connection) Error!*Stream {
 /// only valid until the next successful local bidi open on this
 /// connection (`openNextBidi` or an `openBidi` at or above this id).
 pub fn peekNextBidi(conn: *const Connection) u64 {
-    return localStreamType(conn, false).streamId(conn.local_opened_streams_bidi);
+    return localStreamType(conn, false).streamId(conn.local_bidi_ids.opened);
 }
 
 /// The stream id `openNextUni` would use next, without opening anything or
 /// advancing the counter. Same validity caveat as `peekNextBidi`.
 pub fn peekNextUni(conn: *const Connection) u64 {
-    return localStreamType(conn, true).streamId(conn.local_opened_streams_uni);
+    return localStreamType(conn, true).streamId(conn.local_uni_ids.opened);
 }
 
 fn openStream(conn: *Connection, id: u64) Error!*Stream {
@@ -228,16 +228,16 @@ pub fn initialSendStreamLimit(conn: *const Connection, id: u64) u64 {
 // Direction-symmetric stream-count accounting slots; see the note on
 // the matching bidi/uni slot accessors in flow.zig.
 fn peerMaxStreamsSlot(conn: *Connection, bidi: bool) *u64 {
-    return if (bidi) &conn.peer_max_streams_bidi else &conn.peer_max_streams_uni;
+    return if (bidi) &conn.local_bidi_ids.limit else &conn.local_uni_ids.limit;
 }
 
 fn localOpenedStreamsSlot(conn: *Connection, bidi: bool) *u64 {
-    return if (bidi) &conn.local_opened_streams_bidi else &conn.local_opened_streams_uni;
+    return if (bidi) &conn.local_bidi_ids.opened else &conn.local_uni_ids.opened;
 }
 
 // INTERNAL: pub for direct sibling import (flow.zig).
 pub fn peerOpenedStreamsSlot(conn: *Connection, bidi: bool) *u64 {
-    return if (bidi) &conn.peer_opened_streams_bidi else &conn.peer_opened_streams_uni;
+    return if (bidi) &conn.peer_bidi_ids.opened else &conn.peer_uni_ids.opened;
 }
 
 fn recordLocalStreamOpen(conn: *Connection, id: u64) Error!void {
@@ -317,7 +317,7 @@ pub fn streamRecvWasReaped(conn: *const Connection, id: u64) bool {
 fn notePeerStreamReaped(conn: *Connection, id: u64) void {
     if (streamInitiatedByLocal(conn, id)) return;
     const idx = streamIndex(id);
-    // Bounded by local_max_streams_* <= max_streams_per_connection.
+    // Bounded by peer_*_ids.limit <= max_streams_per_connection.
     std.debug.assert(idx < max_streams_per_connection);
     const bidi = streamIsBidi(id);
     const bits = if (bidi) &conn.peer_reaped_bits_bidi else &conn.peer_reaped_bits_uni;
@@ -326,7 +326,7 @@ fn notePeerStreamReaped(conn: *Connection, id: u64) void {
     bits.set(@intCast(idx));
     // Coalesce: advance the watermark across consecutive reaped bits.
     // The `< opened` guard is load-bearing for paths that reap a
-    // stream without bumping peer_opened_streams_* (e.g. direct-put
+    // stream without bumping peer_*_ids.opened (e.g. direct-put
     // test setup); it keeps the loop trivially in range too.
     while (below.* < opened and bits.isSet(@intCast(below.*))) {
         bits.unset(@intCast(below.*));
@@ -341,12 +341,12 @@ pub fn peerStreamWithinLocalLimit(conn: *Connection, id: u64) bool {
         return false;
     }
     if (streamIsBidi(id)) {
-        if (idx >= conn.local_max_streams_bidi) {
+        if (idx >= conn.peer_bidi_ids.limit) {
             conn.close(true, transport_error_stream_limit, "peer referenced bidirectional stream above limit");
             return false;
         }
     } else {
-        if (idx >= conn.local_max_streams_uni) {
+        if (idx >= conn.peer_uni_ids.limit) {
             conn.close(true, transport_error_stream_limit, "peer referenced unidirectional stream above limit");
             return false;
         }

@@ -397,13 +397,13 @@ test "peekNextBidi returns the id a limit-blocked retry will reuse" {
     defer ctx.deinit();
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
-    conn.peer_max_streams_bidi = 0;
+    conn.local_bidi_ids.limit = 0;
 
     // A limit-blocked open doesn't consume the id, so peek still points at it
     // — this is the GOAWAY-gate-then-open sequence a downstream relies on.
     try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextBidi());
     try std.testing.expectEqual(@as(u64, 0), conn.peekNextBidi());
-    conn.peer_max_streams_bidi = 1;
+    conn.local_bidi_ids.limit = 1;
     try std.testing.expectEqual(conn.peekNextBidi(), (try conn.openNextBidi()).id);
 }
 
