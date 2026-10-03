@@ -1,5 +1,24 @@
 name: quic-go-interop
 
+# A hard gate: quic-zig as a client must complete a handshake and a
+# transfer against a pinned quic-go server.
+#
+# From its first run on 2026-07-05 to 2026-10-03 this gate ran ZERO
+# tests. Of 111 runs, 96 reached the runner; each of those skipped its
+# only pair, and 93 showed green. The pinned runner's
+# docker-compose.yml uses `interface_name`, which needs Docker Engine
+# 28.1 or later; GitHub's ubuntu image carries 28.0.4, so no container
+# ever started. The runner's compliance preflight read that as
+# "quic-zig client not compliant", skipped the pair, and exited 0.
+# Every release tagged in that window, 0.23.0 included, counted this
+# gate as passed.
+#
+# Three things stop a repeat. This workflow installs a newer Engine, as
+# the runner's own workflow does. The wrapper refuses to start on an
+# Engine that is too old. And the wrapper reads the result file after
+# the run: a skipped or missing cell fails the step (`interop evidence`
+# in the log is the line to read; the run conclusion is not evidence).
+
 on:
   push:
     branches: [main]
@@ -63,9 +82,28 @@ jobs:
           echo "::error::dependency prefetch failed after 5 attempts"
           exit 1
 
+      # The runner's compose file needs Engine >= 28.1 (`interface_name`);
+      # the ubuntu image carries 28.0.4. The runner's own workflow
+      # installs a newer Engine the same way. Drop this step when the
+      # image's own Engine is new enough (the wrapper checks, and says
+      # so when it is not).
+      - name: Set up Docker Engine
+        uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
+        with:
+          version: v29.8.2
+
+      # As the runner's own workflow does: its simulator filters IPv6.
+      - name: Load the IPv6 filter module for the network simulator
+        run: sudo modprobe ip6table_filter
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
+      # No `--assume-compliant`: the preflight runs for both sides. It
+      # was skipped for quic-go from 0.7.3 on, because it "failed in CI";
+      # the failure was the Engine, not the preflight.
+      # `--strict`: both cells must be `succeeded`. Read the
+      # `interop evidence:` line in the log, not the run conclusion.
       - name: Run quic-go hard interop gate
         working-directory: quic-zig
         env:
@@ -79,7 +117,7 @@ jobs:
             --servers quic-go \
             --tests H,D \
             --quic-go-image "${QUIC_GO_IMAGE}" \
-            --assume-compliant quic-go \
+            --strict \
             --log-dir "${{ github.workspace }}/interop-logs/quic-go-hard" \
             --json "${{ github.workspace }}/interop-results/quic-go-hard.json"
 

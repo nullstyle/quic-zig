@@ -66,6 +66,10 @@ const Config = struct {
     scenario: ?[]const u8 = null,
     quic_go_image: ?[]const u8 = null,
     assume_compliant: []const u8 = "",
+    /// Every cell must be `succeeded`: an `unsupported` cell is a
+    /// failure too. For a gate whose cells this implementation is
+    /// required to pass.
+    strict: bool = false,
 };
 
 const RunnerRole = enum {
@@ -131,7 +135,7 @@ fn usage() void {
         \\usage:
         \\  zig build external-interop -- preflight [--image quic-zig-qns:local] [--dry-run]
         \\  zig build external-interop -- build-image [--image quic-zig-qns:local] [--zig-version <ver> (also needs matching --build-arg hashes)] [--dry-run]
-        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--assume-compliant quic-go] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
+        \\  zig build external-interop -- runner [--role server|client] [--build-image] [--runner-dir ../quic-interop-runner] [--clients quic-go,ngtcp2,quiche] [--servers quic-go,ngtcp2,quiche] [--tests core+retry] [--quic-go-image martenseemann/quic-go-interop@sha256:...] [--assume-compliant quic-go] [--strict] [--scenario "drop-rate ..."] [--python 3.12] [--wireshark-image quic-zig-interop-wireshark:local] [--dry-run]
         \\
     , .{});
 }
@@ -229,6 +233,9 @@ fn parseRunner(allocator: std.mem.Allocator, args: []const []const u8, cfg: *Con
             i += 1;
             if (i >= args.len) return error.MissingAssumeCompliant;
             cfg.assume_compliant = args[i];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            cfg.strict = true;
             i += 1;
         } else {
             std.debug.print("unknown runner argument: {s}\n", .{arg});
@@ -368,7 +375,9 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     const overlay = try std.Io.Dir.path.join(allocator, &.{ cfg.repo, ".zig-cache", "interop-runner-overlay" });
     try recreateDir(io, overlay);
     try copyTree(allocator, io, runner_dir, overlay);
+    if (!cfg.dry_run) try requireEngineForCompose(allocator, io, overlay);
     try patchRunnerKeylogSelection(allocator, io, overlay);
+    try patchRunnerComplianceOutput(allocator, io, overlay);
     if (cfg.scenario != null) try patchRunnerScenarioOverride(allocator, io, overlay);
     if (cfg.assume_compliant.len != 0) try patchRunnerAssumeCompliant(allocator, io, overlay);
     try injectQuicZigImplementation(allocator, io, overlay, cfg.image, @tagName(cfg.role));
@@ -433,7 +442,175 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
         "-i",
         "quic-zig",
     });
-    try runCommand(io, cmd.items, overlay, cfg.dry_run);
+    const code = try runCommandCode(io, cmd.items, overlay, cfg.dry_run);
+    if (cfg.dry_run) return;
+
+    // The runner's exit code is its count of failed test cells, so a
+    // run that skipped every pair exits 0. The result file is the
+    // evidence; a clean exit code alone is not a pass.
+    const proven = reportEvidence(allocator, io, cfg.json_path.?, cfg.strict);
+    if (code != 0) std.process.exit(code);
+    if (!proven) std.process.exit(1);
+}
+
+/// What the runner's result file says happened, cell by cell. A cell is
+/// one test case or one measurement for one client/server pair.
+const Evidence = struct {
+    pairs: usize = 0,
+    succeeded: usize = 0,
+    failed: usize = 0,
+    unsupported: usize = 0,
+    /// Cells the runner never ran. When a compliance preflight fails,
+    /// the runner skips the pair, writes `"result": null` for each of
+    /// its test cases, leaves its measurements out, and counts none of
+    /// it as a failure.
+    skipped: usize = 0,
+
+    fn cells(ev: Evidence) usize {
+        return ev.succeeded + ev.failed + ev.unsupported + ev.skipped;
+    }
+
+    fn count(ev: *Evidence, cell: std.json.Value) !void {
+        if (cell != .object) return error.InvalidResultJson;
+        const result = cell.object.get("result") orelse return error.InvalidResultJson;
+        switch (result) {
+            .null => ev.skipped += 1,
+            .string => |s| {
+                if (std.mem.eql(u8, s, "succeeded")) {
+                    ev.succeeded += 1;
+                } else if (std.mem.eql(u8, s, "failed")) {
+                    ev.failed += 1;
+                } else if (std.mem.eql(u8, s, "unsupported")) {
+                    ev.unsupported += 1;
+                } else return error.InvalidResultJson;
+            },
+            else => return error.InvalidResultJson,
+        }
+    }
+};
+
+fn summarizeResults(allocator: std.mem.Allocator, bytes: []const u8) !Evidence {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResultJson;
+    const root = parsed.value.object;
+
+    const results = root.get("results") orelse return error.InvalidResultJson;
+    const measurements = root.get("measurements") orelse return error.InvalidResultJson;
+    const tests = root.get("tests") orelse return error.InvalidResultJson;
+    if (results != .array or measurements != .array or tests != .object) return error.InvalidResultJson;
+
+    var ev: Evidence = .{ .pairs = results.array.items.len };
+    var tests_per_pair: usize = 0;
+    for (results.array.items) |row| {
+        if (row != .array) return error.InvalidResultJson;
+        tests_per_pair = row.array.items.len;
+        for (row.array.items) |cell| try ev.count(cell);
+    }
+
+    // `tests` names the test cases and the measurements together, and a
+    // pair's `results` row always has one cell per test case, so the
+    // difference is how many measurements each pair owes. A measurement
+    // that did not run is absent, not null.
+    const measurements_per_pair = tests.object.count() -| tests_per_pair;
+    var measurement_cells: usize = 0;
+    for (measurements.array.items) |row| {
+        if (row != .array) return error.InvalidResultJson;
+        measurement_cells += row.array.items.len;
+        for (row.array.items) |cell| try ev.count(cell);
+    }
+    ev.skipped += (ev.pairs * measurements_per_pair) -| measurement_cells;
+    return ev;
+}
+
+/// Why this run is not a pass, or null when the evidence holds.
+fn evidenceProblem(ev: Evidence, strict: bool) ?[]const u8 {
+    if (ev.cells() == 0) return "the result file has no cells: nothing ran";
+    if (ev.skipped != 0) return "the runner skipped cells: a failed compliance preflight skips the pair and still exits 0";
+    if (ev.failed != 0) return "cells failed";
+    if (ev.succeeded == 0) return "no cell succeeded";
+    if (strict and ev.unsupported != 0) return "--strict needs every cell to succeed, and some were unsupported";
+    return null;
+}
+
+/// Prints the one line that says what the run proved, and returns
+/// whether it is a pass.
+fn reportEvidence(allocator: std.mem.Allocator, io: std.Io, json_path: []const u8, strict: bool) bool {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, json_path, allocator, .limited(64 * 1024 * 1024)) catch |err| {
+        std.debug.print("interop evidence: NOT A PASS: no result file at {s} ({s})\n", .{ json_path, @errorName(err) });
+        return false;
+    };
+    defer allocator.free(bytes);
+    const ev = summarizeResults(allocator, bytes) catch |err| {
+        std.debug.print("interop evidence: NOT A PASS: cannot read {s} ({s})\n", .{ json_path, @errorName(err) });
+        return false;
+    };
+    std.debug.print(
+        "interop evidence: pairs={d} cells={d} succeeded={d} failed={d} unsupported={d} skipped={d}\n",
+        .{ ev.pairs, ev.cells(), ev.succeeded, ev.failed, ev.unsupported, ev.skipped },
+    );
+    if (evidenceProblem(ev, strict)) |problem| {
+        std.debug.print("interop evidence: NOT A PASS: {s}\n", .{problem});
+        return false;
+    }
+    return true;
+}
+
+/// The first Docker Engine release that accepts `interface_name` on a
+/// compose service network.
+const interface_name_engine: [2]u32 = .{ 28, 1 };
+
+/// True when `version` ("28.0.4", "29.4.0-rc.1") is at least
+/// `major.minor`; null when it does not parse.
+fn engineAtLeast(version: []const u8, min: [2]u32) ?bool {
+    var it = std.mem.splitScalar(u8, version, '.');
+    const major = std.fmt.parseInt(u32, it.next() orelse return null, 10) catch return null;
+    const minor = std.fmt.parseInt(u32, it.next() orelse return null, 10) catch return null;
+    if (major != min[0]) return major > min[0];
+    return minor >= min[1];
+}
+
+/// The pinned runner names the simulator's interfaces with
+/// `interface_name` in docker-compose.yml (its fix for the interface
+/// order of Docker Engine 28). An older daemon refuses to create the
+/// `sim` container, the runner reads that as "not compliant", skips the
+/// pair, and exits 0. GitHub's ubuntu image carried Engine 28.0.4, so
+/// both interop workflows ran zero tests from 2026-07-05 to 2026-10-03
+/// and showed green. Say so up front instead.
+fn requireEngineForCompose(allocator: std.mem.Allocator, io: std.Io, overlay: []const u8) !void {
+    const compose_path = try std.Io.Dir.path.join(allocator, &.{ overlay, "docker-compose.yml" });
+    const compose = try std.Io.Dir.cwd().readFileAlloc(io, compose_path, allocator, .limited(1024 * 1024));
+    defer allocator.free(compose);
+    if (std.mem.find(u8, compose, "interface_name") == null) return;
+
+    const argv = [_][]const u8{ "docker", "version", "--format", "{{.Server.Version}}" };
+    const result = std.process.run(allocator, io, .{
+        .argv = &argv,
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(16 * 1024),
+    }) catch |err| {
+        std.debug.print("could not run: ", .{});
+        printCommand(&argv);
+        std.debug.print("  ({s})\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    const version = std.mem.trim(u8, result.stdout, " \t\r\n");
+    const ok = engineAtLeast(version, interface_name_engine) orelse {
+        std.debug.print("note: cannot read the Docker Engine version (\"{s}\"); the runner needs {d}.{d} or later\n", .{ version, interface_name_engine[0], interface_name_engine[1] });
+        if (result.stderr.len > 0) std.debug.print("{s}\n", .{result.stderr});
+        return;
+    };
+    if (ok) return;
+    std.debug.print(
+        \\Docker Engine {s} is too old for this quic-interop-runner.
+        \\Its docker-compose.yml uses `interface_name`, which needs Engine {d}.{d} or later.
+        \\With an older Engine no container starts and the runner skips every pair.
+        \\In GitHub Actions, install a newer Engine with docker/setup-docker-action.
+        \\
+    , .{ version, interface_name_engine[0], interface_name_engine[1] });
+    std.process.exit(1);
 }
 
 fn prepareTraceTools(allocator: std.mem.Allocator, io: std.Io, cfg: Config, overlay: []const u8) !?[]const u8 {
@@ -754,6 +931,35 @@ fn patchRunnerAssumeCompliant(
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = interop_path, .data = patched.items });
 }
 
+/// When a compliance preflight fails, the runner prints "<name> not
+/// compliant" and logs what docker compose actually said at debug
+/// level, which nothing shows. In CI the hidden text was a Docker
+/// Engine error, and it stayed hidden for three months. Raise it to
+/// error level, so the reason is in the log next to the verdict.
+fn patchRunnerComplianceOutput(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    overlay: []const u8,
+) !void {
+    const interop_path = try std.Io.Dir.path.join(allocator, &.{ overlay, "interop.py" });
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, interop_path, allocator, .limited(2 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    const needle =
+        \\logging.debug("%s", output.stdout.decode("utf-8", errors="replace"))
+    ;
+    const replacement =
+        \\logging.error("%s", output.stdout.decode("utf-8", errors="replace"))
+    ;
+    if (std.mem.find(u8, bytes, needle) == null) {
+        if (std.mem.find(u8, bytes, replacement) != null) return;
+        return error.UnsupportedRunnerComplianceLogging;
+    }
+    const patched = try std.mem.replaceOwned(u8, allocator, bytes, needle, replacement);
+    defer allocator.free(patched);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = interop_path, .data = patched });
+}
+
 fn expandCases(allocator: std.mem.Allocator, spec: []const u8) ![]u8 {
     if (std.mem.eql(u8, spec, "core")) {
         return try allocator.dupe(u8, "handshake,transfer,chacha20,resumption,zerortt,multiplexing");
@@ -810,8 +1016,15 @@ fn ensureParentDir(io: std.Io, path: []const u8) !void {
 }
 
 fn runCommand(io: std.Io, argv: []const []const u8, cwd: []const u8, dry_run: bool) !void {
+    const code = try runCommandCode(io, argv, cwd, dry_run);
+    if (code != 0) std.process.exit(code);
+}
+
+/// Like `runCommand`, but hands the exit code back, so the caller can
+/// still report on what the command left behind.
+fn runCommandCode(io: std.Io, argv: []const []const u8, cwd: []const u8, dry_run: bool) !u8 {
     printCommand(argv);
-    if (dry_run) return;
+    if (dry_run) return 0;
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .cwd = .{ .path = cwd },
@@ -820,10 +1033,10 @@ fn runCommand(io: std.Io, argv: []const []const u8, cwd: []const u8, dry_run: bo
         .stderr = .inherit,
     });
     const term = try child.wait(io);
-    switch (term) {
-        .exited => |code| if (code != 0) std.process.exit(code),
-        .signal, .stopped, .unknown => std.process.exit(1),
-    }
+    return switch (term) {
+        .exited => |code| code,
+        .signal, .stopped, .unknown => 1,
+    };
 }
 
 fn runAndRequireZero(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd: ?[]const u8) !void {
@@ -927,6 +1140,100 @@ test "runner paths are normalized to absolute paths" {
     try std.testing.expectEqualStrings("quic-go", cfg.assume_compliant);
 }
 
+test "evidence: a skipped pair is not a pass" {
+    // Verbatim from the hard gate on the v0.23.0 release commit (run
+    // 37111206247, 2026-10-03): the preflight failed, the runner skipped
+    // the only pair, exited 0, and the workflow showed green.
+    const skipped_run =
+        \\{"start_time": 1791017942.8862, "end_time": 1791017946.71258, "log_dir": "/home/runner/work/quic-zig/quic-zig/interop-logs/quic-go-hard", "servers": ["quic-go"], "clients": ["quic-zig"], "urls": {"quic-zig": "https://github.com/nullstyle/quic-zig", "quic-go": "https://github.com/quic-go/quic-go"}, "tests": {"H": {"name": "handshake", "desc": "Handshake completes successfully."}, "DC": {"name": "transfer", "desc": "Stream data is being sent and received correctly. Connection close completes with a zero error code."}}, "quic_version": "0x1", "results": [[{"abbr": "H", "name": "handshake", "result": null}, {"abbr": "DC", "name": "transfer", "result": null}]], "measurements": [[]]}
+    ;
+    const ev = try summarizeResults(std.testing.allocator, skipped_run);
+    try std.testing.expectEqual(@as(usize, 1), ev.pairs);
+    try std.testing.expectEqual(@as(usize, 2), ev.cells());
+    try std.testing.expectEqual(@as(usize, 2), ev.skipped);
+    try std.testing.expectEqual(@as(usize, 0), ev.succeeded);
+    try std.testing.expect(evidenceProblem(ev, false) != null);
+    try std.testing.expect(evidenceProblem(ev, true) != null);
+}
+
+test "evidence: a skipped measurement is absent, and still counted" {
+    // Two pairs, one test case and one measurement each. The second
+    // pair was skipped: its test cell is null and its measurement row
+    // is empty.
+    const half_run =
+        \\{"servers": ["quic-zig"], "clients": ["quic-go", "quiche"],
+        \\ "tests": {"H": {"name": "handshake", "desc": ""}, "G": {"name": "goodput", "desc": ""}},
+        \\ "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"}],
+        \\             [{"abbr": "H", "name": "handshake", "result": null}]],
+        \\ "measurements": [[{"name": "goodput", "abbr": "G", "result": "succeeded", "details": "9000 kbps"}], []]}
+    ;
+    const ev = try summarizeResults(std.testing.allocator, half_run);
+    try std.testing.expectEqual(@as(usize, 2), ev.pairs);
+    try std.testing.expectEqual(@as(usize, 4), ev.cells());
+    try std.testing.expectEqual(@as(usize, 2), ev.succeeded);
+    try std.testing.expectEqual(@as(usize, 2), ev.skipped);
+    try std.testing.expect(evidenceProblem(ev, false) != null);
+}
+
+test "evidence: a pass needs every cell run and none failed" {
+    const allocator = std.testing.allocator;
+    const passed =
+        \\{"servers": ["quic-go"], "clients": ["quic-zig"],
+        \\ "tests": {"H": {"name": "handshake", "desc": ""}, "DC": {"name": "transfer", "desc": ""}},
+        \\ "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"},
+        \\              {"abbr": "DC", "name": "transfer", "result": "succeeded"}]],
+        \\ "measurements": [[]]}
+    ;
+    const ok = try summarizeResults(allocator, passed);
+    try std.testing.expectEqual(@as(usize, 2), ok.succeeded);
+    try std.testing.expectEqual(@as(usize, 0), ok.skipped);
+    try std.testing.expectEqual(@as(?[]const u8, null), evidenceProblem(ok, false));
+    try std.testing.expectEqual(@as(?[]const u8, null), evidenceProblem(ok, true));
+
+    // A failed measurement is not in the runner's exit code. It is a
+    // failure here.
+    const failed_measurement =
+        \\{"servers": ["quic-zig"], "clients": ["quic-go"],
+        \\ "tests": {"H": {"name": "handshake", "desc": ""}, "G": {"name": "goodput", "desc": ""}},
+        \\ "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"}]],
+        \\ "measurements": [[{"name": "goodput", "abbr": "G", "result": "failed", "details": ""}]]}
+    ;
+    const bad = try summarizeResults(allocator, failed_measurement);
+    try std.testing.expectEqual(@as(usize, 1), bad.failed);
+    try std.testing.expect(evidenceProblem(bad, false) != null);
+
+    // `unsupported` is a peer's right in a matrix, and a failure in a
+    // gate this implementation must pass.
+    const unsupported =
+        \\{"servers": ["quic-go"], "clients": ["quic-zig"],
+        \\ "tests": {"H": {"name": "handshake", "desc": ""}, "DC": {"name": "transfer", "desc": ""}},
+        \\ "results": [[{"abbr": "H", "name": "handshake", "result": "succeeded"},
+        \\              {"abbr": "DC", "name": "transfer", "result": "unsupported"}]],
+        \\ "measurements": [[]]}
+    ;
+    const partial = try summarizeResults(allocator, unsupported);
+    try std.testing.expectEqual(@as(?[]const u8, null), evidenceProblem(partial, false));
+    try std.testing.expect(evidenceProblem(partial, true) != null);
+
+    // Nothing but `unsupported` proves nothing.
+    try std.testing.expect(evidenceProblem(.{ .pairs = 1, .unsupported = 2 }, false) != null);
+    // No cells at all proves nothing, and says so.
+    try std.testing.expectEqualStrings("the result file has no cells: nothing ran", evidenceProblem(.{}, false).?);
+    try std.testing.expectError(error.InvalidResultJson, summarizeResults(allocator, "{}"));
+}
+
+test "engine version gate for the runner's compose file" {
+    // 28.0.4 is what GitHub's ubuntu image carried while both interop
+    // workflows ran zero tests.
+    try std.testing.expectEqual(@as(?bool, false), engineAtLeast("28.0.4", interface_name_engine));
+    try std.testing.expectEqual(@as(?bool, false), engineAtLeast("27.5.1", interface_name_engine));
+    try std.testing.expectEqual(@as(?bool, true), engineAtLeast("28.1.0", interface_name_engine));
+    try std.testing.expectEqual(@as(?bool, true), engineAtLeast("28.1.0-rc.1", interface_name_engine));
+    try std.testing.expectEqual(@as(?bool, true), engineAtLeast("29.4.0", interface_name_engine));
+    try std.testing.expectEqual(@as(?bool, null), engineAtLeast("", interface_name_engine));
+    try std.testing.expectEqual(@as(?bool, null), engineAtLeast("dev", interface_name_engine));
+}
+
 test "runner client role defaults to client result path" {
     const allocator = std.testing.allocator;
     var cfg = Config{
@@ -938,12 +1245,15 @@ test "runner client role defaults to client result path" {
         "client",
         "--servers",
         "quic-go",
+        "--strict",
     };
+    try std.testing.expect(!cfg.strict);
     try parseRunner(allocator, &args, &cfg);
     defer allocator.free(cfg.runner_dir.?);
     defer allocator.free(cfg.log_dir.?);
     defer allocator.free(cfg.json_path.?);
 
+    try std.testing.expect(cfg.strict);
     try std.testing.expectEqual(RunnerRole.client, cfg.role);
     try std.testing.expectEqualStrings("quic-go", cfg.servers);
     const json_tail = try std.Io.Dir.path.join(allocator, &.{ "interop", "results", "quic-zig-client.json" });

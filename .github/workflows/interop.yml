@@ -20,13 +20,16 @@ on:
 # investigate, not a merge gate (test.yml and quic-go-interop.yml are
 # the gates). Advisory does not mean hidden. This job used to carry
 # `continue-on-error: true`, and every run from at least 2026-07-26 to
-# 2026-10-03 ran ZERO tests and still showed green: the pinned runner's
-# unknown-testcase preflight rejects the server image in CI ("quic-zig
-# server not compliant"), so each client was skipped, and the result
-# file then failed to write. The hard gate got `--assume-compliant` and
-# a result path outside the log tree for exactly that in 0.7.3 / 0.7.4;
-# this job never did. It has both now, and a failed matrix step is a
-# red run.
+# 2026-10-03 ran ZERO tests and still showed green. The cause is the
+# one recorded in quic-go-interop.yml: the pinned runner's compose file
+# needs Docker Engine 28.1 or later, GitHub's ubuntu image carries
+# 28.0.4, no container started, and the runner reported that as
+# "quic-zig server not compliant" and skipped every client.
+#
+# The job now installs a newer Engine, and a failed matrix step is a
+# red run. The wrapper reads the result file after the run: a skipped
+# pair, a failed test, or a failed measurement fails the step. Read the
+# `interop evidence:` line in the log, not the run conclusion.
 jobs:
   qns-server:
     name: QNS interop (quic-zig as server)
@@ -91,6 +94,17 @@ jobs:
         working-directory: quic-interop-runner
         run: pip install -r requirements.txt
 
+      # The runner's compose file needs Engine >= 28.1 (`interface_name`);
+      # the ubuntu image carries 28.0.4. See quic-go-interop.yml.
+      - name: Set up Docker Engine
+        uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
+        with:
+          version: v29.8.2
+
+      # As the runner's own workflow does: its simulator filters IPv6.
+      - name: Load the IPv6 filter module for the network simulator
+        run: sudo modprobe ip6table_filter
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
@@ -99,16 +113,10 @@ jobs:
         run: |
           zig build external-interop -- build-image --image "${QUIC_ZIG_IMAGE}"
 
-      # `--assume-compliant`: the pinned runner's unknown-testcase
-      # preflight fails in CI for every implementation, server or client
-      # ("<name> server not compliant" / "<name> client not compliant"),
-      # and a failed preflight skips the pair without failing anything.
-      # The preflight is not a test of quic-zig: it only asks whether an
-      # image exits 127 for an unknown TESTCASE, which ours does
-      # (interop/qns/run_endpoint.sh; checked by hand against this
-      # runner ref) and which the per-test "unsupported" handling covers
-      # for the peers anyway. So it is skipped for all of them, as
-      # quic-go-interop.yml has done for its peer since 0.7.3.
+      # No `--assume-compliant`: the runner's preflight runs for every
+      # implementation. A failed preflight skips the pair and the runner
+      # still exits 0, so the wrapper reads the result file and fails
+      # the step on any skipped cell.
       # The runner owns and recreates the log directory, so the JSON
       # result lives outside it.
       - name: Run QNS interop (server role)
@@ -123,26 +131,8 @@ jobs:
             --clients "${CLIENTS}" \
             --tests "${TESTS}" \
             --quic-go-image "${QUIC_GO_IMAGE}" \
-            --assume-compliant "quic-zig,${CLIENTS}" \
             --log-dir "${{ github.workspace }}/interop-logs/matrix" \
             --json "${{ github.workspace }}/interop-results/matrix.json"
-
-      # A matrix in which every pair was skipped exits 0 and writes an
-      # empty result. That is how this job ran zero tests for ten weeks,
-      # so count the cells: no executed test or measurement is a failure.
-      - name: The matrix actually ran
-        run: |
-          RESULT="${{ github.workspace }}/interop-results/matrix.json"
-          if [ ! -f "$RESULT" ]; then
-            echo "::error::no result file: the matrix did not run"
-            exit 1
-          fi
-          cells=$(jq '[.results[]?[]?, .measurements[]?[]?] | length' "$RESULT")
-          echo "executed cells: $cells"
-          if [ "$cells" -eq 0 ]; then
-            echo "::error::the interop matrix ran zero tests (every pair was skipped)"
-            exit 1
-          fi
 
       # Surface the pass/fail matrix and the goodput measurements in
       # the job summary so nobody has to download artifacts to see the

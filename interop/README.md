@@ -93,6 +93,34 @@ The published QNS image workflow lives in
 `ghcr.io/nullstyle/quic-zig-qns` with the source commit in the
 `commit_id` label.
 
+## Reading a Run
+
+The runner needs Docker Engine 28.1 or later: its `docker-compose.yml`
+names the simulator's interfaces with `interface_name`. On an older
+Engine no container starts. The wrapper checks the Engine first and
+stops with a message that says so.
+
+The last line of a run is the evidence:
+
+```text
+interop evidence: pairs=1 cells=2 succeeded=2 failed=0 unsupported=0 skipped=0
+```
+
+A cell is one test case or one measurement for one client/server pair.
+The wrapper exits non-zero when a cell failed, when a cell was skipped,
+or when no cell succeeded. With `--strict`, an `unsupported` cell is a
+failure too; the quic-go hard gate uses it.
+
+Read that line. Do not read the runner's exit code, or the colour of a
+CI run. The runner's exit code is its count of failed test cases, so
+the runner exits 0 when a compliance preflight fails and it skips the
+pair. From 2026-07-05 to 2026-10-03 both interop workflows ran on an
+Engine that was too old, skipped every pair that way, ran zero tests,
+and showed green.
+
+When a preflight does fail, the wrapper makes the runner print what
+`docker compose` said, next to the "not compliant" line.
+
 ## Test Selectors
 
 Common runner abbreviations:
