@@ -16,14 +16,21 @@ on:
         required: false
         default: "quic-go,quiche,ngtcp2"
 
-# Interop runs are intentionally tolerant: a regression here is a
-# signal to investigate, not a hard merge gate. The test workflow
-# (test.yml) is the actual CI gate.
+# Interop runs are advisory: a regression here is a signal to
+# investigate, not a merge gate (test.yml and quic-go-interop.yml are
+# the gates). Advisory does not mean hidden. This job used to carry
+# `continue-on-error: true`, and every run from at least 2026-07-26 to
+# 2026-10-03 ran ZERO tests and still showed green: the pinned runner's
+# unknown-testcase preflight rejects the server image in CI ("quic-zig
+# server not compliant"), so each client was skipped, and the result
+# file then failed to write. The hard gate got `--assume-compliant` and
+# a result path outside the log tree for exactly that in 0.7.3 / 0.7.4;
+# this job never did. It has both now, and a failed matrix step is a
+# red run.
 jobs:
   qns-server:
     name: QNS interop (quic-zig as server)
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 90
     env:
       QUIC_INTEROP_RUNNER_REF: 1d6f6554ac8e3b7c4cca0e3d40fd69f661420673
@@ -92,6 +99,14 @@ jobs:
         run: |
           zig build external-interop -- build-image --image "${QUIC_ZIG_IMAGE}"
 
+      # `--assume-compliant quic-zig`: the pinned runner's server-side
+      # unknown-testcase preflight fails in CI for any server image, which
+      # skipped every client. The endpoint does exit 127 for an unknown
+      # TESTCASE (interop/qns/run_endpoint.sh; checked by hand against
+      # this runner ref), so the preflight is skipped for our own image
+      # only; the client implementations are still checked.
+      # The runner owns and recreates the log directory, so the JSON
+      # result lives outside it.
       - name: Run QNS interop (server role)
         working-directory: quic-zig
         env:
@@ -104,8 +119,9 @@ jobs:
             --clients "${CLIENTS}" \
             --tests "${TESTS}" \
             --quic-go-image "${QUIC_GO_IMAGE}" \
-            --log-dir "${{ github.workspace }}/interop-logs" \
-            --json "${{ github.workspace }}/interop-logs/result.json"
+            --assume-compliant quic-zig \
+            --log-dir "${{ github.workspace }}/interop-logs/matrix" \
+            --json "${{ github.workspace }}/interop-results/matrix.json"
 
       # Surface the pass/fail matrix and the goodput measurements in
       # the job summary so nobody has to download artifacts to see the
@@ -115,9 +131,9 @@ jobs:
       - name: Summarize results
         if: always()
         run: |
-          RESULT="${{ github.workspace }}/interop-logs/result.json"
+          RESULT="${{ github.workspace }}/interop-results/matrix.json"
           if [ ! -f "$RESULT" ]; then
-            echo "### interop: no result.json produced" >> "$GITHUB_STEP_SUMMARY"
+            echo "### interop: no result file produced — the matrix did not run" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           {
@@ -143,5 +159,6 @@ jobs:
           name: interop-logs-${{ github.run_id }}
           path: |
             interop-logs/**
+            interop-results/**
           if-no-files-found: warn
           retention-days: 14
