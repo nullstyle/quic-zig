@@ -580,33 +580,6 @@ early_data_surfaced: bool = false,
 /// packet (non-incremental streams are unaffected — they keep strict
 /// stream-id order). See `collectSendableStreamsByPriority`.
 priority_rr_cursor: u64 = 0,
-// Contiguous "reaped" watermark per peer-initiated direction: the
-// count k such that every peer stream index in [0, k) was created
-// and reaped (RFC 9000 §3.2). A STREAM/RESET_STREAM for an absent
-// peer stream with index < the watermark is a post-terminal frame
-// and is ignored rather than resurrecting the stream (which would
-// forget its locked final size / reset state). The bitset records
-// reaped-but-not-yet-coalesced indices in the bounded window
-// [peer_reaped_below_*, peer_*_ids.opened); the watermark only
-// ever advances across a contiguous run of reaped indices from the
-// bottom, so an implicitly-opened-but-never-created lower index
-// (whose bit is never set) permanently halts the run and its later
-// first data still flows to the normal create path. Bounded: every
-// creatable peer index is < peer_*_ids.limit <=
-// max_streams_per_connection (4096), so the fixed bitset is always
-// in range and adds a constant 2×512 B per connection.
-peer_reaped_below_bidi: u64 = 0,
-peer_reaped_below_uni: u64 = 0,
-peer_reaped_bits_bidi: std.bit_set.Static(max_streams_per_connection) = std.bit_set.Static(max_streams_per_connection).empty,
-peer_reaped_bits_uni: std.bit_set.Static(max_streams_per_connection) = std.bit_set.Static(max_streams_per_connection).empty,
-/// Actually reaped local bidi streams, distinguished from sparse local IDs
-/// that were never materialized. A late reply/RESET must not turn a completed
-/// request into STREAM_STATE_ERROR. Negotiated peer stream limits are capped
-/// at max_streams_per_connection; one fixed 512-byte bitmap covers that lifetime
-/// range without allocating during GC. Send-only local uni streams need no
-/// receive tombstone. Any pre-parameter local bidi ID outside the bitmap keeps
-/// its terminal Stream allocation instead of being forgotten unsafely.
-local_reaped_bits_bidi: std.bit_set.Static(max_streams_per_connection) = std.bit_set.Static(max_streams_per_connection).empty,
 /// Decoded peer parameters once BoringSSL exposes them.
 cached_peer_transport_params: ?TransportParams = null,
 /// The peer's transport parameters as REMEMBERED from a prior
@@ -864,6 +837,12 @@ pub const Error = error{
     DatagramIdExhausted,
     InvalidStreamId,
     StreamLimitExceeded,
+    /// `openBidi` / `openUni` named an id far out of order: opening it
+    /// would leave more separate runs of skipped lower ids than the
+    /// connection remembers (`max_local_skipped_stream_ranges`). Not a
+    /// "retry later" condition: open the skipped ids, or open in order
+    /// (`openNextBidi` / `openNextUni` never skip).
+    TooManySkippedStreamIds,
     /// `streamWrite` / `streamFinish` / `streamReset` was called on a
     /// stream the local endpoint cannot send on: a peer-initiated
     /// unidirectional stream (RFC 9000 §2.1 — its low bits make it
@@ -1258,6 +1237,15 @@ pub const stream_credit_return_divisor: u64 = 1;
 /// adversarial probe-flood. Surfaced in qlog as
 /// `migration_fail_reason = .rate_limited`.
 pub const min_path_challenge_interval_us: u64 = 100_000;
+
+/// How many separate runs of skipped stream ids the connection
+/// remembers for the streams it opens itself. `openBidi(id)` /
+/// `openUni(id)` may name ids out of order; every lower id that is
+/// not opened yet is remembered as skipped until it is opened, so a
+/// frame for it can be told from a frame for a stream that was closed.
+/// Skipping one contiguous block of ids costs one run, however large.
+/// Past this many runs the open fails with `TooManySkippedStreamIds`.
+pub const max_local_skipped_stream_ranges: usize = 64;
 
 /// Implementation allocation policy. QUIC's wire limits are intentionally
 /// enormous; quic caps the resources it advertises and tracks so peer input
@@ -2693,8 +2681,6 @@ pub fn setRememberedPeerTransportParams(self: *Connection, params: TransportPara
         self.peer_max_data = @min(self.peer_max_data, params.initial_max_data);
     }
 }
-
-pub const recordPeerStreamOpenOrClose = conn_streams.recordPeerStreamOpenOrClose;
 
 /// Connection-level send flow credit: new stream bytes the peer's
 /// MAX_DATA window accepts right now. See `streamSendWindow` for

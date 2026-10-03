@@ -25,7 +25,8 @@ const StopSendingItem = state_mod.StopSendingItem;
 const transport_error_frame_encoding = state_mod.transport_error_frame_encoding;
 const recv_stream_mod = state_mod.recv_stream_mod;
 const max_stream_count_limit = state_mod.max_stream_count_limit;
-const max_streams_per_connection = state_mod.max_streams_per_connection;
+const max_local_skipped_stream_ranges = state_mod.max_local_skipped_stream_ranges;
+const StreamIdSpace = @import("../conn/StreamIdSpace.zig");
 const default_stream_receive_window = state_mod.default_stream_receive_window;
 const default_connection_receive_window = state_mod.default_connection_receive_window;
 const transport_error_stream_limit = state_mod.transport_error_stream_limit;
@@ -36,17 +37,37 @@ const transport_error_protocol_violation = state_mod.transport_error_protocol_vi
 // Doc comment lives on the `Connection.openBidi` thunk in Connection.zig.
 pub fn openBidi(conn: *Connection, id: u64) Error!*Stream {
     if (!streamIsBidi(id) or !streamInitiatedByLocal(conn, id)) return Error.InvalidStreamId;
-    if (conn.streams.contains(id) or localBidiStreamAlreadyReaped(conn, id)) return Error.StreamAlreadyOpen;
-    try recordLocalStreamOpen(conn, id);
-    return try openStream(conn, id);
+    return openLocalStream(conn, id);
 }
 
 // Doc comment lives on the `Connection.openUni` thunk in Connection.zig.
 pub fn openUni(conn: *Connection, id: u64) Error!*Stream {
     if (!streamIsUni(id) or !streamInitiatedByLocal(conn, id)) return Error.InvalidStreamId;
-    if (conn.streams.contains(id)) return Error.StreamAlreadyOpen;
-    try recordLocalStreamOpen(conn, id);
-    return try openStream(conn, id);
+    return openLocalStream(conn, id);
+}
+
+/// Shared tail of `openBidi` / `openUni` (and so of the `openNext*`
+/// helpers): `id` is a local id of the right kind.
+///
+/// The order of the checks is the order of the errors an embedder
+/// sees: an id that is live, or that was used and closed, is
+/// `StreamAlreadyOpen` (a used id is never free again, RFC 9000 §2.1);
+/// then graceful shutdown; then the peer's stream limit.
+fn openLocalStream(conn: *Connection, id: u64) Error!*Stream {
+    const idx = streamIndex(id);
+    const bidi = streamIsBidi(id);
+    const ids = idSpace(conn, id);
+    if (conn.streams.contains(id) or ids.classify(idx) == .used) return Error.StreamAlreadyOpen;
+    // During graceful shutdown we open no new local streams; in-flight
+    // streams keep draining. Single chokepoint for openBidi/openUni and
+    // the openNext* helpers.
+    if (conn.graceful_shutdown) return Error.ShuttingDown;
+    if (idx >= max_stream_count_limit) return Error.InvalidStreamId;
+    if (idx >= ids.limit) {
+        conn.noteStreamsBlocked(bidi, ids.limit);
+        return Error.StreamLimitExceeded;
+    }
+    return materializeStream(conn, id, max_local_skipped_stream_ranges);
 }
 
 // Doc comment lives on the `Connection.localStreamType` thunk in Connection.zig.
@@ -83,10 +104,25 @@ pub fn peekNextUni(conn: *const Connection) u64 {
     return localStreamType(conn, true).streamId(conn.local_uni_ids.opened);
 }
 
-fn openStream(conn: *Connection, id: u64) Error!*Stream {
-    if (conn.streams.contains(id)) return Error.StreamAlreadyOpen;
+/// Create the stream object for `id` and mark its index used in its
+/// id space. The caller has checked that `id` is absent, is not a
+/// used index, and is below the limit.
+///
+/// The memory comes first and the id space last, so a failed
+/// allocation leaves the id untouched. The other order would leave an
+/// index marked used with no stream behind it, and that reads as "a
+/// stream that was closed": every later frame for it would be ignored.
+fn materializeStream(conn: *Connection, id: u64, max_hole_ranges: usize) Error!*Stream {
+    try conn.streams.ensureUnusedCapacity(conn.allocator, 1);
     const ptr = try conn.allocator.create(Stream);
     errdefer conn.allocator.destroy(ptr);
+    idSpace(conn, id).open(conn.allocator, streamIndex(id), max_hole_ranges) catch |err| return switch (err) {
+        error.OutOfMemory => Error.OutOfMemory,
+        error.TooManySkippedIds => Error.TooManySkippedStreamIds,
+        // Both were ruled out by the caller.
+        error.LimitExceeded => Error.StreamLimitExceeded,
+        error.AlreadyUsed => Error.StreamAlreadyOpen,
+    };
     ptr.* = .{
         .id = id,
         .send = SendStream.init(conn.allocator),
@@ -94,7 +130,7 @@ fn openStream(conn: *Connection, id: u64) Error!*Stream {
         .recv_max_data = initialRecvStreamLimit(conn, id),
         .send_max_data = initialSendStreamLimit(conn, id),
     };
-    try conn.streams.put(conn.allocator, id, ptr);
+    conn.streams.putAssumeCapacity(id, ptr);
     conn_qlog.emitQlog(conn, .{
         .name = .stream_state_updated,
         .stream_id = id,
@@ -111,23 +147,23 @@ pub const PeerStreamFrame = enum { stream_data, reset_stream };
 
 /// Shared STREAM / RESET_STREAM inbound prologue: run the peer-stream
 /// gates in order, then return the stream — the existing one, or a
-/// fresh one materialized through `openStream` (so peer-initiated
+/// fresh one made by `materializeStream` (so peer-initiated
 /// streams emit the same `stream_state_updated` `.open` qlog event as
 /// local opens).
 ///
 /// Gate order is load-bearing:
 /// 1. `peerMaySendOnStream` — data/reset on our send-only uni stream
 ///    closes with STREAM_STATE_ERROR;
-/// 2. an absent local bidi stream actually recorded by GC is post-terminal
-///    and ignored; any other absent local stream closes with STREAM_STATE_ERROR;
+/// 2. an absent local bidi stream that was used and closed is
+///    post-terminal and ignored; any other absent local stream (never
+///    opened, or skipped) closes with STREAM_STATE_ERROR;
 /// 3. RFC 9000 §3.2: an absent peer stream that already reached a
 ///    terminal state and was reaped is post-terminal — the frame is
 ///    dropped instead of resurrecting the stream with fresh
-///    (final-size / reset) state. Checked before
-///    `recordPeerStreamOpenOrClose` so the id is neither re-counted
-///    nor recreated;
-/// 4. `recordPeerStreamOpenOrClose` — stream-limit accounting; closes
-///    the connection itself when the peer overruns a limit.
+///    (final-size / reset) state. Checked before the limit, so the id
+///    is neither re-counted nor recreated;
+/// 4. the stream limit — closes the connection itself when the peer
+///    overruns it.
 ///
 /// Returns null when a gate closed the connection or decided the
 /// frame must be ignored; the caller just returns.
@@ -144,17 +180,50 @@ pub fn ensurePeerStream(conn: *Connection, id: u64, frame: PeerStreamFrame) Erro
     }
     const existing = conn.streams.get(id);
     if (existing) |ptr| return ptr;
+    const idx = streamIndex(id);
+    const ids = idSpace(conn, id);
     if (streamInitiatedByLocal(conn, id)) {
-        if (localBidiStreamAlreadyReaped(conn, id)) return null;
+        if (ids.classify(idx) == .used) return null;
         conn.close(true, transport_error_stream_state, switch (frame) {
             .stream_data => "peer referenced unopened local stream",
             .reset_stream => "peer reset unopened local stream",
         });
         return null;
     }
-    if (peerStreamAlreadyReaped(conn, id)) return null;
-    if (!recordPeerStreamOpenOrClose(conn, id)) return null;
-    return try openStream(conn, id);
+    if (ids.classify(idx) == .used) return null;
+    if (idx >= max_stream_count_limit) {
+        conn.close(true, transport_error_frame_encoding, "stream id exceeds stream count space");
+        return null;
+    }
+    if (idx >= ids.limit) {
+        conn.close(true, transport_error_stream_limit, if (streamIsBidi(id))
+            "peer exceeded bidirectional stream limit"
+        else
+            "peer exceeded unidirectional stream limit");
+        return null;
+    }
+    // A peer space needs no cap of its own on skipped ranges: every
+    // skipped id is below the limit we advertised.
+    return try materializeStream(conn, id, std.math.maxInt(usize));
+}
+
+/// The id space of `id`: by who initiated it, and its kind.
+///
+/// INTERNAL: pub for direct sibling import.
+pub fn idSpace(conn: *Connection, id: u64) *StreamIdSpace {
+    const bidi = streamIsBidi(id);
+    return if (streamInitiatedByLocal(conn, id))
+        (if (bidi) &conn.local_bidi_ids else &conn.local_uni_ids)
+    else
+        (if (bidi) &conn.peer_bidi_ids else &conn.peer_uni_ids);
+}
+
+fn idSpaceConst(conn: *const Connection, id: u64) *const StreamIdSpace {
+    const bidi = streamIsBidi(id);
+    return if (streamInitiatedByLocal(conn, id))
+        (if (bidi) &conn.local_bidi_ids else &conn.local_uni_ids)
+    else
+        (if (bidi) &conn.peer_bidi_ids else &conn.peer_uni_ids);
 }
 
 pub fn streamIsBidi(id: u64) bool {
@@ -225,113 +294,28 @@ pub fn initialSendStreamLimit(conn: *const Connection, id: u64) u64 {
     return params.initial_max_stream_data_bidi_local;
 }
 
-// Direction-symmetric stream-count accounting slots; see the note on
-// the matching bidi/uni slot accessors in flow.zig.
-fn peerMaxStreamsSlot(conn: *Connection, bidi: bool) *u64 {
-    return if (bidi) &conn.local_bidi_ids.limit else &conn.local_uni_ids.limit;
-}
-
-fn localOpenedStreamsSlot(conn: *Connection, bidi: bool) *u64 {
-    return if (bidi) &conn.local_bidi_ids.opened else &conn.local_uni_ids.opened;
-}
-
 // INTERNAL: pub for direct sibling import (flow.zig).
 pub fn peerOpenedStreamsSlot(conn: *Connection, bidi: bool) *u64 {
     return if (bidi) &conn.peer_bidi_ids.opened else &conn.peer_uni_ids.opened;
 }
 
-fn recordLocalStreamOpen(conn: *Connection, id: u64) Error!void {
-    // During graceful shutdown we open no new local streams; in-flight
-    // streams keep draining. Single chokepoint for openBidi/openUni and
-    // the openNext* helpers.
-    if (conn.graceful_shutdown) return Error.ShuttingDown;
-    const idx = streamIndex(id);
-    if (idx >= max_stream_count_limit) return Error.InvalidStreamId;
-    const next = idx + 1;
-    const bidi = streamIsBidi(id);
-    const peer_max = peerMaxStreamsSlot(conn, bidi).*;
-    if (idx >= peer_max) {
-        conn.noteStreamsBlocked(bidi, peer_max);
-        return Error.StreamLimitExceeded;
-    }
-    const opened = localOpenedStreamsSlot(conn, bidi);
-    if (next > opened.*) opened.* = next;
-}
-
-pub fn recordPeerStreamOpenOrClose(conn: *Connection, id: u64) bool {
-    const idx = streamIndex(id);
-    if (idx >= max_stream_count_limit) {
-        conn.close(true, transport_error_frame_encoding, "stream id exceeds stream count space");
-        return false;
-    }
-    const next = idx + 1;
-    const bidi = streamIsBidi(id);
-    if (idx >= conn_flow.localMaxStreamsSlot(conn, bidi).*) {
-        conn.close(true, transport_error_stream_limit, if (bidi)
-            "peer exceeded bidirectional stream limit"
-        else
-            "peer exceeded unidirectional stream limit");
-        return false;
-    }
-    const opened = peerOpenedStreamsSlot(conn, bidi);
-    if (next > opened.*) opened.* = next;
-    return true;
-}
-
-/// True if `id` is a peer-initiated stream that was already opened,
-/// driven to a terminal state, and reclaimed. A STREAM/RESET_STREAM for
-/// such an id is a post-terminal frame that MUST be ignored (RFC 9000
-/// §3.2) rather than resurrecting the stream. Only meaningful for
-/// peer-initiated ids; callers gate on an absent, peer-initiated stream
-/// first.
+/// True if `id` has no live stream because its stream was driven to a
+/// terminal state and reclaimed. A STREAM / RESET_STREAM for such an
+/// id is a post-terminal frame that MUST be ignored (RFC 9000 §3.2)
+/// rather than resurrecting the stream.
 ///
-/// Two cases: below the contiguous watermark (a run of reaped indices
-/// coalesced from the bottom), OR reaped-but-above the watermark because
-/// a lower peer stream is still live — the latter is tracked individually
-/// by its reaped bit until the watermark coalesces past it.
-pub fn peerStreamAlreadyReaped(conn: *const Connection, id: u64) bool {
-    const idx = streamIndex(id);
-    const bidi = streamIsBidi(id);
-    if (idx < (if (bidi) conn.peer_reaped_below_bidi else conn.peer_reaped_below_uni)) return true;
-    if (idx >= max_streams_per_connection) return false;
-    const bits = if (bidi) &conn.peer_reaped_bits_bidi else &conn.peer_reaped_bits_uni;
-    return bits.isSet(@intCast(idx));
-}
-
-fn localBidiStreamAlreadyReaped(conn: *const Connection, id: u64) bool {
-    const idx = streamIndex(id);
-    return idx < max_streams_per_connection and conn.local_reaped_bits_bidi.isSet(@intCast(idx));
+/// The id space remembers which ids were ever used; the stream table
+/// says which are live. Used and not live is closed. An id that was
+/// only SKIPPED (a lower id, implicitly opened when a higher one was
+/// used) is neither: its first frame may still arrive.
+fn streamWasReaped(conn: *const Connection, id: u64) bool {
+    return !conn.streams.contains(id) and idSpaceConst(conn, id).classify(streamIndex(id)) == .used;
 }
 
 // Doc comment lives on the Connection.streamRecvWasReaped thunk.
 pub fn streamRecvWasReaped(conn: *const Connection, id: u64) bool {
     if (!peerMaySendOnStream(conn, id)) return false;
-    return if (streamInitiatedByLocal(conn, id)) localBidiStreamAlreadyReaped(conn, id) else peerStreamAlreadyReaped(conn, id);
-}
-
-/// Record that a peer-initiated stream was reaped, advancing the
-/// contiguous reaped watermark. Local bidi reaps use their own bitmap;
-/// send-only local uni streams cannot receive STREAM/RESET_STREAM frames.
-/// Sets the index's bit, then advances the watermark past
-/// any consecutive run of reaped indices from the bottom.
-fn notePeerStreamReaped(conn: *Connection, id: u64) void {
-    if (streamInitiatedByLocal(conn, id)) return;
-    const idx = streamIndex(id);
-    // Bounded by peer_*_ids.limit <= max_streams_per_connection.
-    std.debug.assert(idx < max_streams_per_connection);
-    const bidi = streamIsBidi(id);
-    const bits = if (bidi) &conn.peer_reaped_bits_bidi else &conn.peer_reaped_bits_uni;
-    const below = if (bidi) &conn.peer_reaped_below_bidi else &conn.peer_reaped_below_uni;
-    const opened = peerOpenedStreamsSlot(conn, bidi).*;
-    bits.set(@intCast(idx));
-    // Coalesce: advance the watermark across consecutive reaped bits.
-    // The `< opened` guard is load-bearing for paths that reap a
-    // stream without bumping peer_*_ids.opened (e.g. direct-put
-    // test setup); it keeps the loop trivially in range too.
-    while (below.* < opened and bits.isSet(@intCast(below.*))) {
-        bits.unset(@intCast(below.*));
-        below.* += 1;
-    }
+    return streamWasReaped(conn, id);
 }
 
 pub fn peerStreamWithinLocalLimit(conn: *Connection, id: u64) bool {
@@ -507,11 +491,6 @@ pub fn gcClosedStreams(conn: *Connection) void {
         else
             recv_done;
         if (!reclaimable) continue;
-        // The negotiated local-open range is capped at 4096 streams. Before
-        // peer parameters arrive, the explicit-open API can name higher IDs;
-        // preserve their terminal state rather than lose a receive tombstone.
-        if (streamIsBidi(s.id) and streamInitiatedByLocal(conn, s.id) and
-            streamIndex(s.id) >= max_streams_per_connection) continue;
         if (n == batch.len) break;
         batch[n] = s.id;
         n += 1;
@@ -519,12 +498,13 @@ pub fn gcClosedStreams(conn: *Connection) void {
     for (batch[0..n]) |id| {
         const removed = conn.streams.fetchRemove(id) orelse continue;
         const s = removed.value;
-        // A late STREAM/RESET_STREAM is post-terminal regardless of which
-        // endpoint initiated the bidi stream. Remember only actual reaps:
-        // local allocation watermarks can include sparse, unopened IDs.
-        if (streamInitiatedByLocal(conn, id) and streamIsBidi(id)) {
-            conn.local_reaped_bits_bidi.set(@intCast(streamIndex(id)));
-        } else notePeerStreamReaped(conn, id);
+        // The id stays `used` in its id space, with no live stream: that
+        // is the tombstone. A late STREAM/RESET_STREAM for it is
+        // post-terminal, whichever endpoint initiated the stream.
+        // Count the close only for an id the space knows: a stream put
+        // straight into the table (test setup) never went through it.
+        const ids = idSpace(conn, id);
+        if (ids.classify(streamIndex(id)) == .used) ids.noteClosed();
         const held = s.send.bytes.items.len + s.recv.bytes.items.len;
         if (held > 0) conn.releaseResidentBytes(held);
         conn_qlog.emitQlog(conn, .{

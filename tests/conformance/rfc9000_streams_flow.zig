@@ -617,7 +617,7 @@ test "MUST ignore MAX_STREAMS that does not raise the current limit [RFC9000 §1
 test "MUST emit STREAM_LIMIT_ERROR CONNECTION_CLOSE when peer opens above the local limit [RFC9000 §4.6 ¶2]" {
     // RFC 9000 §4.6 ¶2: "An endpoint MUST terminate a connection with
     // a STREAM_LIMIT_ERROR error if a peer opens more streams than was
-    // permitted." `Connection.recordPeerStreamOpenOrClose` is the
+    // permitted." `ensurePeerStream` (src/Connection/streams.zig) is the
     // bookkeeping hook called from `handleStream` on the first frame
     // for a previously-unseen stream; it closes with
     // `transport_error_stream_limit` (0x04) when the stream's

@@ -11,6 +11,7 @@ const Error = state.Error;
 const RecvStream = state.RecvStream;
 const SendStream = state.SendStream;
 const Stream = state.Stream;
+const StreamIdSpace = @import("../conn/StreamIdSpace.zig");
 const StreamSendStats = state.StreamSendStats;
 const StreamRecvState = state.StreamRecvState;
 const StreamPriority = state.StreamPriority;
@@ -476,9 +477,9 @@ test "gcClosedStreams reclaims peer-initiated uni streams once recv is terminal 
 
     // Server-initiated uni from a client connection's POV: low bits 0b11.
     const id: u64 = 3;
-    // Simulate the receive-side path: bypass `recordPeerStreamOpenOrClose`
-    // by reaching into the private `openStream` to plant a peer-side
-    // entry without driving the full peer-side state machine.
+    // Simulate the receive-side path: plant a peer-side entry straight
+    // into the stream table, without `ensurePeerStream` and so without
+    // the id space ever hearing of the id.
     const ptr = try allocator.create(Stream);
     errdefer allocator.destroy(ptr);
     ptr.* = .{
@@ -498,6 +499,9 @@ test "gcClosedStreams reclaims peer-initiated uni streams once recv is terminal 
 
     try conn.tick(1_000_000);
     try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
+    // The id space never saw this id, so it does not count a close for
+    // it (a close it did not open would be stream credit from nowhere).
+    try std.testing.expectEqual(@as(u64, 0), conn.peer_uni_ids.closed);
 }
 
 test "gcClosedStreams: a reaped peer stream is not resurrected by a replayed frame (L2)" {
@@ -533,8 +537,9 @@ test "gcClosedStreams: a reaped peer stream is not resurrected by a replayed fra
     try std.testing.expectEqual(@as(usize, 2), try conn.streamRead(sid, &buf));
     try conn.tick(1_000_000);
     try std.testing.expect(conn.streams.get(sid) == null);
-    // Contiguous reaped watermark advanced past uni index 0.
-    try std.testing.expectEqual(@as(u64, 1), conn.peer_reaped_below_uni);
+    // The id space still knows uni index 0 was used, and counts the close.
+    try std.testing.expectEqual(StreamIdSpace.State.used, conn.peer_uni_ids.classify(0));
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_uni_ids.closed);
 
     // Replay a STREAM frame for the reaped id — must be ignored (RFC 9000
     // §3.2), not resurrected with fresh state.
@@ -602,15 +607,16 @@ test "gcClosedStreams: an out-of-order reaped peer stream above the watermark is
     try std.testing.expect(conn.streams.get(id2) == null);
     try std.testing.expect(conn.streams.get(id1) != null);
 
-    // The contiguous watermark only advanced past index 0 (blocked by the
-    // still-live index 1). Index 2 is reaped but ABOVE the watermark —
-    // tracked only by its bit, not the watermark.
-    try std.testing.expectEqual(@as(u64, 1), conn.peer_reaped_below_uni);
-    try std.testing.expect(conn.peer_reaped_bits_uni.isSet(2));
+    // Two closed, one live between them. All three indices are `used`;
+    // only the stream table tells the live one from the closed ones.
+    try std.testing.expectEqual(@as(u64, 2), conn.peer_uni_ids.closed);
+    for ([_]u64{ 0, 1, 2 }) |index| {
+        try std.testing.expectEqual(StreamIdSpace.State.used, conn.peer_uni_ids.classify(index));
+    }
 
     // A replayed STREAM frame for the out-of-order reaped id (index 2) MUST
-    // be ignored (RFC 9000 §3.2), not resurrected — the reaped bit, not just
-    // the contiguous watermark, has to suppress it.
+    // be ignored (RFC 9000 §3.2), not resurrected — a closed stream above a
+    // still-live one is as closed as one below it.
     try conn.handleStream(.application, .{
         .stream_id = id2,
         .offset = 0,
@@ -625,6 +631,13 @@ test "gcClosedStreams: an out-of-order reaped peer stream above the watermark is
 
     // The still-live in-between stream is unaffected.
     try std.testing.expect(conn.streams.get(id1) != null);
+    // "Reaped" is for a stream that is gone. A live stream is not
+    // reaped, though its id is used too; an id that was never used is
+    // not reaped either.
+    try std.testing.expect(conn.streamRecvWasReaped(id0));
+    try std.testing.expect(conn.streamRecvWasReaped(id2));
+    try std.testing.expect(!conn.streamRecvWasReaped(id1));
+    try std.testing.expect(!conn.streamRecvWasReaped(14));
 }
 
 test "gcClosedStreams: reordered replies to reaped local bidi streams do not close the connection" {
@@ -663,13 +676,18 @@ test "gcClosedStreams: reordered replies to reaped local bidi streams do not clo
     }
 }
 
-test "gcClosedStreams: local bidi tombstones retain pre-parameter IDs outside the bounded range" {
+test "gcClosedStreams: a tombstone has no index bound" {
+    // The tombstone was one bit in a 4096-bit set, so a local bidi id
+    // at index 4096 or above could not be forgotten and kept its
+    // terminal Stream for the life of the connection. The id space has
+    // no such bound: any index is reaped, and stays closed.
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
     const conn = try Connection.createClient(std.testing.allocator, ctx, "x");
     defer conn.destroy();
     try conn.setTransportParams(.{ .initial_max_data = 4096, .initial_max_stream_data_bidi_local = 4096 });
-    for ([_]u64{ max_streams_per_connection - 1, max_streams_per_connection }) |index| {
+    const indices = [_]u64{ 4095, 4096, 1_000_000 };
+    for (indices) |index| {
         const sid = index * 4;
         const stream = try conn.openBidi(sid);
         try conn.streamFinish(sid);
@@ -678,12 +696,103 @@ test "gcClosedStreams: local bidi tombstones retain pre-parameter IDs outside th
         try conn.handleStream(.application, .{ .stream_id = sid, .data = "", .has_length = true, .fin = true });
     }
     try conn.tick(1000);
-    try std.testing.expect(conn.stream((max_streams_per_connection - 1) * 4) == null);
-    try std.testing.expect(conn.stream(max_streams_per_connection * 4) != null);
-    for ([_]u64{ max_streams_per_connection - 1, max_streams_per_connection }) |index| {
+    try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
+    try std.testing.expectEqual(@as(u64, 3), conn.local_bidi_ids.closed);
+    // Skipping a block of ids costs one range, however large the block.
+    try std.testing.expectEqual(@as(usize, 2), conn.local_bidi_ids.holes.items.len);
+    for (indices) |index| {
+        // A late reply is ignored, and the id is not free again.
         try conn.handleStream(.application, .{ .stream_id = index * 4, .data = "", .has_length = true, .fin = true });
+        try conn.handleResetStream(.{ .stream_id = index * 4, .application_error_code = 0, .final_size = 0 });
+        try std.testing.expect(conn.stream(index * 4) == null);
+        try std.testing.expectError(Error.StreamAlreadyOpen, conn.openBidi(index * 4));
     }
     try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+    // An id that was only skipped is not closed: it can still be opened.
+    _ = try conn.openBidi(5000 * 4);
+}
+
+test "gcClosedStreams: a reaped local uni stream id cannot be opened again" {
+    // `openUni` had no tombstone check, so a reaped id opened a fresh
+    // stream at offset 0. The peer drops frames for a stream it has
+    // closed (RFC 9000 §3.2), so that data was lost with no error.
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(std.testing.allocator, ctx, "x");
+    defer conn.destroy();
+    const sid = (try conn.openNextUni()).id;
+    const stream = conn.stream(sid).?;
+    try conn.streamFinish(sid);
+    stream.send.fin_acked = true;
+    stream.send.state = .data_recvd;
+    try conn.tick(1000);
+    try std.testing.expect(conn.stream(sid) == null);
+
+    try std.testing.expectError(Error.StreamAlreadyOpen, conn.openUni(sid));
+    try std.testing.expect(conn.stream(sid) == null);
+    // The next id in order is not affected.
+    try std.testing.expectEqual(sid + 4, (try conn.openNextUni()).id);
+}
+
+test "openBidi: skipped ids are remembered in a bounded number of ranges" {
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(std.testing.allocator, ctx, "x");
+    defer conn.destroy();
+
+    // Each open skips one id, so each leaves one more one-id range.
+    var index: u64 = 1;
+    var opened: usize = 0;
+    while (opened < Connection.max_local_skipped_stream_ranges) : (opened += 1) {
+        _ = try conn.openBidi(index * 4);
+        index += 2;
+    }
+    try std.testing.expectEqual(Connection.max_local_skipped_stream_ranges, conn.local_bidi_ids.holes.items.len);
+
+    // One more skip is refused, and changes nothing.
+    const before = conn.local_bidi_ids.opened;
+    try std.testing.expectError(Error.TooManySkippedStreamIds, conn.openBidi(index * 4));
+    try std.testing.expectEqual(before, conn.local_bidi_ids.opened);
+    try std.testing.expect(conn.stream(index * 4) == null);
+
+    // In-order opens never skip, so they still work; so does filling a
+    // skipped id.
+    _ = try conn.openNextBidi();
+    _ = try conn.openBidi(0);
+    try std.testing.expectEqual(Connection.max_local_skipped_stream_ranges - 1, conn.local_bidi_ids.holes.items.len);
+}
+
+test "materializeStream: a failed allocation does not consume the id" {
+    // If the id were marked used before the Stream is allocated, an
+    // out-of-memory here would leave "used, with no stream": the id of
+    // a closed stream. Every later frame for it would be ignored.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(failing.allocator(), ctx);
+    defer conn.destroy();
+    try conn.setTransportParams(.{
+        .initial_max_data = 4096,
+        .initial_max_stream_data_uni = 4096,
+        .initial_max_streams_uni = 4,
+    });
+
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectError(error.OutOfMemory, conn.handleStream(.application, .{
+        .stream_id = 2,
+        .data = "hi",
+        .has_length = true,
+    }));
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try std.testing.expect(conn.stream(2) == null);
+    try std.testing.expectEqual(StreamIdSpace.State.not_opened, conn.peer_uni_ids.classify(0));
+
+    // The retransmission of that frame opens the stream.
+    try conn.handleStream(.application, .{ .stream_id = 2, .data = "hi", .has_length = true });
+    try std.testing.expect(conn.stream(2) != null);
+    try std.testing.expectEqual(StreamIdSpace.State.used, conn.peer_uni_ids.classify(0));
 }
 
 test "gcClosedStreams: an absent local stream below the allocation watermark is not necessarily reaped" {

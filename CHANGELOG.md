@@ -21,6 +21,41 @@ changes.
   the last grant before the 4096 cap could not be recovered. Found by
   reading the code on the way to "credit on close", where the same
   loss would stop a peer that is out of stream credit for good.
+- **`openUni` could re-open the id of a stream that had finished.**
+  `openBidi` refused a reaped id; `openUni` had no such check and made
+  a fresh stream at offset 0. A peer drops frames for a stream it has
+  closed (RFC 9000 §3.2), so data written there was lost with no
+  error. Both now return `StreamAlreadyOpen`.
+- **A local bidirectional stream at index 4096 or above was never
+  reclaimed.** Its closed state was one bit in a 4096-bit set, so an id
+  past the set kept its terminal `Stream` until the connection ended.
+  Reachable only before the peer's transport parameters arrive (the
+  negotiated limit is capped at 4096 until the lifetime cap goes).
+
+### Changed
+
+- **Closed-stream memory is no longer indexed by stream id.** The three
+  fixed 4096-bit sets that recorded which streams had been reaped are
+  gone. Each of the four stream-id spaces (peer or local, bidi or uni)
+  is now a `conn.stream_id_space.StreamIdSpace`: the highest id used,
+  plus a short list of the lower ids that were skipped and not used
+  yet. An id below the high-water mark that is not live and was not
+  skipped is closed, at any index. `Connection` is 1,360 bytes smaller
+  (156,040 to 154,680 in Debug). This is the groundwork for removing
+  the lifetime stream cap; the cap itself is still in place here.
+- **New error `TooManySkippedStreamIds`.** `openBidi(id)` /
+  `openUni(id)` may name ids out of order. Each separate run of
+  skipped lower ids is remembered until it is opened, and the
+  connection keeps at most `Connection.max_local_skipped_stream_ranges`
+  (64) runs; one more out-of-order open fails with this error.
+  `openNextBidi` / `openNextUni` never skip. Before, any number of
+  scattered ids below 4096 could be opened.
+- Removed the `Connection.recordPeerStreamOpenOrClose` thunk
+  (internal scaffolding with no caller outside the library). The
+  fields `local_max_streams_*`, `peer_max_streams_*`,
+  `peer_opened_streams_*`, `local_opened_streams_*` are now
+  `peer_*_ids.limit`, `local_*_ids.limit`, `peer_*_ids.opened`,
+  `local_*_ids.opened`.
 
 ### CI and tests
 
