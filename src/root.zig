@@ -376,7 +376,7 @@ test "phase 0: builds and links against boringssl" {
     // Single-sourced from build.zig.zon; assert it is populated and
     // well-formed rather than pinning a literal that must be bumped twice.
     const v = version();
-    try std.testing.expect(v.len > 0 and std.mem.indexOfScalar(u8, v, '.') != null);
+    try std.testing.expect(v.len > 0 and std.mem.findScalar(u8, v, '.') != null);
     try std.testing.expectEqual(@as(u32, 1), QUIC_VERSION_1);
     try std.testing.expectEqual(@as(u32, 0x6b3343cf), QUIC_VERSION_2);
 }
@@ -389,10 +389,10 @@ test "public re-exports: ConnectionEvent payloads + Address resolve at the top l
     // collision or unresolved alias fails the build here; the identity checks
     // catch silent drift if a future edit repoints one of them.
     try std.testing.expect(@sizeOf(Address) > 0);
-    try std.testing.expect(StreamOpenedInfo == std.meta.fieldInfo(ConnectionEvent, .stream_opened).type);
-    try std.testing.expect(FlowBlockedInfo == std.meta.fieldInfo(ConnectionEvent, .flow_blocked).type);
-    try std.testing.expect(ConnectionIdReplenishInfo == std.meta.fieldInfo(ConnectionEvent, .connection_ids_needed).type);
-    try std.testing.expect(DatagramSendEvent == std.meta.fieldInfo(ConnectionEvent, .datagram_acked).type);
-    try std.testing.expect(FlowBlockedKind == std.meta.fieldInfo(FlowBlockedInfo, .kind).type);
-    try std.testing.expect(FlowBlockedSource == std.meta.fieldInfo(FlowBlockedInfo, .source).type);
+    try std.testing.expect(StreamOpenedInfo == @FieldType(ConnectionEvent, "stream_opened"));
+    try std.testing.expect(FlowBlockedInfo == @FieldType(ConnectionEvent, "flow_blocked"));
+    try std.testing.expect(ConnectionIdReplenishInfo == @FieldType(ConnectionEvent, "connection_ids_needed"));
+    try std.testing.expect(DatagramSendEvent == @FieldType(ConnectionEvent, "datagram_acked"));
+    try std.testing.expect(FlowBlockedKind == @FieldType(FlowBlockedInfo, "kind"));
+    try std.testing.expect(FlowBlockedSource == @FieldType(FlowBlockedInfo, "source"));
 }

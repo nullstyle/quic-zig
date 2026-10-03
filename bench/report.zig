@@ -172,8 +172,8 @@ pub fn buildReportPath(
 ) ![]const u8 {
     out.clearRetainingCapacity();
     try out.appendSlice(allocator, dir);
-    if (dir.len > 0 and dir[dir.len - 1] != std.fs.path.sep) {
-        try out.append(allocator, std.fs.path.sep);
+    if (dir.len > 0 and dir[dir.len - 1] != std.Io.Dir.path.sep) {
+        try out.append(allocator, std.Io.Dir.path.sep);
     }
     try out.appendSlice(allocator, prefix);
     try out.append(allocator, '-');
@@ -222,13 +222,13 @@ pub const Meta = struct {
 };
 
 fn ensureParentDir(io: std.Io, path: []const u8) !void {
-    const parent = std.fs.path.dirname(path) orelse return;
+    const parent = std.Io.Dir.path.dirname(path) orelse return;
     try std.Io.Dir.cwd().createDirPath(io, parent);
 }
 
 pub fn writeReportFile(io: std.Io, path: []const u8, data: []const u8) !void {
     try ensureParentDir(io, path);
-    if (std.fs.path.isAbsolute(path)) {
+    if (std.Io.Dir.path.isAbsolute(path)) {
         var file = try std.Io.Dir.createFileAbsolute(io, path, .{});
         defer file.close(io);
         try file.writeStreamingAll(io, data);

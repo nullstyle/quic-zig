@@ -202,7 +202,7 @@ pub const Outbox = struct {
     /// while they were staged (delivered by `flush` after the last
     /// staged byte lands).
     const Tail = struct {
-        data: std.ArrayListUnmanaged(u8) = .empty,
+        data: std.ArrayList(u8) = .empty,
         fin: bool = false,
     };
 

@@ -592,8 +592,8 @@ priority_rr_cursor: u64 = 0,
 // in range and adds a constant 2×512 B per connection.
 peer_reaped_below_bidi: u64 = 0,
 peer_reaped_below_uni: u64 = 0,
-peer_reaped_bits_bidi: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
-peer_reaped_bits_uni: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
+peer_reaped_bits_bidi: std.bit_set.Static(max_streams_per_connection) = std.bit_set.Static(max_streams_per_connection).empty,
+peer_reaped_bits_uni: std.bit_set.Static(max_streams_per_connection) = std.bit_set.Static(max_streams_per_connection).empty,
 /// Actually reaped local bidi streams, distinguished from sparse local IDs
 /// that were never materialized. A late reply/RESET must not turn a completed
 /// request into STREAM_STATE_ERROR. Negotiated peer stream limits are capped
@@ -601,7 +601,7 @@ peer_reaped_bits_uni: std.StaticBitSet(max_streams_per_connection) = std.StaticB
 /// range without allocating during GC. Send-only local uni streams need no
 /// receive tombstone. Any pre-parameter local bidi ID outside the bitmap keeps
 /// its terminal Stream allocation instead of being forgotten unsafely.
-local_reaped_bits_bidi: std.StaticBitSet(max_streams_per_connection) = std.StaticBitSet(max_streams_per_connection).empty,
+local_reaped_bits_bidi: std.bit_set.Static(max_streams_per_connection) = std.bit_set.Static(max_streams_per_connection).empty,
 /// Decoded peer parameters once BoringSSL exposes them.
 cached_peer_transport_params: ?TransportParams = null,
 /// The peer's transport parameters as REMEMBERED from a prior

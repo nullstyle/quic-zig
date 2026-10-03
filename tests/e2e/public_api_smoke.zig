@@ -173,22 +173,22 @@ test "ConnectionEvent payload aliases stay top-level and forward-compatible" {
         _ = quic.ConnectionIdReplenishInfo;
         _ = quic.StreamOpenedInfo;
 
-        if (std.meta.fieldInfo(Event, .datagram_acked).type != quic.DatagramSendEvent) {
+        if (@FieldType(Event, "datagram_acked") != quic.DatagramSendEvent) {
             @compileError("ConnectionEvent.datagram_acked payload alias drifted");
         }
-        if (std.meta.fieldInfo(Event, .flow_blocked).type != quic.FlowBlockedInfo) {
+        if (@FieldType(Event, "flow_blocked") != quic.FlowBlockedInfo) {
             @compileError("ConnectionEvent.flow_blocked payload alias drifted");
         }
-        if (std.meta.fieldInfo(Event, .connection_ids_needed).type != quic.ConnectionIdReplenishInfo) {
+        if (@FieldType(Event, "connection_ids_needed") != quic.ConnectionIdReplenishInfo) {
             @compileError("ConnectionEvent.connection_ids_needed payload alias drifted");
         }
-        if (std.meta.fieldInfo(Event, .stream_opened).type != quic.StreamOpenedInfo) {
+        if (@FieldType(Event, "stream_opened") != quic.StreamOpenedInfo) {
             @compileError("ConnectionEvent.stream_opened payload alias drifted");
         }
         // `handshake_established` is a void one-shot; pin its presence.
-        _ = std.meta.fieldInfo(Event, .handshake_established);
+        _ = @FieldType(Event, "handshake_established");
         // `early_data` carries the Stable EarlyDataStatus enum.
-        if (std.meta.fieldInfo(Event, .early_data).type != quic.EarlyDataStatus) {
+        if (@FieldType(Event, "early_data") != quic.EarlyDataStatus) {
             @compileError("ConnectionEvent.early_data payload alias drifted");
         }
     }
@@ -211,8 +211,8 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         // StreamRecvState carries the read cursor + final size as of
         // 0.16.0 (qmsg friction #4: completion tests without
         // reaching into internals).
-        _ = std.meta.fieldInfo(quic.StreamRecvState, .read_offset);
-        _ = std.meta.fieldInfo(quic.StreamRecvState, .final_size);
+        _ = @FieldType(quic.StreamRecvState, "read_offset");
+        _ = @FieldType(quic.StreamRecvState, "final_size");
         // Post-init teardown-hook wiring for wrapper stacks
         // (friction #6) and the Driver convenience over it.
         requireDecl(quic.Server, "setConnectionWillCloseHook");
@@ -221,13 +221,13 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         _ = quic.EarlyDataStatus;
         // Wrapper config: ticket capture (client) and 0-RTT replay
         // context + proactive CID replenish (server).
-        _ = std.meta.fieldInfo(quic.Client.Config, .new_session_callback);
-        _ = std.meta.fieldInfo(quic.Client.Config, .resumption_state);
-        _ = std.meta.fieldInfo(quic.Server.Config, .early_data);
+        _ = @FieldType(quic.Client.Config, "new_session_callback");
+        _ = @FieldType(quic.Client.Config, "resumption_state");
+        _ = @FieldType(quic.Server.Config, "early_data");
         _ = quic.Server.EarlyData.disabled;
-        _ = std.meta.fieldInfo(quic.Server.Config, .early_data_application_context);
-        _ = std.meta.fieldInfo(quic.Server.Config, .auto_replenish_connection_ids);
-        _ = std.meta.fieldInfo(quic.Server.Config, .max_auto_replenish_cids);
+        _ = @FieldType(quic.Server.Config, "early_data_application_context");
+        _ = @FieldType(quic.Server.Config, "auto_replenish_connection_ids");
+        _ = @FieldType(quic.Server.Config, "max_auto_replenish_cids");
         // Typed migration refusals stay in the public error set.
         // Named via the root alias on purpose: that is the path
         // embedders composing their own error sets should use, so
@@ -278,16 +278,16 @@ test "stable observation-point fields stay reachable on Connection" {
     // rename/removal fails CI instead of silently breaking the
     // documented surface.
     comptime {
-        if (std.meta.fieldInfo(quic.Connection, .last_activity_us).type != u64) {
+        if (@FieldType(quic.Connection, "last_activity_us") != u64) {
             @compileError("Connection.last_activity_us drifted from u64");
         }
-        if (std.meta.fieldInfo(quic.Connection, .ecn_enabled).type != bool) {
+        if (@FieldType(quic.Connection, "ecn_enabled") != bool) {
             @compileError("Connection.ecn_enabled drifted from bool");
         }
-        if (std.meta.fieldInfo(quic.Connection, .reveal_close_reason_on_wire).type != bool) {
+        if (@FieldType(quic.Connection, "reveal_close_reason_on_wire") != bool) {
             @compileError("Connection.reveal_close_reason_on_wire drifted from bool");
         }
-        if (std.meta.fieldInfo(quic.Connection, .delayed_ack_packet_threshold).type != u8) {
+        if (@FieldType(quic.Connection, "delayed_ack_packet_threshold") != u8) {
             @compileError("Connection.delayed_ack_packet_threshold drifted from u8");
         }
     }
@@ -297,7 +297,7 @@ test "server hostability surface keeps its callable shape" {
     const Server = quic.Server;
     comptime {
         // Embedder-owned per-connection pointer on the slot.
-        if (std.meta.fieldInfo(Server.Slot, .user_data).type != ?*anyopaque) {
+        if (@FieldType(Server.Slot, "user_data") != ?*anyopaque) {
             @compileError("Slot.user_data drifted from ?*anyopaque");
         }
         // Pre-reap ordered-teardown hook and its Config wiring.
@@ -308,13 +308,11 @@ test "server hostability surface keeps its callable shape" {
     _ = next_deadline;
 
     // Per-iteration application hooks on both packaged loops.
-    const server_hook_field = comptime std.meta.fieldInfo(quic.transport.RunUdpOptions, .on_iteration);
-    const client_hook_field = comptime std.meta.fieldInfo(quic.transport.RunUdpClientOptions, .on_iteration);
     comptime {
-        if (server_hook_field.type != ?*const fn (?*anyopaque, *quic.Server, u64) anyerror!void) {
+        if (@FieldType(quic.transport.RunUdpOptions, "on_iteration") != ?*const fn (?*anyopaque, *quic.Server, u64) anyerror!void) {
             @compileError("RunUdpOptions.on_iteration hook signature drifted");
         }
-        if (client_hook_field.type != ?*const fn (?*anyopaque, *quic.Client, u64) anyerror!void) {
+        if (@FieldType(quic.transport.RunUdpClientOptions, "on_iteration") != ?*const fn (?*anyopaque, *quic.Client, u64) anyerror!void) {
             @compileError("RunUdpClientOptions.on_iteration hook signature drifted");
         }
     }

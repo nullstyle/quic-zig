@@ -416,11 +416,11 @@ const QlogSink = struct {
     fn init(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, role: []const u8) !QlogSink {
         try std.Io.Dir.cwd().createDirPath(io, dir);
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/quic-zig-{s}.sqlog", .{ dir, role });
+        const path = try std.mem.print(&path_buf, "{s}/quic-zig-{s}.sqlog", .{ dir, role });
         const file = try createTraceFile(io, path, true);
         errdefer file.close(io);
         var title_buf: [64]u8 = undefined;
-        const title = try std.fmt.bufPrint(&title_buf, "quic-zig qns {s}", .{role});
+        const title = try std.mem.print(&title_buf, "quic-zig qns {s}", .{role});
         const writer = try quic.qlog.Writer.init(allocator, io, file, .{
             .vantage_point = if (std.mem.eql(u8, role, "server")) .server else .client,
             .title = title,
@@ -973,11 +973,11 @@ fn usage() void {
 }
 
 fn createTraceFile(io: std.Io, path: []const u8, truncate: bool) !std.Io.File {
-    if (std.fs.path.dirname(path)) |parent| {
+    if (std.Io.Dir.path.dirname(path)) |parent| {
         if (parent.len > 0) try std.Io.Dir.cwd().createDirPath(io, parent);
     }
     const flags: std.Io.Dir.CreateFileOptions = .{ .truncate = truncate };
-    return if (std.fs.path.isAbsolute(path))
+    return if (std.Io.Dir.path.isAbsolute(path))
         try std.Io.Dir.createFileAbsolute(io, path, flags)
     else
         try std.Io.Dir.cwd().createFile(io, path, flags);
@@ -1754,8 +1754,8 @@ fn clientMode(testcase: []const u8) ClientMode {
 /// just one of them. The TESTCASE env var is unreliable here because
 /// `TestCaseConnectionMigration.testname(CLIENT)` returns "transfer".
 fn clientShouldActivelyMigrate(opts: ClientOptions) bool {
-    if (std.mem.indexOf(u8, opts.server, "server46") != null) return true;
-    if (std.mem.indexOf(u8, opts.server_name, "server46") != null) return true;
+    if (std.mem.find(u8, opts.server, "server46") != null) return true;
+    if (std.mem.find(u8, opts.server_name, "server46") != null) return true;
     return false;
 }
 
@@ -2264,19 +2264,19 @@ fn requestPathFromUrl(url: []const u8) ![]const u8 {
     var path = url;
     if (std.mem.startsWith(u8, path, "https://")) {
         const rest = path["https://".len..];
-        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidRequestUrl;
+        const slash = std.mem.findScalar(u8, rest, '/') orelse return error.InvalidRequestUrl;
         path = rest[slash + 1 ..];
     } else if (std.mem.startsWith(u8, path, "http://")) {
         const rest = path["http://".len..];
-        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidRequestUrl;
+        const slash = std.mem.findScalar(u8, rest, '/') orelse return error.InvalidRequestUrl;
         path = rest[slash + 1 ..];
     }
 
     while (std.mem.startsWith(u8, path, "/")) path = path[1..];
-    if (std.mem.indexOfAny(u8, path, "?#")) |end| path = path[0..end];
+    if (std.mem.findAny(u8, path, "?#")) |end| path = path[0..end];
     if (path.len == 0) return error.InvalidRequestUrl;
-    if (std.mem.indexOf(u8, path, "..") != null) return error.InvalidRequestUrl;
-    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.InvalidRequestUrl;
+    if (std.mem.find(u8, path, "..") != null) return error.InvalidRequestUrl;
+    if (std.mem.findScalar(u8, path, '\\') != null) return error.InvalidRequestUrl;
     return path;
 }
 
@@ -2316,14 +2316,14 @@ const HostPort = struct {
 fn splitHostPort(endpoint: []const u8) !HostPort {
     if (endpoint.len == 0) return error.InvalidServerAddress;
     if (endpoint[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, endpoint, ']') orelse return error.InvalidServerAddress;
+        const close = std.mem.findScalar(u8, endpoint, ']') orelse return error.InvalidServerAddress;
         const host = endpoint[1..close];
         if (endpoint.len == close + 1) return .{ .host = host, .port = 443 };
         if (endpoint.len <= close + 2 or endpoint[close + 1] != ':') return error.InvalidServerAddress;
         return .{ .host = host, .port = try parsePort(endpoint[close + 2 ..]) };
     }
-    if (std.mem.lastIndexOfScalar(u8, endpoint, ':')) |colon| {
-        if (std.mem.indexOfScalar(u8, endpoint[0..colon], ':') != null) return error.InvalidServerAddress;
+    if (std.mem.findScalarLast(u8, endpoint, ':')) |colon| {
+        if (std.mem.findScalar(u8, endpoint[0..colon], ':') != null) return error.InvalidServerAddress;
         return .{ .host = endpoint[0..colon], .port = try parsePort(endpoint[colon + 1 ..]) };
     }
     return .{ .host = endpoint, .port = 443 };
@@ -2346,7 +2346,7 @@ fn startClientRequests(
             if (err == error.StreamLimitExceeded) return progressed;
             return err;
         };
-        const request = try std.fmt.allocPrint(allocator, "GET /{s}\r\n", .{download.rel_path});
+        const request = try allocator.print("GET /{s}\r\n", .{download.rel_path});
         defer allocator.free(request);
         const written = try conn.streamWrite(download.stream_id, request);
         if (written != request.len) return error.ShortStreamWrite;
@@ -2395,7 +2395,7 @@ fn writeCompletedDownloads(
 ) !void {
     for (downloads) |*download| {
         if (!download.complete or download.written) continue;
-        if (std.fs.path.dirname(download.rel_path)) |parent| {
+        if (std.Io.Dir.path.dirname(download.rel_path)) |parent| {
             if (parent.len > 0) try downloads_dir.createDirPath(io, parent);
         }
         try downloads_dir.writeFile(io, .{
@@ -2422,16 +2422,16 @@ fn parseGetPath(request: []const u8) ?[]const u8 {
     const trimmed = std.mem.trimEnd(u8, request, " \r\n");
     if (!std.mem.startsWith(u8, trimmed, "GET ")) return null;
     var path = trimmed[4..];
-    if (std.mem.indexOfAny(u8, path, " \t")) |end| path = path[0..end];
+    if (std.mem.findAny(u8, path, " \t")) |end| path = path[0..end];
     while (std.mem.startsWith(u8, path, "/")) path = path[1..];
     if (path.len == 0) return null;
-    if (std.mem.indexOf(u8, path, "..") != null) return null;
-    if (std.mem.indexOfScalar(u8, path, '\\') != null) return null;
+    if (std.mem.find(u8, path, "..") != null) return null;
+    if (std.mem.findScalar(u8, path, '\\') != null) return null;
     return path;
 }
 
 fn openDir(io: std.Io, path: []const u8) !std.Io.Dir {
-    if (std.fs.path.isAbsolute(path)) return try std.Io.Dir.openDirAbsolute(io, path, .{});
+    if (std.Io.Dir.path.isAbsolute(path)) return try std.Io.Dir.openDirAbsolute(io, path, .{});
     return try std.Io.Dir.cwd().openDir(io, path, .{});
 }
 

@@ -57,6 +57,12 @@ const bench_io_options = @import("bench_io_options");
 /// bench builds with a stock (non-fork) std.
 const threaded_only = bench_io_options.threaded_only;
 
+/// Targets with kqueue: the Darwin family and the BSDs.
+const has_kqueue = builtin.target.os.tag.isDarwin() or switch (builtin.target.os.tag) {
+    .freebsd, .openbsd, .netbsd, .dragonfly => true,
+    else => false,
+};
+
 const cert_pem = @embedFile("e2e/support/test_cert.pem");
 const key_pem = @embedFile("e2e/support/test_key.pem");
 const alpn = "bench-io/1";
@@ -546,7 +552,7 @@ fn runSample(
 ) !Sample {
     const port = try pickLoopbackPort(io);
     var addr_buf: [32]u8 = undefined;
-    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1:{d}", .{port});
+    const addr = try std.mem.print(&addr_buf, "127.0.0.1:{d}", .{port});
 
     var shutdown = std.atomic.Value(bool).init(false);
     var ready = std.atomic.Value(bool).init(false);
@@ -664,7 +670,7 @@ fn runSampleLoops(
     const m = if (opts.clients == 0) n else opts.clients;
     const port = try pickLoopbackPort(io);
     var addr_buf: [32]u8 = undefined;
-    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1:{d}", .{port});
+    const addr = try std.mem.print(&addr_buf, "127.0.0.1:{d}", .{port});
 
     var shutdown = std.atomic.Value(bool).init(false);
     const readies = try gpa.alloc(std.atomic.Value(bool), n);
@@ -873,7 +879,7 @@ const EvThread = struct {
     /// The Evented backend on this target supports single-threaded mode.
     fn supported() bool {
         const Evented = std.Io.Evented;
-        return !threaded_only and switch (builtin.os.tag) {
+        return !threaded_only and switch (builtin.target.os.tag) {
             .linux => Evented == std.Io.Uring,
             .freebsd, .netbsd, .openbsd, .dragonfly => Evented == std.Io.Kqueue,
             else => false,
@@ -1122,7 +1128,7 @@ pub fn main(init: std.process.Init) !void {
         } else {
             const Evented = std.Io.Evented;
             if (Evented == void) {
-                std.debug.print("bench-io: std.Io.Evented is void on {s}-{s} with this std; skipping evented\n", .{ @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) });
+                std.debug.print("bench-io: std.Io.Evented is void on {s}-{s} with this std; skipping evented\n", .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag) });
             } else {
                 var evented: Evented = undefined;
                 // `leeway` (timer slack) exists only on the libdispatch
@@ -1142,7 +1148,7 @@ pub fn main(init: std.process.Init) !void {
         // reproduces in; see HANDOFF.md.
         .@"kqueue-shared" => if (comptime threaded_only) {
             std.debug.print("bench-io: built with -Dbench-io-threaded-only; skipping kqueue-shared\n", .{});
-        } else if (comptime !(builtin.os.tag.isDarwin() or builtin.os.tag.isBSD())) {
+        } else if (comptime !has_kqueue) {
             std.debug.print("bench-io: --io kqueue-shared needs a kqueue target; skipping\n", .{});
         } else {
             var kqueue: std.Io.Kqueue = undefined;
@@ -1171,8 +1177,8 @@ pub fn main(init: std.process.Init) !void {
     if (opts.json_path) |path| {
         const report: Report = .{
             .zig_version = builtin.zig_version_string,
-            .os = @tagName(builtin.os.tag),
-            .arch = @tagName(builtin.cpu.arch),
+            .os = @tagName(builtin.target.os.tag),
+            .arch = @tagName(builtin.target.cpu.arch),
             .optimize = @tagName(builtin.mode),
             .cpu_count = std.Thread.getCpuCount() catch 0,
             .leeway_ms = opts.leeway_ms,

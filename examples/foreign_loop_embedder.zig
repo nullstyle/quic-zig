@@ -971,7 +971,7 @@ pub const WorkQueue = struct {
 /// Everything poll-shaped in this file therefore goes through the
 /// comptime-selected aliases below, and L1/L2 above — which is what
 /// the portable tests exercise — never touch `std.posix` at all.
-pub const poll_reactor_supported = builtin.os.tag != .windows;
+pub const poll_reactor_supported = builtin.target.os.tag != .windows;
 
 /// `poll(2)`'s per-fd descriptor, or a layout-compatible placeholder
 /// on targets without one, so signatures mentioning it still compile

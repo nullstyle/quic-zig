@@ -196,7 +196,7 @@ test "runUdpClient with shutdown_flag pre-set returns inside the grace window" {
             // ever lifted, this assertion fails and tells us to
             // re-check the loop there. See the note on
             // `transport.RunError`.
-            try std.testing.expect(builtin.os.tag == .windows);
+            try std.testing.expect(builtin.target.os.tag == .windows);
             return;
         },
         else => return err,

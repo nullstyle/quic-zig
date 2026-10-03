@@ -176,7 +176,7 @@ test "runUdpServer with shutdown_flag already set returns immediately" {
             // ever lifted, this assertion fails and tells us to
             // re-check the loop there. See the note on
             // `transport.RunError`.
-            try std.testing.expect(builtin.os.tag == .windows);
+            try std.testing.expect(builtin.target.os.tag == .windows);
             return;
         },
         else => return err,
@@ -241,7 +241,7 @@ test "runUdpServer binds preferred-address alt listener and returns cleanly" {
             // ever lifted, this assertion fails and tells us to
             // re-check the loop there. See the note on
             // `transport.RunError`.
-            try std.testing.expect(builtin.os.tag == .windows);
+            try std.testing.expect(builtin.target.os.tag == .windows);
             return;
         },
         else => return err,
@@ -269,7 +269,7 @@ const ReuseGroupHolder = struct {
     }
 
     fn listenLiteral(self: *const ReuseGroupHolder, buf: []u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, "127.0.0.1:{d}", .{self.sock.address.ip4.port});
+        return std.mem.print(buf, "127.0.0.1:{d}", .{self.sock.address.ip4.port});
     }
 };
 
@@ -279,7 +279,7 @@ test "runUdpServer with reuse_port joins a port another socket holds" {
     // with AddressInUse, then exit cleanly on the preset shutdown
     // flag. Without the flag this exact setup fails — the test below
     // pins that contrast.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     var holder = try ReuseGroupHolder.init();
     defer holder.deinit();
     var lit_buf: [32]u8 = undefined;
@@ -345,7 +345,7 @@ const RecordingBindIo = struct {
 };
 
 test "runUdpServer with reuse_port binds through the Io vtable when std can" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     if (!quic.transport.has_reuseport_sockopt) return error.SkipZigTest;
     // Spelled independently of the library's own gate, so a typo in the
     // library's `@hasField` string fails here instead of passing quietly.
@@ -404,7 +404,7 @@ test "runUdpServer without reuse_port conflicts with an open holder" {
     // loop's plain bind must fail with AddressInUse — deterministic,
     // because the holder stays open for the whole call and a bind
     // without SO_REUSEPORT cannot join it.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     var holder = try ReuseGroupHolder.init();
     defer holder.deinit();
     var lit_buf: [32]u8 = undefined;

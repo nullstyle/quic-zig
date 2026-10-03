@@ -108,7 +108,7 @@ const Ctx = struct {
     verbose: bool = false,
     client_datagrams: usize = 0,
     server_datagrams: usize = 0,
-    got: std.ArrayListUnmanaged(u8) = .empty,
+    got: std.ArrayList(u8) = .empty,
 
     fn openStreamIfReady(self: *Ctx) !void {
         if (self.stream_id != null) return;

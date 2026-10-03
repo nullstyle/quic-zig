@@ -9,7 +9,7 @@ const quic = @import("quic");
 const common = @import("common.zig");
 
 const WarnCtx = struct {
-    warnings: std.ArrayListUnmanaged([]const u8) = .empty,
+    warnings: std.ArrayList([]const u8) = .empty,
 
     fn onLog(user_data: ?*anyopaque, ev: quic.Server.LogEvent) void {
         const ctx: *WarnCtx = @ptrCast(@alignCast(user_data.?));
@@ -38,7 +38,7 @@ test "Server.init warns when transport_params admit nothing" {
     defer srv.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), ctx.warnings.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, ctx.warnings.items[0], "admit no streams") != null);
+    try std.testing.expect(std.mem.find(u8, ctx.warnings.items[0], "admit no streams") != null);
 }
 
 test "Server.init refuses a hand-set transport_params.stateless_reset_token without a key" {

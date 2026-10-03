@@ -248,7 +248,7 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
     // everywhere. Past it, fail up front on Windows — before any
     // socket is bound — instead of deep inside the first timed
     // receive (see RunError.WindowsBundledLoopUnsupported).
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         return error.WindowsBundledLoopUnsupported;
     }
 

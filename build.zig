@@ -65,7 +65,7 @@ const BoringsslForward = struct {
 fn boringsslDependency(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     fwd: BoringsslForward,
 ) *std.Build.Dependency {
     // `b.dependency`'s args struct is comptime-shaped, so every
@@ -622,10 +622,10 @@ pub fn build(b: *std.Build) void {
         "bench-unsafe-release-fast",
         "Build benchmarks with ReleaseFast instead of the default ReleaseSafe; disables runtime safety checks",
     ) orelse false;
-    const bench_optimize: std.builtin.OptimizeMode = if (bench_unsafe_release_fast)
-        .ReleaseFast
+    const bench_optimize: std.lang.Optimize = if (bench_unsafe_release_fast)
+        .fast
     else
-        .ReleaseSafe;
+        .safe;
     const bench_boringssl_dep = boringsslDependency(b, target, bench_optimize, bssl_fwd);
     const bench_boringssl_mod = bench_boringssl_dep.module("boringssl");
 

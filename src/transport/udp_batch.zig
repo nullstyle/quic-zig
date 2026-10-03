@@ -373,7 +373,7 @@ test "fillGsoBatch on an idle connection returns an empty batch" {
 // -- IngressIterator ----------------------------------------------------------
 
 const builtin = @import("builtin");
-const native_endian = builtin.cpu.arch.endian();
+const native_endian = builtin.target.cpu.arch.endian();
 
 const no_flags: Net.IncomingMessage.Flags = .{
     .eor = false,
@@ -461,7 +461,7 @@ test "IngressIterator: a buffer no longer than the stride passes through unsplit
 }
 
 test "IngressIterator parses ECN once per message and applies it to every split segment" {
-    if (comptime !(builtin.os.tag == .linux or builtin.os.tag.isDarwin())) return error.SkipZigTest;
+    if (comptime !(builtin.target.os.tag == .linux or builtin.target.os.tag.isDarwin())) return error.SkipZigTest;
     // Kernel-realistic control buffer for a coalesced ECN-marked
     // receive: an IP_TOS cmsg (ECT(0)) followed by the UDP_GRO
     // segment-size cmsg.

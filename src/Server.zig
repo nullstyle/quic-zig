@@ -575,7 +575,7 @@ current_generation: u32 = 0,
 /// contexts that the embedder originally supplied via
 /// `tls_context_override` are NOT inserted here — the embedder
 /// retains ownership of those.
-draining_tls_contexts: std.ArrayListUnmanaged(DrainingTlsEntry) = .empty,
+draining_tls_contexts: std.ArrayList(DrainingTlsEntry) = .empty,
 
 // -- observability counters ---------------------------------------
 //

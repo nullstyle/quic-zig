@@ -83,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(cwd);
 
     const repo = cwd;
-    const workspace = std.fs.path.dirname(repo) orelse ".";
+    const workspace = std.Io.Dir.path.dirname(repo) orelse ".";
     var cfg = Config{
         .repo = repo,
         .workspace = workspace,
@@ -236,13 +236,13 @@ fn parseRunner(allocator: std.mem.Allocator, args: []const []const u8, cfg: *Con
         }
     }
     if (cfg.runner_dir == null) {
-        cfg.runner_dir = try std.fs.path.join(allocator, &.{ cfg.workspace, "quic-interop-runner" });
+        cfg.runner_dir = try std.Io.Dir.path.join(allocator, &.{ cfg.workspace, "quic-interop-runner" });
     }
     if (cfg.log_dir == null) {
-        cfg.log_dir = try std.fs.path.join(allocator, &.{ cfg.repo, "interop", "logs" });
+        cfg.log_dir = try std.Io.Dir.path.join(allocator, &.{ cfg.repo, "interop", "logs" });
     }
     if (cfg.json_path == null) {
-        cfg.json_path = try std.fs.path.join(allocator, &.{ cfg.repo, "interop", "results", defaultRunnerJsonName(cfg.role) });
+        cfg.json_path = try std.Io.Dir.path.join(allocator, &.{ cfg.repo, "interop", "results", defaultRunnerJsonName(cfg.role) });
     }
     cfg.runner_dir = try absolutePath(allocator, cfg.repo, cfg.runner_dir.?);
     cfg.log_dir = try absolutePath(allocator, cfg.repo, cfg.log_dir.?);
@@ -263,8 +263,8 @@ fn defaultRunnerJsonName(role: RunnerRole) []const u8 {
 }
 
 fn absolutePath(allocator: std.mem.Allocator, base: []const u8, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return path;
-    return try std.fs.path.resolve(allocator, &.{ base, path });
+    if (std.Io.Dir.path.isAbsolute(path)) return path;
+    return try std.Io.Dir.path.resolveAlloc(allocator, &.{ base, path });
 }
 
 fn parseCommonAt(args: []const []const u8, i: *usize, cfg: *Config) !bool {
@@ -285,7 +285,7 @@ fn parseCommonAt(args: []const []const u8, i: *usize, cfg: *Config) !bool {
 }
 
 fn preflight(allocator: std.mem.Allocator, io: std.Io, cfg: Config, runner: bool) !void {
-    try expectPath(allocator, io, try std.fs.path.join(allocator, &.{ cfg.repo, "interop", "qns", "Dockerfile" }));
+    try expectPath(allocator, io, try std.Io.Dir.path.join(allocator, &.{ cfg.repo, "interop", "qns", "Dockerfile" }));
 
     if (!cfg.dry_run) {
         try runAndRequireZero(allocator, io, &.{ "docker", "--version" }, null);
@@ -298,15 +298,15 @@ fn preflight(allocator: std.mem.Allocator, io: std.Io, cfg: Config, runner: bool
 
 fn buildImage(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     try preflight(allocator, io, cfg, false);
-    const docker_context = try std.fs.path.join(allocator, &.{ cfg.repo, ".zig-cache", "interop-docker-context" });
+    const docker_context = try std.Io.Dir.path.join(allocator, &.{ cfg.repo, ".zig-cache", "interop-docker-context" });
     try recreateDir(io, docker_context);
 
-    const staged_quic_zig = try std.fs.path.join(allocator, &.{ docker_context, "quic-zig" });
+    const staged_quic_zig = try std.Io.Dir.path.join(allocator, &.{ docker_context, "quic-zig" });
     try copyTree(allocator, io, cfg.repo, staged_quic_zig);
 
     // Always create the package-cache directory so the Dockerfile can
     // COPY it whether or not the host has a populated Zig cache.
-    const staged_cache_p = try std.fs.path.join(allocator, &.{ docker_context, "zig-cache-p" });
+    const staged_cache_p = try std.Io.Dir.path.join(allocator, &.{ docker_context, "zig-cache-p" });
     try std.Io.Dir.cwd().createDirPath(io, staged_cache_p);
 
     // Stage the host's Zig package cache into the docker context if
@@ -337,7 +337,7 @@ fn buildImage(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     if (cfg.zig_version) |v| {
         try cmd.appendSlice(allocator, &.{
             "--build-arg",
-            try std.fmt.allocPrint(allocator, "ZIG_VERSION={s}", .{v}),
+            try allocator.print("ZIG_VERSION={s}", .{v}),
         });
     }
     try cmd.appendSlice(allocator, &.{
@@ -352,10 +352,10 @@ fn buildImage(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
 
 fn hostZigPackageCachePath(allocator: std.mem.Allocator, cfg: Config) !?[]const u8 {
     if (cfg.zig_global_cache_env.len != 0) {
-        return try std.fs.path.join(allocator, &.{ cfg.zig_global_cache_env, "p" });
+        return try std.Io.Dir.path.join(allocator, &.{ cfg.zig_global_cache_env, "p" });
     }
     if (cfg.home_env.len != 0) {
-        return try std.fs.path.join(allocator, &.{ cfg.home_env, ".cache", "zig", "p" });
+        return try std.Io.Dir.path.join(allocator, &.{ cfg.home_env, ".cache", "zig", "p" });
     }
     return null;
 }
@@ -365,7 +365,7 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     const runner_dir = cfg.runner_dir.?;
     try expectPath(allocator, io, runner_dir);
 
-    const overlay = try std.fs.path.join(allocator, &.{ cfg.repo, ".zig-cache", "interop-runner-overlay" });
+    const overlay = try std.Io.Dir.path.join(allocator, &.{ cfg.repo, ".zig-cache", "interop-runner-overlay" });
     try recreateDir(io, overlay);
     try copyTree(allocator, io, runner_dir, overlay);
     try patchRunnerKeylogSelection(allocator, io, overlay);
@@ -387,20 +387,20 @@ fn runRunner(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
         try cmd.append(allocator, "/usr/bin/env");
         if (trace_tools_dir) |dir| {
             const env_path = if (cfg.path_env.len > 0)
-                try std.fmt.allocPrint(allocator, "PATH={s}:{s}", .{ dir, cfg.path_env })
+                try allocator.print("PATH={s}:{s}", .{ dir, cfg.path_env })
             else
-                try std.fmt.allocPrint(allocator, "PATH={s}", .{dir});
+                try allocator.print("PATH={s}", .{dir});
             try cmd.append(allocator, env_path);
         }
         if (cfg.assume_compliant.len != 0) {
-            try cmd.append(allocator, try std.fmt.allocPrint(allocator, "QUIC_ZIG_ASSUME_COMPLIANT={s}", .{cfg.assume_compliant}));
+            try cmd.append(allocator, try allocator.print("QUIC_ZIG_ASSUME_COMPLIANT={s}", .{cfg.assume_compliant}));
         }
         if (cfg.scenario) |scenario| {
-            try cmd.append(allocator, try std.fmt.allocPrint(allocator, "QUIC_ZIG_INTEROP_SCENARIO={s}", .{scenario}));
+            try cmd.append(allocator, try allocator.print("QUIC_ZIG_INTEROP_SCENARIO={s}", .{scenario}));
         }
     }
     try cmd.appendSlice(allocator, &.{ "uv", "run", "--python", cfg.runner_python });
-    const requirements = try std.fs.path.join(allocator, &.{ overlay, "requirements.txt" });
+    const requirements = try std.Io.Dir.path.join(allocator, &.{ overlay, "requirements.txt" });
     if (pathExists(io, requirements)) {
         try cmd.appendSlice(allocator, &.{ "--with-requirements", "requirements.txt" });
     }
@@ -444,7 +444,7 @@ fn prepareTraceTools(allocator: std.mem.Allocator, io: std.Io, cfg: Config, over
     std.debug.print("host tshark/editcap not found; using Docker Wireshark tools image {s}\n", .{cfg.wireshark_image});
     try ensureWiresharkImage(allocator, io, cfg);
 
-    const bin_dir = try std.fs.path.join(allocator, &.{ overlay, ".quic-zig-tools-bin" });
+    const bin_dir = try std.Io.Dir.path.join(allocator, &.{ overlay, ".quic-zig-tools-bin" });
     if (cfg.dry_run) return bin_dir;
 
     try std.Io.Dir.cwd().createDirPath(io, bin_dir);
@@ -456,8 +456,8 @@ fn prepareTraceTools(allocator: std.mem.Allocator, io: std.Io, cfg: Config, over
 fn ensureWiresharkImage(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !void {
     if (!cfg.dry_run and dockerImageExists(allocator, io, cfg.wireshark_image)) return;
 
-    const dockerfile = try std.fs.path.join(allocator, &.{ cfg.repo, "interop", "qns-tools", "Dockerfile" });
-    const context = try std.fs.path.join(allocator, &.{ cfg.repo, "interop", "qns-tools" });
+    const dockerfile = try std.Io.Dir.path.join(allocator, &.{ cfg.repo, "interop", "qns-tools", "Dockerfile" });
+    const context = try std.Io.Dir.path.join(allocator, &.{ cfg.repo, "interop", "qns-tools" });
     const cmd = [_][]const u8{
         "docker",
         "build",
@@ -485,8 +485,8 @@ fn dockerImageExists(allocator: std.mem.Allocator, io: std.Io, image: []const u8
 }
 
 fn writeDockerToolShim(allocator: std.mem.Allocator, io: std.Io, bin_dir: []const u8, tool: []const u8, cfg: Config) !void {
-    const path = try std.fs.path.join(allocator, &.{ bin_dir, tool });
-    const script = try std.fmt.allocPrint(allocator,
+    const path = try std.Io.Dir.path.join(allocator, &.{ bin_dir, tool });
+    const script = try allocator.print(
         \\#!/bin/sh
         \\exec docker run --rm -i -v '{s}:{s}:rw' -v /tmp:/tmp:rw -v /private:/private:rw --entrypoint {s} {s} "$@"
         \\
@@ -496,9 +496,9 @@ fn writeDockerToolShim(allocator: std.mem.Allocator, io: std.Io, bin_dir: []cons
 }
 
 fn commandAvailable(allocator: std.mem.Allocator, io: std.Io, path_env: []const u8, name: []const u8) bool {
-    var it = std.mem.tokenizeScalar(u8, path_env, std.fs.path.delimiter);
+    var it = std.mem.tokenizeScalar(u8, path_env, std.Io.Dir.path.delimiter);
     while (it.next()) |dir| {
-        const candidate = std.fs.path.join(allocator, &.{ dir, name }) catch continue;
+        const candidate = std.Io.Dir.path.join(allocator, &.{ dir, name }) catch continue;
         defer allocator.free(candidate);
         std.Io.Dir.accessAbsolute(io, candidate, .{}) catch continue;
         return true;
@@ -519,7 +519,7 @@ fn prepareRunnerOutputs(io: std.Io, cfg: Config) !void {
     // The interop runner owns the log directory and fails fast if it
     // already exists. Only prepare the JSON parent when doing so does not
     // recreate that same log directory.
-    const json_parent = std.fs.path.dirname(cfg.json_path.?) orelse return;
+    const json_parent = std.Io.Dir.path.dirname(cfg.json_path.?) orelse return;
     if (!std.mem.eql(u8, json_parent, cfg.log_dir.?)) {
         try std.Io.Dir.cwd().createDirPath(io, json_parent);
     }
@@ -593,7 +593,7 @@ fn injectQuicZigImplementation(
     image: []const u8,
     role: []const u8,
 ) !void {
-    const impl_path = try std.fs.path.join(allocator, &.{ overlay, "implementations_quic.json" });
+    const impl_path = try std.Io.Dir.path.join(allocator, &.{ overlay, "implementations_quic.json" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, impl_path, allocator, .limited(8 * 1024 * 1024));
     defer allocator.free(bytes);
 
@@ -607,7 +607,7 @@ fn injectQuicZigImplementation(
     try quic.put(allocator, "role", .{ .string = role });
     try parsed.value.object.put(allocator, "quic-zig", .{ .object = quic });
 
-    const rendered = try std.fmt.allocPrint(allocator, "{f}\n", .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })});
+    const rendered = try allocator.print("{f}\n", .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })});
     defer allocator.free(rendered);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = impl_path, .data = rendered });
 }
@@ -619,7 +619,7 @@ fn overrideImplementationImage(
     name: []const u8,
     image: []const u8,
 ) !void {
-    const impl_path = try std.fs.path.join(allocator, &.{ overlay, "implementations_quic.json" });
+    const impl_path = try std.Io.Dir.path.join(allocator, &.{ overlay, "implementations_quic.json" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, impl_path, allocator, .limited(8 * 1024 * 1024));
     defer allocator.free(bytes);
 
@@ -630,7 +630,7 @@ fn overrideImplementationImage(
     if (impl.* != .object) return error.InvalidImplementationsJson;
     try impl.object.put(allocator, "image", .{ .string = image });
 
-    const rendered = try std.fmt.allocPrint(allocator, "{f}\n", .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })});
+    const rendered = try allocator.print("{f}\n", .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })});
     defer allocator.free(rendered);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = impl_path, .data = rendered });
 }
@@ -640,7 +640,7 @@ fn patchRunnerKeylogSelection(
     io: std.Io,
     overlay: []const u8,
 ) !void {
-    const testcase_path = try std.fs.path.join(allocator, &.{ overlay, "testcase.py" });
+    const testcase_path = try std.Io.Dir.path.join(allocator, &.{ overlay, "testcase.py" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, testcase_path, allocator, .limited(2 * 1024 * 1024));
     defer allocator.free(bytes);
 
@@ -688,8 +688,8 @@ fn patchRunnerKeylogSelection(
         \\        logging.debug("No key log file found.")
     ;
 
-    if (std.mem.indexOf(u8, bytes, replacement) != null) return;
-    const idx = std.mem.indexOf(u8, bytes, needle) orelse return error.UnsupportedRunnerKeylogMethod;
+    if (std.mem.find(u8, bytes, replacement) != null) return;
+    const idx = std.mem.find(u8, bytes, needle) orelse return error.UnsupportedRunnerKeylogMethod;
     var patched: std.ArrayList(u8) = .empty;
     defer patched.deinit(allocator);
     try patched.appendSlice(allocator, bytes[0..idx]);
@@ -703,7 +703,7 @@ fn patchRunnerScenarioOverride(
     io: std.Io,
     overlay: []const u8,
 ) !void {
-    const interop_path = try std.fs.path.join(allocator, &.{ overlay, "interop.py" });
+    const interop_path = try std.Io.Dir.path.join(allocator, &.{ overlay, "interop.py" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, interop_path, allocator, .limited(2 * 1024 * 1024));
     defer allocator.free(bytes);
 
@@ -713,8 +713,8 @@ fn patchRunnerScenarioOverride(
     const replacement =
         \\        ).format(os.environ.get("QUIC_ZIG_INTEROP_SCENARIO", test.scenario()))
     ;
-    if (std.mem.indexOf(u8, bytes, replacement) != null) return;
-    const idx = std.mem.indexOf(u8, bytes, needle) orelse return error.UnsupportedRunnerScenarioFormat;
+    if (std.mem.find(u8, bytes, replacement) != null) return;
+    const idx = std.mem.find(u8, bytes, needle) orelse return error.UnsupportedRunnerScenarioFormat;
     var patched: std.ArrayList(u8) = .empty;
     defer patched.deinit(allocator);
     try patched.appendSlice(allocator, bytes[0..idx]);
@@ -728,7 +728,7 @@ fn patchRunnerAssumeCompliant(
     io: std.Io,
     overlay: []const u8,
 ) !void {
-    const interop_path = try std.fs.path.join(allocator, &.{ overlay, "interop.py" });
+    const interop_path = try std.Io.Dir.path.join(allocator, &.{ overlay, "interop.py" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, interop_path, allocator, .limited(2 * 1024 * 1024));
     defer allocator.free(bytes);
 
@@ -744,8 +744,8 @@ fn patchRunnerAssumeCompliant(
         \\            self.compliant.setdefault(name, {})[role] = True
         \\            return True
     ;
-    if (std.mem.indexOf(u8, bytes, replacement) != null) return;
-    const idx = std.mem.indexOf(u8, bytes, needle) orelse return error.UnsupportedRunnerComplianceMethod;
+    if (std.mem.find(u8, bytes, replacement) != null) return;
+    const idx = std.mem.find(u8, bytes, needle) orelse return error.UnsupportedRunnerComplianceMethod;
     var patched: std.ArrayList(u8) = .empty;
     defer patched.deinit(allocator);
     try patched.appendSlice(allocator, bytes[0..idx]);
@@ -805,7 +805,7 @@ fn pathExists(io: std.Io, path: []const u8) bool {
 }
 
 fn ensureParentDir(io: std.Io, path: []const u8) !void {
-    const parent = std.fs.path.dirname(path) orelse return;
+    const parent = std.Io.Dir.path.dirname(path) orelse return;
     try std.Io.Dir.cwd().createDirPath(io, parent);
 }
 
@@ -868,7 +868,7 @@ test "case expansion supports presets and aliases" {
 
     const preset = try expandCases(allocator, "core+retry");
     defer allocator.free(preset);
-    try std.testing.expect(std.mem.indexOf(u8, preset, "retry") != null);
+    try std.testing.expect(std.mem.find(u8, preset, "retry") != null);
 
     const loss = try expandCases(allocator, "loss");
     defer allocator.free(loss);
@@ -912,13 +912,13 @@ test "runner paths are normalized to absolute paths" {
     defer allocator.free(cfg.log_dir.?);
     defer allocator.free(cfg.json_path.?);
 
-    try std.testing.expect(std.fs.path.isAbsolute(cfg.runner_dir.?));
-    try std.testing.expect(std.fs.path.isAbsolute(cfg.log_dir.?));
-    try std.testing.expect(std.fs.path.isAbsolute(cfg.json_path.?));
+    try std.testing.expect(std.Io.Dir.path.isAbsolute(cfg.runner_dir.?));
+    try std.testing.expect(std.Io.Dir.path.isAbsolute(cfg.log_dir.?));
+    try std.testing.expect(std.Io.Dir.path.isAbsolute(cfg.json_path.?));
     try std.testing.expect(std.mem.endsWith(u8, cfg.runner_dir.?, "quic-interop-runner"));
-    const log_tail = try std.fs.path.join(allocator, &.{ "interop", "logs" });
+    const log_tail = try std.Io.Dir.path.join(allocator, &.{ "interop", "logs" });
     defer allocator.free(log_tail);
-    const json_tail = try std.fs.path.join(allocator, &.{ "interop", "results", "out.json" });
+    const json_tail = try std.Io.Dir.path.join(allocator, &.{ "interop", "results", "out.json" });
     defer allocator.free(json_tail);
     try std.testing.expect(std.mem.endsWith(u8, cfg.log_dir.?, log_tail));
     try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, json_tail));
@@ -946,7 +946,7 @@ test "runner client role defaults to client result path" {
 
     try std.testing.expectEqual(RunnerRole.client, cfg.role);
     try std.testing.expectEqualStrings("quic-go", cfg.servers);
-    const json_tail = try std.fs.path.join(allocator, &.{ "interop", "results", "quic-zig-client.json" });
+    const json_tail = try std.Io.Dir.path.join(allocator, &.{ "interop", "results", "quic-zig-client.json" });
     defer allocator.free(json_tail);
     try std.testing.expect(std.mem.endsWith(u8, cfg.json_path.?, json_tail));
 }
@@ -962,7 +962,7 @@ test "host Zig package cache honors ZIG_GLOBAL_CACHE_DIR first" {
     const cache = (try hostZigPackageCachePath(allocator, cfg)).?;
     defer allocator.free(cache);
 
-    const expected = try std.fs.path.join(allocator, &.{ "/tmp/quic/.zig-global-cache", "p" });
+    const expected = try std.Io.Dir.path.join(allocator, &.{ "/tmp/quic/.zig-global-cache", "p" });
     defer allocator.free(expected);
     try std.testing.expectEqualStrings(expected, cache);
 }

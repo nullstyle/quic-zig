@@ -38,7 +38,7 @@ const EchoApp = struct {
     /// Events landing in the dispatch's `else` arm (`on_event`) — the
     /// tracked-datagram ACK below guarantees at least one.
     other_events: u32 = 0,
-    datagram_payloads: std.ArrayListUnmanaged([]u8) = .empty,
+    datagram_payloads: std.ArrayList([]u8) = .empty,
 
     fn onConnect(app: *EchoApp, session: *D.Session) anyerror!void {
         app.connected += 1;
@@ -145,7 +145,7 @@ fn pumpClientToServerHolding(
     rx: []u8,
     now_us: u64,
     hold_idx: u32,
-    held: *std.ArrayListUnmanaged([]u8),
+    held: *std.ArrayList([]u8),
     counter: *u32,
 ) !void {
     while (try cli.conn.poll(rx, now_us)) |len| {
@@ -290,7 +290,7 @@ test "Driver: echo application over the Server/Client wrappers, with lifecycle h
     try cli.conn.streamFinish(stream.id);
     try cli.conn.sendDatagram("driver-ping");
 
-    var echo: std.ArrayListUnmanaged(u8) = .empty;
+    var echo: std.ArrayList(u8) = .empty;
     defer echo.deinit(allocator);
     var rbuf: [4096]u8 = undefined;
 
@@ -428,7 +428,7 @@ test "Driver: stream end waits for a reordering hole below the FIN, not the FIN 
     _ = try cli.conn.streamWrite(stream.id, payload);
     try cli.conn.streamFinish(stream.id);
 
-    var held: std.ArrayListUnmanaged([]u8) = .empty;
+    var held: std.ArrayList([]u8) = .empty;
     defer {
         for (held.items) |h| allocator.free(h);
         held.deinit(allocator);
@@ -458,7 +458,7 @@ test "Driver: stream end waits for a reordering hole below the FIN, not the FIN 
     // the FULL byte count.
     _ = try srv.feed(held.items[0], addr, now_us);
     var phase2: u32 = 0;
-    var echo: std.ArrayListUnmanaged(u8) = .empty;
+    var echo: std.ArrayList(u8) = .empty;
     defer echo.deinit(allocator);
     var rbuf: [4096]u8 = undefined;
     while (phase2 < 100_000) : (phase2 += 1) {
@@ -586,7 +586,7 @@ test "Driver: full stream table refuses via STOP_SENDING, not a silent hang" {
 // -- Abrupt-disconnect teardown --------------------------------------------
 
 const LeakApp = struct {
-    pub const StreamState = struct { buf: std.ArrayListUnmanaged(u8) = .empty };
+    pub const StreamState = struct { buf: std.ArrayList(u8) = .empty };
     pub const ConnState = void;
 
     allocator: std.mem.Allocator,
@@ -1236,7 +1236,7 @@ const BorrowedApp = struct {
     const C = quic.app.ConnectionDriver(@This());
     echo: bool,
     read_limit: usize = 0,
-    received: std.ArrayListUnmanaged(u8) = .empty,
+    received: std.ArrayList(u8) = .empty,
     handshakes: usize = 0,
     ends: usize = 0,
     disconnects: usize = 0,

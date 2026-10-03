@@ -40,8 +40,8 @@ test "no comment cites the ghost security guide" {
             if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
             // Skip caches and hidden trees (e.g. vendored .zig-cache).
             if (entry.path[0] == '.' or
-                std.mem.indexOf(u8, entry.path, "zig-cache") != null or
-                std.mem.indexOf(u8, entry.path, "/.") != null) continue;
+                std.mem.find(u8, entry.path, "zig-cache") != null or
+                std.mem.find(u8, entry.path, "/.") != null) continue;
             const bytes = entry.dir.readFileAlloc(io, entry.basename, allocator, .limited(8 * 1024 * 1024)) catch continue;
             defer allocator.free(bytes);
             offenders += scanFile(root, entry.path, bytes);

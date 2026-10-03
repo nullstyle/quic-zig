@@ -246,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
         break :blk probe.address.getPort();
     };
     var addr_buf: [32]u8 = undefined;
-    const addr = try std.fmt.bufPrint(&addr_buf, "127.0.0.1:{d}", .{port});
+    const addr = try std.mem.print(&addr_buf, "127.0.0.1:{d}", .{port});
 
     var shutdown = std.atomic.Value(bool).init(false);
     var task: ServerTask = .{

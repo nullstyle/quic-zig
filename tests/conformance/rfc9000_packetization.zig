@@ -326,7 +326,7 @@ test "NORMATIVE PADDING and PING are absent from the retransmit-frame union [RFC
     // `ping` variant; we mirror that here as a compile-time tag-list
     // inspection so a future addition of either tag would have to
     // delete this test.
-    const tags = comptime std.meta.fieldNames(sent_packets.RetransmitFrame);
+    const tags = comptime @typeInfo(sent_packets.RetransmitFrame).@"union".field_names;
     inline for (tags) |name| {
         try std.testing.expect(!std.mem.eql(u8, name, "padding"));
         try std.testing.expect(!std.mem.eql(u8, name, "ping"));

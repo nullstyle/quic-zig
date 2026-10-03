@@ -45,7 +45,7 @@ const posix = std.posix;
 // INTERNAL: pub for direct sibling import (udp_batch.zig tests build
 // synthetic IP_TOS control buffers with it).
 pub const ip_consts = blk: {
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         // include/uapi/linux/in.h
         break :blk struct {
             pub const ip_proto: u32 = 0;
@@ -55,7 +55,7 @@ pub const ip_consts = blk: {
             pub const ipv6_tclass: u32 = 67;
             pub const ipv6_recvtclass: u32 = 66;
         };
-    } else if (builtin.os.tag.isDarwin()) {
+    } else if (builtin.target.os.tag.isDarwin()) {
         // bsd/netinet/in.h, bsd/netinet6/in6.h
         break :blk struct {
             pub const ip_proto: u32 = 0;
@@ -82,13 +82,13 @@ pub const ip_consts = blk: {
 /// True iff the build target exposes IP TOS / IPV6 TCLASS sockopts.
 /// Both setter helpers degrade to `error.Unsupported` on platforms
 /// where this is `false`.
-const has_ip_ecn_sockopts: bool = builtin.os.tag == .linux or builtin.os.tag.isDarwin();
+const has_ip_ecn_sockopts: bool = builtin.target.os.tag == .linux or builtin.target.os.tag.isDarwin();
 
 /// True iff this module should use `std.posix.setsockopt` /
 /// `getsockopt` for SO_RCVBUF and SO_SNDBUF. Zig's Windows POSIX shim
 /// intentionally routes sockets through `std.Io`, so this module treats
 /// the Unix-only tuning helpers as unsupported there.
-const has_posix_buffer_sockopts: bool = builtin.os.tag != .windows;
+const has_posix_buffer_sockopts: bool = builtin.target.os.tag != .windows;
 
 /// True iff `std.c.cmsghdr` is a real struct on this target, so the
 /// cmsg byte-math helpers below can project field offsets from it.
@@ -383,7 +383,7 @@ pub fn parseEcnFromControl(control: []const u8) EcnCodepoint {
     return .not_ect;
 }
 
-const native_endian = @import("builtin").cpu.arch.endian();
+const native_endian = @import("builtin").target.cpu.arch.endian();
 
 /// Recommended `SO_RCVBUF` for a QUIC server on the open internet.
 ///
@@ -460,7 +460,7 @@ fn setBufferImpl(handle: Handle, bytes: usize, dir: BufferDirection) SetBufferEr
     // the only way to exceed `net.core.{r,w}mem_max` without
     // editing sysctl; production servers behind systemd or k8s
     // typically have `CAP_NET_ADMIN` and benefit from this.
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         const force_optname: u32 = switch (dir) {
             .recv => @intCast(std.os.linux.SO.RCVBUFFORCE),
             .send => @intCast(std.os.linux.SO.SNDBUFFORCE),
@@ -857,7 +857,7 @@ pub const udp_gro: i32 = 104;
 pub const default_gso_max_segments: u32 = 64;
 
 /// Whether this target can ever do UDP GSO/GRO.
-pub const has_udp_gso: bool = builtin.os.tag == .linux;
+pub const has_udp_gso: bool = builtin.target.os.tag == .linux;
 
 /// Probe whether `handle` accepts UDP_SEGMENT — the load-bearing gate
 /// for attaching GSO cmsgs: the std maps a rejected sendmsg cmsg
@@ -1073,7 +1073,7 @@ test "negotiateUdpOffloads: best-effort on loopback, never errors" {
 /// native Windows is excluded because winsock has no such option (and
 /// the bundled loops refuse to run there anyway — see
 /// `RunError.WindowsBundledLoopUnsupported`).
-pub const has_reuseport_sockopt: bool = builtin.os.tag != .windows and
+pub const has_reuseport_sockopt: bool = builtin.target.os.tag != .windows and
     @hasDecl(posix.SO, "REUSEPORT");
 
 /// Whether this std's `IpAddress.BindOptions` has a `reuse_port` field.
@@ -1152,7 +1152,7 @@ pub fn bindUdpSocket(
     address: *const Net.IpAddress,
     options: BindUdpOptions,
 ) BindUdpError!Net.Socket {
-    if (comptime builtin.os.tag == .windows) return error.OptionUnsupported;
+    if (comptime builtin.target.os.tag == .windows) return error.OptionUnsupported;
     if (options.reuse_port and !has_reuseport_sockopt) return error.OptionUnsupported;
 
     const family: posix.sa_family_t = switch (address.*) {
@@ -1296,7 +1296,7 @@ test "bindUdpSocket: reuse_port lets two sockets share one port" {
     try testing.expect(first.address.ip4.port != 0);
 
     var lit_buf: [32]u8 = undefined;
-    const same_port = try Net.IpAddress.parseLiteral(try std.fmt.bufPrint(
+    const same_port = try Net.IpAddress.parseLiteral(try std.mem.print(
         &lit_buf,
         "127.0.0.1:{d}",
         .{first.address.ip4.port},
@@ -1317,7 +1317,7 @@ test "bindUdpSocket: without reuse_port the second bind conflicts" {
     defer first.close(io);
 
     var lit_buf: [32]u8 = undefined;
-    const same_port = try Net.IpAddress.parseLiteral(try std.fmt.bufPrint(
+    const same_port = try Net.IpAddress.parseLiteral(try std.mem.print(
         &lit_buf,
         "127.0.0.1:{d}",
         .{first.address.ip4.port},
@@ -1329,7 +1329,7 @@ test "bindUdpSocket: without reuse_port the second bind conflicts" {
 }
 
 test "bindUdpSocket: the fd drives the normal std.Io operate path" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
     const bound_addr = try Net.IpAddress.parseLiteral("127.0.0.1:0");
     const bound = try bindUdpSocket(&bound_addr, .{});
@@ -1357,7 +1357,7 @@ test "SO_REUSEPORT delivery: balanced on Linux, newest-bound on Darwin" {
     const first = try bindUdpSocket(&group_addr, .{ .reuse_port = true });
     defer first.close(io);
     var lit_buf: [32]u8 = undefined;
-    const same_port = try Net.IpAddress.parseLiteral(try std.fmt.bufPrint(
+    const same_port = try Net.IpAddress.parseLiteral(try std.mem.print(
         &lit_buf,
         "127.0.0.1:{d}",
         .{first.address.ip4.port},
@@ -1402,7 +1402,7 @@ test "SO_REUSEPORT delivery: balanced on Linux, newest-bound on Darwin" {
         last_got += 1;
     }
 
-    if (builtin.os.tag.isDarwin()) {
+    if (builtin.target.os.tag.isDarwin()) {
         // BSD lineage (specific-address bind; a wildcard bind favours
         // the oldest): the most recently bound socket receives every
         // datagram; the survivors take over only when it closes. A

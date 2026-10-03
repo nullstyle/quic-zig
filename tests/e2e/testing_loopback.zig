@@ -80,7 +80,7 @@ test "Loopback drives a full echo exchange in memory" {
     _ = try cli.conn.streamWrite(stream.id, payload);
     try cli.conn.streamFinish(stream.id);
 
-    var echo: std.ArrayListUnmanaged(u8) = .empty;
+    var echo: std.ArrayList(u8) = .empty;
     defer echo.deinit(allocator);
 
     // Drive until the echoed stream is terminal and fully read.

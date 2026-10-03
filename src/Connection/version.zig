@@ -269,7 +269,7 @@ pub fn clientAcceptCompatibleVersion(conn: *Connection, version: u32) bool {
     // includes the wire version at index 0 plus every
     // compatible_version from `Client.Config`.
     const advertised = conn.local_transport_params.compatibleVersions();
-    if (std.mem.indexOfScalar(u32, advertised, version) == null) return false;
+    if (std.mem.findScalar(u32, advertised, version) == null) return false;
     setVersion(conn, version);
     return true;
 }

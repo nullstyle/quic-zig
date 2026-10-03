@@ -36,7 +36,7 @@ pub const max_request_bytes: usize = 1 << 20;
 const App = struct {
     pub const StreamState = struct {
         /// Request bytes accumulated so far (length-prefixed frame).
-        req: std.ArrayListUnmanaged(u8) = .empty,
+        req: std.ArrayList(u8) = .empty,
         /// Set once the request overflowed `max_request_bytes` and was
         /// refused on the wire. Later chunks are dropped and the end
         /// of the stream is not answered.
@@ -94,7 +94,7 @@ const App = struct {
         }
         const body = req[4..];
 
-        var response: std.ArrayListUnmanaged(u8) = .empty;
+        var response: std.ArrayList(u8) = .empty;
         defer response.deinit(app.allocator);
         var prefix: [4]u8 = undefined;
         std.mem.writeInt(u32, &prefix, @intCast(body.len), .little);
@@ -179,7 +179,7 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next(); // program name
     const listen = args.next() orelse common.default_addr;
 
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         const act: std.posix.Sigaction = .{
             .handler = .{ .handler = onSigInt },
             .mask = std.posix.sigemptyset(),
@@ -276,7 +276,7 @@ const TestPeers = struct {
         self: *TestPeers,
         allocator: std.mem.Allocator,
         body: []const u8,
-        out: *std.ArrayListUnmanaged(u8),
+        out: *std.ArrayList(u8),
     ) !void {
         const stream = try self.client.conn.openNextBidi();
         var prefix: [4]u8 = undefined;
@@ -320,7 +320,7 @@ test "request/response over Loopback: framed answer, and state survives slot reu
         .{ .body = "zig", .want = "ZIG" },
     };
     for (legs) |leg| {
-        var resp: std.ArrayListUnmanaged(u8) = .empty;
+        var resp: std.ArrayList(u8) = .empty;
         defer resp.deinit(allocator);
         try p.roundTrip(allocator, leg.body, &resp);
         try std.testing.expect(resp.items.len >= 4);
@@ -373,7 +373,7 @@ test "request/response over Loopback: oversized request is refused, connection s
     // The connection is still healthy: a well-behaved request on a
     // fresh stream (reusing the refused stream's table slot) still
     // gets its answer.
-    var resp: std.ArrayListUnmanaged(u8) = .empty;
+    var resp: std.ArrayList(u8) = .empty;
     defer resp.deinit(allocator);
     try p.roundTrip(allocator, "still alive", &resp);
     try std.testing.expect(resp.items.len >= 4);
@@ -404,7 +404,7 @@ test "request/response over Loopback: uni-stream request is refused, connection 
     try std.testing.expect(refused);
 
     // And a proper bidi request afterwards still gets its answer.
-    var resp: std.ArrayListUnmanaged(u8) = .empty;
+    var resp: std.ArrayList(u8) = .empty;
     defer resp.deinit(allocator);
     try p.roundTrip(allocator, "still here", &resp);
     try std.testing.expect(resp.items.len >= 4);

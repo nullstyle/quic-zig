@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
     else
         false;
 
-    if (builtin.os.tag != .windows) {
+    if (builtin.target.os.tag != .windows) {
         const act: std.posix.Sigaction = .{
             .handler = .{ .handler = onSigInt },
             .mask = std.posix.sigemptyset(),

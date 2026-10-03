@@ -25,6 +25,28 @@ changes.
   verified under; the SentPacket size pin and the e2e suite cannot
   pass under the older dev.1683 pin).
 
+### Changed
+
+- **Deprecated std forms retired (internal; no behavior or API
+  change).** Zig 0.17.0 marks a set of std names deprecated — only in
+  doc comments, the compiler does not warn — and removes some of them
+  in 0.18.0. The list was built from the release's own `lib/std`
+  `Deprecated` comments rather than from memory, and every use in the
+  tree is migrated: `builtin.os` / `builtin.cpu` to `builtin.target.*`
+  and `Target.Os.Tag.isBSD` to explicit tags (both removed in 0.18.0),
+  `std.builtin.OptimizeMode` to `std.lang.Optimize`,
+  `std.ArrayListUnmanaged` to `std.ArrayList`, `std.StaticBitSet` to
+  `std.bit_set.Static`, `std.mem.indexOf*` to `std.mem.find*`,
+  `std.fmt.bufPrint` to `std.mem.print`, `std.fmt.allocPrint` to
+  `Allocator.print`, `std.fs.path` to `std.Io.Dir.path`,
+  `std.meta.fieldInfo` / `fieldNames` to `@FieldType` / `@typeInfo`,
+  and `std.mem.copyForwards` to `@memmove`. Two deprecated names stay
+  on purpose, because their replacements are not renames:
+  `Socket.sendMany` (the replacement reports partial sends and takes a
+  different lowering — a send-path change that deserves its own
+  measurement) and `std.heap.DebugAllocator` in the `bench-io`
+  `HEAPDEBUG` aid.
+
 ### Documentation
 
 - **Compiler notes re-measured on Zig 0.17.0.** Every in-tree note that

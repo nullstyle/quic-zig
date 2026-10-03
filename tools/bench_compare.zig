@@ -367,7 +367,7 @@ fn appendToStepSummary(io: std.Io, allocator: std.mem.Allocator, summary_path: [
     defer merged.deinit(allocator);
     merged.appendSlice(allocator, existing) catch return;
     merged.appendSlice(allocator, table) catch return;
-    if (std.fs.path.isAbsolute(summary_path)) {
+    if (std.Io.Dir.path.isAbsolute(summary_path)) {
         var file = std.Io.Dir.createFileAbsolute(io, summary_path, .{}) catch return;
         defer file.close(io);
         file.writeStreamingAll(io, merged.items) catch {};
