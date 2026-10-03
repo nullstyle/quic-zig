@@ -105,6 +105,20 @@ jobs:
       - name: Load the IPv6 filter module for the network simulator
         run: sudo modprobe ip6table_filter
 
+      # A host tshark (Wireshark 4.5 or later), not the wrapper's Docker
+      # fallback. See quic-go-interop.yml.
+      - name: Install tshark
+        run: |
+          sudo add-apt-repository -y ppa:wireshark-dev/stable
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+          v=$(dpkg-query -W -f='${Version}' tshark)
+          echo "tshark package version: $v"
+          if ! dpkg --compare-versions "$v" ge 4.5.0; then
+            echo "::error::tshark $v is older than the 4.5.0 the runner needs"
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 

@@ -100,6 +100,13 @@ names the simulator's interfaces with `interface_name`. On an older
 Engine no container starts. The wrapper checks the Engine first and
 stops with a message that says so.
 
+The runner also needs `tshark` from Wireshark 4.5 or later, to read
+its packet captures. Install it on the host. If the host has no
+`tshark`, the wrapper uses one from a Docker image; on Linux that
+fallback can stop the whole runner with `TSharkCrashException` (the
+Python library that drives `tshark` loses track of the `docker run`
+process). Both CI workflows install a host `tshark`.
+
 The last line of a run is the evidence:
 
 ```text
