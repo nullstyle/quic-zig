@@ -119,15 +119,14 @@ is safe to embed in production. The gates:
 ### Cross-repo hygiene
 - [ ] `boringssl` is pinned to a tag (not a bare SHA) in both quic-zig
       and http3-zig, byte-for-byte identically (roadmap H1 #3). Current
-      reality (2026-08): both repos pin bare SHA `b47af8c…` — the
-      renamed `boringssl` package identity (was `boringssl_zig`;
-      package name and module name now align) carrying the
-      `SSL_get_client_random` binding — byte-for-byte identically, and
-      `.github/workflows/pin-lint.yml` enforces STRICT identity (the
-      repin-transition known pair was deleted once http3-zig repinned).
-      Re-check this box when boringssl-zig tags the release, both repos
-      repin to the tag, and http3-zig's `tools/check-boringssl-pin.sh`
-      again lints a tag pin.
+      reality (2026-10): the pins have diverged. quic-zig pins bare SHA
+      `ff30fe9…` (boringssl 0.6.7, since v0.21.2); http3-zig's main
+      still pins `87d15bf…` (0.6.6) beside quic v0.19.0.
+      `.github/workflows/pin-lint.yml` is a ratchet: identical pins
+      pass, exactly that dated pair passes with a warning, anything
+      else fails. Re-check this box when boringssl-zig tags the release,
+      both repos repin to the tag (delete the known pair then), and
+      http3-zig's `tools/check-boringssl-pin.sh` again lints a tag pin.
 
 - [x] **Toolchain pinning policy is decided and executed.** quic-zig
       tracked Zig master while 0.17 was in development and **pins the
@@ -250,6 +249,38 @@ over a short one. The gate additionally verifies the coverage file
 reports non-zero `pcs_len`, so an uninstrumented run can no longer pass
 silently. Deep fuzzing moved to the weekly advisory job, which is the
 right home for it: it runs whether or not anyone is cutting a release.
+
+## v0.23.0 toolchain release
+
+v0.23.0 moves the project off Zig master pins onto the tagged Zig
+0.17.0 release, and repairs the release gates it found broken on the
+way.
+
+**What the gates had been missing.** From v0.16.0 through v0.22.0 the
+pre-release fuzz gate could not fail on a failing fuzz site:
+`zig build test --fuzz` exits 0 when a site fails and ends the run
+there, and the gate asked only for a non-zero coverage header. Every
+gate run in that window logged the same failing site — a stale
+close-code invariant in the CID-lifecycle harness, a test defect and
+not a protocol one — ran between 1% and 23% of its budget, and passed.
+v0.21.2 and v0.22.0 were tagged with no gate run at all, and v0.22.0
+with `test` red on its own commit, because the toolchain pin had moved
+in one of its four places and not the others. No protocol defect is
+known in any of those tags and none is withdrawn, but none of them
+carries the fuzz evidence a tag is supposed to imply.
+
+From v0.23.0: `tools/fuzz-gate.sh` judges a fuzz run on its log and
+its coverage header instead of its exit status (failing site, run
+count below 90% of sites x budget, missing or uninstrumented coverage
+file); `tools/check-zig-pins.sh` fails when the four pin sites
+disagree; and the weekly fuzz job no longer reports a failed step as a
+green run. Both scripts were mutation-checked before they were
+trusted.
+
+The first full-budget gate run since v0.15.x, on the tagged toolchain:
+`n_runs=2,075,711 unique_runs=9,326 pcs_len=40,982` across 40 sites,
+coverage 3546/40982 (8.65%), no failing site (Linux x86_64, Zig
+0.17.0).
 
 ### RC/soak criterion toward 1.0
 

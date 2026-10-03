@@ -694,7 +694,8 @@ switch (quic.StreamType.fromId(id)) {
 
 `openNextBidi` / `openNextUni` pick the id automatically and return
 `Error.StreamLimitExceeded` when the peer's limit is reached without
-consuming the id (a later retry reuses it). When a layer must know the id
+consuming the id (a later retry reuses it; "Stream limits are lifetime
+limits" below says when no retry can succeed). When a layer must know the id
 *before* opening — e.g. to run a GOAWAY / stream-limit gate keyed on it —
 `peekNextBidi()` / `peekNextUni()` return the id the matching `openNext*`
 would use next, without consuming it:
@@ -704,6 +705,32 @@ const id = conn.peekNextBidi();
 if (!localGoawayGate(id)) return error.RequestBlocked;
 const s = try conn.openNextBidi();   // reuses the peeked id
 ```
+
+### Stream limits are lifetime limits
+
+A connection can open at most `Connection.max_streams_per_connection`
+(4096) streams of each kind — each endpoint's bidirectional and
+unidirectional streams are counted separately — over its **whole
+life**, not at a time. Finishing a stream returns its credit only up
+to that total: the cumulative MAX_STREAMS quic-zig grants never rises
+past 4096, and a larger grant from a peer is clamped to 4096, however
+many of the earlier streams have completed and been reaped. Past that
+point `openNextBidi` / `openNextUni` return `Error.StreamLimitExceeded`
+on every call, and waiting does not help.
+
+That bounds a long-lived connection in a way a short test never
+reaches. A protocol that spends one bidirectional stream per request
+gets 4096 requests per connection; from the 4097th on, a request layer
+that treats `StreamLimitExceeded` as transient backpressure sees every
+later request queue up and time out, on a connection that otherwise
+looks healthy. Plan for it: count the streams a connection has opened
+(`peekNextBidi() / 4` is the index the next one will get) and retire
+the connection with some headroom left, or carry many requests on
+fewer, longer-lived streams. The cap is a deliberate allocation bound
+— fixed per-connection bitmaps remember which stream ids were reaped —
+and `tests/e2e/app_driver.zig` pins it; recycling stream credit so a
+connection is bounded by live streams instead is planned work, not
+current behavior.
 
 To observe stream completion and backpressure without reaching into the
 stream internals — which the transport's stream GC reclaims the moment a

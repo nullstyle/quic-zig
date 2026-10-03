@@ -77,22 +77,25 @@ The public Zig module name is `quic`.
 ### Consuming this package
 
 Fetch a tagged release into your `build.zig.zon` — substitute the
-current tag (`v0.16.1` as of this writing):
+current tag (`v0.23.0` as of this writing):
 
 ```sh
-zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.16.1.tar.gz
+zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.23.0.tar.gz
 ```
 
-Pin the **archive tarball URL exactly as above** — not a
-`git+https://…#v0.13.0` reference. Release tags here are annotated
-tag objects, and on current Zig master a `git+…#tag` pin resolves
-them to a different (unnamed `N-V`) fingerprint than the tarball,
-failing the hash check (first reported by a downstream on
-0.17.0-dev). Two related field notes from the same report: standalone
-`zig fetch` and `zig build --fetch` unpacked the tarball's wrapper
-directory differently on that toolchain, so if a consumer sees an
-`N-V` mismatch despite the correct URL, repopulating the package
-store from the canonical cached tarball resolves it.
+Pin the **archive tarball URL** as above; it is the form every release
+is verified with. On Zig 0.17.0 a `git+https://…#v0.23.0` reference
+resolves to the same package hash. (On the 0.17.0-dev builds it did
+not: release tags here are annotated tag objects, and those builds
+gave them a different, unnamed `N-V` fingerprint.)
+
+One Zig 0.17.0 field note. A standalone `zig fetch <url>` — without
+`--save` — rewrites the package's entry in the global cache in a form
+that a later `zig build` rejects with an unrelated-looking `N-V` hash
+mismatch; `zig fetch --save` and `zig build --fetch` do not. If you
+see that mismatch despite the correct URL and hash, delete the
+package's `<hash>.tar.gz` from the `p/` directory of the Zig global
+cache and build again.
 
 Then wire the module in `build.zig`:
 

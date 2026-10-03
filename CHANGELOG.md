@@ -49,6 +49,24 @@ changes.
 
 ### Documentation
 
+- **Stream limits are lifetime limits, and now say so.** A connection
+  can open at most 4096 streams of each kind over its whole life: the
+  cumulative MAX_STREAMS quic-zig grants stops at
+  `Connection.max_streams_per_connection`, and a larger grant from a
+  peer is clamped to it, no matter how many earlier streams finished.
+  This is not new — every release with the cap behaves this way — but
+  the docs described `StreamLimitExceeded` only as retryable
+  backpressure, and a one-stream-per-request protocol on a long-lived
+  connection reaches the cap after 4096 requests and then sees every
+  later request time out. EMBEDDING.md ("Stream limits are lifetime
+  limits") and docs/ERROR_CODES.md now state the limit and what to do
+  about it (retire the connection with headroom, or carry more
+  requests per stream), and `tests/e2e/app_driver.zig` pins it
+  end to end: 4096 request/reply streams complete, the 4097th open
+  fails, and waiting does not help. Recycling stream credit, so that a
+  connection is bounded by live streams rather than lifetime indices,
+  is planned work.
+
 - **Compiler notes re-measured on Zig 0.17.0.** Every in-tree note that
   cited a 0.17-dev build was re-tested against the release and either
   re-stamped or corrected. The one correction that matters to
@@ -68,6 +86,22 @@ changes.
   true: a filtered test binary fuzzes cleanly again.
 
 ### CI and tests
+
+- **A long-lived connection test for the application drivers.** Every
+  existing `ConnectionDriver` / `Driver` test used a fresh connection
+  for a handful of streams, so nothing covered what a session that
+  stays up depends on: stream-table entries being released and stream
+  credit being returned. "ConnectionDriver: a long-lived connection
+  keeps answering requests" runs 300 request/reply streams over one
+  connection with eight-entry stream tables and the default credit of
+  100. It was written to chase a downstream report that 0.22.0 broke
+  long-lived request/reply sessions, and it passes. So do, against the
+  0.22.0 tag itself, qmsg's two-node tests extended to 200 rounds in
+  each direction, and nest's unit tests and the QUIC family of its
+  kill suite (87 scenarios) with every quic pin moved to 0.22.0. No
+  0.22.0 defect was found behind that report; the one hard limit a
+  long-lived session does hit is the lifetime stream cap documented
+  above, which predates 0.22.0.
 
 - **The CID-lifecycle fuzz harness had a stale close-code invariant.**
   `registerPeerCid` has closed with CONNECTION_ID_LIMIT_ERROR (RFC 9000
@@ -109,6 +143,14 @@ changes.
   push, and the new `zig-pin` job in `pin-lint.yml` additionally checks
   the Dockerfile's per-arch SHA-256 against the digests ziglang.org
   publishes.
+
+- **The cross-repo boringssl pin lint is a ratchet again.** quic-zig
+  has pinned boringssl 0.6.7 since 0.21.2 while http3-zig's main still
+  pins 0.6.6, so the strict lint had been red on every run since that
+  release — and a lint that is always red reports nothing. It now
+  passes identical pins, tolerates exactly that dated pair with a
+  warning, and fails on anything else. The pair is deleted when
+  http3-zig repins.
 
 ## [0.22.0] - 2026-09-20
 

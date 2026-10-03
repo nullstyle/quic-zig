@@ -17,7 +17,7 @@ contract. The error sets are additive-only across minor releases
 | `InvalidStreamId` | The id cannot name a stream this endpoint may open. | Manual `openBidi`/`openUni` with wrong low bits or direction; use `openNextBidi` / `openNextUni`. |
 | `StreamAlreadyOpen` | Open for an id that is already live. | Re-opening after `peekNext*`; track your opens. |
 | `StreamNotFound` | The id is not in the live stream table. | Normal completion signal: the stream reached terminal and the GC reaped it. Also genuinely-unknown ids. |
-| `StreamLimitExceeded` | Peer's MAX_STREAMS window is full. | Retryable; the id is not consumed. |
+| `StreamLimitExceeded` | Peer's MAX_STREAMS window is full. | Retryable, and the id is not consumed — until the connection has opened 4096 streams of that kind in its lifetime. After that it is permanent: retire the connection (EMBEDDING.md, "Stream limits are lifetime limits"). |
 | `ShuttingDown` | Local graceful shutdown refuses new streams. | After `beginGracefulShutdown`. |
 | `StreamClosed` (SendStream) | Wrote after FIN or RESET on that stream. | App-side sequencing bug. |
 

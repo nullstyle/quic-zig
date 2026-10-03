@@ -1336,6 +1336,156 @@ test "ConnectionDriver: borrowed accepted and dialed connections share partial r
     try std.testing.expectEqual(@as(usize, 1), client_app.disconnects);
 }
 
+/// Request/reply over one long-lived connection: the answering side
+/// echoes each bidi stream's bytes and its FIN; the asking side counts
+/// completed replies.
+const LongLivedApp = struct {
+    pub const ConnState = void;
+    pub const StreamState = struct {};
+    const C = quic.app.ConnectionDriver(@This());
+    reply: bool,
+    ends: usize = 0,
+
+    fn data(app: *LongLivedApp, d: *C, e: *C.StreamEntry, bytes: []const u8) anyerror!usize {
+        if (app.reply) try d.outbox.push(d.conn, e.id, bytes);
+        return bytes.len;
+    }
+    fn ended(app: *LongLivedApp, d: *C, e: *C.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
+        if (end != .fin) return;
+        app.ends += 1;
+        if (app.reply) try d.outbox.finish(d.conn, e.id);
+    }
+    fn hooks() C.Hooks {
+        return .{ .on_stream_data = data, .on_stream_end = ended };
+    }
+};
+
+test "ConnectionDriver: a long-lived connection keeps answering requests" {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"long-lived"};
+    var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = common.defaultParams() });
+    defer server.deinit();
+    var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = common.defaultParams(), .insecure_skip_verify = true });
+    defer client.deinit();
+    var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+    defer loop.deinit();
+    try loop.handshake(&quic.testing.NullDriver{});
+    while (server.iterator()[0].conn.pollEvent()) |_| {}
+    while (client.conn.pollEvent()) |_| {}
+    var server_app: LongLivedApp = .{ .reply = true };
+    var client_app: LongLivedApp = .{ .reply = false };
+    var receiver = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &server_app, .conn = server.iterator()[0].conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
+    defer receiver.deinit();
+    var sender = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &client_app, .conn = client.conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
+    defer sender.deinit();
+
+    // One request/reply stream at a time, for more rounds than either
+    // stream table holds (8) and than the initial bidi stream credit
+    // allows (100). Every round therefore needs the earlier rounds'
+    // table entries to have been released and their stream credit to
+    // have been returned through MAX_STREAMS: a per-connection leak of
+    // either stalls here, where a fresh connection per case never
+    // notices. The expected value names the round that stalled.
+    const rounds = 300;
+    for (0..rounds) |round| {
+        const stream = try client.conn.openNextBidi();
+        try sender.trackStream(stream.id);
+        try sender.outbox.push(client.conn, stream.id, "request");
+        try sender.outbox.finish(client.conn, stream.id);
+        var steps: usize = 0;
+        while (client_app.ends <= round and steps < 64) : (steps += 1) {
+            _ = try loop.pumpClientToServer();
+            try receiver.service();
+            _ = try loop.pumpServerToClient();
+            try sender.service();
+            try server.tick(loop.now_us);
+            try client.conn.tick(loop.now_us);
+            loop.now_us += 1_000;
+        }
+        try std.testing.expectEqual(round + 1, client_app.ends);
+        try std.testing.expectEqual(round + 1, server_app.ends);
+    }
+    try std.testing.expectEqual(@as(u64, 0), sender.refusedStreams());
+    try std.testing.expectEqual(@as(u64, 0), receiver.refusedStreams());
+}
+
+test "ConnectionDriver: the lifetime stream cap ends a long-lived session, and waiting does not help" {
+    // A connection can open `Connection.max_streams_per_connection`
+    // streams of each type over its WHOLE LIFE, not at a time: the
+    // peer's cumulative MAX_STREAMS never rises past the cap, however
+    // many of the earlier streams have finished and been reaped. A
+    // protocol that spends one bidi stream per request therefore gets
+    // 4096 requests per connection, and then `StreamLimitExceeded` on
+    // every open, for good — on a long-lived session that looks like
+    // every later request timing out. This test pins that documented
+    // limit (EMBEDDING.md, "Stream limits are lifetime limits"); when
+    // stream credit is recycled instead, it fails, and the docs and
+    // this test move together.
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"long-lived"};
+    var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = common.defaultParams() });
+    defer server.deinit();
+    var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = common.defaultParams(), .insecure_skip_verify = true });
+    defer client.deinit();
+    var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+    defer loop.deinit();
+    try loop.handshake(&quic.testing.NullDriver{});
+    while (server.iterator()[0].conn.pollEvent()) |_| {}
+    while (client.conn.pollEvent()) |_| {}
+    var server_app: LongLivedApp = .{ .reply = true };
+    var client_app: LongLivedApp = .{ .reply = false };
+    var receiver = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &server_app, .conn = server.iterator()[0].conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
+    defer receiver.deinit();
+    var sender = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &client_app, .conn = client.conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
+    defer sender.deinit();
+    const cap: usize = @intCast(quic.Connection.max_streams_per_connection);
+    var opened: usize = 0;
+    while (opened < cap) {
+        // Up to six requests in flight (the tables hold eight). Credit
+        // that has not been returned yet just makes a batch shorter.
+        const before = opened;
+        while (opened < cap and opened - before < 6) {
+            const stream = client.conn.openNextBidi() catch |err| switch (err) {
+                error.StreamLimitExceeded => break,
+                else => return err,
+            };
+            try sender.trackStream(stream.id);
+            try sender.outbox.push(client.conn, stream.id, "request");
+            try sender.outbox.finish(client.conn, stream.id);
+            opened += 1;
+        }
+        // Below the cap, credit always comes back.
+        try std.testing.expect(opened > before);
+        var steps: usize = 0;
+        while (client_app.ends < opened and steps < 256) : (steps += 1) {
+            _ = try loop.pumpClientToServer();
+            try receiver.service();
+            _ = try loop.pumpServerToClient();
+            try sender.service();
+            try server.tick(loop.now_us);
+            try client.conn.tick(loop.now_us);
+            loop.now_us += 1_000;
+        }
+        try std.testing.expectEqual(opened, client_app.ends);
+    }
+
+    // All 4096 were answered and reaped. The next open fails, and it
+    // still fails after the peer has had every chance to grant credit.
+    try std.testing.expectError(error.StreamLimitExceeded, client.conn.openNextBidi());
+    for (0..64) |_| {
+        _ = try loop.pumpClientToServer();
+        try receiver.service();
+        _ = try loop.pumpServerToClient();
+        try sender.service();
+        try server.tick(loop.now_us);
+        try client.conn.tick(loop.now_us);
+        loop.now_us += 1_000;
+    }
+    try std.testing.expectError(error.StreamLimitExceeded, client.conn.openNextBidi());
+    try std.testing.expectEqual(@as(u64, 0), sender.refusedStreams());
+    try std.testing.expectEqual(@as(u64, 0), receiver.refusedStreams());
+}
+
 test "Driver: automatic attachment preserves foreign user data and chains teardown" {
     const Observer = struct {
         calls: usize = 0,

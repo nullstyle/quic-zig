@@ -5,12 +5,21 @@ name: pin-lint
 # byte-for-byte, or `boringssl.tls.Context` type identity breaks for
 # embedders composing both packages.
 #
-# Both repos now carry the renamed `boringssl` package identity
-# (b47af8c, SSL_get_client_random + rename), so the lint enforces
-# STRICT identity: identical pins pass, any other combination fails.
+# The lint is a RATCHET: identical pins pass; the one dated, known
+# divergence below passes with a warning; any other combination fails.
 # The extractor still recognizes the old `.boringssl_zig` key so a
 # one-sided back-pin fails loudly instead of as an unparseable
 # manifest.
+#
+# Known divergence (2026-10-03): quic-zig has pinned boringssl 0.6.7
+# since v0.21.2 (2026-09-21; crypto.pkey / x509 / pem for consumers
+# that mint development PKIs), while http3-zig's main still pins 0.6.6
+# beside quic v0.19.0. The lint compares this repo's manifest with
+# http3-zig's main, so it has been red since that release, and a lint
+# that is always red reports nothing. When http3-zig moves to a quic
+# release that carries 0.6.7 (v0.21.2 or later) and repins, delete the
+# known pair so the lint enforces strict identity again, and re-check
+# the RELEASE_READINESS box.
 #
 # The `zig-pin` job is the in-repo half: the Zig toolchain is named in
 # four places (mise.toml lists them) and they must agree, including the
@@ -89,6 +98,12 @@ jobs:
               exit 1
           }
 
+          # The one tolerated divergence (see the header comment): quic-zig
+          # on boringssl 0.6.7, http3-zig still on 0.6.6. Delete this pair
+          # once http3-zig repins.
+          known_ours="boringssl-0.6.7-Vv5DN8RMAgDGST3F3NpoMjez8Z_J60megIom9Ru9XqD2"
+          known_theirs="boringssl-0.6.6-Vv5DNx8KAgCi6qYllvBlOXf0DwfFhk8OJ_sY5HGR7Kqh"
+
           if [ "$ours" = "$theirs" ]; then
               {
                   echo "### pin-lint: OK"
@@ -97,15 +112,27 @@ jobs:
                   echo ""
                   echo '`'"$ours"'`'
               } | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$ours" = "$known_ours" ] && [ "$theirs" = "$known_theirs" ]; then
+              {
+                  echo "### pin-lint: WARNING (known divergence tolerated)"
+                  echo ""
+                  echo "- quic-zig: \`$ours\`"
+                  echo "- http3-zig: \`$theirs\` (has not moved to a quic release that carries 0.6.7)"
+                  echo ""
+                  echo "Reconverge when http3-zig repins, then delete the known pair"
+                  echo "in pin-lint.yml to restore strict identity."
+              } | tee -a "$GITHUB_STEP_SUMMARY"
           else
               {
-                  echo "### pin-lint: FAIL (pins drifted)"
+                  echo "### pin-lint: FAIL (pins drifted beyond the known pair)"
                   echo ""
                   echo "- quic-zig: \`$ours\`"
                   echo "- http3-zig: \`$theirs\`"
                   echo ""
-                  echo "Repin both repos identically — \`boringssl.tls.Context\` type"
-                  echo "identity across the quic/http3 boundary depends on the dedupe."
+                  echo "Either repin both repos identically — \`boringssl.tls.Context\`"
+                  echo "type identity across the quic/http3 boundary depends on the"
+                  echo "dedupe — or, for a deliberate temporary divergence, update the"
+                  echo "known pair in pin-lint.yml with a dated justification."
               } | tee -a "$GITHUB_STEP_SUMMARY"
               exit 1
           fi
