@@ -101,7 +101,7 @@ is safe to embed in production. The gates:
       `zig build test --fuzz` reports none of the three — and the
       workflow uploads `.zig-cache/f` and `.zig-cache/v` for replay. No
       open crashers are tracked in-tree. (The gate was blind to a failing
-      site from v0.16.0 through v0.22.0; see the v0.23.0 section below.)
+      site from v0.14.0 through v0.22.0; see the v0.23.0 section below.)
 
 ### API surface
 - [x] The `Connection` surface is partitioned into Stable / Unstable so
@@ -256,18 +256,22 @@ v0.23.0 moves the project off Zig master pins onto the tagged Zig
 0.17.0 release, and repairs the release gates it found broken on the
 way.
 
-**What the gates had been missing.** From v0.16.0 through v0.22.0 the
+**What the gates had been missing.** From v0.14.0 through v0.22.0 the
 pre-release fuzz gate could not fail on a failing fuzz site:
 `zig build test --fuzz` exits 0 when a site fails and ends the run
-there, and the gate asked only for a non-zero coverage header. Every
-gate run in that window logged the same failing site — a stale
-close-code invariant in the CID-lifecycle harness, a test defect and
-not a protocol one — ran between 1% and 23% of its budget, and passed.
-v0.21.2 and v0.22.0 were tagged with no gate run at all, and v0.22.0
-with `test` red on its own commit, because the toolchain pin had moved
-in one of its four places and not the others. No protocol defect is
-known in any of those tags and none is withdrawn, but none of them
-carries the fuzz evidence a tag is supposed to imply.
+there, and the gate asked only for a non-zero coverage header. All
+eight gate runs in that window (v0.14.0, v0.15.0, v0.15.1, v0.16.0,
+v0.16.1, v0.17.0, v0.20.0, v0.21.1) logged the same failing site — a
+stale close-code invariant in the CID-lifecycle harness, a test defect
+and not a protocol one — ran between 1% and 60% of their budget
+(18,503 to 1,119,215 executions of about 2M), and passed. v0.18.0,
+v0.19.0, v0.21.0, v0.21.2, and v0.22.0 were tagged with no gate run at
+all, and v0.22.0 with `test` red on its own commit, because the
+toolchain pin had moved in one of its four places and not the others.
+No protocol defect is known in any of those tags and none is
+withdrawn, but none of them carries the fuzz evidence a tag is
+supposed to imply. The last gate run that was what it claimed to be
+was v0.13.1's (1,923,878 executions, no failing site).
 
 From v0.23.0: `tools/fuzz-gate.sh` judges a fuzz run on its log and
 its coverage header instead of its exit status (failing site, run
@@ -277,7 +281,7 @@ disagree; and the weekly fuzz job no longer reports a failed step as a
 green run. Both scripts were mutation-checked before they were
 trusted.
 
-The first full-budget gate run since v0.15.x, on the tagged toolchain:
+The first full-budget gate run since v0.13.1, on the tagged toolchain:
 `n_runs=2,075,711 unique_runs=9,326 pcs_len=40,982` across 40 sites,
 coverage 3546/40982 (8.65%), no failing site (Linux x86_64, Zig
 0.17.0).

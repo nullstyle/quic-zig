@@ -98,9 +98,9 @@ modes:
   exit status, which has fooled it twice. An uninstrumented run executes
   the whole budget and looks green — that is how the gate produced no
   signal for two weeks before 0.10.0. And a run with a *failing site*
-  exits 0 as well: from v0.16.0 through v0.21.1 every gate run logged one
-  (a stale invariant in the CID-lifecycle harness), stopped at a fraction
-  of its budget, and passed. `tools/fuzz-gate.sh` now fails the run on
+  exits 0 as well: from v0.14.0 through v0.21.1 every gate run — eight
+  of them — logged one (a stale invariant in the CID-lifecycle harness),
+  stopped at a fraction of its budget, and passed. `tools/fuzz-gate.sh` now fails the run on
   the failing-site log line, on a run count below 90% of sites x budget,
   and on a missing or zero-`pcs_len` coverage file, and prints the
   coverage numbers either way. Raise the budget for an RC or 1.0 if you

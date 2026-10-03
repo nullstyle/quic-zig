@@ -27,10 +27,10 @@ on:
 #
 # It has failed at that twice, both times by trusting the exit status of
 # `zig build test --fuzz`. First a run with no coverage instrumentation
-# "passed" for two weeks. Then, from v0.16.0 through v0.21.1, every gate
-# run logged a failing site, stopped at a fraction of its budget (as
-# little as 18,503 of ~2M executions), and still exited 0 — a non-zero
-# coverage header was all the old check asked for. tools/fuzz-gate.sh now
+# "passed" for two weeks. Then, from v0.14.0 through v0.21.1, all eight
+# gate runs logged a failing site, stopped at a fraction of their budget
+# (as little as 18,503 of ~2M executions), and still exited 0 — a
+# non-zero coverage header was all the old check asked for. tools/fuzz-gate.sh now
 # fails on the failing-site log line, on a run count below 90% of
 # sites x budget, and on a missing or uninstrumented coverage file; it
 # prints the coverage numbers either way.
