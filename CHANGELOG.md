@@ -5,7 +5,25 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.24.0] - 2026-10-03
+
+The stream-window release. A connection could carry 4096 streams of
+each type over its whole life; now it carries any number, a window at
+a time. `initial_max_streams_bidi` / `_uni` is the number of streams
+the peer may have open at once, and an id comes back when a stream is
+fully closed. It is a breaking release: in wire behaviour (when
+MAX_STREAMS is sent and how far it goes), in what the two parameters
+mean, and in two names (`Connection.max_streams_per_connection` is
+removed; `streamStopSending` can refuse). Read "Stream limits are a
+window" in EMBEDDING.md before you move a pin. Three kinds of code need
+a change: code that opens more streams than the window in one burst
+and does not retry, code that leaves a peer's stream unanswered and
+unfinished, and code that refuses a stream with STOP_SENDING alone.
+Eight stream faults are fixed on the way, and the interop cell that
+had failed in every run for months (`server x quiche x multiplexing`)
+now passes 6 runs in 10, which is what that client does against the
+other servers. Verified toolchain: 0.17.0 (Linux x86-64 and aarch64,
+macOS, and Windows in CI; macOS locally).
 
 ### Fixed
 
