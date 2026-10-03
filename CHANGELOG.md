@@ -24,7 +24,7 @@ changes.
   - `interop.yml`, the advisory weekly matrix: its job failed in each
     of its 21 scheduled runs since 2026-05-10, and `continue-on-error`
     showed each as a green run. Every run whose log still exists
-    (2026-07-26 on) ran zero tests, including the run dispatched on
+    (2026-07-12 on) ran zero tests, including the run dispatched on
     the commit that made BBRv3 the default.
 
   Two earlier entries in this file cite a CI interop result and are
@@ -87,11 +87,11 @@ changes.
   write accepted, so a request that meets a full send window is cut
   short, sent without FIN, and never finished: 12 to 25 of the 1999
   requests in each run whose log was read. Its window fills because
-  quic-zig returns
-  stream credit when a quarter of the limit has been opened, and
-  doubles it (1000, 2000, 4000, 4096): quiche then sends one request
-  per packet in large bursts, the simulator's 25-packet queue drops
-  about 8% of them, and its congestion window collapses mid-burst. A
+  quic-zig returns stream credit when a quarter of the limit has been
+  opened, and doubles it (1000, 2000, 4000, 4096): quiche then sends
+  one request per packet in large bursts, the simulator's 25-packet
+  queue drops about 8% of them, and its congestion window collapses
+  mid-burst. A
   lower initial limit on the test endpoint does not help (the credit
   still doubles). Returning credit as streams close would, and that
   is library work that is not in this change. Until then the weekly

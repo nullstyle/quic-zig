@@ -307,7 +307,7 @@ The advisory weekly matrix (`interop.yml`, quic-zig as server) never
 had a green job: each of its 21 scheduled runs since the first on
 2026-05-10 failed at the matrix step or before it, and
 `continue-on-error` showed every one as a green run. Every run whose
-log still exists (2026-07-26 on) ran zero tests; that includes the
+log still exists (2026-07-12 on) ran zero tests; that includes the
 dispatched run on the commit that made BBRv3 the default (v0.16.0).
 
 The cause is one line in the runner's log bundle: `interface_name

@@ -107,7 +107,7 @@ fallback can stop the whole runner with `TSharkCrashException` (the
 Python library that drives `tshark` loses track of the `docker run`
 process). Both CI workflows install a host `tshark`.
 
-The last line of a run is the evidence:
+A run ends with the evidence line:
 
 ```text
 interop evidence: pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0 skipped=0
