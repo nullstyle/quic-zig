@@ -132,11 +132,15 @@ counted as `flaky_passed` or `flaky_failed`, and named below the
 evidence line. It decides nothing: a failure does not fail the run, and
 a pass is not counted in `succeeded` (a run in which only flaky cells
 passed is still "no cell succeeded"). A cell on both lists is an error.
-The weekly matrix lists `quiche:multiplexing`: measured 2026-10-03, it
-fails 4 of 10 runs against quic-zig, and with no quic-zig in the pair 4
-of 8 against a quic-go server and 2 of 8 against an ngtcp2 server. The
-comment above `endpoint_bidi_stream_limit` in `interop/qns_endpoint.zig`
-has the cause, and why the cell failed every time through 0.23.0.
+The weekly matrix lists `quiche:multiplexing`: measured 2026-10-03,
+with no quic-zig in the pair it fails 4 of 8 runs against a quic-go
+server and 2 of 8 against an ngtcp2 server. Against quic-zig it failed
+every run through 0.23.0, 7 of 20 with 0.24.0, and none of 15 since the
+interop server's stream window became 20. The comment above
+`endpoint_bidi_stream_limit` in `interop/qns_endpoint.zig` has the
+cause of each number. `.github/workflows/interop.yml` says when the
+cell comes off the list: after eight scheduled runs in a row in which
+it passed.
 
 Read that line. Do not read the runner's exit code, or the colour of a
 CI run. The runner's exit code is its count of failed test cases, so

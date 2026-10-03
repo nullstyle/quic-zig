@@ -56,12 +56,19 @@ jobs:
       # quiche:multiplexing — quiche's test client puts one request in
       # each packet, and when its send window cuts a request write
       # short it never sends the rest. Measured 2026-10-03 on one
-      # machine: the cell fails 4 of 10 runs against quic-zig, and
-      # with no quic-zig in the pair 4 of 8 against a quic-go server
-      # and 2 of 8 against an ngtcp2 server. Through 0.23.0 it failed
-      # every run against quic-zig; the cause was the stream window of
-      # our interop server (1000, theirs are 100). The detail is above
-      # `endpoint_bidi_stream_limit` in interop/qns_endpoint.zig.
+      # machine: with no quic-zig in the pair the cell fails 4 of 8
+      # runs against a quic-go server and 2 of 8 against an ngtcp2
+      # server. Against quic-zig it depends on the stream window of
+      # our interop server: every run failed at 1000 (through 0.23.0),
+      # 7 of 20 at 100 (0.24.0), and none of 15 at 20 (now), where the
+      # client's bursts fit the simulator's queue and no packet is
+      # lost. The detail is above `endpoint_bidi_stream_limit` in
+      # interop/qns_endpoint.zig.
+      #
+      # Local runs do not prove the cell is steady in CI. Take it
+      # off this list when the evidence line of EIGHT scheduled runs in
+      # a row shows `flaky_passed=1 flaky_failed=0`. From then on a
+      # failure of this cell fails the job, as for every other cell.
       #
       # The wrapper also has `--known-failures peer:test` for a cell
       # that fails EVERY time: a listed cell that passes fails the job,

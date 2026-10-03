@@ -5,6 +5,39 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### CI and tests
+
+- **The interop server's stream window is 20, and `server x quiche x
+  multiplexing` passes 15 runs of 15.** 0.24.0 took the window from
+  1000 to 100 and the cell from 0 of 10 to 13 of 20. What was left was
+  loss: quiche's test client sends one request per packet, a burst of
+  up to 100 of them overflows the 25-packet queue of the runner's
+  network simulator (3 to 6% of the client's packets were lost), its
+  congestion window shrinks, and it drops what a short request write
+  did not take. With a window of 20 a burst fits the queue. In each of
+  the 15 runs every packet the client sent arrived (2053 to 2161 of
+  them), no request was cut, and the test passed. The quic-go and
+  ngtcp2 clients pass too (5 of 5 each). The cost is time, W streams
+  per two round trips: a run takes 24 s where it took 18 s (the test
+  allows 60 s).
+  `interop/qns_endpoint.zig` (`endpoint_bidi_stream_limit`) has the
+  three windows side by side. The cell stays in the wrapper's `--flaky`
+  class for now, because local runs do not prove it is steady in
+  CI; `.github/workflows/interop.yml` says when it comes off (eight
+  scheduled runs in a row in which it passed).
+- **Measured and not adopted: an interop server loop that empties its
+  socket before it sends.** The loop reads one datagram per pass, so
+  it answers a client that sends one request per packet with one
+  response per packet (2021 datagrams for 2000 responses). A scratch
+  build that reads up to 64 datagrams per pass sent 160, and 289 in
+  place of 915 to the quic-go client. It made no clear difference to
+  the quiche cell at a window of 100 (16 of 20 runs against 13 of 20).
+  The library's own `runUdpServer` already receives in batches. Every
+  server-role cell runs this loop, so the change waits for a wide
+  matrix run of its own.
+
 ## [0.24.0] - 2026-10-03
 
 The stream-window release. A connection could carry 4096 streams of
