@@ -710,10 +710,17 @@ test "STOP_SENDING propagates and resets the sender's stream" {
     _ = try client.openBidi(0);
     _ = try client.streamWrite(0, "data the server doesn't want");
 
+    var pkt: [2048]u8 = undefined;
+    // The server cannot stop a stream it has not seen: the peer would
+    // have to treat a STOP_SENDING for a stream it never opened as a
+    // STREAM_STATE_ERROR (RFC 9000 §19.5), so the call refuses to
+    // queue one. (This test used to call it before the first packet.)
+    try std.testing.expectError(error.StreamNotFound, server.streamStopSending(0, 0xff));
+    if (try client.poll(&pkt, 1_000_000)) |n| try server.handle(pkt[0..n], null, 1_000_000);
+
     // Server tells client to stop sending stream 0.
     try server.streamStopSending(0, 0xff);
 
-    var pkt: [2048]u8 = undefined;
     var iters: u32 = 0;
     while (iters < 8) : (iters += 1) {
         if (try server.poll(&pkt, 1_000_000)) |n| try client.handle(pkt[0..n], null, 1_000_000);

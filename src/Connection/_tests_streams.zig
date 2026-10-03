@@ -668,7 +668,7 @@ test "gcClosedStreams: reordered replies to reaped local bidi streams do not clo
         try std.testing.expectEqual(state.CloseState.open, conn.closeState());
         try conn.handleResetStream(.{ .stream_id = sid, .application_error_code = 0, .final_size = 2 });
         try @import("recv_stream_control_handlers.zig").handleStopSending(conn, .{ .stream_id = sid, .application_error_code = 0 });
-        conn.handleMaxStreamData(.{ .stream_id = sid, .maximum_stream_data = 4096 });
+        try conn.handleMaxStreamData(.{ .stream_id = sid, .maximum_stream_data = 4096 });
         try std.testing.expectEqual(state.CloseState.open, conn.closeState());
         try std.testing.expect(conn.stream(sid) == null);
         try std.testing.expect(conn.stream(role) != null);
@@ -927,4 +927,318 @@ test "recv-side reads on a local-initiated uni stream fail fast with StreamNotRe
     try std.testing.expectEqual(@as(usize, 0), try conn.streamRead(bidi.id, &buf));
     const st = conn.streamRecvState(bidi.id) orelse return error.MissingRecvState;
     try std.testing.expect(!st.terminal);
+}
+
+// -- STOP_SENDING and MAX_STREAM_DATA: frames that name OUR sending part --
+
+const stream_control = @import("recv_stream_control_handlers.zig");
+const transport_error_stream_state = state.transport_error_stream_state;
+
+fn stopSending(conn: *Connection, id: u64) Error!void {
+    return stream_control.handleStopSending(conn, .{ .stream_id = id, .application_error_code = 9 });
+}
+
+fn maxStreamData(conn: *Connection, id: u64, maximum: u64) Error!void {
+    return conn.handleMaxStreamData(.{ .stream_id = id, .maximum_stream_data = maximum });
+}
+
+/// The connection closed itself with the transport error `code`.
+fn expectClosedWith(conn: *Connection, code: u64) !void {
+    const ev = conn.closeEvent() orelse return error.ConnectionNotClosed;
+    try std.testing.expectEqual(code, ev.error_code);
+}
+
+/// A server connection that lets the peer open four streams of each type.
+fn sendPartServer(ctx: boringssl.tls.Context) !*Connection {
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    errdefer conn.destroy();
+    try conn.setTransportParams(.{
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 64,
+        .initial_max_stream_data_bidi_remote = 64,
+        .initial_max_stream_data_uni = 64,
+        .initial_max_streams_bidi = 4,
+        .initial_max_streams_uni = 4,
+    });
+    return conn;
+}
+
+test "STOP_SENDING for a receive-only stream is STREAM_STATE_ERROR, and makes no RESET_STREAM" {
+    // RFC 9000 §19.5: "An endpoint that receives a STOP_SENDING frame
+    // for a receive-only stream MUST terminate the connection with
+    // error STREAM_STATE_ERROR." Stream 2 is a unidirectional stream of
+    // the client: this server has no sending part on it. The handler
+    // used to reset the send half of the `Stream` all the same, which
+    // queued a RESET_STREAM on a stream we cannot send on.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    {
+        const conn = try sendPartServer(ctx);
+        defer conn.destroy();
+        try conn.handleStream(.application, .{ .stream_id = 2, .offset = 0, .data = "x", .has_length = true });
+        try stopSending(conn, 2);
+        try expectClosedWith(conn, transport_error_stream_state);
+        try std.testing.expect(conn.stream(2).?.send.reset == null);
+    }
+    {
+        // And for one the peer has not used yet: the frame does not open it.
+        const conn = try sendPartServer(ctx);
+        defer conn.destroy();
+        try stopSending(conn, 6);
+        try expectClosedWith(conn, transport_error_stream_state);
+        try std.testing.expect(conn.stream(6) == null);
+        try std.testing.expectEqual(@as(u64, 0), conn.peer_uni_ids.opened);
+    }
+}
+
+test "STOP_SENDING and MAX_STREAM_DATA for a stream of ours that was never opened are STREAM_STATE_ERROR" {
+    // RFC 9000 §19.5 and §19.10, in the same words: a frame "for a
+    // locally initiated stream that has not yet been created MUST be
+    // treated as a connection error of type STREAM_STATE_ERROR". The
+    // peer cannot know about a stream we have not opened. Both frames
+    // used to be dropped without a word.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    // 1: a bidirectional stream of the server. 3: a unidirectional one.
+    for ([_]u64{ 1, 3 }) |id| {
+        for ([_]bool{ true, false }) |stop| {
+            const conn = try sendPartServer(ctx);
+            defer conn.destroy();
+            if (stop) try stopSending(conn, id) else try maxStreamData(conn, id, 1000);
+            try expectClosedWith(conn, transport_error_stream_state);
+            try std.testing.expect(conn.stream(id) == null);
+        }
+    }
+}
+
+test "STOP_SENDING or MAX_STREAM_DATA as the first frame for a peer bidirectional stream creates it" {
+    // RFC 9000 §3.2: "For bidirectional streams initiated by a peer,
+    // receipt of a MAX_STREAM_DATA or STOP_SENDING frame for the
+    // sending part of the stream also creates the receiving part."
+    // Both used to be dropped when the stream was not there yet: the
+    // STOP_SENDING was then never answered with a RESET_STREAM, and the
+    // credit of the MAX_STREAM_DATA was lost.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+    // The peer lets us send 10 bytes on a stream it opens.
+    conn.cached_peer_transport_params = .{ .initial_max_stream_data_bidi_local = 10 };
+    conn.validatePeerTransportLimits();
+
+    try stopSending(conn, 0);
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+    const first = conn.stream(0) orelse return error.StreamNotCreated;
+    // Our sending part is abandoned, as the peer asked (§3.5).
+    try std.testing.expectEqual(SendStream.State.reset_sent, first.send.state);
+    try std.testing.expectEqual(@as(u64, 9), first.send.reset.?.error_code);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_bidi_ids.opened);
+
+    // Stream 8 arrives before stream 4: both are open now (§2.1), and
+    // the one that was named has the credit.
+    try maxStreamData(conn, 8, 1000);
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+    const third = conn.stream(8) orelse return error.StreamNotCreated;
+    try std.testing.expectEqual(@as(u64, 1000), third.send_max_data);
+    try std.testing.expectEqual(@as(u64, 3), conn.peer_bidi_ids.opened);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_bidi_ids.holeCount());
+
+    // The embedder is told about all three, in order.
+    var seen: u64 = 0;
+    while (conn.pollEvent()) |ev| switch (ev) {
+        .stream_opened => |info| {
+            try std.testing.expectEqual(seen * 4, info.stream_id);
+            seen += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(u64, 3), seen);
+}
+
+test "STOP_SENDING or MAX_STREAM_DATA for a peer stream over the limit is STREAM_LIMIT_ERROR" {
+    // The frame would create the stream (§3.2), so the stream limit
+    // applies to it as to any first frame (§4.6).
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    for ([_]bool{ true, false }) |stop| {
+        const conn = try sendPartServer(ctx);
+        defer conn.destroy();
+        // Index 4 with a limit of four.
+        if (stop) try stopSending(conn, 16) else try maxStreamData(conn, 16, 1000);
+        try expectClosedWith(conn, transport_error_stream_limit);
+        try std.testing.expect(conn.stream(16) == null);
+    }
+}
+
+test "STOP_SENDING or MAX_STREAM_DATA for a peer stream that closed is ignored" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+
+    // Stream 0: request read to its end, reply finished and
+    // acknowledged, reaped.
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = "x", .has_length = true, .fin = true });
+    var buf: [1]u8 = undefined;
+    _ = try conn.streamRead(0, &buf);
+    try conn.streamFinish(0);
+    const s = conn.stream(0).?;
+    s.send.fin_acked = true;
+    s.send.state = .data_recvd;
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(0) == null);
+
+    try stopSending(conn, 0);
+    try maxStreamData(conn, 0, 1000);
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+    try std.testing.expect(conn.stream(0) == null);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_bidi_ids.opened);
+}
+
+test "STOP_SENDING after every byte was acknowledged makes no RESET_STREAM" {
+    // RFC 9000 §3.1: RESET_STREAM is sent from "Ready", "Send" or "Data
+    // Sent". In "Data Recvd" the peer has acknowledged every byte and
+    // the FIN, and the state is terminal. A STOP_SENDING that crossed
+    // those acknowledgements on the path used to put the stream back
+    // in "Reset Sent": a RESET_STREAM for a finished stream, and a
+    // stream that was terminal a moment ago and now waits for one more
+    // acknowledgement before it can be reaped.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = "x", .has_length = true, .fin = true });
+    var buf: [1]u8 = undefined;
+    _ = try conn.streamRead(0, &buf);
+    try conn.streamFinish(0);
+    const s = conn.stream(0).?;
+    s.send.fin_acked = true;
+    s.send.state = .data_recvd;
+
+    try stopSending(conn, 0);
+    try std.testing.expectEqual(SendStream.State.data_recvd, s.send.state);
+    try std.testing.expect(s.send.reset == null);
+    try std.testing.expect(!s.send.hasPendingChunk());
+    // Still terminal: the next tick reaps it.
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(0) == null);
+}
+
+// -- streams the application stopped reading, and streams the peer reset --
+
+test "a peer RESET_STREAM gives the bytes nobody read back to the connection window" {
+    // The connection-level window counts every byte the peer sends on
+    // any stream, and MAX_DATA moves it forward as the application
+    // reads. Bytes on a stream the peer resets are never read, and they
+    // were never given back: each reset took its unread bytes out of
+    // the window for good, and a connection that lived long enough
+    // stalled at `initial_max_data`.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+
+    // 40 bytes arrive and the application reads 10 of them. Then the
+    // peer resets the stream at 60: it had sent 20 more, which were
+    // lost on the way.
+    const forty: [40]u8 = @splat('x');
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = &forty, .has_length = true });
+    var buf: [10]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 10), try conn.streamRead(0, &buf));
+    try std.testing.expectEqual(@as(u64, 10), conn.recv_stream_bytes_read);
+    try conn.handleResetStream(.{ .stream_id = 0, .application_error_code = 1, .final_size = 60 });
+    // All 60 count against the window, and all 60 are now done with.
+    try std.testing.expectEqual(@as(u64, 60), conn.peer_sent_stream_data);
+    try std.testing.expectEqual(@as(u64, 60), conn.recv_stream_bytes_read);
+
+    // A second copy of the RESET_STREAM gives nothing back twice.
+    try conn.handleResetStream(.{ .stream_id = 0, .application_error_code = 1, .final_size = 60 });
+    try std.testing.expectEqual(@as(u64, 60), conn.recv_stream_bytes_read);
+}
+
+test "streamStopSending: what arrives afterwards is thrown away, and the receive half ends by itself" {
+    // The application told the peer to stop. It will not read this
+    // stream again, so the library reads it to its end for it. Without
+    // that, a stream whose peer had already sent everything (and so
+    // sends no RESET_STREAM) stayed open here for the life of the
+    // connection, holding its place in the stream window and its
+    // bytes in the connection window.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+
+    try conn.handleStream(.application, .{ .stream_id = 2, .offset = 0, .data = "hello", .has_length = true });
+    try conn.streamStopSending(2, 7);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.stop_sending.items.len);
+    // Nothing is consumed during the call (the caller may be inside a
+    // read callback, with a slice of this buffer in hand). The five
+    // bytes that were waiting are thrown away by the next tick, and
+    // count as read.
+    try std.testing.expectEqual(@as(u64, 0), conn.recv_stream_bytes_read);
+    try conn.tick(1_000_000);
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_stream_bytes_read);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamRead(2, &buf));
+    try std.testing.expect(conn.stream(2) != null);
+
+    // The rest was already on its way, with the FIN. Nobody reads it.
+    try conn.handleStream(.application, .{ .stream_id = 2, .offset = 5, .data = " world", .has_length = true, .fin = true });
+    try std.testing.expectEqual(@as(u64, 11), conn.recv_stream_bytes_read);
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(2) == null);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_uni_ids.closed);
+}
+
+test "streamStopSending: only for a stream the peer can send on, and that is there" {
+    // A STOP_SENDING for a stream the peer cannot send on, or has not
+    // opened, is a STREAM_STATE_ERROR on the peer's side (RFC 9000
+    // §19.5): the call must not put one on the wire.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+
+    // Our own unidirectional stream: the peer has no sending part.
+    conn.local_uni_ids.limit = 4;
+    const uni = try conn.openNextUni();
+    try std.testing.expectError(Error.StreamNotReadable, conn.streamStopSending(uni.id, 0));
+    // A stream the peer has not opened.
+    try std.testing.expectError(Error.StreamNotFound, conn.streamStopSending(0, 0));
+    // A stream that finished and was reaped.
+    try conn.handleStream(.application, .{ .stream_id = 2, .offset = 0, .data = "", .has_length = true, .fin = true });
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(2) == null);
+    try std.testing.expectError(Error.StreamNotFound, conn.streamStopSending(2, 0));
+
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.stop_sending.items.len);
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+}
+
+test "streamStopSending on a stream the peer opened by skipping it is remembered" {
+    // The peer used its second unidirectional stream first. The first
+    // one (id 2) is open too (RFC 9000 §2.1) and is reported to the
+    // embedder, but has no `Stream` here yet. If the embedder refuses
+    // it now, the refusal has to be kept: data that arrives for it
+    // later must be thrown away, not left for a reader that will never
+    // come.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+
+    try conn.handleStream(.application, .{ .stream_id = 6, .offset = 0, .data = "x", .has_length = true });
+    try std.testing.expect(conn.stream(2) == null);
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_uni_ids.holeCount());
+
+    try conn.streamStopSending(2, 7);
+    try std.testing.expect(conn.stream(2) != null);
+    try std.testing.expectEqual(@as(u64, 0), conn.peer_uni_ids.holeCount());
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.stop_sending.items.len);
+
+    try conn.handleStream(.application, .{ .stream_id = 2, .offset = 0, .data = "late", .has_length = true, .fin = true });
+    try std.testing.expectEqual(@as(u64, 4), conn.recv_stream_bytes_read);
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(2) == null);
 }

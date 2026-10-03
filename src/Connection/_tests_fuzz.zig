@@ -642,12 +642,38 @@ fn fuzzConnFlowControlWindow(_: void, smith: *std.testing.Smith) anyerror!void {
                 code == transport_error_protocol_violation or
                     code == transport_error_frame_encoding or
                     code == transport_error_stream_state or
+                    // MAX_STREAM_DATA for a bidirectional stream of the
+                    // peer that is not here yet creates it (RFC 9000
+                    // §3.2), so the stream limit applies to the frame.
+                    code == transport_error_stream_limit or
                     code == transport_error_excessive_load,
             );
+            // MAX_STREAM_DATA never passes without a word: a stream of
+            // ours that was never opened, and a receive-only stream,
+            // are STREAM_STATE_ERROR (§19.10); a stream of the peer
+            // over the limit is STREAM_LIMIT_ERROR. This connection
+            // has no stream and grants none, so every one closes it.
+            if (op == 1) {
+                try std.testing.expect(code == transport_error_stream_state or code == transport_error_stream_limit);
+            }
             break;
         }
+        try std.testing.expect(op != 1);
     }
 }
+
+// Seed: one MAX_STREAM_DATA for stream 1, a bidirectional stream of the
+// server that this client has not seen. The frame would create it, and
+// the client grants no streams: STREAM_LIMIT_ERROR. (Draw order as for
+// the seed below: `num_frames`, then `op`, `value`, `stream_id_low`,
+// `bidi`.)
+const max_stream_data_unseen_peer_stream_seed: [5 * 8]u8 = blk: {
+    var buf: [5 * 8]u8 = undefined;
+    for ([_]u64{ 1, 1, 1000, 1, 0 }, 0..) |word, i| {
+        std.mem.writeInt(u64, buf[i * 8 ..][0..8], word, .little);
+    }
+    break :blk buf;
+};
 
 fn fuzzConnBlockedFrames(_: void, smith: *std.testing.Smith) anyerror!void {
     const allocator = std.testing.allocator;
@@ -990,8 +1016,12 @@ test "fuzz: Connection PATH_CHALLENGE / PATH_RESPONSE handler invariants" {
 //   non-decreasing, bounded above only by the stream id space, and
 //   equal to the largest in-range MAX_STREAMS seen (the handler does
 //   not clamp: there is no lifetime stream cap).
-// - MAX_STREAM_DATA on a peer-to-local-only stream id (e.g. peer-uni
-//   stream where the peer is sending) closes with `stream_state`.
+// - MAX_STREAM_DATA always closes this connection, which has no stream
+//   and grants none: `stream_state` for a receive-only stream (a
+//   unidirectional stream of the peer) and for a stream of ours that
+//   was never opened (RFC 9000 §19.10), `stream_limit` for a
+//   bidirectional stream of the peer, which the frame would create
+//   (§3.2).
 // - MAX_STREAMS exceeding `max_stream_count_limit` closes with
 //   `frame_encoding`.
 // - Lifecycle state is one of the documented `CloseState` values.
@@ -1011,7 +1041,7 @@ const max_streams_above_old_cap_seed: [5 * 8]u8 = blk: {
 
 test "fuzz: Connection MAX_DATA / MAX_STREAM_DATA / MAX_STREAMS monotonicity" {
     try std.testing.fuzz({}, fuzzConnFlowControlWindow, .{
-        .corpus = &.{&max_streams_above_old_cap_seed},
+        .corpus = &.{ &max_streams_above_old_cap_seed, &max_stream_data_unseen_peer_stream_seed },
     });
 }
 

@@ -548,18 +548,29 @@ fn pumpConnection(owner: anytype, session: anytype) anyerror!void {
 fn trackConnectionStream(owner: anytype, session: anytype, info: quic.StreamOpenedInfo) !void {
     if (session.table.get(info.stream_id) != null) return;
     if (!owner.streamsServiced()) {
-        owner.streams_refused +|= 1;
-        session.conn.streamStopSending(info.stream_id, owner.stream_refusal_code) catch {};
+        refuseStream(owner, session, info);
         return;
     }
     const entry = session.table.track(info.stream_id) orelse {
-        owner.streams_refused +|= 1;
-        session.conn.streamStopSending(info.stream_id, owner.stream_refusal_code) catch {};
+        refuseStream(owner, session, info);
         return;
     };
     entry.state = initialState(@TypeOf(entry.state));
     entry.bidi = info.bidi;
     if (owner.hooks.on_stream_open) |f| try f(owner.app, session, entry, info.bidi);
+}
+
+/// Refuse a peer stream, loudly and completely. STOP_SENDING ends the
+/// half the peer sends on (the connection reads and drops what still
+/// arrives). On a bidirectional stream RESET_STREAM ends our half too:
+/// it is what the peer SEES, whatever it had already sent (a peer whose
+/// request was acknowledged in full answers STOP_SENDING with
+/// nothing), and without it the stream would stay half open here and
+/// keep its place in the stream window for the life of the connection.
+fn refuseStream(owner: anytype, session: anytype, info: quic.StreamOpenedInfo) void {
+    owner.streams_refused +|= 1;
+    session.conn.streamStopSending(info.stream_id, owner.stream_refusal_code) catch {};
+    if (info.bidi) session.conn.streamReset(info.stream_id, owner.stream_refusal_code) catch {};
 }
 
 fn pumpStream(owner: anytype, session: anytype, entry: anytype) anyerror!void {

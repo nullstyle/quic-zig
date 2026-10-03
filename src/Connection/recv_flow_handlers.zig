@@ -28,14 +28,13 @@ pub fn handleMaxData(conn: *Connection, md: frame_types.MaxData) void {
 
 /// Handle a peer-sent MAX_STREAM_DATA frame (RFC 9000 §19.10). Lifts
 /// the per-stream send limit on `stream_id` if the peer's value
-/// increases. PROTOCOL_VIOLATION if the stream is receive-only from
-/// our perspective.
-pub fn handleMaxStreamData(conn: *Connection, msd: frame_types.MaxStreamData) void {
-    if (!conn_streams.localMaySendOnStream(conn, msd.stream_id)) {
-        conn.close(true, transport_error_stream_state, "max stream data for receive-only stream");
-        return;
-    }
-    const s = conn.streams.get(msd.stream_id) orelse return;
+/// increases. `sendPartForPeerFrame` decides which stream that is:
+/// STREAM_STATE_ERROR for a receive-only stream or a stream of ours
+/// that was never opened, and a bidirectional stream of the peer that
+/// is not here yet is created by the frame (§3.2), so its credit is
+/// not lost.
+pub fn handleMaxStreamData(conn: *Connection, msd: frame_types.MaxStreamData) Error!void {
+    const s = (try conn_streams.sendPartForPeerFrame(conn, msd.stream_id, .max_stream_data)) orelse return;
     if (msd.maximum_stream_data > s.send_max_data) {
         s.send_max_data = msd.maximum_stream_data;
         conn.clearLocalStreamDataBlocked(msd.stream_id, msd.maximum_stream_data);

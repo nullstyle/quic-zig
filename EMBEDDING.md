@@ -349,7 +349,9 @@ nothing, so commit application side effects only with successful progress.
 Peer streams are discovered automatically. After opening a local bidi
 stream, call `pump.trackStream(id)` to receive its response. `refusedStreams()`
 counts incoming streams rejected because the table is full or no data hook
-is installed; rejection sends STOP_SENDING. FIN is delivered
+is installed; rejection sends STOP_SENDING, and RESET_STREAM too on a
+bidirectional stream (so the stream ends on both sides and gives its
+place in the stream window back). FIN is delivered
 only after all bytes have been consumed; RESET and teardown deliver a single
 terminal hook. `deinit` is idempotent and delivers remaining stream ends
 before `on_disconnect`, without destroying the borrowed connection.
@@ -724,6 +726,15 @@ advertised is always `window + streams closed`. Things to know:
   A request you never answer and never finish holds one place in the
   window for the life of the connection. Finish (`streamFinish`) or
   reset (`streamReset`) every stream you do not need.
+- **To refuse a stream, end both halves.** `streamStopSending(id, code)`
+  ends the half the peer sends on: the peer is asked to stop, and the
+  connection reads and drops what still arrives, so you need not read
+  the stream again. On a bidirectional stream also call
+  `streamReset(id, code)` for your own half. STOP_SENDING alone leaves
+  a bidirectional stream half open, and a peer whose bytes were all
+  acknowledged answers it with nothing, so the RESET_STREAM is also
+  what tells the peer it was refused. (`quic.app.Driver` does both when
+  its table is full.)
 - **`Error.StreamLimitExceeded` is always temporary.** The id is not
   consumed. Try again when the peer has raised its limit; a
   `flow_blocked` event with `kind == .streams` tells you that you were

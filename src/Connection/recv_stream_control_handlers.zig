@@ -12,11 +12,17 @@ const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;
 const transport_error_final_size = state_mod.transport_error_final_size;
 
+/// Handle a peer-sent STOP_SENDING frame (RFC 9000 §19.5): the peer
+/// no longer reads the stream, so our sending part is abandoned with
+/// RESET_STREAM (§3.5). `sendPartForPeerFrame` decides which stream
+/// that is, and closes the connection for a receive-only stream or a
+/// stream of ours that was never opened. A sending part whose bytes
+/// are all acknowledged is left alone (`SendStream.resetStream`).
 pub fn handleStopSending(
     conn: *Connection,
     ss: frame_types.StopSending,
 ) Error!void {
-    const ptr = conn.streams.get(ss.stream_id) orelse return;
+    const ptr = (try conn_streams.sendPartForPeerFrame(conn, ss.stream_id, .stop_sending)) orelse return;
     try ptr.send.resetStream(ss.application_error_code);
 }
 
@@ -32,6 +38,7 @@ pub fn handleResetStream(conn: *Connection, rs: frame_types.ResetStream) Error!v
     // backing allocation to zero. Reconcile the global
     // resident-bytes counter against that drop.
     const recv_before = ptr.recv.bytes.items.len;
+    const first_reset = ptr.recv.reset == null;
     ptr.recv.resetStream(rs.application_error_code, rs.final_size) catch |err| switch (err) {
         error.BeyondFinalSize, error.FinalSizeChanged => {
             conn.close(true, transport_error_final_size, "reset stream final size changed");
@@ -43,4 +50,8 @@ pub fn handleResetStream(conn: *Connection, rs: frame_types.ResetStream) Error!v
         conn.releaseResidentBytes(recv_before - ptr.recv.bytes.items.len);
     }
     conn.peer_sent_stream_data += delta;
+    // Every byte up to the final size counts against the connection
+    // window, and the application will read none of the rest: give it
+    // back now. (A second copy of the frame gives nothing twice.)
+    if (first_reset) conn_streams.creditConnectionRecvWindow(conn, rs.final_size - ptr.recv.read_offset);
 }

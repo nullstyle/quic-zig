@@ -541,34 +541,34 @@ test "Driver: full stream table refuses via STOP_SENDING, not a silent hang" {
     }
     try std.testing.expect(cli.conn.handshakeDone());
 
-    // Open three client bidi streams. Only one fits the server's
-    // table; the other two must earn a STOP_SENDING (observed by the
-    // client as a recv-half reset).
+    // Open two client bidi streams. Only one fits the server's table;
+    // the other must be refused on the wire. A refusal is STOP_SENDING
+    // for the half the client sends on, and RESET_STREAM for the half
+    // the server would answer on. The RESET_STREAM is what the client
+    // is sure to see: its whole request ("two" and the FIN) is
+    // acknowledged before the STOP_SENDING is processed, so its
+    // sending half is finished and is not reset (RFC 9000 §3.1).
     const s0 = try cli.conn.openNextBidi();
     const s1 = try cli.conn.openNextBidi();
     _ = s0;
     _ = try cli.conn.streamWrite(s1.id, "two");
     try cli.conn.streamFinish(s1.id);
 
+    var refused_seen = false;
     var iters: u32 = 0;
-    while (iters < 5_000) : (iters += 1) {
+    while (iters < 5_000 and !refused_seen) : (iters += 1) {
         try pumpClientToServer(&cli, &srv, &rx, now_us);
         try driver.service(&srv);
         try pumpServerToClient(&srv, &cli, &rx, now_us);
+        // Looked at before the client's tick: the refused stream is
+        // finished in both directions then, and the tick reaps it.
+        if (cli.conn.streamRecvState(s1.id)) |st| refused_seen = st.reset_seen;
         try srv.tick(now_us);
         try cli.conn.tick(now_us);
-        // STOP_SENDING lands on the client as a send-half abort of
-        // the refused (client-initiated) stream: reset_sent, possibly
-        // already reset_recvd once the server ACKs the RESET_STREAM.
-        if (cli.conn.stream(s1.id)) |cs| {
-            if (cs.send.state == .reset_sent or cs.send.state == .reset_recvd) break;
-        }
         now_us += 1_000;
     }
-    // The overflowed stream was refused on the wire: the client's
-    // send half of s1 aborted after receiving STOP_SENDING.
-    const cs1 = cli.conn.stream(s1.id) orelse return error.RefusedStreamMissing;
-    try std.testing.expect(cs1.send.reset != null);
+    try std.testing.expect(refused_seen);
+    try std.testing.expectEqual(@as(u64, 1), driver.refusedStreams());
 
     // Teardown: same close-and-reap, typed for this test's driver.
     cli.conn.close(false, 0, "done");
@@ -996,12 +996,17 @@ test "Driver: with no stream hooks, peer streams are refused loudly, not black-h
     });
     defer driver.deinit();
 
+    // Four streams of each type at once (see the end of this test).
+    var small_windows = common.defaultParams();
+    small_windows.initial_max_streams_bidi = 4;
+    small_windows.initial_max_streams_uni = 4;
+
     var srv = try quic.Server.init(.{
         .allocator = allocator,
         .tls_cert_pem = common.test_cert_pem,
         .tls_key_pem = common.test_key_pem,
         .alpn_protocols = &protos,
-        .transport_params = common.defaultParams(),
+        .transport_params = small_windows,
         .on_connection_will_close = MD.willCloseHook,
         .on_connection_will_close_user_data = &driver,
     });
@@ -1037,20 +1042,58 @@ test "Driver: with no stream hooks, peer streams are refused loudly, not black-h
     _ = try cli.conn.streamWrite(s.id, "anyone home?");
     try cli.conn.streamFinish(s.id);
 
+    // The refusal the client is sure to see is the RESET_STREAM on the
+    // half the server would answer on (see the full-table test above).
+    var refused_seen = false;
     var iters: u32 = 0;
-    while (iters < 5_000) : (iters += 1) {
+    while (iters < 5_000 and !refused_seen) : (iters += 1) {
+        try pumpClientToServer(&cli, &srv, &rx, now_us);
+        try driver.service(&srv);
+        try pumpServerToClient(&srv, &cli, &rx, now_us);
+        if (cli.conn.streamRecvState(s.id)) |st| refused_seen = st.reset_seen;
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        now_us += 1_000;
+    }
+    try std.testing.expect(refused_seen);
+
+    // Refused streams do not use up the stream window. Every stream
+    // this server is offered is refused, and each refusal ends the
+    // stream on both sides, so its place comes back: forty requests
+    // and forty one-way streams go through windows of four. (When a
+    // refusal was STOP_SENDING alone, a refused stream stayed half
+    // open on the server and kept its place for good.)
+    const server_conn = srv.iterator()[0].conn;
+    var requests: u64 = 1;
+    var notes: u64 = 0;
+    var steps: u32 = 0;
+    while (server_conn.peer_bidi_ids.closed < 40 or server_conn.peer_uni_ids.closed < 40) : (steps += 1) {
+        try std.testing.expect(steps < 4_000);
+        if (requests < 40) {
+            if (cli.conn.openNextBidi()) |st| {
+                _ = try cli.conn.streamWrite(st.id, "anyone home?");
+                try cli.conn.streamFinish(st.id);
+                requests += 1;
+            } else |err| if (err != error.StreamLimitExceeded) return err;
+        }
+        if (notes < 40) {
+            if (cli.conn.openNextUni()) |st| {
+                _ = try cli.conn.streamWrite(st.id, "a note nobody reads");
+                try cli.conn.streamFinish(st.id);
+                notes += 1;
+            } else |err| if (err != error.StreamLimitExceeded) return err;
+        }
         try pumpClientToServer(&cli, &srv, &rx, now_us);
         try driver.service(&srv);
         try pumpServerToClient(&srv, &cli, &rx, now_us);
         try srv.tick(now_us);
         try cli.conn.tick(now_us);
-        if (cli.conn.stream(s.id)) |cs| {
-            if (cs.send.state == .reset_sent or cs.send.state == .reset_recvd) break;
-        }
         now_us += 1_000;
     }
-    const cs = cli.conn.stream(s.id) orelse return error.RefusedStreamMissing;
-    try std.testing.expect(cs.send.reset != null);
+    try std.testing.expectEqual(@as(u64, 80), driver.refusedStreams());
+    try std.testing.expectEqual(@as(usize, 0), server_conn.streams.count());
+    try std.testing.expect(cli.conn.closeEvent() == null);
+    try std.testing.expect(server_conn.closeEvent() == null);
 
     cli.conn.close(false, 0, "done");
     var td: u32 = 0;

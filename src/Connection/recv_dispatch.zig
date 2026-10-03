@@ -677,7 +677,7 @@ pub fn dispatchFrames(
             .paths_blocked => |pb| conn.handlePathsBlocked(pb),
             .path_cids_blocked => |pcb| conn.handlePathCidsBlocked(pcb),
             .max_data => |md| conn.handleMaxData(md),
-            .max_stream_data => |msd| conn.handleMaxStreamData(msd),
+            .max_stream_data => |msd| try conn.handleMaxStreamData(msd),
             .max_streams => |ms| conn.handleMaxStreams(ms),
             .data_blocked => |db| conn.handleDataBlocked(db),
             .stream_data_blocked => |sdb| try conn.handleStreamDataBlocked(sdb),

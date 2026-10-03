@@ -31,6 +31,51 @@ changes.
   past the set kept its terminal `Stream` until the connection ended.
   Reachable only before the peer's transport parameters arrived (the
   negotiated limit was capped at 4096 then).
+- **A stream the application stopped reading never ended on our
+  side.** `streamStopSending` queued the frame and did nothing else. A
+  peer answers STOP_SENDING with RESET_STREAM only while it still has
+  bytes to send; a peer whose bytes are all acknowledged answers with
+  nothing (RFC 9000 §3.1). So a refused stream whose request was small
+  stayed open here for the life of the connection, with its unread
+  bytes charged to the connection window. Now the connection reads
+  such a stream to its end and drops the bytes (from the next `tick`,
+  and as data arrives), so its receive half ends by itself. Under the
+  window rule this is not optional: a stream that never ends keeps its
+  place in the stream window. See "Changed" for what the call refuses
+  now.
+- **`quic.app.Driver` refused a bidirectional stream by half.** A full
+  table (or no stream hooks) sent STOP_SENDING and left our own half of
+  the stream open. The Driver now also sends RESET_STREAM, which ends
+  the stream on both sides and is the refusal the peer is sure to see.
+  Measured with the refusal test: with STOP_SENDING alone, forty
+  refused requests through a window of four never finish.
+- **Bytes of a stream the peer reset were never given back to the
+  connection window.** MAX_DATA moved forward only as the application
+  read. What the peer had sent on a stream it then reset (read or not,
+  arrived or not: the final size counts) stayed charged for good, so
+  every such stream made the connection window smaller, and a
+  connection that lived long enough stalled at `initial_max_data`. The
+  unread part of the final size is now credited when the RESET_STREAM
+  arrives.
+- **STOP_SENDING and MAX_STREAM_DATA were not checked against the
+  stream they name** (RFC 9000 §19.5, §19.10, §3.2).
+  - For a receive-only stream (a unidirectional stream of the peer),
+    STOP_SENDING reset a send half that does not exist, which queued a
+    RESET_STREAM on a stream we cannot send on. It is
+    STREAM_STATE_ERROR now, as §19.5 requires.
+  - For a stream of ours that was never opened, both frames were
+    dropped. Both are STREAM_STATE_ERROR now.
+  - For a bidirectional stream of the peer that had not been seen yet,
+    both frames were dropped: the STOP_SENDING was never answered, and
+    the credit of the MAX_STREAM_DATA was lost. Both create the stream
+    now (§3.2), under the stream limit.
+- **RESET_STREAM for a stream that was already finished.** A reset
+  (the application's, or the one a late STOP_SENDING asks for) after
+  every byte and the FIN were acknowledged took the send half out of
+  its terminal state, sent a RESET_STREAM for a stream the peer had
+  finished with, and made the stream wait for one more acknowledgement
+  before it could be reaped. "Data Recvd" is terminal (§3.1): the
+  reset is a no-op there.
 
 ### Changed (BREAKING)
 
@@ -90,6 +135,18 @@ changes.
 
 ### Changed
 
+- **`Connection.streamStopSending` can refuse.** It always returned
+  success and queued a frame, for any id. It now returns
+  `StreamNotReadable` for a unidirectional stream of ours and
+  `StreamNotFound` for a stream the peer has not opened or that is
+  already closed, and queues nothing: each of those frames would be a
+  STREAM_STATE_ERROR on the peer's side, which closes the connection.
+  It is a no-op for a receive half that has already ended. For a stream
+  the peer opened by skipping it (open, reported, no data yet) the call
+  records the refusal, so data that arrives later is dropped. Callers
+  that use `catch {}` need no change.
+- **`Connection.handleMaxStreamData` returns `Error!void`** (it can
+  create a stream now).
 - **Closed-stream memory is no longer indexed by stream id.** The three
   fixed 4096-bit sets that recorded which streams had been reaped are
   gone. Each of the four stream-id spaces (peer or local, bidi or uni)

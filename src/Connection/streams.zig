@@ -190,6 +190,17 @@ pub fn ensurePeerStream(conn: *Connection, id: u64, frame: PeerStreamFrame) Erro
         });
         return null;
     }
+    return openPeerStream(conn, id);
+}
+
+/// A frame names a stream the PEER initiates that has no live `Stream`.
+/// Null when the stream was used before and is gone (closed and
+/// reaped: the frame is late and is ignored, RFC 9000 §3.2), or when
+/// the id is over a limit (the connection is closed here). Otherwise
+/// the frame opens the stream.
+fn openPeerStream(conn: *Connection, id: u64) Error!?*Stream {
+    const idx = streamIndex(id);
+    const ids = idSpace(conn, id);
     if (ids.classify(idx) == .used) return null;
     if (idx >= max_stream_count_limit) {
         conn.close(true, transport_error_frame_encoding, "stream id exceeds stream count space");
@@ -210,6 +221,47 @@ pub fn ensurePeerStream(conn: *Connection, id: u64, frame: PeerStreamFrame) Erro
     // 9000 §4.6).
     conn_flow.maybeAdvertiseStreamCredit(conn, streamIsBidi(id));
     return s;
+}
+
+/// The two frames that name OUR sending part of a stream.
+pub const SendPartFrame = enum { stop_sending, max_stream_data };
+
+/// Inbound prologue for STOP_SENDING and MAX_STREAM_DATA (RFC 9000
+/// §19.5, §19.10). Returns the stream to act on, or null when there is
+/// nothing to do: the connection was closed here, or the stream was
+/// closed and reaped and the frame is late (§3.2).
+///
+/// 1. A stream the peer opened as unidirectional has no sending part
+///    of ours: STREAM_STATE_ERROR.
+/// 2. A stream of ours that was used and is gone is a late frame. One
+///    we never opened is a stream the peer cannot know:
+///    STREAM_STATE_ERROR.
+/// 3. A bidirectional stream of the peer that is not here yet is
+///    CREATED by the frame (§3.2: "receipt of a MAX_STREAM_DATA or
+///    STOP_SENDING frame for the sending part of the stream also
+///    creates the receiving part"), under the same stream limit as any
+///    first frame.
+///
+/// INTERNAL: pub for direct sibling import (recv_flow_handlers.zig,
+/// recv_stream_control_handlers.zig).
+pub fn sendPartForPeerFrame(conn: *Connection, id: u64, frame: SendPartFrame) Error!?*Stream {
+    if (!localMaySendOnStream(conn, id)) {
+        conn.close(true, transport_error_stream_state, switch (frame) {
+            .stop_sending => "stop sending for receive-only stream",
+            .max_stream_data => "max stream data for receive-only stream",
+        });
+        return null;
+    }
+    if (conn.streams.get(id)) |ptr| return ptr;
+    if (streamInitiatedByLocal(conn, id)) {
+        if (idSpace(conn, id).classify(streamIndex(id)) == .used) return null;
+        conn.close(true, transport_error_stream_state, switch (frame) {
+            .stop_sending => "stop sending for unopened local stream",
+            .max_stream_data => "max stream data for unopened local stream",
+        });
+        return null;
+    }
+    return openPeerStream(conn, id);
 }
 
 /// The id space of `id`: by who initiated it, and its kind.
@@ -482,6 +534,9 @@ pub fn gcClosedStreams(conn: *Connection) void {
     var it = conn.streams.iterator();
     while (it.next()) |entry| {
         const s = entry.value_ptr.*;
+        // Nobody reads a stream the application stopped: read it
+        // here, so that its receive half can end.
+        if (s.recv_stopped) discardStopped(conn, s);
         const send_done = s.send.isTerminal();
         const recv_done = s.recvFullyTerminated();
         const reclaimable = if (streamIsBidi(s.id))
@@ -711,7 +766,6 @@ fn afterStreamConsume(
         conn.releaseResidentBytes(physical_before - s.recv.bytes.items.len);
     }
     if (n > 0) {
-        conn.recv_stream_bytes_read += n;
         if (Connection.shouldQueueReceiveCredit(
             s.recv.read_offset,
             s.recv_max_data,
@@ -719,13 +773,61 @@ fn afterStreamConsume(
         )) {
             try conn_flow.queueMaxStreamData(conn, id, s.recv.read_offset +| default_stream_receive_window);
         }
-        if (Connection.shouldQueueReceiveCredit(
-            conn.recv_stream_bytes_read,
-            conn.local_max_data,
-            default_connection_receive_window,
-        )) {
-            conn_flow.queueMaxData(conn, conn.recv_stream_bytes_read +| default_connection_receive_window);
+        creditConnectionRecvWindow(conn, n);
+    }
+}
+
+/// `n` bytes of stream data are done with on the receive side: give
+/// them back to the connection-level window (MAX_DATA, RFC 9000 §4.1).
+///
+/// "Done with" is read by the application, or never going to be read:
+/// the peer reset the stream, or the application stopped reading it.
+/// The second kind used to be forgotten. Every stream the peer reset
+/// took its unread bytes out of the window for good, and a connection
+/// that lived long enough stalled at `initial_max_data`.
+///
+/// INTERNAL: pub for direct sibling import
+/// (recv_stream_control_handlers.zig).
+pub fn creditConnectionRecvWindow(conn: *Connection, n: u64) void {
+    if (n == 0) return;
+    conn.recv_stream_bytes_read += n;
+    if (Connection.shouldQueueReceiveCredit(
+        conn.recv_stream_bytes_read,
+        conn.local_max_data,
+        default_connection_receive_window,
+    )) {
+        conn_flow.queueMaxData(conn, conn.recv_stream_bytes_read +| default_connection_receive_window);
+    }
+}
+
+/// Read a stream the application stopped reading (`recv_stopped`) as
+/// far as it goes and throw the bytes away: release the buffer budget
+/// and give the bytes back to the connection window, as a read does.
+/// So FIN plus the last byte ends the receive half with nobody
+/// reading.
+///
+/// No stream-level credit is given: after STOP_SENDING a peer resets
+/// the stream, or has already sent all of it (RFC 9000 §3.5), so it
+/// never needs more.
+///
+/// Called when data arrives for the stream and from `tick`, and NOT
+/// from `streamStopSending` itself: an application calls that from
+/// inside a read callback, with a slice of this very buffer in hand
+/// and a `streamConsume` still to come.
+///
+/// INTERNAL: pub for direct sibling import (recv_data_handlers.zig).
+pub fn discardStopped(conn: *Connection, s: *Stream) void {
+    while (true) {
+        const n = s.recv.peek().len;
+        const physical_before = s.recv.bytes.items.len;
+        // `consume(0)` still advances the state (a FIN with nothing
+        // left to read).
+        s.recv.consume(n);
+        if (s.recv.bytes.items.len < physical_before) {
+            conn.releaseResidentBytes(physical_before - s.recv.bytes.items.len);
         }
+        creditConnectionRecvWindow(conn, n);
+        if (n == 0) break;
     }
 }
 
@@ -770,10 +872,23 @@ pub fn streamStopSending(
     stream_id: u64,
     application_error_code: u64,
 ) Error!void {
+    if (!peerMaySendOnStream(conn, stream_id)) return Error.StreamNotReadable;
+    const s = conn.streams.get(stream_id) orelse blk: {
+        // A stream the peer opened by using a higher id (RFC 9000
+        // §2.1) is open for the peer and has been reported to the
+        // embedder, but has no `Stream` yet. Make it now: the refusal
+        // has to be on record when its data arrives.
+        if (streamInitiatedByLocal(conn, stream_id)) return Error.StreamNotFound;
+        if (idSpace(conn, stream_id).classify(streamIndex(stream_id)) != .hole) return Error.StreamNotFound;
+        break :blk try materializeStream(conn, stream_id, std.math.maxInt(usize));
+    };
+    // The peer has nothing more to send on a receive half that ended.
+    if (s.recvFullyTerminated()) return;
     try queueStopSending(conn, .{
         .stream_id = stream_id,
         .application_error_code = application_error_code,
     });
+    s.recv_stopped = true;
 }
 
 pub fn queueStopSending(

@@ -288,7 +288,7 @@ test "MAX_DATA MAX_STREAM_DATA and MAX_STREAMS raise send-side limits" {
     _ = try conn.openBidi(4);
 
     conn.handleMaxData(.{ .maximum_data = 32 });
-    conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 16 });
+    try conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 16 });
     try std.testing.expectEqual(@as(u64, 32), conn.peer_max_data);
     try std.testing.expectEqual(@as(u64, 16), conn.stream(0).?.send_max_data);
 }
@@ -345,7 +345,7 @@ test "sendWindow / streamSendWindow report credit, backlog, and net writable" {
     try std.testing.expectEqual(@as(u64, 4_000), w.writable);
 
     // Peer window raises are visible immediately.
-    conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 9_000 });
+    try conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 9_000 });
     w = conn.streamSendWindow(0).?;
     try std.testing.expectEqual(@as(u64, 7_000), w.stream);
     try std.testing.expectEqual(@as(u64, 7_000), w.writable);
@@ -560,7 +560,7 @@ test "stream flow block queues STREAM_DATA_BLOCKED and clears on MAX_STREAM_DATA
     try std.testing.expectEqual(@as(?u64, 0), event.flow_blocked.stream_id);
     try std.testing.expectEqual(@as(u64, 4), event.flow_blocked.limit);
 
-    conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 8 });
+    try conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 8 });
     try std.testing.expectEqual(@as(?u64, null), conn.localStreamDataBlockedAt(0));
     try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.stream_data_blocked.items.len);
 }

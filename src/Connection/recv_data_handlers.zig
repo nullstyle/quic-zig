@@ -340,6 +340,9 @@ pub fn handleStream(
         conn.releaseResidentBytes(recv_before - ptr.recv.bytes.items.len);
     }
     conn.peer_sent_stream_data += delta;
+    // Nobody reads a stream the application stopped: read it here, so
+    // that it can end (see `Connection.streamStopSending`).
+    if (ptr.recv_stopped) conn_streams.discardStopped(conn, ptr);
 }
 
 /// Best-effort reconciliation of the resident-bytes counter when

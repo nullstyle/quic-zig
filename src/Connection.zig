@@ -998,6 +998,11 @@ pub const Stream = struct {
     send_flow_highest: u64 = 0,
     /// True once any byte for this stream arrived in a 0-RTT packet.
     arrived_in_early_data: bool = false,
+    /// True once the application stopped reading this stream
+    /// (`streamStopSending`). What arrives after that is read to the
+    /// end and thrown away by the connection, so the receive half
+    /// still reaches a terminal state and the stream can be reaped.
+    recv_stopped: bool = false,
 
     /// RFC 9218 send priority. Default urgency 3 / non-incremental, so a
     /// connection with no explicit priorities schedules ready streams in
@@ -4293,9 +4298,32 @@ pub fn releaseResidentBytes(self: *Connection, n: usize) void {
     self.bytes_resident -|= sub;
 }
 
-/// Queue a STOP_SENDING for `stream_id` with the given app
-/// error code (RFC 9000 §19.5). Tells the peer to stop
-/// sending on the receiving half of the stream.
+/// Stop reading `stream_id`: queue a STOP_SENDING with the given
+/// application error code (RFC 9000 §19.5), which asks the peer to
+/// stop sending on it, and throw away what has arrived and what
+/// still arrives.
+///
+/// The application need not read the stream again. The connection
+/// reads it to its end instead (from the next `tick`, and as data
+/// arrives) and gives the bytes back to the connection window, so the
+/// receive half ends when the peer's RESET_STREAM or its last byte and
+/// FIN arrive. That matters twice. The peer sends no RESET_STREAM for
+/// a stream whose bytes were all acknowledged, so a stream nobody
+/// reads would stay open here for good. And a stream that stays open
+/// keeps its place in the stream window (`initial_max_streams_*`).
+/// It is safe to call from inside a read callback: nothing is
+/// consumed during the call.
+///
+/// For a bidirectional stream this ends the RECEIVE half only. The
+/// stream is closed, and its place in the window comes back, when
+/// your sending half is finished too: `streamFinish` after a reply, or
+/// `streamReset` to refuse the stream outright.
+///
+/// Errors, each with no frame queued (the frame would be a
+/// STREAM_STATE_ERROR on the peer's side): `StreamNotReadable` for a
+/// unidirectional stream of ours, `StreamNotFound` for a stream that
+/// was never opened or is already closed. A receive half that has
+/// already ended is a no-op.
 pub const streamStopSending = conn_streams.streamStopSending;
 
 const queueStopSending = conn_streams.queueStopSending;

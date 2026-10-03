@@ -311,11 +311,19 @@ pub fn finish(self: *SendStream) Error!void {
 }
 
 /// Abandon the stream. Equivalent to RESET_STREAM (§19.4).
+///
+/// A no-op once every byte and the FIN are acknowledged. RFC 9000 §3.1
+/// sends RESET_STREAM from "Ready", "Send" or "Data Sent"; "Data Recvd"
+/// is terminal. There is nothing left to abandon, and a RESET_STREAM
+/// then would name a stream the peer has finished with and would take
+/// this side out of its terminal state to wait for one more
+/// acknowledgement.
 pub fn resetStream(
     self: *SendStream,
     error_code: u64,
 ) Error!void {
     if (self.reset != null) return;
+    if (self.state == .data_recvd) return;
     self.reset = .{ .error_code = error_code, .final_size = self.write_offset };
     self.state = .reset_sent;
     // Drop any pending data; we'll never send it.
