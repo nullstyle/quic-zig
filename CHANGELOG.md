@@ -33,24 +33,27 @@ changes.
 
 ### CI and tests
 
-- **The interop server's stream window is 20, and `server x quiche x
-  multiplexing` passes 15 runs of 15.** 0.24.0 took the window from
-  1000 to 100 and the cell from 0 of 10 to 13 of 20. What was left was
+- **Measured and taken back: an interop server stream window of 20.**
+  0.24.0 took that window from 1000 to 100 and `server x quiche x
+  multiplexing` from 0 of 10 runs to 13 of 20. What is left at 100 is
   loss: quiche's test client sends one request per packet, a burst of
   up to 100 of them overflows the 25-packet queue of the runner's
-  network simulator (3 to 6% of the client's packets were lost), its
+  network simulator (3 to 6% of the client's packets lost), its
   congestion window shrinks, and it drops what a short request write
-  did not take. With a window of 20 a burst fits the queue. In each of
-  the 15 runs every packet the client sent arrived (2053 to 2161 of
-  them), no request was cut, and the test passed. The quic-go and
-  ngtcp2 clients pass too (5 of 5 each). The cost is time, W streams
-  per two round trips: a run takes 24 s where it took 18 s (the test
-  allows 60 s).
-  `interop/qns_endpoint.zig` (`endpoint_bidi_stream_limit`) has the
-  three windows side by side. The cell stays in the wrapper's `--flaky`
-  class for now, because local runs do not prove it is steady in
-  CI; `.github/workflows/interop.yml` says when it comes off (eight
-  scheduled runs in a row in which it passed).
+  did not take. With a window of 20 a burst fits the queue: 15 local
+  runs of 15 passed, and in each one every packet the client sent
+  arrived. That was committed (`4017b1c`), and the wide matrix on it
+  failed: `zerortt` for all three clients, "Client sent too much data
+  in 1-RTT packets" (`pairs=3 cells=48 succeeded=40 failed=3`). The
+  runner's 0-RTT test sends 40 requests before the handshake is done,
+  and a client can open only as many 0-RTT streams as the window it
+  remembers. The window is 100 again, where that matrix has no failed
+  cell (`succeeded=43 failed=0`). The runs that made 20 look right
+  were multiplexing runs only; the matrix was the check, and `main`
+  did not move before it was read. `interop/qns_endpoint.zig`
+  (`endpoint_bidi_stream_limit`) has the three windows side by side,
+  and what could serve both tests (a window per test case, or 40):
+  not measured.
 - **Measured and not adopted: an interop server loop that empties its
   socket before it sends.** The loop reads one datagram per pass, so
   it answers a client that sends one request per packet with one

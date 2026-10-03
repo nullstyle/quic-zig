@@ -60,14 +60,19 @@ const endpoint_udp_payload_size = 1350;
 const endpoint_connection_receive_window: u64 = 16 * 1024 * 1024;
 const endpoint_stream_receive_window: u64 = 16 * 1024 * 1024;
 const endpoint_uni_stream_receive_window: u64 = 1024 * 1024;
-// The stream window of the interop server: 20, so that a client's
-// burst of new streams fits the 25-packet queue of the runner's network
-// simulator. The runner's `multiplexing` test case opens 2000 streams
-// and asserts `initial_max_streams_bidi <= 1000`
-// (`testcases_quic.py:286-288`: "Server set a stream limit > 1000."):
-// it checks that a server gives stream credit back as streams close.
-// The quic-go and ngtcp2 interop servers advertise 100 (read from their
-// transport parameters in a client log, 2026-10-03).
+// The stream window of the interop server: 100, which is also what the
+// quic-go and ngtcp2 interop servers advertise (read from their
+// transport parameters in a client log, 2026-10-03). Two test cases of
+// the runner bound this number:
+// - `multiplexing` opens 2000 streams and asserts
+//   `initial_max_streams_bidi <= 1000` (`testcases_quic.py:286-288`:
+//   "Server set a stream limit > 1000."): it checks that a server
+//   gives stream credit back as streams close.
+// - `zerortt` has the client send 40 requests in 0-RTT packets, and
+//   fails when too many of them leave after the handshake
+//   (`TestCaseZeroRTT`: `NUM_FILES = 40`, "Client sent too much data
+//   in 1-RTT packets"). A client can open only as many 0-RTT streams
+//   as the window it remembers, so the window must be 40 or more.
 //
 // MEASURED 2026-10-03 with the 0.24.0 library (credit comes back when
 // a stream is closed: `maybeAdvertiseStreamCredit` in
@@ -75,36 +80,48 @@ const endpoint_uni_stream_receive_window: u64 = 1024 * 1024;
 //   window 1000: 0 of 10 pass; 18 to 31 of the 1999 requests are cut
 //   window 100:  13 of 20 pass; 1 to 4 requests are cut in a failed run
 //   window 20:   15 of 15 pass; no packet is lost in either direction
-// The quic-go and ngtcp2 clients pass at all three windows.
+// The quic-go and ngtcp2 clients pass `multiplexing` at all three.
 //
-// Why. quiche's test client puts one request in each packet and drops
-// what a short request write did not take (see the note above
-// `stalled_peer_keepalive_idle_us`).
+// 20 is NOT the answer. It was committed after 0.24.0 (4017b1c) and
+// taken back the same day: the wide matrix on that commit (CI run
+// 37152701649) failed `zerortt` for all three clients, each with
+// "Client sent too much data in 1-RTT packets" (`pairs=3 cells=48
+// succeeded=40 failed=3 unsupported=4 flaky_passed=1`). At 100 the
+// same matrix has no failed cell (run 37149418254: `succeeded=43
+// failed=0`). The local runs that made 20 look right were multiplexing
+// runs only.
+//
+// Why each window does what it does. quiche's test client puts one
+// request in each packet and drops what a short request write did not
+// take (see the note above `stalled_peer_keepalive_idle_us`).
 // - At 1000 its first flight is 1000 packets. Its send window starts
 //   at its first congestion window, 13,500 bytes, and a request is
 //   about 28 bytes, so the flight runs past that at request 486 or so.
 //   In each of the 10 runs the first cut request was the one that
 //   crossed byte 13,500 (stream index 481 to 488). 1000 cannot pass.
 //   This endpoint used 1000 from 2026-05 through 0.23.0.
-// - At 100 (0.24.0) the first flight is under 3,000 bytes, but a burst
-//   of up to 100 one-request packets still overflows the simulator's
-//   queue: 3 to 6% of the client's packets are lost, its congestion
-//   window shrinks, and a request write that meets the shrunken window
-//   is cut. The same client fails 4 of 8 runs against a quic-go server
-//   and 2 of 8 against an ngtcp2 server, which also use 100.
+// - At 100 the first flight is under 3,000 bytes, but a burst of up to
+//   100 one-request packets still overflows the 25-packet queue of the
+//   runner's network simulator: 3 to 6% of the client's packets are
+//   lost, its congestion window shrinks, and a request write that
+//   meets the shrunken window is cut. The same client fails 4 of 8
+//   runs against a quic-go server and 2 of 8 against an ngtcp2 server,
+//   which also use 100.
 // - At 20 a burst fits the queue. Credit comes back 10 streams at a
 //   time (half a window), and in all 15 runs every packet the client
 //   sent arrived (2053 to 2161 of them).
-// The cost of a small window is time: W streams per two round trips.
-// The 2000 streams take about 6 s more than at 100 (a run is 24 s
-// against 18 s; the test allows 60 s).
+//
+// What could serve both tests, NOT measured: a window chosen by test
+// case (the runner tells the endpoint which TESTCASE it runs), or a
+// window of 40 if a first flight of 40 one-request packets does not
+// hurt quiche. Either wants the wide matrix before it lands.
 //
 // A window of 100 did NOT help while the limit doubled (the credit
 // rule through 0.23.0): the grants were 200, 400, 800, 1600, 3200, the
 // bursts as large as before, and 3 of 3 runs failed with 25 to 36
 // requests cut. A limit above 1000 was tried in 2026-05 (commit
 // 77e6bed) and reverted: the runner refuses it.
-const endpoint_bidi_stream_limit: u64 = 20;
+const endpoint_bidi_stream_limit: u64 = 100;
 const endpoint_uni_stream_limit: u64 = 64;
 // Higher than the RFC 9000 §18.2 ¶22 minimum of 2 so peers (quiche
 // especially) keep issuing fresh NEW_CONNECTION_ID frames as we
@@ -190,8 +207,9 @@ const endpoint_server_cid_desired_last_seq: u8 = 1;
 // `endpoint_bidi_stream_limit`. At a window of 100 the cell failed 4
 // of 10 runs, the same class as quic-go's 4 of 8 and ngtcp2's 2 of 8,
 // so the weekly matrix lists it under `--flaky` (run, counted, named,
-// decides nothing) and no longer under `--known-failures`. The window
-// is 20 since then, and the cell passed 15 of 15 with it.
+// decides nothing) and no longer under `--known-failures`. A window of
+// 20 made this cell pass 15 runs of 15 and made `zerortt` fail for
+// every client, so it was taken back (see above).
 //
 // One difference that is left, and now understood: this server sends
 // about one response per packet to this client (2021 datagrams for

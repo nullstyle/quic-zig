@@ -60,15 +60,10 @@ jobs:
       # runs against a quic-go server and 2 of 8 against an ngtcp2
       # server. Against quic-zig it depends on the stream window of
       # our interop server: every run failed at 1000 (through 0.23.0),
-      # 7 of 20 at 100 (0.24.0), and none of 15 at 20 (now), where the
-      # client's bursts fit the simulator's queue and no packet is
-      # lost. The detail is above `endpoint_bidi_stream_limit` in
+      # and 7 of 20 fail at 100 (0.24.0 and now). At 20 none of 15
+      # failed, but 20 breaks `zerortt` for every client, so it is not
+      # used. The detail is above `endpoint_bidi_stream_limit` in
       # interop/qns_endpoint.zig.
-      #
-      # Local runs do not prove the cell is steady in CI. Take it
-      # off this list when the evidence line of EIGHT scheduled runs in
-      # a row shows `flaky_passed=1 flaky_failed=0`. From then on a
-      # failure of this cell fails the job, as for every other cell.
       #
       # The wrapper also has `--known-failures peer:test` for a cell
       # that fails EVERY time: a listed cell that passes fails the job,
