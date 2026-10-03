@@ -192,8 +192,20 @@ const endpoint_server_cid_desired_last_seq: u8 = 1;
 // response in each packet. With the quic-go client, which puts about
 // 2.6 requests in a packet, the same loop sends 680 datagrams for
 // 2000 responses. It is a property of this test loop, not of the
-// library's send path. A loop that empties the socket before it sends
-// would pack more; whether that changes this cell is not measured.
+// library's send path (the library's own `runUdpServer` receives in
+// batches).
+//
+// MEASURED after 0.24.0 was cut, on a scratch build of it: a loop that
+// empties the socket before it sends (up to 64 datagrams a pass, no
+// wait after the first) sent 160 datagrams for the 2000 responses to
+// quiche, and 289 to quic-go (915 before). It is not the cure for this
+// cell: the client still loses about 4% of its own one-request packets
+// in the simulator's queue and still cuts a request now and then, and
+// the cell passed 16 runs of 20 (13 of 20 without the change, which is
+// no clear difference; half of those runs were interleaved pairs, and
+// both builds failed in the same two pairs). Not adopted yet: every
+// server-role cell uses this loop, so the change wants the wide matrix
+// first.
 const stalled_peer_keepalive_idle_us: u64 = 2_000_000;
 const stalled_peer_keepalive_min_period_us: u64 = 1_000_000;
 // Lifetime cap on extra client-issued SCIDs the qns driver feeds

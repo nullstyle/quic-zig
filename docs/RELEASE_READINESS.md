@@ -373,6 +373,129 @@ interop matrix, the interop hard gate) is the same, and it is the rule
 this project now applies to its own gates: a run's conclusion is not
 evidence. Read the line that counts what ran.
 
+## v0.24.0 stream-window release
+
+v0.24.0 removes the lifetime stream cap and makes the stream limit a
+window. Through v0.23.0 a connection could open 4096 streams of each
+type over its whole life, and `initial_max_streams_*` did not bound
+how many were open at once, because the limit doubled as it was used.
+From v0.24.0 the parameter is the number of streams a peer may have
+open at once, an id comes back when a stream is fully closed, and a
+connection carries any number of streams. It is a breaking release: in
+wire behaviour, in what the two parameters mean, and in two names. The
+CHANGELOG has the list, and EMBEDDING.md ("Stream limits are a
+window") has what an embedder must do.
+
+**Criteria written before the first change, and what was measured.**
+
+- One connection completes 20,000 bidirectional and 20,000
+  unidirectional streams in each direction, with no re-dial: through
+  `quic.app.ConnectionDriver` and on bare connections, with late
+  replies for streams that are already reaped, in Debug and in
+  ReleaseSafe.
+- The live peer streams never pass a window of 1, 2, 16 or 100, in
+  either direction, for either type, while a greedy peer still fills
+  the window (end to end; and a fuzz harness checks "no credit is
+  owed" after every operation).
+- With the first copy of every MAX_STREAMS frame lost, 2,000 streams
+  through a window of 1 still finish.
+- `@sizeOf(Connection)` is 154,680 bytes (Debug); it was 156,040.
+- The id-space model fuzz ran 1,000,336 executions with no
+  disagreement, and every rule of the module has a compiling mutant
+  that dies.
+- 13 of the 14 virtual-time cells of v0.23.0 are byte-identical. The
+  14th (`impairment_bottleneck_10mbit_mux8`) is one datagram shorter:
+  the old rule sent two MAX_STREAMS frames for eight streams that were
+  never closed.
+- A request/reply stream gives its id back two round trips after it
+  opens, so a window of W carries about W / (2 x RTT) such streams per
+  second: 16.6, 66.2 and 221.5 per second for windows of 1, 4 and 16
+  on a 30 ms round trip (the new `churn` bench cells).
+
+**Eight stream faults were fixed on the way**, none of them new in
+this release: a lost MAX_STREAMS frame was never sent again; `openUni`
+could re-open a finished id; a stream the application stopped reading
+never ended; the app driver refused a stream by half; bytes of a reset
+stream never went back to the connection window (a long-lived
+connection stalled at `initial_max_data`); STOP_SENDING and
+MAX_STREAM_DATA were not checked against the stream they name; a reset
+after the last acknowledgement left the terminal state; and a local
+stream at index 4096 or above was never reclaimed. Ten RFC conformance
+tests had been testing bookkeeping types that no connection ran; they
+now drive a real connection pair, and for three mutants of the real
+flow-control code they are the only tests that fail.
+
+**Interop.** The quic-go and ngtcp2 clients pass `multiplexing`
+(2000 streams) against the release's interop server 5 runs of 5 each.
+`server x quiche x multiplexing`, which had failed in every run on
+record, passes 6 runs of 10 (13 of 20, with ten more runs made after
+the release commit). "Every run" had one cause: the stream
+window of our interop server was 1000, and the other two servers use
+100. quiche's test client drops what a short request write did not
+take, its send window starts at its first congestion window (13,500
+bytes), and a first flight of 1000 requests crosses that near request
+486: in each of 10 runs at a window of 1000, the first request cut was
+the one that crossed byte 13,500. It took both changes of this release
+to move the cell (window 100 with the old doubling rule: 0 of 3; window
+1000 with credit on close: 0 of 10). What is left is the client's own
+failure rate, which it shows against the other servers too (4 of 8
+against quic-go, 2 of 8 against ngtcp2, with no quic-zig in the pair).
+So the cell is in a new class of the wrapper, `--flaky`: it is run,
+counted (`flaky_passed` / `flaky_failed` on the evidence line) and
+named, and it cannot decide a run in either direction. No cell is a
+known failure now. As a client, the release passes the same 18 of 21
+cells against quic-go, ngtcp2 and quiche servers as v0.23.0 did; the
+`zerortt` cell fails against each (see "On record"). The CI
+matrix results are with the gates, below.
+
+**The gates on the release commit.** Tagged 2026-10-03 at
+`1d34b32`. All five gates ran on that commit, and each was read at its
+evidence line, not at the colour of its run.
+
+- `test`: six jobs (Linux x86-64 and aarch64, macOS 15 and 26, Windows,
+  `-Dsanitize-c=full`), every step green. The four Unix jobs ran
+  1,811 tests in Debug (16 skipped) and 1,771 in ReleaseSafe; the
+  Windows job ran 1,748 in each mode (39 skipped); the sanitizer job
+  ran the 1,811.
+- rc-fuzz: `n_runs=2,068,452 unique_runs=10,655 pcs_len=41,855` across
+  41 sites (floor 1,845,000), coverage 4110/41855 (9.82%), no failing
+  site.
+- `quic-go-interop` (quic-zig as client against the pinned quic-go,
+  handshake and transfer, `--strict`): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0 skipped=0
+  flaky_passed=0 flaky_failed=0`.
+- QNS image: built from that commit (a real build, not a cache hit).
+- pin-lint: `zig pins agree: 0.17.0`; the boringssl pin differs from
+  http3-zig's main by the one dated pair the lint tolerates.
+
+The matrix dispatched on the same commit (run 37149749367; quic-zig as
+server; handshake, transfer, chacha20, multiplexing, transferloss,
+blackhole, and the goodput measurement; quic-go, quiche and ngtcp2
+clients) ended with `interop evidence: pairs=3 cells=21 succeeded=19
+failed=0 known_failed=0 unsupported=1 skipped=0 flaky_passed=1
+flaky_failed=0`. quic-go and ngtcp2 passed all six tests. quiche
+passed five and does not support chacha20; its `multiplexing` pass is
+the flaky cell, and the first time that cell passed in CI. Goodput on
+the runner's 10 Mbps link: 9.30 Mbps to quic-go, 9.12 to quiche, 9.18
+to ngtcp2 (v0.23.0: 9.30, 9.11, 9.16). A wider matrix on the commit before
+the version line (run 37149418254 on `cf5bf7c`: 16 tests, 48 cells)
+ended with `interop evidence: pairs=3 cells=48 succeeded=43 failed=0
+known_failed=0 unsupported=4 skipped=0 flaky_passed=1 flaky_failed=0`.
+It is the first run of that matrix with no failed cell. On the v0.23.0
+code the same matrix (run 37137087184) had `succeeded=42 failed=1
+known_failed=1`. Two cells changed: `quiche:multiplexing` (a pass
+now), and `quic-go:retry` (it failed that once, passes now, and passes
+5 runs of 5 on a developer machine with either code: not reproduced).
+
+**On record, not done.** The loss and reorder bench cells have a long
+tail (`impairment_reorder10pct` took more than a second in 4 of 24
+seeded runs, with no loss in the cell). The QNS client sends no 0-RTT
+data in the `zerortt` test against any of three servers. The interop
+server answers one datagram at a time, so it sends one response per
+packet to a client that sends one request per packet. The bench
+harness makes its handshake without packets. Each is a candidate for
+the next sprint; none is new in this release.
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig
