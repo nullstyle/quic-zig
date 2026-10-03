@@ -408,8 +408,8 @@ fn fuzzCidLifecycle(_: void, smith: *std.testing.Smith) anyerror!void {
         }
 
         // Invariant 1: peer_cids count for path 0 stays inside cap.
-        // (`registerPeerCid` closes with PROTOCOL_VIOLATION rather
-        // than overshoot the cap, so the cap holds even on
+        // (`registerPeerCid` closes with CONNECTION_ID_LIMIT_ERROR
+        // rather than overshoot the cap, so the cap holds even on
         // adversarial input.)
         const path0_count: u64 = @intCast(conn.peerCidActiveCountForPath(0));
         try std.testing.expect(path0_count <= peer_cid_cap);
@@ -458,14 +458,22 @@ fn fuzzCidLifecycle(_: void, smith: *std.testing.Smith) anyerror!void {
         }
 
         // Invariant 5 (close-code coherence): if the run produced a
-        // close, the error code lives in the documented set. Stop
-        // feeding ops once closed — the handlers no-op anyway, but
-        // the asserts above grow stale on a zombie state machine.
+        // close, the error code lives in the documented set. Today
+        // the handlers reach three of the four:
+        // CONNECTION_ID_LIMIT_ERROR for one CID too many (RFC 9000
+        // §5.1.1), FRAME_ENCODING_ERROR for `retire_prior_to >
+        // sequence_number` (§19.15), and PROTOCOL_VIOLATION for a
+        // reused sequence number or CID and for every
+        // RETIRE_CONNECTION_ID violation (§19.16, including the
+        // per-cycle flood gate). Stop feeding ops once closed — the
+        // handlers no-op anyway, but the asserts above grow stale on
+        // a zombie state machine.
         if (conn.lifecycle.pending_close) |info| {
             const code = info.error_code;
             try std.testing.expect(
                 code == transport_error_protocol_violation or
                     code == transport_error_frame_encoding or
+                    code == transport_error_connection_id_limit or
                     code == transport_error_excessive_load,
             );
             break;
@@ -879,11 +887,17 @@ test "fuzz: Connection.recordAuthenticatedDatagramAddress migration sequences" {
 // - If the connection closed during the run, the close error code is
 //   one of {`transport_error_protocol_violation`,
 //   `transport_error_frame_encoding`,
+//   `transport_error_connection_id_limit`,
 //   `transport_error_excessive_load`}. In practice
-//   `registerPeerCid` / `handleRetireConnectionId` only emit
-//   `protocol_violation` (retire-not-yet-issued, sequence-reuse,
-//   cid-reuse-across-paths, retire_prior_to-too-large, active-cid
-//   limit), but the broader set is documented for forward-compat.
+//   `registerPeerCid` / `handleRetireConnectionId` emit
+//   `protocol_violation` (retire-not-yet-issued, retire flood,
+//   sequence-reuse, cid-reuse-across-paths), `frame_encoding`
+//   (retire_prior_to-too-large), and `connection_id_limit`
+//   (active-cid limit); `excessive_load` is documented for
+//   forward-compat. Keep this set in step with the handlers: when a
+//   close moves to a different code, the harness must move with it,
+//   and the limit seed below is what makes a miss fail `zig build
+//   test` instead of waiting for the deep fuzzer.
 //
 // Multipath scope reduction: we hold path_id at 0 for the
 // `handlePathNewConnectionId` op so the harness does not need to
@@ -892,8 +906,48 @@ test "fuzz: Connection.recordAuthenticatedDatagramAddress migration sequences" {
 // `handlePathNewConnectionId` converge on `registerPeerCid`, so the
 // fuzzer-chosen interleaving of the two entry points still exercises
 // the same state-machine surface that §11.1 #19 calls out.
+// Seed corpus for the CID lifecycle harness. With no fuzzer attached,
+// `Smith` reads every integer draw as an 8-byte little-endian word and
+// every `bytes` draw as raw bytes, in harness draw order: `num_ops`,
+// then per op `op_kind`, `seq`, `cid_len`, the CID bytes, the 16-byte
+// reset token, and `rpt_kind`.
+//
+// The seed is six NEW_CONNECTION_ID frames with distinct sequence
+// numbers and CIDs and `retire_prior_to = 0`. The harness advertises
+// `active_connection_id_limit = 4`, so the fifth registration is one
+// too many and closes with CONNECTION_ID_LIMIT_ERROR (RFC 9000 §5.1.1).
+// Only the deep fuzzer reached that close before this seed existed,
+// which is how Invariant 5 sat stale for seven weeks after the close
+// code moved off PROTOCOL_VIOLATION: the per-commit smoke run could
+// not see it, and the fuzz gates did not fail on it.
+const cid_limit_seed_ops = 6;
+const cid_limit_seed: [8 + cid_limit_seed_ops * 56]u8 = blk: {
+    var buf: [8 + cid_limit_seed_ops * 56]u8 = undefined;
+    var at: usize = 0;
+    const put = struct {
+        fn word(b: []u8, pos: *usize, v: u64) void {
+            std.mem.writeInt(u64, b[pos.*..][0..8], v, .little);
+            pos.* += 8;
+        }
+    }.word;
+    put(&buf, &at, cid_limit_seed_ops); // num_ops
+    for (1..cid_limit_seed_ops + 1) |i| {
+        put(&buf, &at, 0); // op_kind 0: NEW_CONNECTION_ID
+        put(&buf, &at, i); // seq
+        put(&buf, &at, 8); // cid_len
+        @memset(buf[at..][0..8], 0xc0 + i); // CID, distinct per op
+        at += 8;
+        @memset(buf[at..][0..16], 0xd0 + i); // stateless reset token
+        at += 16;
+        put(&buf, &at, 0); // rpt_kind 0: retire_prior_to = 0
+    }
+    break :blk buf;
+};
+
 test "fuzz: Connection NEW_CONNECTION_ID / RETIRE_CONNECTION_ID lifecycle invariants" {
-    try std.testing.fuzz({}, fuzzCidLifecycle, .{});
+    try std.testing.fuzz({}, fuzzCidLifecycle, .{
+        .corpus = &.{&cid_limit_seed},
+    });
 }
 
 // PATH_CHALLENGE / PATH_RESPONSE fuzz harness — drives

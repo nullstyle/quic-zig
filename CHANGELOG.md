@@ -25,7 +25,17 @@ changes.
   verified under; the SentPacket size pin and the e2e suite cannot
   pass under the older dev.1683 pin).
 
-### CI
+### CI and tests
+
+- **The CID-lifecycle fuzz harness had a stale close-code invariant.**
+  `registerPeerCid` has closed with CONNECTION_ID_LIMIT_ERROR (RFC 9000
+  §5.1.1) since 0.14.0, but the harness's close-code set still expected
+  PROTOCOL_VIOLATION for that path, so the deep fuzzer failed on it in
+  every run — the fuzz gates just did not notice (next entry). No
+  protocol behavior was wrong and none changes. The invariant now
+  admits the code, and the harness carries a seed that walks past the
+  limit, so the next close-code move fails `zig build test` on the
+  commit that makes it instead of waiting for a deep run.
 
 - **Toolchain pin agreement lint.** The Zig toolchain is named in four
   places — `mise.toml`, `build.zig.zon`, `tools/consumer-smoke/build.zig.zon`,
