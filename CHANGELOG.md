@@ -200,12 +200,17 @@ changes.
   the same on bare `Connection`s through a window of 100, with every
   7th datagram from the answering side delivered 40 iterations late,
   so that replies arrive for streams that are finished and reaped
-  (6,678 late datagrams, all ignored as RFC 9000 §3.2 says). Those are
-  the release-build sizes (`zig build test -Drelease=true`: the whole
-  end-to-end suite takes 1.1 s there). A Debug build of the library is
-  about 100 times slower in these loops, so the Debug suite runs the
-  same checks on fewer streams, and one run of 4,200 requests, past
-  the old cap.
+  (6,678 late datagrams, all ignored as RFC 9000 §3.2 says). Every
+  build mode runs those counts. At first a Debug build needed 24 s for
+  the end-to-end suite (4 s before), and a profile showed why:
+  `std.testing.allocator` records a stack trace for each allocation,
+  and in a Debug build that cost about 100 times everything else these
+  loops do. The stream tests now count leaks with
+  `tests/e2e/common.zig` `LeakCounter` (no traces; mutation-checked,
+  with a library that leaks every reaped stream among the mutants), and
+  keep one short run of the same paths on `std.testing.allocator` for
+  what a counter cannot see. The Debug suite takes 8.4 s, the release
+  suite 0.8 s.
 - **Stream-window tests at three levels.** End to end
   (`tests/e2e/stream_window.zig`, a real `Server` / `Client` pair):
   the live peer streams never pass a window of 1, 2, 16 or 100, in

@@ -14,25 +14,17 @@
 //! A real `Server` / `Client` pair over `quic.testing.Loopback`. The
 //! two `Connection`s are driven directly, with no application layer,
 //! so the counters asserted here are the connection's own.
+//!
+//! The runs count leaks with `common.LeakCounter` (see there for why
+//! they are not on `std.testing.allocator`), and have one size in
+//! every build mode. The last test is a short run on
+//! `std.testing.allocator`, for the faults a counter cannot see.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const quic = @import("quic");
 const common = @import("common.zig");
 
 const Side = enum { client, server };
-
-/// Every test here has two sizes. A Debug build of this library is
-/// about 100 times slower than a release build in these loops
-/// (MEASURED 2026-10-03: 40,000 streams take 23 s in Debug and 0.2 s
-/// in ReleaseSafe), and at full size this file alone took the Debug
-/// suite from 4 s to 24 s. So `zig build test -Drelease=true` (a CI
-/// job) runs the counts the comments name, and a Debug build runs the
-/// same checks on fewer streams. The one count that must be large in
-/// every build, past the old lifetime cap of 4096, is in the
-/// app-driver test (`tests/e2e/app_driver.zig`, "no lifetime stream
-/// cap").
-const full_size = builtin.mode != .debug;
 
 /// The largest `Options.window` a run can be given (scratch for the
 /// live stream ids of one type).
@@ -85,6 +77,7 @@ const Held = struct {
 
 const Run = struct {
     o: Options,
+    allocator: std.mem.Allocator,
     loop: *quic.testing.Loopback,
     opener: *quic.Connection,
     answerer: *quic.Connection,
@@ -97,8 +90,8 @@ const Run = struct {
     answerer_datagrams: usize = 0,
 
     fn deinit(self: *Run) void {
-        for (self.held.items) |h| std.testing.allocator.free(h.bytes);
-        self.held.deinit(std.testing.allocator);
+        for (self.held.items) |h| self.allocator.free(h.bytes);
+        self.held.deinit(self.allocator);
     }
 
     /// Deliver the held datagrams whose time has come (all of them when
@@ -112,7 +105,7 @@ const Run = struct {
                 continue;
             }
             _ = self.held.orderedRemove(i);
-            defer std.testing.allocator.free(h.bytes);
+            defer self.allocator.free(h.bytes);
             self.result.late_delivered += 1;
             if (self.opener.local_bidi_ids.closed >= h.opened_then) self.result.late_after_reap += 1;
             try self.deliver(self.opener, h.bytes);
@@ -250,9 +243,9 @@ const Run = struct {
             if (self.o.late_every != 0 and from == self.answerer) {
                 self.answerer_datagrams += 1;
                 if (self.answerer_datagrams % self.o.late_every == 0) {
-                    const copy = try std.testing.allocator.dupe(u8, self.loop.rx[0..len]);
-                    errdefer std.testing.allocator.free(copy);
-                    try self.held.append(std.testing.allocator, .{
+                    const copy = try self.allocator.dupe(u8, self.loop.rx[0..len]);
+                    errdefer self.allocator.free(copy);
+                    try self.held.append(self.allocator, .{
                         .bytes = copy,
                         .release_step = self.result.steps + self.o.late_hold_steps,
                         .opened_then = self.opener.local_bidi_ids.opened,
@@ -305,8 +298,15 @@ const Run = struct {
     }
 };
 
+/// One run, with nothing left allocated when both endpoints are gone.
 fn runWindow(o: Options) !Result {
-    const allocator = std.testing.allocator;
+    var leaks: common.LeakCounter = .{};
+    const result = try runWindowOn(leaks.allocator(), o);
+    try leaks.expectNoLeaks();
+    return result;
+}
+
+fn runWindowOn(allocator: std.mem.Allocator, o: Options) !Result {
     const protos = [_][]const u8{"stream-window"};
     var windowed = common.defaultParams();
     windowed.initial_max_streams_bidi = o.window;
@@ -334,6 +334,7 @@ fn runWindow(o: Options) !Result {
     const server_conn = server.iterator()[0].conn;
     var run: Run = .{
         .o = o,
+        .allocator = allocator,
         .loop = &loop,
         .opener = if (o.opener == .client) client.conn else server_conn,
         .answerer = if (o.opener == .client) server_conn else client.conn,
@@ -356,7 +357,7 @@ test "stream window: live peer streams never pass the window, and the peer can f
     // than `window + closed` (the old rule doubled the limit) fails the
     // window check; one that gives less, or never gives it, stalls.
     for ([_]u64{ 1, 2, 16, 100 }) |window| {
-        const streams = if (full_size) @max(200, 6 * window) else @max(40, 3 * window);
+        const streams = @max(200, 6 * window);
         for ([_]Side{ .client, .server }) |opener| {
             const r = try runWindow(.{
                 .window = window,
@@ -382,7 +383,7 @@ test "stream window: the default window of 1000 holds, and credit does not wait 
     // arrive.
     const r = try runWindow(.{
         .window = 1000,
-        .streams = if (full_size) 2_500 else 1_300,
+        .streams = 2_500,
         .opener = .client,
         // Measured: 47 iterations for 3,000 streams.
         .budget_steps = 500,
@@ -400,8 +401,8 @@ test "stream window: every MAX_STREAMS frame is lost once and the connection sti
     // nothing new. At a window of 1 every stream needs its own credit
     // frame, so 2,000 streams of each type lose about 4,000 frames.
     const cases = [_]struct { window: u64, streams: u64 }{
-        .{ .window = 1, .streams = if (full_size) 2_000 else 300 },
-        .{ .window = 16, .streams = if (full_size) 600 else 300 },
+        .{ .window = 1, .streams = 2_000 },
+        .{ .window = 16, .streams = 600 },
     };
     for (cases) |case| {
         const r = try runWindow(.{
@@ -424,8 +425,7 @@ test "stream window: one connection completes 20,000 streams of each type, each 
     // 0.23.0, over its whole life. Here one connection completes
     // 20,000 bidirectional and 20,000 unidirectional streams through a
     // window of 100, with the client opening them and then with the
-    // server opening them. (A Debug build runs 600 of each, opened by
-    // the client: the late replies, not the count. See `full_size`.)
+    // server opening them.
     //
     // Every 7th datagram from the answering side arrives 40 iterations
     // late. By then its replies were sent again and their streams are
@@ -433,9 +433,8 @@ test "stream window: one connection completes 20,000 streams of each type, each 
     // STREAM frames for streams that no longer exist. They are ignored
     // (RFC 9000 §3.2): they do not make a stream again, and they do
     // not close the connection.
-    const streams: u64 = if (full_size) 20_000 else 600;
-    const openers: []const Side = if (full_size) &.{ .client, .server } else &.{.client};
-    for (openers) |opener| {
+    const streams: u64 = 20_000;
+    for ([_]Side{ .client, .server }) |opener| {
         const r = try runWindow(.{
             .window = 100,
             .streams = streams,
@@ -449,5 +448,31 @@ test "stream window: one connection completes 20,000 streams of each type, each 
         // of them after its streams were reaped.
         try std.testing.expect(r.late_delivered > streams / 10);
         try std.testing.expect(r.late_after_reap > streams / 10);
+    }
+}
+
+test "stream window: a short run on std.testing.allocator" {
+    // The runs above count leaks and nothing else (`common.LeakCounter`).
+    // `std.testing.allocator` also finds a double free and a free with
+    // the wrong length. These runs are small enough for it, and go the
+    // same ways: late replies for reaped streams, and lost credit, with
+    // each side opening the streams.
+    for ([_]Side{ .client, .server }) |opener| {
+        const late = try runWindowOn(std.testing.allocator, .{
+            .window = 4,
+            .streams = 80,
+            .opener = opener,
+            .late_every = 7,
+            .budget_steps = 4_000,
+        });
+        try std.testing.expect(late.late_after_reap > 0);
+        const lossy = try runWindowOn(std.testing.allocator, .{
+            .window = 4,
+            .streams = 80,
+            .opener = opener,
+            .drop_each_credit_once = true,
+            .budget_steps = 8_000,
+        });
+        try std.testing.expect(lossy.credits_dropped > 0);
     }
 }
