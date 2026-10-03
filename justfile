@@ -31,11 +31,13 @@ check-pins online="":
 test:
     zig build test
 
-# Deep coverage-guided fuzzing (single-instance, unfiltered). ITERS = input
-# budget. The fuzzer rotates across all sites in the unfiltered test binary.
-# -Duse-llvm matches CI: the self-hosted x86_64 backend emits no sancov.
+# Deep coverage-guided fuzzing (single-instance, unfiltered). ITERS = per-site
+# input budget. Runs through tools/fuzz-gate.sh, exactly as CI does:
+# `zig build test --fuzz` exits 0 even when a site fails, so the script
+# judges the run on its log and its coverage header instead. It passes
+# -Duse-llvm, because the self-hosted x86_64 backend emits no sancov.
 fuzz iters="1M":
-    zig build test -Duse-llvm=true --fuzz={{iters}}
+    tools/fuzz-gate.sh {{iters}}
 
 # Compile-only check against a tier-1 platform we can't run locally.
 #

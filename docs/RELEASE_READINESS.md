@@ -91,12 +91,15 @@ is safe to embed in production. The gates:
       `zig build test` runs every `std.testing.fuzz` seed as a deterministic
       smoke test on each push; `.github/workflows/fuzz.yml` remains weekly
       advisory coverage. Before tagging v0.8.0 or a later RC/final release,
-      `.github/workflows/rc-fuzz.yml` must pass unfiltered
-      `zig build test --fuzz` at its default budget of 50000 per target
-      (~1.85M executions; raise it for an RC/1.0), assert the coverage
-      file's `pcs_len` is non-zero (an uninstrumented run looks green),
-      and upload `.zig-cache/v` for replay. No open crashers are tracked
-      in-tree.
+      `.github/workflows/rc-fuzz.yml` must pass `tools/fuzz-gate.sh`
+      (unfiltered `zig build test --fuzz`) at its default budget of 50000
+      per site (~2M executions; raise it for an RC/1.0). The script fails
+      on a failing site, on a run below 90% of sites x budget, and on a
+      missing or zero-`pcs_len` coverage file — the exit status of
+      `zig build test --fuzz` reports none of the three — and the
+      workflow uploads `.zig-cache/f` and `.zig-cache/v` for replay. No
+      open crashers are tracked in-tree. (The gate was blind to a failing
+      site from v0.16.0 through v0.22.0; see the v0.23.0 section below.)
 
 ### API surface
 - [x] The `Connection` surface is partitioned into Stable / Unstable so

@@ -772,4 +772,9 @@ pub fn build(b: *std.Build) void {
     // cleanly (measured with a three-site probe), so per-site steps are
     // possible now; none exist yet, and `just fuzz` / `mise run fuzz`
     // call the unfiltered command above.
+    //
+    // `--fuzz` exits 0 even when a site fails, and stops the run at that
+    // site. The evidence is the log line "...; input saved to ..." and
+    // the coverage file's run count, so CI, `just fuzz`, and `mise run
+    // fuzz` all go through tools/fuzz-gate.sh, which reads both.
 }

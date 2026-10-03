@@ -61,18 +61,21 @@ modes:
   against its seed `.corpus` (and a default input). This is part of the CI
   gate (`.github/workflows/test.yml`), so a seed that panics or trips a
   safety check fails the build like any other test.
-- **Deep, coverage-guided (Linux).** Run `zig build test --fuzz=$ITERS`
+- **Deep, coverage-guided (Linux).** Run `tools/fuzz-gate.sh $ITERS`
   (`just fuzz` / `mise run fuzz`), which is exactly what CI runs weekly on
-  Linux (`.github/workflows/fuzz.yml`). The fuzzer rotates across every
-  `std.testing.fuzz` site in the unfiltered test binary. It is
-  single-instance (see caveats), so it saturates one core; give it a large
-  `$ITERS` and let it run.
-- **Pre-release gate (~10 minutes).** Before a release is tagged, a
-  completed green run of `.github/workflows/rc-fuzz.yml` must exist for
-  the release commit. Default budget is `50000` per target (39 targets
-  as of 2026-08-13 — count them with `grep -rc 'std.testing.fuzz('
-  src --include='*.zig'` rather than trusting this sentence — so
-  ~1.9M executions). Unlike the weekly fuzz job, this gate is
+  Linux (`.github/workflows/fuzz.yml`). It wraps
+  `zig build test -Duse-llvm=true --fuzz=$ITERS` and judges the run on
+  its log and coverage header, because the command's own exit status
+  says nothing (see "Toolchain caveats"). The fuzzer gives every
+  `std.testing.fuzz` site in the unfiltered test binary its own budget.
+  Limit mode is single-instance (see caveats), so it saturates one core;
+  give it a large `$ITERS` and let it run.
+- **Pre-release gate.** Before a release is tagged, a completed green run
+  of `.github/workflows/rc-fuzz.yml` must exist for the release commit.
+  Default budget is `50000` per site (40 sites as of 2026-10-02, so ~2M
+  executions; the gate counts the sites itself with
+  `grep -rho 'std\.testing\.fuzz(' src --include='*.zig' | wc -l` rather
+  than trusting this sentence). Unlike the weekly fuzz job, this gate is
   blocking. Anyone — maintainer, contributor, or an agent session — can
   dispatch it (`gh workflow run rc-fuzz.yml --ref <ref>`) and tag on
   green; the gate is about the evidence existing, not about who pushes
@@ -90,13 +93,18 @@ modes:
   never actually runnable), which runs regardless of the release calendar.
 
   What the release gate is for, and still does at `50000`: prove the fuzz
-  harness is genuinely instrumented on this commit, and catch a crash or
-  corpus regression before a tag. The workflow now asserts the coverage
-  file's `pcs_len` is non-zero rather than trusting exit status, because
-  an uninstrumented run executes the whole budget and looks green — that
-  is precisely how this gate produced no signal for two weeks. Raise the
-  budget for an RC or 1.0 if you want more; the default is tuned for
-  "tag a 0.x release in half an hour".
+  harness is genuinely instrumented on this commit, and catch a failing
+  site or corpus regression before a tag. It trusts none of that to the
+  exit status, which has fooled it twice. An uninstrumented run executes
+  the whole budget and looks green — that is how the gate produced no
+  signal for two weeks before 0.10.0. And a run with a *failing site*
+  exits 0 as well: from v0.16.0 through v0.21.1 every gate run logged one
+  (a stale invariant in the CID-lifecycle harness), stopped at a fraction
+  of its budget, and passed. `tools/fuzz-gate.sh` now fails the run on
+  the failing-site log line, on a run count below 90% of sites x budget,
+  and on a missing or zero-`pcs_len` coverage file, and prints the
+  coverage numbers either way. Raise the budget for an RC or 1.0 if you
+  want more; the default is tuned for "tag a 0.x release in half an hour".
 
 ### Regression corpus
 
@@ -106,6 +114,29 @@ the input and add it to that target's `.corpus`** — it then runs on every
 `zig build test` and is gated by CI, turning a one-off finding into
 permanent per-commit regression coverage.
 
+Where the failing input is: the log line names `.zig-cache/f/crash`, but
+on Zig 0.17.0 that file is cut to a multiple of 512 bytes — empty for
+most harness inputs — because the runner does not flush its last buffer.
+The whole input is still in the instance's input file,
+`.zig-cache/f/in0`: a 20-byte header (the input length is the
+little-endian `u32` at offset 16), then the input. Both fuzz workflows
+upload all of `.zig-cache/f`.
+
+How a seed is encoded: with no fuzzer attached, `std.testing.Smith` reads
+every integer draw (`value`, `valueRangeAtMost`, ...) as one 8-byte
+little-endian word, and every `bytes` draw as raw bytes, in the order the
+harness draws them; `slice` reads a 4-byte length first. A seed for a
+parser is therefore just the bytes (see `src/wire/varint.zig`); a seed
+for a state-machine harness is easier to read built at comptime from the
+operations it encodes (see `cid_limit_seed` in
+`src/Connection/_tests_fuzz.zig`).
+
+A harness invariant that lists the *allowed* outcomes of a handler (close
+codes, event reasons) needs a seed for each outcome the handler can
+produce. Otherwise only the deep fuzzer exercises the list, and it goes
+stale silently the day the handler changes — which is how the CID
+harness's close-code set outlived the code it described.
+
 Corpus hygiene: seeds are protocol bytes, never secrets. Do not paste a
 real key, token, or ticket into a `.corpus` entry — synthesize the shape
 you need (the crypto targets derive keys from fixed test secrets in the
@@ -113,22 +144,35 @@ harness itself).
 
 ### Toolchain caveats
 
-- **Only the unfiltered binary can be fuzzed.** On 0.17.0-dev.1158, a test
-  binary built with a filter (`addTest(.filters = ...)`) aborts the
-  build-runner with "reached unreachable code" as soon as it runs under
-  `--fuzz`, while the unfiltered `zig build test --fuzz` runs cleanly
-  (confirmed on Linux: unfiltered exits 0 with 750k+ runs; a single
-  filtered site exits 1 on the same tree). So there is deliberately no
-  per-site or `-j<N>` parallel fuzz step — those all rely on filtered
-  binaries. Deep fuzzing is single-instance (n_instances = 1;
-  ziglang/zig#25352) until upstream fixes filtered-binary fuzzing or lifts
-  the instance cap.
-- **macOS deep-fuzzing works as of 0.17.0-dev.1252** — this used to say it
-  did not. On 0.17.0-dev.1158 the coverage-guided runtime aborted on
-  macOS; on the pinned toolchain `zig build test --fuzz=1000` completes on
-  aarch64-macOS with real coverage (verified: 41,865 runs, 1,669 unique,
-  3058/33548 PCs = 9.12%, exit 0). Re-check before assuming a platform
+Measured on Zig 0.17.0 unless a bullet says otherwise. Re-measure when the
+toolchain moves: two of these described a bug that a later Zig fixed, and
+the note outlived the bug.
+
+- **`zig build test --fuzz` exits 0 when a site fails, and stops there.**
+  The only trace is a log line, `error: test '...' exited with code 1;
+  input saved to '.zig-cache/f/crash'`. The run also ends at the failing
+  site, and the site order changes from run to run, so the sites after it
+  get none of their budget. `tools/fuzz-gate.sh` exists because of this;
+  never gate anything on the bare command.
+- **Per-site fuzz binaries work again; none exist yet.** On
+  0.17.0-dev.1158, a test binary built with a filter
+  (`addTest(.filters = ...)`) aborted the build runner with "reached
+  unreachable code" as soon as it ran under `--fuzz`
+  (ziglang/zig#25352), which is why there is no per-site or `-j<N>`
+  parallel fuzz step. On 0.17.0 a filtered binary fuzzes cleanly (probe:
+  three sites, one selected by filter, full budget). Limit mode
+  (`--fuzz=N`) is still single-instance (`n_instances = 1`); only forever
+  mode (`--fuzz`) uses every core.
+- **macOS deep-fuzzing works.** On 0.17.0-dev.1158 the coverage-guided
+  runtime aborted on macOS. On 0.17.0, `tools/fuzz-gate.sh 1000` completes
+  on aarch64-macOS with real coverage (verified: 49,770 runs, 1,908
+  unique, 3405/40622 PCs = 8.38%). Re-check before assuming a platform
   gap, and prefer Linux only for long runs, since that is what CI does.
+- **x86_64 needs `-Duse-llvm=true`.** Only the LLVM backend emits the
+  sancov sections the fuzzer reads, and x86_64 defaults to the self-hosted
+  backend: an x86_64-linux `-ffuzz` test binary has 0 sancov sections by
+  default and 2 with `-fllvm`. `tools/fuzz-gate.sh` passes the flag; the
+  build.zig comment on `use-llvm` has the history.
 - **Do not add `-ffuzz` / `Module.fuzz` by hand.** `--fuzz` already sets
   the compilation-level flag on the *root* module, and every
   `std.testing.fuzz` site lives in `src/`, which is the root module of
@@ -141,9 +185,10 @@ harness itself).
   symbols, on Linux and macOS alike. It looks like a platform bug and is
   not one.
 - **Verify a deep-fuzz run was real** rather than trusting exit status.
-  A populated coverage file is large (~270 KB here); a 24-byte one is a
-  header with `pcs_len = 0`, i.e. the truncated-artifact flake below, not
-  a run with no instrumentation:
+  `tools/fuzz-gate.sh` does it for you and prints the numbers. To read a
+  coverage file by hand: a populated one is large (~330 KB here); a
+  24-byte one is a header with `pcs_len = 0`, i.e. the truncated-artifact
+  flake below, not a run with no instrumentation:
 
   ```sh
   python3 -c 'import struct,glob
@@ -151,12 +196,13 @@ harness itself).
       b=open(f,"rb").read(); n,u,p=struct.unpack("<QQQ",b[:24])
       print(f, len(b), f"n_runs={n:,} unique_runs={u:,} pcs_len={p}")'
   ```
-- Long Linux limit-mode runs on the current Zig line can occasionally leave
-  an empty-PC coverage metadata file in `.zig-cache/v` and fail with
-  "corrupted coverage file ... pcs_len was zero". The pre-release `rc-fuzz`
-  gate treats only that runner metadata failure as retryable: it deletes
-  `.zig-cache/v` and reruns once. Any target crash, replayable corpus entry,
-  or repeated coverage failure still fails the blocking gate.
+- Long Linux limit-mode runs have occasionally left an empty-PC coverage
+  metadata file in `.zig-cache/v` and failed with "corrupted coverage file
+  ... pcs_len was zero" (seen on 0.17-dev builds; not re-observed on
+  0.17.0 yet, and not ruled out). `tools/fuzz-gate.sh` treats only that
+  runner metadata failure as retryable: it deletes `.zig-cache/v` and
+  reruns once. A failing site in either attempt, or a repeated coverage
+  failure, still fails the gate.
 
 ## Interop
 

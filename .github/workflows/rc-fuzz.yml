@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       iterations:
-        description: "Per-target coverage-guided fuzz budget (37 targets, so total execs = 37x this). Default 50000 ~= 10 min. Plain integers and the M suffix are both known to parse."
+        description: "Per-site coverage-guided fuzz budget (total execs = sites x this; the gate counts the sites). Plain integers and the K / M suffixes parse."
         required: false
         default: "50000"
 
 # Manual pre-release gate. Blocking: it must be green on the release commit
-# before tagging. The scheduled `fuzz.yml` job (1M/target budget, weekly)
+# before tagging. The scheduled `fuzz.yml` job (1M/site budget, weekly)
 # remains advisory and is what carries deep bug-hunting coverage.
 #
-# The budget is 50000 per target (~1.85M executions, ~10 minutes) rather than
+# The budget is 50000 per site (~2M executions across 40 sites) rather than
 # the 1M it used to be, because the long run measurably buys almost nothing:
 # measured on 0.17.0-dev.1252, coverage was 8.81% at 39k executions and
 # 9.48% at 37.1M — 0.67 percentage points for ~950x the work — with unique
@@ -21,10 +21,19 @@ on:
 # getting tagged at all, which is strictly worse for security than a short
 # gate that actually runs.
 #
-# What this gate is FOR, and still does at 50k: prove the fuzz harness is
-# real on this commit (see the pcs_len check below — a run with no coverage
-# instrumentation silently "passed" for two weeks), and catch a crash or a
-# corpus regression before a tag. Deep exploration is the weekly job's job.
+# What this gate is FOR: prove the fuzz harness is real on this commit and
+# catch a failing site or a corpus regression before a tag. Deep
+# exploration is the weekly job's job.
+#
+# It has failed at that twice, both times by trusting the exit status of
+# `zig build test --fuzz`. First a run with no coverage instrumentation
+# "passed" for two weeks. Then, from v0.16.0 through v0.21.1, every gate
+# run logged a failing site, stopped at a fraction of its budget (as
+# little as 18,503 of ~2M executions), and still exited 0 — a non-zero
+# coverage header was all the old check asked for. tools/fuzz-gate.sh now
+# fails on the failing-site log line, on a run count below 90% of
+# sites x budget, and on a missing or uninstrumented coverage file; it
+# prints the coverage numbers either way.
 jobs:
   fuzz:
     runs-on: ubuntu-latest
@@ -64,77 +73,27 @@ jobs:
           echo "::error::dependency prefetch failed after 5 attempts"
           exit 1
 
-      - name: zig build test --fuzz
+      # Exit status alone is NOT evidence the gate did anything (see the
+      # header). The script runs the fuzzer, retries once on the coverage
+      # metadata flake, then judges the run on its log and on the coverage
+      # file's own header, and prints the coverage numbers even on failure
+      # — a failed run is when you most need to know whether pcs_len was
+      # zero and how far the run got.
+      - name: zig build test --fuzz (via tools/fuzz-gate.sh)
         shell: bash
         run: |
-          set +e
-          rm -rf .zig-cache/v
-          zig build test -Duse-llvm=true --fuzz="$ITERS" 2>&1 | tee rc-fuzz.log
-          status=${PIPESTATUS[0]}
-          set -e
+          rm -rf .zig-cache/f
+          tools/fuzz-gate.sh "$ITERS" rc-fuzz.log
 
-          if [ "$status" -eq 0 ]; then
-            exit 0
-          fi
-
-          if grep -q "corrupted coverage file .*pcs_len was zero" rc-fuzz.log; then
-            echo "::warning::Zig fuzz coverage metadata was corrupted; retrying once with a clean fuzz cache"
-            rm -rf .zig-cache/v
-            set +e
-            zig build test -Duse-llvm=true --fuzz="$ITERS" 2>&1 | tee -a rc-fuzz.log
-            retry_status=${PIPESTATUS[0]}
-            set -e
-            exit "$retry_status"
-          fi
-
-          exit "$status"
-
-      # Exit status alone is NOT evidence the gate did anything. A run with
-      # no coverage instrumentation executes the full budget, collects zero
-      # program counters, and can look indistinguishable from a real run —
-      # that is exactly how this gate produced no signal for two weeks. So
-      # assert on the coverage file's own header: pcs_len is the number of
-      # instrumented program counters and must be non-zero, and n_runs must
-      # be in the neighbourhood of 37 targets x the budget.
-      # `if: always()` on purpose: this is the only place the coverage
-      # numbers are ever printed, so skipping it on failure is exactly
-      # backwards — a failed run is when you most need to know whether
-      # pcs_len was zero. It still fails the job on bad coverage.
-      - name: Verify the run actually collected coverage
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import glob, struct, sys
-          files = sorted(glob.glob(".zig-cache/v/*"))
-          if not files:
-              sys.exit("::error::no coverage file was produced; the fuzz run did not report coverage")
-          bad = False
-          for f in files:
-              b = open(f, "rb").read()
-              if len(b) < 24:
-                  print(f"::error::{f} is {len(b)} bytes, too short to hold a coverage header")
-                  bad = True
-                  continue
-              n_runs, unique_runs, pcs_len = struct.unpack("<QQQ", b[:24])
-              print(f"{f}: {len(b)} bytes n_runs={n_runs:,} unique_runs={unique_runs:,} pcs_len={pcs_len}")
-              if pcs_len == 0:
-                  print(f"::error::{f} reports pcs_len=0 — the target ran with NO coverage instrumentation, so this run proves nothing")
-                  bad = True
-              elif n_runs == 0:
-                  print(f"::error::{f} reports n_runs=0 — no inputs were executed")
-                  bad = True
-          if bad:
-              sys.exit(1)
-          print("coverage verified: instrumentation present and inputs executed")
-          PY
-
-      - name: Upload corpus, crashes, and log
+      # .zig-cache/f holds the corpus and, on a failure, the failing input
+      # (`crash`, and the instance input file `in0` it was copied from).
+      - name: Upload corpus, failing input, coverage, and log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rc-fuzz-cache-${{ github.run_id }}
           path: |
+            .zig-cache/f
             .zig-cache/v
             rc-fuzz.log
           if-no-files-found: ignore

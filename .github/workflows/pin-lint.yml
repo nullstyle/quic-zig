@@ -104,7 +104,7 @@ jobs:
                   echo "- quic-zig: \`$ours\`"
                   echo "- http3-zig: \`$theirs\`"
                   echo ""
-                  echo "Repin both repos identically — `boringssl.tls.Context` type"
+                  echo "Repin both repos identically — \`boringssl.tls.Context\` type"
                   echo "identity across the quic/http3 boundary depends on the dedupe."
               } | tee -a "$GITHUB_STEP_SUMMARY"
               exit 1

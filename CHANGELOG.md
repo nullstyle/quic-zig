@@ -37,6 +37,27 @@ changes.
   limit, so the next close-code move fails `zig build test` on the
   commit that makes it instead of waiting for a deep run.
 
+- **The fuzz gates could not fail on a failing site.**
+  `zig build test --fuzz` exits 0 when a fuzz site fails; the only
+  trace is a log line, and the run stops at that site, so the sites
+  after it get no budget. Every weekly fuzz run since 2026-08-16 and
+  every pre-release gate run from v0.16.0 through v0.21.1 logged the
+  failing site above, stopped at a fraction of its budget (as little as
+  18,503 of ~2M executions), and reported success; v0.21.2 and v0.22.0
+  were tagged with no gate run at all. So for seven weeks most fuzz
+  sites got little or no deep fuzzing, and no release in that window
+  has the fuzz evidence its tag implied. `tools/fuzz-gate.sh` now
+  defines a clean run for the release gate (`rc-fuzz.yml`), the weekly
+  job (`fuzz.yml`), and `just fuzz` / `mise run fuzz` alike: it fails on
+  the failing-site log line, on a run count below 90% of sites x budget,
+  and on a missing or uninstrumented coverage file, and it prints the
+  coverage numbers either way. The weekly job also lost its
+  `continue-on-error` (a failed fuzz step showed as a green run), now
+  persists the corpus (`.zig-cache/f`; it had been caching the coverage
+  file, so every run started cold), and both jobs upload the failing
+  input. Verified by mutation: with the CID invariant re-broken the
+  gate exits 1; on the fixed tree it passes.
+
 - **Toolchain pin agreement lint.** The Zig toolchain is named in four
   places — `mise.toml`, `build.zig.zon`, `tools/consumer-smoke/build.zig.zon`,
   and `interop/qns/Dockerfile` — and they had drifted apart: `main`

@@ -40,9 +40,10 @@ run = "zig build test"
 # each site its own budget. Matches CI (.github/workflows/fuzz.yml) in
 # command and budget: 1M/target ~= 40M executions. Works on macOS (verified
 # on 0.17.0; see CONTRIBUTING.md "Fuzzing"), but prefer Linux for long runs
-# since that is what CI exercises.
+# since that is what CI exercises. Runs through tools/fuzz-gate.sh because
+# `zig build test --fuzz` exits 0 even when a site fails.
 description = "Deep coverage-guided fuzzing (single-instance, unfiltered)"
-run = "zig build test -Duse-llvm=true --fuzz=1M"
+run = "tools/fuzz-gate.sh 1M"
 
 [tasks.qns-endpoint]
 description = "Build the QNS endpoint binary"
