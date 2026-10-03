@@ -359,6 +359,15 @@ burst into that state. The CHANGELOG entry after 0.23.0 has the
 detail. The weekly matrix lists that cell as a known failure, in a
 list that fails the job when a listed cell passes.
 
+Measured after that paragraph was written: the cell says little about
+quic-zig. With no quic-zig in the pair, the same quiche client fails
+the same test against a quic-go server in 4 of 8 runs and against an
+ngtcp2 server in 2 of 8, and a trial of "credit returned as streams
+close" on our side still failed 8 of 9. A server only changes the
+odds. The first version of this record named our stream credit as the
+cause and its change as the fix, before the control run (the same test
+without quic-zig) had been made. The control comes first.
+
 The pattern across all four (the fuzz gate, the weekly fuzz job, the
 interop matrix, the interop hard gate) is the same, and it is the rule
 this project now applies to its own gates: a run's conclusion is not

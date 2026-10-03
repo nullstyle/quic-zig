@@ -68,11 +68,13 @@ const endpoint_uni_stream_receive_window: u64 = 1024 * 1024;
 // 2026-05-09 verification matrix showed it broke server ×
 // multiplexing × {quic-go, ngtcp2} — the runner deliberately
 // validates that servers issue `MAX_STREAMS` dynamically rather
-// than statically advertising a huge floor. The actual fix lives
-// in `maybeQueueBatchedMaxStreams` in `src/conn/state.zig`, which
-// now lowers the credit-return watermark from "1/2 consumed" to
-// "1/4 consumed" so MAX_STREAMS reaches the peer before quiche's
-// pipelined burst exhausts the initial allotment.
+// than statically advertising a huge floor. The change made for
+// that lives in `maybeQueueBatchedMaxStreams` in
+// `src/Connection/flow.zig`, which lowered the credit-return
+// watermark from "1/2 consumed" to "1/4 consumed" so MAX_STREAMS
+// reaches the peer before quiche's pipelined burst exhausts the
+// initial allotment. It did not fix that cell (see the MEASURED
+// note above `stalled_peer_keepalive_idle_us`).
 const endpoint_bidi_stream_limit: u64 = 1000;
 const endpoint_uni_stream_limit: u64 = 64;
 // Higher than the RFC 9000 §18.2 ¶22 minimum of 2 so peers (quiche
@@ -137,11 +139,24 @@ const endpoint_server_cid_desired_last_seq: u8 = 1;
 // 4000, 4096), so quiche sends its 1999 one-packet requests in large
 // bursts, the simulator's 25-packet queue drops about 8% of them, and
 // quiche's congestion window collapses mid-burst. An initial limit of
-// 100 does not help (200, 400, 800, ...: 25 cut requests). A server
-// that returns credit as streams CLOSE keeps the bursts small; that is
-// library work (it is also what lifting the lifetime stream cap
-// needs), not an endpoint knob. Until then the weekly matrix lists
-// this cell under `--known-failures`.
+// 100 does not help (200, 400, 800, ...: 25 cut requests).
+//
+// CORRECTED the same day. This note first said that a server that
+// returns credit as streams CLOSE would fix the cell. A trial of that
+// rule (limit = initial + closed, window 100) cut 4 requests in place
+// of 12 to 25 and still failed 8 of 9 runs. And the cell is not only
+// ours: with no quic-zig in the pair, the same quiche client fails the
+// same test against a quic-go server in 4 of 8 runs and against an
+// ngtcp2 server in 2 of 8 (same machine, runner and simulator;
+// quic-zig 0.23.0: 8 of 8). quiche emits exactly one STREAM frame per
+// packet (2427 packets for 2427 frames), so every burst of requests is
+// a burst of small packets, and the 25-packet queue drops 4 to 8% of
+// them whatever the server does. A server only changes the odds. One
+// thing that differs on our side and is not understood yet: we send
+// about one response per packet (1899 packets for 1984 STREAM frames;
+// quic-go 1107 for 2116, ngtcp2 249 for 1999). The weekly matrix lists
+// this cell under `--known-failures`, which is right only while it
+// fails every time.
 const stalled_peer_keepalive_idle_us: u64 = 2_000_000;
 const stalled_peer_keepalive_min_period_us: u64 = 1_000_000;
 // Lifetime cap on extra client-issued SCIDs the qns driver feeds

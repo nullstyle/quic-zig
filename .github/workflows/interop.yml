@@ -52,13 +52,16 @@ jobs:
       # cannot go stale; a cell that is not in a given run is ignored.
       #
       # quiche:multiplexing — quiche's test client cuts a request short
-      # when its send window is full and never finishes it, and this
-      # library's stream credit (doubled each time a quarter is opened)
-      # lets it burst into that state. Fails every time, against server
-      # images back to 2026-05-11. Measured 2026-10-03; the detail is
-      # above `stalled_peer_keepalive_idle_us` in
-      # interop/qns_endpoint.zig. The fix is credit returned as streams
-      # close, in the library.
+      # when its send window is full and never finishes it. It does
+      # that against other servers too (quic-go 4 of 8 runs, ngtcp2 2
+      # of 8, no quic-zig in the pair); against quic-zig it fails
+      # every time (8 of 8, and against server images back to
+      # 2026-05-11). A server only changes the odds, so this cell is
+      # not a pass/fail signal for quic-zig. It can stay on this list
+      # only while it fails every time; when that stops, it needs a
+      # "flaky" class, not this one. Measured 2026-10-03; the detail
+      # is above `stalled_peer_keepalive_idle_us` in
+      # interop/qns_endpoint.zig.
       KNOWN_FAILURES: quiche:multiplexing
     steps:
       - name: Checkout quic-zig

@@ -93,11 +93,25 @@ changes.
   queue drops about 8% of them, and its congestion window collapses
   mid-burst. A
   lower initial limit on the test endpoint does not help (the credit
-  still doubles). Returning credit as streams close would, and that
-  is library work that is not in this change. Until then the weekly
-  matrix lists the cell with the wrapper's new `--known-failures`: a
+  still doubles).
+
+  Corrected after this entry was first written, which said that
+  returning credit as streams close would fix the cell. It does not,
+  and the cell is not only ours. A trial of that rule (limit = initial
+  + closed, window 100) cut 4 requests in place of 12 to 25 and still
+  failed 8 of 9 runs. With no quic-zig in the pair, the same quiche
+  client fails the same test against a quic-go server in 4 of 8 runs
+  and against an ngtcp2 server in 2 of 8, on the same machine with the
+  same runner and simulator; quic-zig 0.23.0 fails 8 of 8. quiche
+  puts exactly one STREAM frame in each packet, so every burst of
+  requests is a burst of small packets, and the simulator's 25-packet
+  queue drops 4 to 8% of them whatever the server does. A server only
+  changes the odds, and ours are the worst of the three. So this cell
+  cannot be a pass/fail signal for quic-zig. For now the weekly
+  matrix lists it with the wrapper's new `--known-failures`: a
   listed cell that fails does not fail the job, and a listed cell
-  that passes does, so the list cannot go stale. The endpoint's
+  that passes does, so the list cannot go stale. That holds only
+  while the cell fails every time. The endpoint's
   "stalled-peer keepalive" for this cell rests on a theory the logs
   do not support (nothing is parked on the quiche side); the
   measurement is recorded next to it in `interop/qns_endpoint.zig`.
