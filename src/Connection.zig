@@ -1243,7 +1243,21 @@ pub const max_local_skipped_stream_ranges: usize = 64;
 /// Implementation allocation policy. QUIC's wire limits are intentionally
 /// enormous; quic caps the resources it advertises and tracks so peer input
 /// cannot force unbounded stream/path/CID state.
-pub const max_streams_per_connection: u64 = 4096;
+///
+/// The most streams of one type (bidirectional, unidirectional) a peer
+/// may have open AT ONCE: the largest `initial_max_streams_bidi` /
+/// `initial_max_streams_uni` this endpoint accepts in its own transport
+/// parameters, and the most a `queueMaxStreams` call can put the limit
+/// ahead of the streams that have closed. It bounds the live `Stream`s
+/// a peer can make this endpoint hold.
+///
+/// It is NOT a count over the connection's life. The limit rises as
+/// streams close, with no ceiling below the wire's own
+/// (`max_stream_count_limit`, 2^60), and a limit the PEER grants is
+/// taken as sent. (Through 0.23.0 this number was
+/// `max_streams_per_connection` and it was a lifetime cap: a
+/// connection stopped at 4096 streams of each type.)
+pub const max_concurrent_streams_per_kind: u64 = 4096;
 /// Largest QUIC multipath path identifier we accept (draft-ietf-quic-multipath-21).
 pub const max_supported_path_id: u32 = 255;
 /// Hard cap on the `active_connection_id_limit` we honour from the peer.
@@ -2260,8 +2274,8 @@ fn normalizeLocalTransportParams(params: TransportParams) transport_params_mod.E
     {
         return error.InvalidValue;
     }
-    if (local.initial_max_streams_bidi > max_streams_per_connection or
-        local.initial_max_streams_uni > max_streams_per_connection)
+    if (local.initial_max_streams_bidi > max_concurrent_streams_per_kind or
+        local.initial_max_streams_uni > max_concurrent_streams_per_kind)
     {
         return error.InvalidValue;
     }
@@ -2855,6 +2869,18 @@ pub const peerStreamsBlockedAt = conn_flow.peerStreamsBlockedAt;
 
 pub const shouldQueueReceiveCredit = conn_flow.shouldQueueReceiveCredit;
 
+/// Raise the stream limit the peer has been given to `maximum_streams`
+/// (a count, as on the wire) and queue the MAX_STREAMS frame. An
+/// embedder does not need this: stream credit comes back by itself as
+/// the peer's streams close, so the peer can always have
+/// `initial_max_streams_*` streams open. A call puts the limit AHEAD of
+/// that, by hand: the peer may open more at once, and the automatic
+/// credit starts again only when the closed streams catch up.
+///
+/// Ignored when it does not raise the limit, under graceful shutdown,
+/// and above the wire maximum. Bounded: the limit is never more than
+/// `max_concurrent_streams_per_kind` ahead of the streams that have
+/// closed.
 pub const queueMaxStreams = conn_flow.queueMaxStreams;
 
 pub const connectionIdReplenishInfo = conn_cids.connectionIdReplenishInfo;
@@ -3293,8 +3319,8 @@ pub fn validatePeerTransportRole(self: *Connection) void {
 
 fn applyPeerFlowTransportParams(self: *Connection, params: TransportParams) void {
     self.peer_max_data = params.initial_max_data;
-    self.local_bidi_ids.limit = @min(params.initial_max_streams_bidi, max_streams_per_connection);
-    self.local_uni_ids.limit = @min(params.initial_max_streams_uni, max_streams_per_connection);
+    self.local_bidi_ids.limit = params.initial_max_streams_bidi;
+    self.local_uni_ids.limit = params.initial_max_streams_uni;
     var it = self.streams.iterator();
     while (it.next()) |entry| {
         const s = entry.value_ptr.*;

@@ -12,6 +12,7 @@
 //!  - sessions are freed exactly once, in the will-close hook.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const quic = @import("quic");
 const common = @import("common.zig");
 
@@ -1337,8 +1338,9 @@ test "ConnectionDriver: borrowed accepted and dialed connections share partial r
 }
 
 /// Request/reply over one long-lived connection: the answering side
-/// echoes each bidi stream's bytes and its FIN; the asking side counts
-/// completed replies.
+/// echoes each bidi stream's bytes and its FIN (a unidirectional
+/// stream is read and counted, and has no reply); the asking side
+/// counts completed replies.
 const LongLivedApp = struct {
     pub const ConnState = void;
     pub const StreamState = struct {};
@@ -1347,13 +1349,13 @@ const LongLivedApp = struct {
     ends: usize = 0,
 
     fn data(app: *LongLivedApp, d: *C, e: *C.StreamEntry, bytes: []const u8) anyerror!usize {
-        if (app.reply) try d.outbox.push(d.conn, e.id, bytes);
+        if (app.reply and e.bidi) try d.outbox.push(d.conn, e.id, bytes);
         return bytes.len;
     }
     fn ended(app: *LongLivedApp, d: *C, e: *C.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
         if (end != .fin) return;
         app.ends += 1;
-        if (app.reply) try d.outbox.finish(d.conn, e.id);
+        if (app.reply and e.bidi) try d.outbox.finish(d.conn, e.id);
     }
     fn hooks() C.Hooks {
         return .{ .on_stream_data = data, .on_stream_end = ended };
@@ -1439,7 +1441,7 @@ test "ConnectionDriver: a stream table the size of the stream window never refus
         defer sender.deinit();
 
         // The asking side opens a request whenever it is allowed to.
-        const total: usize = 300;
+        const total: usize = if (builtin.mode == .debug) 100 else 300;
         var opened: usize = 0;
         var steps: usize = 0;
         while (client_app.ends < total) : (steps += 1) {
@@ -1470,81 +1472,108 @@ test "ConnectionDriver: a stream table the size of the stream window never refus
     }
 }
 
-test "ConnectionDriver: the lifetime stream cap ends a long-lived session, and waiting does not help" {
-    // A connection can open `Connection.max_streams_per_connection`
-    // streams of each type over its WHOLE LIFE, not at a time: the
-    // peer's cumulative MAX_STREAMS never rises past the cap, however
-    // many of the earlier streams have finished and been reaped. A
-    // protocol that spends one bidi stream per request therefore gets
-    // 4096 requests per connection, and then `StreamLimitExceeded` on
-    // every open, for good — on a long-lived session that looks like
-    // every later request timing out. This test pins that documented
-    // limit (EMBEDDING.md, "Stream limits are lifetime limits"); when
-    // stream credit is recycled instead, it fails, and the docs and
-    // this test move together.
+/// The long run, in two sizes (a Debug build of the library is about
+/// 100 times slower than a release build here; see `full_size` in
+/// stream_window.zig). `zig build test -Drelease=true` runs 20,000
+/// requests and 20,000 one-way streams, asked by the client and then
+/// by the server. A Debug build runs 4,200 requests asked by the
+/// client: past the old lifetime cap of 4096, which is the one count
+/// that must be large in every build.
+const long_run_requests: usize = if (builtin.mode == .debug) 4_200 else 20_000;
+const long_run_notes: usize = if (builtin.mode == .debug) 0 else 20_000;
+const long_run_server_asks: []const bool = if (builtin.mode == .debug) &.{false} else &.{ false, true };
+
+test "ConnectionDriver: a long-lived session has no lifetime stream cap" {
+    // Through 0.23.0 a connection could open 4096 streams of each type
+    // over its WHOLE LIFE: the peer's MAX_STREAMS never rose past
+    // that, however many of the earlier streams had finished. A
+    // protocol that spends one bidirectional stream per request got
+    // 4096 requests, and then `StreamLimitExceeded` on every open, for
+    // good. On a long-lived session that looked like every later
+    // request timing out. This test pinned that limit, as 4096
+    // requests and then a refusal that waiting did not cure. Now the
+    // limit is a window that moves as streams close, and the same
+    // session goes on: 20,000 requests and 20,000 one-way streams on
+    // one connection, with tables of eight, asked by the client and
+    // then (on a fresh pair) by the server.
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"long-lived"};
-    var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = common.defaultParams() });
-    defer server.deinit();
-    var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = common.defaultParams(), .insecure_skip_verify = true });
-    defer client.deinit();
-    var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
-    defer loop.deinit();
-    try loop.handshake(&quic.testing.NullDriver{});
-    while (server.iterator()[0].conn.pollEvent()) |_| {}
-    while (client.conn.pollEvent()) |_| {}
-    var server_app: LongLivedApp = .{ .reply = true };
-    var client_app: LongLivedApp = .{ .reply = false };
-    var receiver = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &server_app, .conn = server.iterator()[0].conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
-    defer receiver.deinit();
-    var sender = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &client_app, .conn = client.conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
-    defer sender.deinit();
-    const cap: usize = @intCast(quic.Connection.max_streams_per_connection);
-    var opened: usize = 0;
-    while (opened < cap) {
-        // Up to six requests in flight (the tables hold eight). Credit
-        // that has not been returned yet just makes a batch shorter.
-        const before = opened;
-        while (opened < cap and opened - before < 6) {
-            const stream = client.conn.openNextBidi() catch |err| switch (err) {
-                error.StreamLimitExceeded => break,
-                else => return err,
-            };
-            try sender.trackStream(stream.id);
-            try sender.outbox.push(client.conn, stream.id, "request");
-            try sender.outbox.finish(client.conn, stream.id);
-            opened += 1;
-        }
-        // Below the cap, credit always comes back.
-        try std.testing.expect(opened > before);
-        var steps: usize = 0;
-        while (client_app.ends < opened and steps < 256) : (steps += 1) {
-            _ = try loop.pumpClientToServer();
-            try receiver.service();
-            _ = try loop.pumpServerToClient();
-            try sender.service();
-            try server.tick(loop.now_us);
-            try client.conn.tick(loop.now_us);
-            loop.now_us += 1_000;
-        }
-        try std.testing.expectEqual(opened, client_app.ends);
-    }
+    for (long_run_server_asks) |server_asks| {
+        var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = common.defaultParams() });
+        defer server.deinit();
+        var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = common.defaultParams(), .insecure_skip_verify = true });
+        defer client.deinit();
+        var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+        defer loop.deinit();
+        try loop.handshake(&quic.testing.NullDriver{});
+        const server_conn = server.iterator()[0].conn;
+        while (server_conn.pollEvent()) |_| {}
+        while (client.conn.pollEvent()) |_| {}
+        const asking_conn = if (server_asks) server_conn else client.conn;
+        const answering_conn = if (server_asks) client.conn else server_conn;
+        var answering_app: LongLivedApp = .{ .reply = true };
+        var asking_app: LongLivedApp = .{ .reply = false };
+        var receiver = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &answering_app, .conn = answering_conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
+        defer receiver.deinit();
+        var sender = try LongLivedApp.C.init(.{ .allocator = allocator, .app = &asking_app, .conn = asking_conn, .hooks = LongLivedApp.hooks(), .max_tracked_streams = 8 });
+        defer sender.deinit();
 
-    // All 4096 were answered and reaped. The next open fails, and it
-    // still fails after the peer has had every chance to grant credit.
-    try std.testing.expectError(error.StreamLimitExceeded, client.conn.openNextBidi());
-    for (0..64) |_| {
-        _ = try loop.pumpClientToServer();
-        try receiver.service();
-        _ = try loop.pumpServerToClient();
-        try sender.service();
-        try server.tick(loop.now_us);
-        try client.conn.tick(loop.now_us);
-        loop.now_us += 1_000;
+        var requests: usize = 0;
+        var notes: usize = 0;
+        while (requests < long_run_requests or notes < long_run_notes) {
+            // Up to three requests and three one-way notes in flight
+            // (the tables hold eight). Credit that has not come back
+            // yet just makes a batch shorter.
+            const requests_before = requests;
+            const notes_before = notes;
+            while (requests < long_run_requests and requests - requests_before < 3) {
+                const stream = asking_conn.openNextBidi() catch |err| switch (err) {
+                    error.StreamLimitExceeded => break,
+                    else => return err,
+                };
+                try sender.trackStream(stream.id);
+                try sender.outbox.push(asking_conn, stream.id, "request");
+                try sender.outbox.finish(asking_conn, stream.id);
+                requests += 1;
+            }
+            while (notes < long_run_notes and notes - notes_before < 3) {
+                const stream = asking_conn.openNextUni() catch |err| switch (err) {
+                    error.StreamLimitExceeded => break,
+                    else => return err,
+                };
+                try sender.outbox.push(asking_conn, stream.id, "note");
+                try sender.outbox.finish(asking_conn, stream.id);
+                notes += 1;
+            }
+            // Credit always comes back: every batch opens something.
+            try std.testing.expect(requests > requests_before or notes > notes_before);
+            var steps: usize = 0;
+            while ((asking_app.ends < requests or answering_app.ends < requests + notes) and steps < 256) : (steps += 1) {
+                _ = try loop.pumpClientToServer();
+                try (if (server_asks) sender.service() else receiver.service());
+                _ = try loop.pumpServerToClient();
+                try (if (server_asks) receiver.service() else sender.service());
+                try server.tick(loop.now_us);
+                try client.conn.tick(loop.now_us);
+                loop.now_us += 1_000;
+            }
+            try std.testing.expectEqual(requests, asking_app.ends);
+            try std.testing.expectEqual(requests + notes, answering_app.ends);
+        }
+
+        // Far past the old cap, for both stream types, on both sides of
+        // the one connection.
+        try std.testing.expect(long_run_requests > 4096);
+        try std.testing.expectEqual(@as(u64, long_run_requests), asking_conn.local_bidi_ids.opened);
+        try std.testing.expectEqual(@as(u64, long_run_notes), asking_conn.local_uni_ids.opened);
+        try std.testing.expectEqual(@as(u64, long_run_requests), answering_conn.peer_bidi_ids.opened);
+        try std.testing.expectEqual(@as(u64, long_run_notes), answering_conn.peer_uni_ids.opened);
+        try std.testing.expect(answering_conn.peer_bidi_ids.limit > long_run_requests);
+        try std.testing.expectEqual(@as(u64, 0), sender.refusedStreams());
+        try std.testing.expectEqual(@as(u64, 0), receiver.refusedStreams());
+        try std.testing.expect(client.conn.closeEvent() == null);
+        try std.testing.expect(server_conn.closeEvent() == null);
     }
-    try std.testing.expectError(error.StreamLimitExceeded, client.conn.openNextBidi());
-    try std.testing.expectEqual(@as(u64, 0), sender.refusedStreams());
-    try std.testing.expectEqual(@as(u64, 0), receiver.refusedStreams());
 }
 
 test "Driver: automatic attachment preserves foreign user data and chains teardown" {

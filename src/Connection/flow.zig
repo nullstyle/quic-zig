@@ -13,7 +13,7 @@ const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const frame_types = state_mod.frame_types;
 const max_stream_count_limit = state_mod.max_stream_count_limit;
-const max_streams_per_connection = state_mod.max_streams_per_connection;
+const max_concurrent_streams_per_kind = state_mod.max_concurrent_streams_per_kind;
 const Stream = state_mod.Stream;
 const FlowBlockedInfo = state_mod.FlowBlockedInfo;
 const max_tracked_stream_data_blocked = state_mod.max_tracked_stream_data_blocked;
@@ -140,7 +140,14 @@ pub fn queueMaxStreams(conn: *Connection, bidi: bool, maximum_streams: u64) void
     // unaffected. Peer-blocked state is intentionally left set.
     if (conn.graceful_shutdown) return;
     if (maximum_streams > max_stream_count_limit) return;
-    const bounded_maximum_streams = @min(maximum_streams, max_streams_per_connection);
+    // Whatever the caller asks for, the limit is never more than
+    // `max_concurrent_streams_per_kind` ahead of the streams that have
+    // closed: that many streams of one type open at once is the most
+    // this endpoint will hold. The automatic credit
+    // (`maybeAdvertiseStreamCredit`) asks for `window + closed`, which
+    // is inside this bound by construction.
+    const closed = if (bidi) conn.peer_bidi_ids.closed else conn.peer_uni_ids.closed;
+    const bounded_maximum_streams = @min(maximum_streams, closed +| max_concurrent_streams_per_kind);
     // Early-out if the limit has not strictly advanced. RFC 9000
     // §19.11: a peer MUST ignore MAX_STREAMS that does not advance.
     // Locally we mirror that — no point clearing peer-blocked state

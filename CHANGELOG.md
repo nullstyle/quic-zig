@@ -29,11 +29,37 @@ changes.
 - **A local bidirectional stream at index 4096 or above was never
   reclaimed.** Its closed state was one bit in a 4096-bit set, so an id
   past the set kept its terminal `Stream` until the connection ended.
-  Reachable only before the peer's transport parameters arrive (the
-  negotiated limit is capped at 4096 until the lifetime cap goes).
+  Reachable only before the peer's transport parameters arrived (the
+  negotiated limit was capped at 4096 then).
 
-### Changed
+### Changed (BREAKING)
 
+- **No lifetime stream cap.** A connection carried at most 4096
+  streams of each type over its whole life: our MAX_STREAMS never rose
+  past 4096, and a larger limit from the peer was clamped to 4096.
+  From stream 4097 on, every open returned `StreamLimitExceeded`, for
+  good, on a connection that otherwise looked healthy. That cap is
+  gone. Together with the window rule below, a connection now carries
+  any number of streams (up to the wire's 2^60), a window's worth at a
+  time.
+  - `Connection.max_streams_per_connection` is REMOVED, not given a new
+    meaning. Code that names it stops compiling, and that is the
+    signal: logic built on it (count the streams, retire the
+    connection before 4096) is no longer needed and should be deleted.
+  - `Connection.max_concurrent_streams_per_kind` (4096) is the new
+    name for what the number still bounds: the largest
+    `initial_max_streams_bidi` / `initial_max_streams_uni` you may
+    configure, which is the most streams of one type a peer can have
+    open at once. A larger value is still `error.InvalidValue`.
+  - A limit the PEER grants, in its transport parameters or in
+    MAX_STREAMS, is taken as sent (the only ceiling is the stream id
+    space).
+  - `Connection.queueMaxStreams` (a manual grant; nothing needs it)
+    is bounded to `max_concurrent_streams_per_kind` ahead of the
+    streams that have closed.
+  - `StreamLimitExceeded` is always temporary now.
+  - EMBEDDING.md: "Stream limits are lifetime limits" is replaced by
+    "Stream limits are a window".
 - **The stream limit is a window, and stream credit comes back when a
   stream is closed (wire behaviour).** `initial_max_streams_bidi` /
   `_uni` is now the number of streams the peer may have open AT ONCE.
@@ -61,8 +87,9 @@ changes.
     `Connection.min_stream_credit_return_batch` and
     `Connection.stream_credit_return_divisor`, and the field
     `Stream.stream_count_credit_returned`.
-  - The 4096 lifetime cap is still in place at this point: a
-    connection still stops at 4096 streams of each type.
+
+### Changed
+
 - **Closed-stream memory is no longer indexed by stream id.** The three
   fixed 4096-bit sets that recorded which streams had been reaped are
   gone. Each of the four stream-id spaces (peer or local, bidi or uni)
@@ -70,8 +97,8 @@ changes.
   plus a short list of the lower ids that were skipped and not used
   yet. An id below the high-water mark that is not live and was not
   skipped is closed, at any index. `Connection` is 1,360 bytes smaller
-  (156,040 to 154,680 in Debug). This is the groundwork for removing
-  the lifetime stream cap; the cap itself is still in place here.
+  (156,040 to 154,680 in Debug). This is what let the lifetime stream
+  cap go.
 - **New error `TooManySkippedStreamIds`.** `openBidi(id)` /
   `openUni(id)` may name ids out of order. Each separate run of
   skipped lower ids is remembered until it is opened, and the
@@ -88,6 +115,21 @@ changes.
 
 ### CI and tests
 
+- **One connection, 20,000 streams of each type, each way.** The test
+  that pinned the lifetime cap (4096 requests, then a refusal that
+  waiting did not cure) is now the test that there is none:
+  `tests/e2e/app_driver.zig` runs 20,000 requests and 20,000 one-way
+  streams on one connection through the app driver, asked by the
+  client and then by the server; `tests/e2e/stream_window.zig` does
+  the same on bare `Connection`s through a window of 100, with every
+  7th datagram from the answering side delivered 40 iterations late,
+  so that replies arrive for streams that are finished and reaped
+  (6,678 late datagrams, all ignored as RFC 9000 §3.2 says). Those are
+  the release-build sizes (`zig build test -Drelease=true`: the whole
+  end-to-end suite takes 1.1 s there). A Debug build of the library is
+  about 100 times slower in these loops, so the Debug suite runs the
+  same checks on fewer streams, and one run of 4,200 requests, past
+  the old cap.
 - **Stream-window tests at three levels.** End to end
   (`tests/e2e/stream_window.zig`, a real `Server` / `Client` pair):
   the live peer streams never pass a window of 1, 2, 16 or 100, in

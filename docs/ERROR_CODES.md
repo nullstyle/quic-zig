@@ -18,7 +18,7 @@ contract. The error sets are additive-only across minor releases
 | `StreamAlreadyOpen` | Open for an id that is live, or that was used before. | Re-opening after `peekNext*`; track your opens. A stream id is used once: an id whose stream finished and was reaped is not free again (RFC 9000 §2.1), for `openBidi` and `openUni` alike. |
 | `TooManySkippedStreamIds` | `openBidi(id)` / `openUni(id)` named an id too far out of order. | Each run of lower ids you skip is remembered until you open it; the connection keeps at most `Connection.max_local_skipped_stream_ranges` (64) runs. Not a retry-later error: open the ids you skipped, or open in order with `openNextBidi` / `openNextUni`, which never skip. |
 | `StreamNotFound` | The id is not in the live stream table. | Normal completion signal: the stream reached terminal and the GC reaped it. Also genuinely-unknown ids. |
-| `StreamLimitExceeded` | Peer's MAX_STREAMS window is full. | Retryable, and the id is not consumed — until the connection has opened 4096 streams of that kind in its lifetime. After that it is permanent: retire the connection (EMBEDDING.md, "Stream limits are lifetime limits"). |
+| `StreamLimitExceeded` | Peer's MAX_STREAMS window is full. | Always temporary, and the id is not consumed: try again when the peer has raised its limit, which it does as your streams close on its side (EMBEDDING.md, "Stream limits are a window"). There is no lifetime cap (0.23.0 and earlier stopped for good at 4096 streams of each type). |
 | `ShuttingDown` | Local graceful shutdown refuses new streams. | After `beginGracefulShutdown`. |
 | `StreamClosed` (SendStream) | Wrote after FIN or RESET on that stream. | App-side sequencing bug. |
 

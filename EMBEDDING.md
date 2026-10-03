@@ -694,8 +694,8 @@ switch (quic.StreamType.fromId(id)) {
 
 `openNextBidi` / `openNextUni` pick the id automatically and return
 `Error.StreamLimitExceeded` when the peer's limit is reached without
-consuming the id (a later retry reuses it; "Stream limits are lifetime
-limits" below says when no retry can succeed). When a layer must know the id
+consuming the id (a later retry reuses it; see "Stream limits are a
+window" below). When a layer must know the id
 *before* opening — e.g. to run a GOAWAY / stream-limit gate keyed on it —
 `peekNextBidi()` / `peekNextUni()` return the id the matching `openNext*`
 would use next, without consuming it:
@@ -706,31 +706,58 @@ if (!localGoawayGate(id)) return error.RequestBlocked;
 const s = try conn.openNextBidi();   // reuses the peeked id
 ```
 
-### Stream limits are lifetime limits
+### Stream limits are a window
 
-A connection can open at most `Connection.max_streams_per_connection`
-(4096) streams of each kind — each endpoint's bidirectional and
-unidirectional streams are counted separately — over its **whole
-life**, not at a time. Finishing a stream returns its credit only up
-to that total: the cumulative MAX_STREAMS quic-zig grants never rises
-past 4096, and a larger grant from a peer is clamped to 4096, however
-many of the earlier streams have completed and been reaped. Past that
-point `openNextBidi` / `openNextUni` return `Error.StreamLimitExceeded`
-on every call, and waiting does not help.
+`initial_max_streams_bidi` and `initial_max_streams_uni` say how many
+streams of each type the peer may have open **at once**. They do not
+limit how many streams a connection carries over its life: a
+connection can go on for as long as it lives (the only ceiling is the
+wire's own, 2^60 streams of each type).
 
-That bounds a long-lived connection in a way a short test never
-reaches. A protocol that spends one bidirectional stream per request
-gets 4096 requests per connection; from the 4097th on, a request layer
-that treats `StreamLimitExceeded` as transient backpressure sees every
-later request queue up and time out, on a connection that otherwise
-looks healthy. Plan for it: count the streams a connection has opened
-(`peekNextBidi() / 4` is the index the next one will get) and retire
-the connection with some headroom left, or carry many requests on
-fewer, longer-lived streams. The cap is a deliberate allocation bound
-— fixed per-connection bitmaps remember which stream ids were reaped —
-and `tests/e2e/app_driver.zig` pins it; recycling stream credit so a
-connection is bounded by live streams instead is planned work, not
-current behavior.
+quic-zig gives a stream id back when a stream of the peer is fully
+closed, and sends the MAX_STREAMS frame for you. The limit it has
+advertised is always `window + streams closed`. Things to know:
+
+- **A stream holds its place until both directions are finished.** For
+  a bidirectional stream the peer opened, that means its data is read
+  to the end, and your side is finished and acknowledged (or reset).
+  A request you never answer and never finish holds one place in the
+  window for the life of the connection. Finish (`streamFinish`) or
+  reset (`streamReset`) every stream you do not need.
+- **`Error.StreamLimitExceeded` is always temporary.** The id is not
+  consumed. Try again when the peer has raised its limit; a
+  `flow_blocked` event with `kind == .streams` tells you that you were
+  blocked, and the peer is told too (STREAMS_BLOCKED). How fast a peer
+  gives ids back is the peer's own rule.
+- **An id you skip is a stream the peer keeps open.** Opening stream
+  12 first also opens 0, 4 and 8 on the peer (RFC 9000 §2.1), and each
+  holds a place in its window until you use and finish it. Open
+  streams in order (`openNextBidi` / `openNextUni` do), or use the ids
+  you skipped.
+- **Size your window from round trips, not from the request count.** An
+  id comes back two round trips after its stream opens: one for the
+  request and the reply, one for the acknowledgement and the credit.
+  A window of `W` therefore carries about `W / (2 x RTT)`
+  request/reply streams per second. Measured (`zig build bench-e2e --
+  --scenario churn`, 30 ms round trip): 16.6, 66.2 and 221.5 per
+  second for windows of 1, 4 and 16.
+- **A table sized to your windows cannot overflow.** A conforming peer
+  never has more than `initial_max_streams_bidi +
+  initial_max_streams_uni` streams open, so a stream table of that
+  size (see `quic.app.Driver`'s `max_tracked_streams`) never has to
+  refuse one.
+- The largest window you may configure is
+  `Connection.max_concurrent_streams_per_kind` (4096); a larger value
+  is `error.InvalidValue`. A limit the PEER grants you is taken as
+  sent.
+
+Releases through 0.23.0 worked differently, and code written for them
+may still plan for it: the limit DOUBLED when streams ended (so it did
+not bound concurrency), and it stopped for good at 4096 streams of each
+type over the life of the connection
+(`Connection.max_streams_per_connection`, removed). If you counted
+streams and retired a connection before stream 4096, you can delete
+that.
 
 To observe stream completion and backpressure without reaching into the
 stream internals — which the transport's stream GC reclaims the moment a
@@ -897,9 +924,12 @@ advertise, and values above the caps are rejected with
 `error.InvalidValue` (at `Client.connect`, or when the server installs
 the parameters on an accepted connection) rather than clamped:
 `initial_max_data` and each `initial_max_stream_data_*` cap at 16 MiB,
-`initial_max_streams_bidi` / `initial_max_streams_uni` at 4096, and
-`active_connection_id_limit` at 16. Peer-advertised stream-count and
-CID limits above those caps are clamped instead.
+`initial_max_streams_bidi` / `initial_max_streams_uni` at 4096
+(`Connection.max_concurrent_streams_per_kind`: streams open at once,
+not streams over the connection's life), and
+`active_connection_id_limit` at 16. A peer-advertised CID limit above
+the cap is clamped instead. A peer-advertised stream limit is taken as
+sent.
 
 Persist Retry, NEW_TOKEN, and stateless-reset keys across graceful
 restarts when continuity matters. Rotating them is a deployment event:

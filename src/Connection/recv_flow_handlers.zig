@@ -15,7 +15,6 @@ const transport_error_stream_state = state_mod.transport_error_stream_state;
 const transport_error_frame_encoding = state_mod.transport_error_frame_encoding;
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
 const max_stream_count_limit = state_mod.max_stream_count_limit;
-const max_streams_per_connection = state_mod.max_streams_per_connection;
 const upsertStreamBlocked = Connection.upsertStreamBlocked;
 
 /// Handle a peer-sent MAX_DATA frame (RFC 9000 §19.9). Lifts our
@@ -44,24 +43,18 @@ pub fn handleMaxStreamData(conn: *Connection, msd: frame_types.MaxStreamData) vo
 }
 
 /// Handle a peer-sent MAX_STREAMS frame (RFC 9000 §19.11). Lifts our
-/// stream-count limit (bidi or uni) if the value increases. Caps at
-/// `max_streams_per_connection`. FRAME_ENCODING_ERROR on out-of-range.
+/// stream-count limit (bidi or uni) if the value increases. The value
+/// is taken as sent: the only ceiling is the stream id space (2^60),
+/// and a value above it is FRAME_ENCODING_ERROR.
 pub fn handleMaxStreams(conn: *Connection, ms: frame_types.MaxStreams) void {
     if (ms.maximum_streams > max_stream_count_limit) {
         conn.close(true, transport_error_frame_encoding, "max streams exceeds stream id space");
         return;
     }
-    const bounded_maximum_streams = @min(ms.maximum_streams, max_streams_per_connection);
-    if (ms.bidi) {
-        if (bounded_maximum_streams > conn.local_bidi_ids.limit) {
-            conn.local_bidi_ids.limit = bounded_maximum_streams;
-            conn.clearLocalStreamsBlocked(true, bounded_maximum_streams);
-        }
-    } else {
-        if (bounded_maximum_streams > conn.local_uni_ids.limit) {
-            conn.local_uni_ids.limit = bounded_maximum_streams;
-            conn.clearLocalStreamsBlocked(false, bounded_maximum_streams);
-        }
+    const ids = if (ms.bidi) &conn.local_bidi_ids else &conn.local_uni_ids;
+    if (ms.maximum_streams > ids.limit) {
+        ids.limit = ms.maximum_streams;
+        conn.clearLocalStreamsBlocked(ms.bidi, ms.maximum_streams);
     }
 }
 

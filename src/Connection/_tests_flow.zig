@@ -19,7 +19,7 @@ const frame_types = state.frame_types;
 const max_initial_connection_receive_window = state.max_initial_connection_receive_window;
 const max_initial_stream_receive_window = state.max_initial_stream_receive_window;
 const max_stream_count_limit = state.max_stream_count_limit;
-const max_streams_per_connection = state.max_streams_per_connection;
+const max_concurrent_streams_per_kind = state.max_concurrent_streams_per_kind;
 const max_supported_active_connection_id_limit = state.max_supported_active_connection_id_limit;
 const max_supported_path_id = state.max_supported_path_id;
 const max_tracked_stream_data_blocked = state.max_tracked_stream_data_blocked;
@@ -93,10 +93,10 @@ test "local transport params reject allocation policy overflows" {
     defer conn.destroy();
 
     try std.testing.expectError(error.InvalidValue, conn.setTransportParams(.{
-        .initial_max_streams_bidi = max_streams_per_connection + 1,
+        .initial_max_streams_bidi = max_concurrent_streams_per_kind + 1,
     }));
     try std.testing.expectError(error.InvalidValue, conn.setTransportParams(.{
-        .initial_max_streams_uni = max_streams_per_connection + 1,
+        .initial_max_streams_uni = max_concurrent_streams_per_kind + 1,
     }));
     try std.testing.expectError(error.InvalidValue, conn.setTransportParams(.{
         .active_connection_id_limit = max_supported_active_connection_id_limit + 1,
@@ -118,26 +118,47 @@ test "local transport params reject allocation policy overflows" {
     }));
 }
 
-test "bounded policy clamps MAX_STREAMS MAX_PATH_ID and peer CID fanout" {
+test "bounded policy: a manual MAX_STREAMS, MAX_PATH_ID and peer CID fanout are clamped; a peer's MAX_STREAMS is not" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
     const conn = try Connection.createClient(allocator, ctx, "x");
     defer conn.destroy();
 
+    // What the PEER grants is taken as sent, in its transport parameters
+    // and in MAX_STREAMS. There is no ceiling on the streams a
+    // connection opens over its life but the id space.
+    conn.cached_peer_transport_params = .{
+        .initial_max_streams_bidi = 100_000,
+        .initial_max_streams_uni = max_stream_count_limit,
+    };
+    conn.validatePeerTransportLimits();
+    try std.testing.expectEqual(@as(u64, 100_000), conn.local_bidi_ids.limit);
+    try std.testing.expectEqual(max_stream_count_limit, conn.local_uni_ids.limit);
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+
     conn.local_bidi_ids.limit = 0;
     conn.local_uni_ids.limit = 0;
-    conn.handleMaxStreams(.{ .bidi = true, .maximum_streams = max_streams_per_connection + 100 });
-    conn.handleMaxStreams(.{ .bidi = false, .maximum_streams = max_streams_per_connection + 100 });
-    try std.testing.expectEqual(max_streams_per_connection, conn.local_bidi_ids.limit);
-    try std.testing.expectEqual(max_streams_per_connection, conn.local_uni_ids.limit);
+    conn.handleMaxStreams(.{ .bidi = true, .maximum_streams = max_concurrent_streams_per_kind + 100 });
+    conn.handleMaxStreams(.{ .bidi = false, .maximum_streams = max_stream_count_limit });
+    try std.testing.expectEqual(max_concurrent_streams_per_kind + 100, conn.local_bidi_ids.limit);
+    try std.testing.expectEqual(max_stream_count_limit, conn.local_uni_ids.limit);
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
 
-    conn.queueMaxStreams(true, max_streams_per_connection + 100);
-    conn.queueMaxStreams(false, max_streams_per_connection + 100);
-    try std.testing.expectEqual(max_streams_per_connection, conn.peer_bidi_ids.limit);
-    try std.testing.expectEqual(max_streams_per_connection, conn.peer_uni_ids.limit);
-    try std.testing.expectEqual(max_streams_per_connection, conn.pending_frames.max_streams_bidi.?);
-    try std.testing.expectEqual(max_streams_per_connection, conn.pending_frames.max_streams_uni.?);
+    // What WE grant by hand is bounded: never more than
+    // `max_concurrent_streams_per_kind` ahead of the streams that have
+    // closed, so a peer can never have more than that open at once.
+    conn.queueMaxStreams(true, max_concurrent_streams_per_kind + 100);
+    conn.queueMaxStreams(false, max_concurrent_streams_per_kind + 100);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind, conn.peer_bidi_ids.limit);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind, conn.peer_uni_ids.limit);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind, conn.pending_frames.max_streams_bidi.?);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind, conn.pending_frames.max_streams_uni.?);
+    // Ten streams have closed: ten more ids may be given.
+    conn.peer_bidi_ids.closed = 10;
+    conn.queueMaxStreams(true, max_stream_count_limit);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind + 10, conn.peer_bidi_ids.limit);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind + 10, conn.pending_frames.max_streams_bidi.?);
 
     conn.queueMaxPathId(max_supported_path_id + 100);
     try std.testing.expectEqual(max_supported_path_id, conn.local_max_path_id);
@@ -1014,30 +1035,26 @@ test "stream credit: the last id can be used by a jump over lower ids, or by RES
     }
 }
 
-test "draining at stream cap does not queue duplicate MAX_STREAMS" {
-    const allocator = std.testing.allocator;
+test "stream credit: at the largest window the limit still rises past it" {
+    // There is no lifetime cap. With the window at the largest value
+    // the transport parameters accept, a closed stream is still one
+    // more id, and the limit goes past `max_concurrent_streams_per_kind`.
+    // (This number was a ceiling on the limit itself through 0.23.0: a
+    // connection stopped at 4096 streams of each type.)
     var ctx = try boringssl.tls.Context.initServer(.{});
     defer ctx.deinit();
-    const conn = try Connection.createServer(allocator, ctx);
+    const conn = try windowServer(ctx, 0, max_concurrent_streams_per_kind);
     defer conn.destroy();
 
-    try conn.setTransportParams(.{
-        .initial_max_data = 16,
-        .initial_max_stream_data_bidi_remote = 16,
-        .initial_max_streams_bidi = max_streams_per_connection,
-    });
-    try conn.handleStream(.application, .{
-        .stream_id = 0,
-        .offset = 0,
-        .data = "x",
-        .has_length = true,
-        .fin = true,
-    });
-
-    var buf: [1]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(0, &buf));
-    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_bidi);
-    try std.testing.expectEqual(max_streams_per_connection, conn.peer_bidi_ids.limit);
+    try openReadReapPeerUni(conn, 0);
+    // One id is far less than half the window and the peer has ids to
+    // spare, so it is held for batching.
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind, conn.peer_uni_ids.limit);
+    // A STREAMS_BLOCKED at the limit releases it.
+    conn.handleStreamsBlocked(.{ .bidi = false, .maximum_streams = max_concurrent_streams_per_kind });
+    try std.testing.expectEqual(@as(?u64, max_concurrent_streams_per_kind + 1), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(max_concurrent_streams_per_kind + 1, conn.peer_uni_ids.limit);
 }
 
 test "PATH_CIDS_BLOCKED cannot skip local cid sequence numbers" {

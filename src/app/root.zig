@@ -69,7 +69,8 @@ pub const StreamEnd = union(enum) {
 /// (a loud, on-wire refusal) rather than accepting the stream into a
 /// black hole. Size the table to the `initial_max_streams_bidi` +
 /// `initial_max_streams_uni` the server advertises and a conforming
-/// peer can never overflow it.
+/// peer can never overflow it: the stream limit is a window, so that
+/// many is the most the peer can have open at once.
 pub fn StreamTable(comptime State: type) type {
     return struct {
         const Self = @This();

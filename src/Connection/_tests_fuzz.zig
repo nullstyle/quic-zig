@@ -16,7 +16,6 @@ const frame_types = state.frame_types;
 const lifecycle_mod = state.lifecycle_mod;
 const max_close_reason_len = state.max_close_reason_len;
 const max_stream_count_limit = state.max_stream_count_limit;
-const max_streams_per_connection = state.max_streams_per_connection;
 const transport_error_excessive_load = state.transport_error_excessive_load;
 const transport_error_final_size = state.transport_error_final_size;
 const transport_error_flow_control = state.transport_error_flow_control;
@@ -622,8 +621,16 @@ fn fuzzConnFlowControlWindow(_: void, smith: *std.testing.Smith) anyerror!void {
         try std.testing.expect(conn.peer_max_data >= before_max_data);
         try std.testing.expect(conn.local_bidi_ids.limit >= before_streams_bidi);
         try std.testing.expect(conn.local_uni_ids.limit >= before_streams_uni);
-        try std.testing.expect(conn.local_bidi_ids.limit <= max_streams_per_connection);
-        try std.testing.expect(conn.local_uni_ids.limit <= max_streams_per_connection);
+        try std.testing.expect(conn.local_bidi_ids.limit <= max_stream_count_limit);
+        try std.testing.expect(conn.local_uni_ids.limit <= max_stream_count_limit);
+        // A MAX_STREAMS inside the id space is taken as sent: there is
+        // no lower ceiling (through 0.23.0 the limit was clamped to
+        // 4096, the lifetime stream cap).
+        if (op == 2 and conn.lifecycle.pending_close == null) {
+            const limit = if (bidi) conn.local_bidi_ids.limit else conn.local_uni_ids.limit;
+            const before = if (bidi) before_streams_bidi else before_streams_uni;
+            try std.testing.expectEqual(@max(before, value), limit);
+        }
 
         switch (conn.lifecycle.state()) {
             .open, .closing, .draining, .closed => {},
@@ -980,16 +987,32 @@ test "fuzz: Connection PATH_CHALLENGE / PATH_RESPONSE handler invariants" {
 //
 // - `peer_max_data` is monotonic non-decreasing (handler only widens).
 // - `local_bidi_ids.limit` and `local_uni_ids.limit` are monotonic
-//   non-decreasing AND bounded above by `max_streams_per_connection`
-//   (the handler clamps with `@min`).
+//   non-decreasing, bounded above only by the stream id space, and
+//   equal to the largest in-range MAX_STREAMS seen (the handler does
+//   not clamp: there is no lifetime stream cap).
 // - MAX_STREAM_DATA on a peer-to-local-only stream id (e.g. peer-uni
 //   stream where the peer is sending) closes with `stream_state`.
 // - MAX_STREAMS exceeding `max_stream_count_limit` closes with
 //   `frame_encoding`.
 // - Lifecycle state is one of the documented `CloseState` values.
 // - Close codes (when set) are in the documented set.
+// Seed: one MAX_STREAMS(bidi, 5000). Draw order: `num_frames`, then per
+// frame `op`, `value`, `stream_id_low`, `bidi` (0 = bidirectional), each
+// an 8-byte little-endian word. 5000 is above 4096, the lifetime stream
+// cap the handler clamped to through 0.23.0, so this seed is what makes
+// "taken as sent" fail `zig build test` if a clamp comes back.
+const max_streams_above_old_cap_seed: [5 * 8]u8 = blk: {
+    var buf: [5 * 8]u8 = undefined;
+    for ([_]u64{ 1, 2, 5000, 0, 0 }, 0..) |word, i| {
+        std.mem.writeInt(u64, buf[i * 8 ..][0..8], word, .little);
+    }
+    break :blk buf;
+};
+
 test "fuzz: Connection MAX_DATA / MAX_STREAM_DATA / MAX_STREAMS monotonicity" {
-    try std.testing.fuzz({}, fuzzConnFlowControlWindow, .{});
+    try std.testing.fuzz({}, fuzzConnFlowControlWindow, .{
+        .corpus = &.{&max_streams_above_old_cap_seed},
+    });
 }
 
 // DATA_BLOCKED / STREAM_DATA_BLOCKED / STREAMS_BLOCKED fuzz harness —

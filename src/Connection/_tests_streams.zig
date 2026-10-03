@@ -20,7 +20,7 @@ const default_connection_receive_window = state.default_connection_receive_windo
 const default_stream_receive_window = state.default_stream_receive_window;
 const frame_mod = state.frame_mod;
 const long_packet_mod = state.long_packet_mod;
-const max_streams_per_connection = state.max_streams_per_connection;
+const max_concurrent_streams_per_kind = state.max_concurrent_streams_per_kind;
 const send_stream_mod = state.send_stream_mod;
 const transport_error_stream_limit = state.transport_error_stream_limit;
 const util = @import("_test_util.zig");
@@ -79,7 +79,7 @@ test "send scheduler orders ready streams by RFC 9218 priority (urgency then id)
     try conn.setTransportParams(.{
         .initial_max_data = 4096,
         .initial_max_stream_data_bidi_local = 4096,
-        .initial_max_streams_bidi = max_streams_per_connection,
+        .initial_max_streams_bidi = max_concurrent_streams_per_kind,
     });
 
     // Three client bidi streams (ids 0, 4, 8), each with a pending send byte.
@@ -131,7 +131,7 @@ test "send scheduler: non-incremental leads its band, incremental streams round-
     try conn.setTransportParams(.{
         .initial_max_data = 4096,
         .initial_max_stream_data_bidi_local = 4096,
-        .initial_max_streams_bidi = max_streams_per_connection,
+        .initial_max_streams_bidi = max_concurrent_streams_per_kind,
     });
 
     // Same urgency: three incremental streams (0, 4, 8) plus one
@@ -174,7 +174,7 @@ test "streamReadFin reports FIN inline with the last read; streamRecvState track
         .initial_max_data = 64,
         .initial_max_stream_data_bidi_local = 64,
         .initial_max_stream_data_bidi_remote = 64,
-        .initial_max_streams_bidi = max_streams_per_connection,
+        .initial_max_streams_bidi = max_concurrent_streams_per_kind,
     });
 
     // Unknown stream → null recv-state (the same "gone" signal a reaped
@@ -219,7 +219,7 @@ test "streamRecvState distinguishes a peer RESET from a clean FIN" {
         .initial_max_data = 64,
         .initial_max_stream_data_bidi_local = 64,
         .initial_max_stream_data_bidi_remote = 64,
-        .initial_max_streams_bidi = max_streams_per_connection,
+        .initial_max_streams_bidi = max_concurrent_streams_per_kind,
     });
     _ = try conn.openBidi(0);
 
