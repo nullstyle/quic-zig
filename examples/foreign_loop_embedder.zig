@@ -953,7 +953,7 @@ pub const WorkQueue = struct {
         // no-op.
         const remaining = self.len - n;
         if (remaining > 0) {
-            std.mem.copyForwards(Work, self.items[0..remaining], self.items[n..self.len]);
+            @memmove(self.items[0..remaining], self.items[n..self.len]);
         }
         self.len = remaining;
         return n;

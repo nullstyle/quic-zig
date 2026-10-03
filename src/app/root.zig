@@ -269,7 +269,7 @@ pub const Outbox = struct {
             return;
         }
         const remaining = data.len - n;
-        std.mem.copyForwards(u8, tail.data.items[0..remaining], tail.data.items[n..]);
+        @memmove(tail.data.items[0..remaining], tail.data.items[n..]);
         tail.data.shrinkAndFree(self.allocator, remaining);
         self.tails.putAssumeCapacity(id, tail);
         self.pending_bytes += remaining;
@@ -318,7 +318,7 @@ pub const Outbox = struct {
             else => return err,
         };
         const remaining = tail.data.items.len - n;
-        std.mem.copyForwards(u8, tail.data.items[0..remaining], tail.data.items[n..]);
+        @memmove(tail.data.items[0..remaining], tail.data.items[n..]);
         self.pending_bytes -= n;
         const capacity_before = tail.data.capacity;
         tail.data.shrinkAndFree(self.allocator, remaining);

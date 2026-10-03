@@ -350,7 +350,7 @@ pub fn consume(self: *RecvStream, take: usize) void {
         self.buf_start = 0;
     } else if (self.buf_start >= self.bytes.items.len / 2) {
         const live_len = self.bytes.items.len - self.buf_start;
-        std.mem.copyForwards(u8, self.bytes.items[0..live_len], self.bytes.items[self.buf_start..]);
+        @memmove(self.bytes.items[0..live_len], self.bytes.items[self.buf_start..]);
         self.bytes.shrinkRetainingCapacity(live_len);
         self.buf_start = 0;
     }

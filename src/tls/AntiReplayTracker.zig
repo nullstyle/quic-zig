@@ -382,7 +382,7 @@ fn pruneStale(self: *AntiReplayTracker, now_us: u64) void {
         }
     }
     const remaining = self.entries.items.len - drop;
-    std.mem.copyForwards(Entry, self.entries.items[0..remaining], self.entries.items[drop..]);
+    @memmove(self.entries.items[0..remaining], self.entries.items[drop..]);
     self.entries.shrinkRetainingCapacity(remaining);
 }
 
@@ -392,8 +392,7 @@ fn evictOldest(self: *AntiReplayTracker) void {
     if (self.seen.get(oldest.id)) |ts| {
         if (ts == oldest.inserted_at_us) _ = self.seen.remove(oldest.id);
     }
-    std.mem.copyForwards(
-        Entry,
+    @memmove(
         self.entries.items[0 .. self.entries.items.len - 1],
         self.entries.items[1..],
     );

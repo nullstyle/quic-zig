@@ -761,8 +761,7 @@ pub fn pollLevelOnPath(
         conn.crypto_send_offset[out_idx] += drain_len;
         // Shift the outbox left to drop what we just consumed.
         const remaining = conn.outbox[out_idx].len - drain_len;
-        std.mem.copyForwards(
-            u8,
+        @memmove(
             conn.outbox[out_idx].buf[0..remaining],
             conn.outbox[out_idx].buf[drain_len..conn.outbox[out_idx].len],
         );

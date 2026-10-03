@@ -233,8 +233,7 @@ pub fn EventQueue(comptime T: type, comptime capacity: usize) type {
             std.debug.assert(index < self.len);
             self.compact();
             if (index + 1 < self.len) {
-                std.mem.copyForwards(
-                    T,
+                @memmove(
                     self.items[index .. self.len - 1],
                     self.items[index + 1 .. self.len],
                 );

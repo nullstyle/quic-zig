@@ -184,7 +184,7 @@ const SendByteBuffer = struct {
     }
 
     fn compactLiveBytes(self: *SendByteBuffer) void {
-        std.mem.copyForwards(u8, self.allocation[0..self.items.len], self.items);
+        @memmove(self.allocation[0..self.items.len], self.items);
         self.start = 0;
         self.items = self.allocation[0..self.items.len];
         self.capacity = self.allocation.len;
