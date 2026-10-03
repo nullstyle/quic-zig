@@ -5,7 +5,20 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.23.0] - 2026-10-03
+
+The tagged-toolchain release. quic-zig now builds on the tagged Zig
+0.17.0 release instead of a pinned master build: a breaking floor move
+for consumers, with no API change and no wire-behavior change against
+0.22.0. Moving the pin also showed that the release gates had gone
+blind in August — the fuzz gate could not fail on a failing fuzz site
+and had been running a fraction of its budget, and the toolchain was
+pinned four different ways — so this release repairs them, and it is
+the first since 0.13.1 to carry a full-budget fuzz run. Consumers move
+their toolchain pin to 0.17.0; anyone who keeps a connection open
+across thousands of streams should read the new note on lifetime
+stream limits. Verified toolchain: 0.17.0 (Linux x86-64 and aarch64,
+macOS, and Windows in CI; macOS locally).
 
 ### Changed (BREAKING)
 
@@ -26,6 +39,28 @@ changes.
   pass under the older dev.1683 pin).
 
 ### Changed
+
+- **Bulk transfer is about 19% faster, from retiring one deprecated
+  call.** `std.mem.copyForwards` — an element-wise loop that LLVM does
+  not turn into a memmove — sat on the stream hot paths: receive-buffer
+  compaction, send-buffer compaction, the CRYPTO outbox shift, and the
+  application Outbox tails. Zig 0.17.0 deprecates it in favor of the
+  `@memmove` builtin, and the swap moves `goodput_bulk_64mib` from 412
+  to 492 MB/s (ReleaseSafe, same machine and session, 9 samples; three
+  pairs measured +19.0%, +19.5%, +21.7%) and handshakes per second by
+  about +3%. The attribution is measured, not assumed: the same tree
+  one commit earlier, with every other deprecation already renamed,
+  still runs at 412 MB/s. The toolchain move by itself is
+  performance-neutral (0.22.0 built with 0.17.0 instead of
+  0.17.0-dev.1978: -1.6% goodput, inside the noise), no microbenchmark
+  moved beyond the compare tolerance (the largest were -7.3% and
+  +6.0%, on a loaded machine), and all 14 deterministic
+  virtual-time cells (impairment and fairness) are byte-identical
+  across 0.22.0 on the old compiler, 0.22.0 on the new one, and this
+  release — so nothing about transport behavior changed. The committed
+  bench baselines are not refreshed in this release: the machine was
+  not quiet enough for a baseline capture, and the numbers above are
+  same-session comparisons.
 
 - **Deprecated std forms retired (internal; no behavior or API
   change).** Zig 0.17.0 marks a set of std names deprecated — only in
@@ -97,11 +132,11 @@ changes.
   100. It was written to chase a downstream report that 0.22.0 broke
   long-lived request/reply sessions, and it passes. So do, against the
   0.22.0 tag itself, qmsg's two-node tests extended to 200 rounds in
-  each direction, and nest's unit tests and the QUIC family of its
-  kill suite (87 scenarios) with every quic pin moved to 0.22.0. No
-  0.22.0 defect was found behind that report; the one hard limit a
-  long-lived session does hit is the lifetime stream cap documented
-  above, which predates 0.22.0.
+  each direction, and nest's unit tests and its whole kill suite (714
+  scenarios) with every quic pin moved to 0.22.0. No 0.22.0 defect was
+  found behind that report; the one hard limit a long-lived session
+  does hit is the lifetime stream cap documented above, which predates
+  0.22.0.
 
 - **The CID-lifecycle fuzz harness had a stale close-code invariant.**
   `registerPeerCid` has closed with CONNECTION_ID_LIMIT_ERROR (RFC 9000
