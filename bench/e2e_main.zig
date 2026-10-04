@@ -36,6 +36,17 @@
 //! Run with `zig build bench-e2e` (`-- --scenario goodput|handshakes|
 //! impairment|fairness|churn|all`, `--samples N`, `--json path` /
 //! `--json-dir dir`).
+//!
+//! One seed is one draw. A virtual-time cell is exact for its seed, and
+//! a different seed can give a very different time (MEASURED 2026-10-03:
+//! `impairment_reorder10pct` took 100 to 280 ms for 20 seeds and more
+//! than a second for 4). So before a conclusion is drawn from one cell:
+//!
+//!  - `--cell NAME`  run only that impairment, fairness or churn cell;
+//!  - `--seed N`     give the impairment cells this seed;
+//!  - `--sweep K`    run each impairment cell over K seeds (N, N + 1,
+//!                   ...) and print the minimum, the median and the
+//!                   maximum. A sweep writes no JSON report.
 //! Same ReleaseSafe default and `-Dbench-unsafe-release-fast` escape
 //! hatch as `zig build bench`; reports share the schema-v3 envelope
 //! (report.zig) so `zig build bench-compare` reads them.
@@ -240,8 +251,23 @@ const churn_cells = [_]harness.ChurnOptions{
     .{ .name = "churn_window16_rtt30ms", .window = 16 },
 };
 
-fn runChurn(allocator: std.mem.Allocator, out: *Entries, cc: quic.CongestionAlgorithm) !void {
+/// Which cells run, and with which seeds (`--cell`, `--seed`, `--sweep`).
+const Selection = struct {
+    cell: ?[]const u8 = null,
+    seed: ?u64 = null,
+    sweep: usize = 0,
+
+    fn wants(self: Selection, name: []const u8) bool {
+        const only = self.cell orelse return true;
+        return std.mem.eql(u8, only, name);
+    }
+};
+
+const max_sweep: usize = 1024;
+
+fn runChurn(allocator: std.mem.Allocator, out: *Entries, cc: quic.CongestionAlgorithm, sel: Selection) !void {
     for (churn_cells) |cell| {
+        if (!sel.wants(cell.name)) continue;
         var cc_cell = cell;
         cc_cell.congestion_control = cc;
         const result = try harness.runChurnOnce(allocator, cc_cell);
@@ -261,8 +287,9 @@ fn runChurn(allocator: std.mem.Allocator, out: *Entries, cc: quic.CongestionAlgo
     }
 }
 
-fn runFairness(allocator: std.mem.Allocator, out: *Entries) !void {
+fn runFairness(allocator: std.mem.Allocator, out: *Entries, sel: Selection) !void {
     for (fairness_cells) |cell| {
+        if (!sel.wants(cell.name)) continue;
         const result = try fairness.runFairnessOnce(allocator, cell);
         try out.fairness.append(allocator, result);
         std.debug.print("{s}: jain {d:.4}, util {d:.3}, peakq {d} us, qdrop {d} —", .{
@@ -282,11 +309,18 @@ fn runImpairment(
     out: *Entries,
     cc: quic.CongestionAlgorithm,
     hystart: bool,
+    sel: Selection,
 ) !void {
     for (impairment_cells) |cell| {
+        if (!sel.wants(cell.name)) continue;
         var cc_cell = cell;
         cc_cell.congestion_control = cc;
         cc_cell.hystart = hystart;
+        if (sel.seed) |seed| cc_cell.seed = seed;
+        if (sel.sweep > 0) {
+            try sweepImpairment(allocator, cc_cell, sel.sweep);
+            continue;
+        }
         const result = try harness.runImpairmentOnce(allocator, cc_cell);
         try out.impairment.append(allocator, result);
         std.debug.print(
@@ -302,6 +336,40 @@ fn runImpairment(
             },
         );
     }
+}
+
+/// One impairment cell over `count` seeds, from the cell's seed up.
+/// Prints every run and then the minimum, the median and the maximum
+/// virtual time, so that a long tail shows.
+fn sweepImpairment(allocator: std.mem.Allocator, cell: harness.ImpairmentOptions, count: usize) !void {
+    const times_ms = try allocator.alloc(u64, count);
+    defer allocator.free(times_ms);
+    var worst_seed: u64 = cell.seed;
+    var worst_ms: u64 = 0;
+    for (0..count) |k| {
+        var one = cell;
+        one.seed = cell.seed +% k;
+        const result = try harness.runImpairmentOnce(allocator, one);
+        const ms = result.virtual_us / std.time.us_per_ms;
+        times_ms[k] = ms;
+        if (ms > worst_ms) {
+            worst_ms = ms;
+            worst_seed = one.seed;
+        }
+        std.debug.print("{s} seed {d}: virtual {d} ms (dropped {d}/{d})\n", .{
+            result.name, one.seed, ms, result.dropped, result.enqueued,
+        });
+    }
+    std.mem.sort(u64, times_ms, {}, std.sort.asc(u64));
+    const median_ms = times_ms[count / 2];
+    std.debug.print(
+        "{s}: sweep of {d} seeds from {d}: min {d} ms, median {d} ms, max {d} ms (seed {d}), max/median {d:.1}\n",
+        .{
+            cell.name,   count,                                                                                               cell.seed,
+            times_ms[0], median_ms,                                                                                           worst_ms,
+            worst_seed,  if (median_ms == 0) 0.0 else @as(f64, @floatFromInt(worst_ms)) / @as(f64, @floatFromInt(median_ms)),
+        },
+    );
 }
 
 fn writeEntrySeparator(out: *std.ArrayList(u8), allocator: std.mem.Allocator, first: *bool) !void {
@@ -416,6 +484,15 @@ fn writeE2eEntries(out: *std.ArrayList(u8), allocator: std.mem.Allocator, entrie
 
 const Scenario = enum { all, goodput, handshakes, impairment, fairness, churn };
 
+/// True if `--cell NAME` names a cell that exists. A name with a typing
+/// error must not look like a run with nothing to report.
+fn knownCell(name: []const u8) bool {
+    for (impairment_cells) |cell| if (std.mem.eql(u8, cell.name, name)) return true;
+    for (fairness_cells) |cell| if (std.mem.eql(u8, cell.name, name)) return true;
+    for (churn_cells) |cell| if (std.mem.eql(u8, cell.name, name)) return true;
+    return false;
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -427,6 +504,7 @@ pub fn main(init: std.process.Init) !void {
     var hystart = true;
     var json_path: ?[]const u8 = null;
     var json_dir: ?[]const u8 = null;
+    var sel: Selection = .{};
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -462,10 +540,35 @@ pub fn main(init: std.process.Init) !void {
             if (i >= args.len) return error.MissingJsonDir;
             if (json_path != null) return error.DuplicateJsonTarget;
             json_dir = args[i];
+        } else if (std.mem.eql(u8, args[i], "--cell")) {
+            i += 1;
+            if (i >= args.len) return error.MissingCellName;
+            sel.cell = args[i];
+        } else if (std.mem.eql(u8, args[i], "--seed")) {
+            i += 1;
+            if (i >= args.len) return error.MissingSeed;
+            sel.seed = std.fmt.parseInt(u64, args[i], 0) catch return error.InvalidSeed;
+        } else if (std.mem.eql(u8, args[i], "--sweep")) {
+            i += 1;
+            if (i >= args.len) return error.MissingSweepCount;
+            const n = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidSweepCount;
+            if (n < 1 or n > max_sweep) return error.InvalidSweepCount;
+            sel.sweep = n;
         } else {
             std.debug.print("unknown bench-e2e argument: {s}\n", .{args[i]});
             return error.UnknownArgument;
         }
+    }
+
+    if (sel.cell) |name| {
+        if (!knownCell(name)) {
+            std.debug.print("unknown bench-e2e cell: {s}\n", .{name});
+            return error.UnknownCell;
+        }
+    }
+    if (sel.sweep > 0 and (json_path != null or json_dir != null)) {
+        std.debug.print("--sweep writes no JSON report; drop --json / --json-dir\n", .{});
+        return error.SweepWritesNoReport;
     }
 
     std.debug.print("quic e2e benchmarks ({s}, {d} samples, cc={s}, hystart={s}, {s})\n", .{
@@ -486,13 +589,13 @@ pub fn main(init: std.process.Init) !void {
         entries.handshakes = try runHandshakes(allocator, samples);
     }
     if (scenario == .all or scenario == .impairment) {
-        try runImpairment(allocator, &entries, cc, hystart);
+        try runImpairment(allocator, &entries, cc, hystart, sel);
     }
     if (scenario == .all or scenario == .fairness) {
-        try runFairness(allocator, &entries);
+        try runFairness(allocator, &entries, sel);
     }
     if (scenario == .all or scenario == .churn) {
-        try runChurn(allocator, &entries, cc);
+        try runChurn(allocator, &entries, cc, sel);
     }
 
     std.debug.print("---------------------------------------------------------------\n", .{});
