@@ -1813,3 +1813,121 @@ test "fuzz: Connection send path against a small sent-packet tracker" {
         .corpus = &.{ &send_seed_full, &send_seed_paced },
     });
 }
+
+// -- datagrams that do not authenticate ----------------------------------
+//
+// Bytes that no key of the connection sealed must be nothing to it:
+// `handle` returns no error and the connection stays open. An error
+// out of `handle` is fatal by contract (`Server.feed` closes the
+// connection, the bundled client loop returns), so an error for such
+// bytes lets anyone who can write one datagram end the connection.
+//
+// FOUND 2026-10-03, by a sweep in tests/e2e/handshake_loss.zig and not
+// by a harness in this file: a header that did not parse came out of
+// `handle` as `error.ConnIdTooLong`, `error.DeclaredLengthExceedsInput`,
+// `error.PayloadTooShort`, `error.InsufficientBytes` or
+// `error.InsufficientCiphertext`. The harness above this one seals its
+// packets, and it takes every error but OutOfMemory as fine, so it
+// could not see that.
+//
+// The connection has read keys at every level (Initial from the
+// Destination Connection ID, Handshake, 0-RTT and 1-RTT from fixed
+// secrets), so no input is dropped early for want of a key. The input
+// is steered towards packet shapes: a first byte of each kind, the
+// real version, the connection's own ID in its place. A random
+// 16-byte tag does not verify, so every close and every error is a
+// finding.
+const unauthenticated_local_cid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+const unauthenticated_odcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
+
+fn fuzzConnHandleUnauthenticated(_: void, smith: *std.testing.Smith) anyerror!void {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try conn.setLocalScid(&unauthenticated_local_cid);
+    try conn.setInitialDcid(&unauthenticated_odcid);
+    try conn.setPeerDcid(&.{ 0xc0, 0xc1, 0xc2, 0xc3 });
+    var material: state.SecretMaterial = .{ .cipher_protocol_id = 0x1301 };
+    material.secret_len = 32;
+    conn.levels[EncryptionLevel.handshake.idx()].read = material;
+    util.installTestEarlyDataReadSecret(conn);
+    try util.installTestApplicationReadSecret(conn);
+
+    const datagrams = smith.valueRangeAtMost(u32, 1, 4);
+    var i: u32 = 0;
+    while (i < datagrams) : (i += 1) {
+        var buf: [1500]u8 = undefined;
+        const len = smith.slice(&buf);
+        const datagram = buf[0..len];
+        const shape = smith.valueRangeAtMost(u8, 0, 5);
+        if (len >= 14) switch (shape) {
+            // As the smith made it.
+            0 => {},
+            // A short header for this connection.
+            1 => {
+                datagram[0] &= 0x7f;
+                @memcpy(datagram[1..9], &unauthenticated_local_cid);
+            },
+            // An Initial (2), a 0-RTT (3) or a Handshake (4) packet of
+            // QUIC v1 for this connection; the lengths behind the
+            // connection ID are the smith's.
+            2, 3, 4 => {
+                datagram[0] = 0xc0 | ((shape - 2) << 4) | (datagram[0] & 0x0f);
+                std.mem.writeInt(u32, datagram[1..5], 1, .big);
+                datagram[5] = 8;
+                @memcpy(datagram[6..14], if (shape == 2) &unauthenticated_odcid else &unauthenticated_local_cid);
+            },
+            // A long header of QUIC v1; all else is the smith's.
+            else => {
+                datagram[0] |= 0x80;
+                std.mem.writeInt(u32, datagram[1..5], 1, .big);
+            },
+        };
+        try conn.handle(datagram, null, 1_000_000);
+        try std.testing.expectEqual(CloseState.open, conn.closeState());
+    }
+}
+
+/// A seed for the harness above: one datagram, given as it is. With no
+/// fuzzer attached, `Smith` reads an integer draw as an 8-byte
+/// little-endian word and a slice as a 4-byte length and the bytes.
+fn unauthenticatedSeed(comptime datagram: []const u8) [8 + 4 + datagram.len + 8]u8 {
+    var buf: [8 + 4 + datagram.len + 8]u8 = @splat(0);
+    // One datagram.
+    std.mem.writeInt(u64, buf[0..8], 1, .little);
+    std.mem.writeInt(u32, buf[8..12], @intCast(datagram.len), .little);
+    @memcpy(buf[12..][0..datagram.len], datagram);
+    // Shape 0: as it is (the last word stays zero).
+    return buf;
+}
+
+// One seed for each error that the code before returned.
+// `error.InsufficientCiphertext`: a short header, the connection ID,
+// and three bytes.
+const unauthenticated_seed_short = unauthenticatedSeed(&([_]u8{0x40} ++ unauthenticated_local_cid ++ [_]u8{ 1, 2, 3 }));
+// `error.ConnIdTooLong`: an Initial packet whose Source Connection ID
+// Length is 21.
+const unauthenticated_seed_cid = unauthenticatedSeed(&([_]u8{ 0xc0, 0, 0, 0, 1, 8 } ++ unauthenticated_odcid ++ [_]u8{ 21, 0, 0, 0, 0, 0, 0, 0, 0, 0 }));
+// `error.DeclaredLengthExceedsInput`: an Initial packet whose Length
+// (16383) is more than the datagram.
+const unauthenticated_seed_length = unauthenticatedSeed(&([_]u8{ 0xc0, 0, 0, 0, 1, 8 } ++ unauthenticated_odcid ++ [_]u8{ 0, 0, 0x7f, 0xff, 1, 2, 3, 4 }));
+// `error.PayloadTooShort`: a Handshake packet whose Length (3) is less
+// than a packet number and a tag.
+const unauthenticated_seed_payload = unauthenticatedSeed(&([_]u8{ 0xe0, 0, 0, 0, 1, 8 } ++ unauthenticated_local_cid ++ [_]u8{ 0, 3, 1, 2, 3 }));
+// `error.InsufficientBytes`: a Handshake packet that ends in its
+// Source Connection ID.
+const unauthenticated_seed_cut = unauthenticatedSeed(&([_]u8{ 0xe0, 0, 0, 0, 1, 8 } ++ unauthenticated_local_cid ++ [_]u8{ 8, 1, 2 }));
+
+test "fuzz: Connection.handle with bytes that do not authenticate neither fails nor closes" {
+    try std.testing.fuzz({}, fuzzConnHandleUnauthenticated, .{
+        .corpus = &.{
+            &unauthenticated_seed_short,
+            &unauthenticated_seed_cid,
+            &unauthenticated_seed_length,
+            &unauthenticated_seed_payload,
+            &unauthenticated_seed_cut,
+        },
+    });
+}

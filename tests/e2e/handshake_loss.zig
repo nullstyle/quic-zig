@@ -86,6 +86,8 @@ const Shape = struct {
     carries_crypto: bool = false,
     leads_with_initial: bool = false,
     leads_with_handshake: bool = false,
+    /// Some packet in the datagram is a Handshake packet.
+    has_handshake: bool = false,
     /// The datagram holds a 1-RTT packet.
     has_short: bool = false,
 };
@@ -104,6 +106,7 @@ fn shape(datagram: []const u8) Shape {
         const typ = (first & 0x30) >> 4;
         if (pos == 0 and typ == 0) out.leads_with_initial = true;
         if (pos == 0 and typ == 2) out.leads_with_handshake = true;
+        if (typ == 2) out.has_handshake = true;
         var i = pos + 5;
         if (i >= datagram.len) break;
         const dcid_len = datagram[i];
@@ -152,6 +155,10 @@ const Options = struct {
     /// none). The server answers the first copy before the second
     /// arrives.
     duplicate_client: usize = 0,
+    /// The network damages the `index`-th datagram of the client, or
+    /// of the server, and delivers it (0 = none).
+    damage_client: Damage = .{},
+    damage_server: Damage = .{},
     /// Random loss toward the server and toward the client, in
     /// percent, and the seed. The network never drops more than
     /// `max_burst` datagrams in a row in one direction (the interop
@@ -171,6 +178,33 @@ const Options = struct {
     /// Stop when this much virtual time has gone by.
     budget_us: u64 = 40 * us_per_s,
     verbose: bool = trace_every_run,
+};
+
+/// One damaged datagram. `.flip` changes the byte at `offset` (the
+/// interop simulator corrupts a datagram this way, in its first 51
+/// bytes). `.cut` delivers only the first `offset` bytes (a receive
+/// buffer that is too small does that). A datagram too short for the
+/// damage is delivered as it is.
+const Damage = struct {
+    index: usize = 0,
+    kind: enum { flip, cut } = .flip,
+    offset: usize = 0,
+    /// For `.flip`: the byte is XORed with this.
+    flip: u8 = 0xff,
+
+    /// The datagram as the receiver gets it, or null if this is not
+    /// the datagram to damage.
+    fn apply(self: Damage, index: usize, datagram: []u8) ?[]u8 {
+        if (self.index == 0 or index != self.index) return null;
+        if (self.offset >= datagram.len) return null;
+        switch (self.kind) {
+            .flip => {
+                datagram[self.offset] ^= self.flip;
+                return datagram;
+            },
+            .cut => return if (self.offset == 0) null else datagram[0..self.offset],
+        }
+    }
 };
 
 /// Set to true to print every datagram of every run (a debugging aid).
@@ -213,6 +247,24 @@ const Outcome = struct {
     /// else, sent before the server's handshake was done. The client
     /// cannot open those: it has no 1-RTT keys yet.
     server_lone_1rtt_before_done: usize = 0,
+    /// Datagrams of the server that lead with an Initial packet, sent
+    /// after a datagram of the client with a Handshake packet was
+    /// delivered to it.
+    server_initials_after_client_handshake: usize = 0,
+    /// Datagrams of the client that lead with an Initial packet, sent
+    /// after a datagram of the client with a Handshake packet.
+    client_initials_after_handshake: usize = 0,
+    /// Datagrams that the network damaged and delivered.
+    damaged: usize = 0,
+    /// The client datagram (1 = the ClientHello) whose delivery made
+    /// the server validate the client's address (0 = none did).
+    validated_by_client_datagram: usize = 0,
+    /// The server had no Initial keys just after it was given the
+    /// damaged datagram of the client.
+    server_initial_keys_gone_after_damage: bool = false,
+    /// The server still has the connection, and it is open.
+    server_open: bool = false,
+    client_open: bool = false,
 };
 
 const Net = struct {
@@ -230,6 +282,11 @@ const Net = struct {
     server_bytes_in: u64 = 0,
     server_bytes_out: u64 = 0,
     server_early_data_queued: bool = false,
+    /// A datagram of the client that holds a Handshake packet was
+    /// delivered to the server.
+    client_handshake_delivered: bool = false,
+    /// The client sent a datagram that holds a Handshake packet.
+    client_sent_handshake: bool = false,
 
     fn sinceStart(self: *const Net) u64 {
         return self.lb.now_us - self.start_us;
@@ -267,6 +324,8 @@ const Net = struct {
         self.out.client_datagrams += 1;
         if (s.leads_with_initial) self.out.client_initials += 1;
         if (s.leads_with_handshake) self.out.client_handshakes += 1;
+        if (self.client_sent_handshake and s.leads_with_initial) self.out.client_initials_after_handshake += 1;
+        if (s.has_handshake) self.client_sent_handshake = true;
         var verdict: Verdict = .deliver;
         const index = self.out.client_datagrams;
         if (index >= self.o.drop_client.first and index < self.o.drop_client.first + self.o.drop_client.count) verdict = .drop;
@@ -276,20 +335,32 @@ const Net = struct {
             self.out.client_dropped += 1;
             return;
         }
-        if (!self.serverValidated()) self.server_bytes_in += datagram.len;
+        var delivered = datagram;
+        if (self.o.damage_client.apply(index, datagram)) |damaged| {
+            delivered = damaged;
+            self.out.damaged += 1;
+            if (self.o.verbose) std.debug.print("[handshake_loss] t={d}us C->S #{d} damaged ({t} at {d})\n", .{ self.sinceStart(), index, self.o.damage_client.kind, self.o.damage_client.offset });
+        } else if (s.has_handshake) {
+            self.client_handshake_delivered = true;
+        }
+        if (!self.serverValidated()) self.server_bytes_in += delivered.len;
         if (index == self.o.duplicate_client) {
             // `feed` opens the packet in place, so keep a copy of the
             // datagram as it was on the wire.
             var copy: [4096]u8 = undefined;
-            @memcpy(copy[0..datagram.len], datagram);
-            _ = try self.srv.feed(datagram, quic.testing.loopback_addr, self.lb.now_us);
+            @memcpy(copy[0..delivered.len], delivered);
+            _ = try self.srv.feed(delivered, quic.testing.loopback_addr, self.lb.now_us);
             _ = try self.serverSends();
-            if (!self.serverValidated()) self.server_bytes_in += datagram.len;
+            if (!self.serverValidated()) self.server_bytes_in += delivered.len;
             if (self.o.verbose) std.debug.print("[handshake_loss] t={d}us C->S #{d} again (a duplicate)\n", .{ self.sinceStart(), index });
-            _ = try self.srv.feed(copy[0..datagram.len], quic.testing.loopback_addr, self.lb.now_us);
+            _ = try self.srv.feed(copy[0..delivered.len], quic.testing.loopback_addr, self.lb.now_us);
             return;
         }
-        _ = try self.srv.feed(datagram, quic.testing.loopback_addr, self.lb.now_us);
+        _ = try self.srv.feed(delivered, quic.testing.loopback_addr, self.lb.now_us);
+        if (self.out.validated_by_client_datagram == 0 and self.serverValidated()) self.out.validated_by_client_datagram = index;
+        if (index == self.o.damage_client.index and self.srv.iterator().len > 0) {
+            self.out.server_initial_keys_gone_after_damage = self.srv.iterator()[0].conn.initial_keys_discarded;
+        }
     }
 
     /// Everything the server has to send now, one datagram at a time.
@@ -301,6 +372,7 @@ const Net = struct {
         var lens: [8]usize = undefined;
         var count: usize = 0;
         const done_before = self.serverDone();
+        const handshake_seen_before = self.client_handshake_delivered;
         for (self.srv.iterator()) |slot| {
             if (self.o.server_early_data and !self.server_early_data_queued) {
                 slot.conn.requestPing();
@@ -326,6 +398,9 @@ const Net = struct {
             if (!done_before and s.has_short and !s.leads_with_initial and !s.leads_with_handshake) {
                 self.out.server_lone_1rtt_before_done += 1;
             }
+            if (handshake_seen_before and s.leads_with_initial) {
+                self.out.server_initials_after_client_handshake += 1;
+            }
             var verdict: Verdict = .deliver;
             const server_index = self.out.server_datagrams;
             if (server_index >= self.o.drop_server.first and server_index < self.o.drop_server.first + self.o.drop_server.count) verdict = .drop;
@@ -342,7 +417,13 @@ const Net = struct {
                 if (s.carries_crypto) self.out.flights_dropped += 1;
                 continue;
             }
-            try self.cli.conn.handle(datagram, null, self.lb.now_us);
+            var delivered = datagram;
+            if (self.o.damage_server.apply(server_index, datagram)) |damaged| {
+                delivered = damaged;
+                self.out.damaged += 1;
+                if (self.o.verbose) std.debug.print("[handshake_loss] t={d}us S->C #{d} damaged ({t} at {d})\n", .{ self.sinceStart(), server_index, self.o.damage_server.kind, self.o.damage_server.offset });
+            }
+            try self.cli.conn.handle(delivered, null, self.lb.now_us);
             while (try self.cli.conn.poll(self.lb.rx, self.lb.now_us)) |len| {
                 try self.fromClient(self.lb.rx[0..len]);
             }
@@ -438,6 +519,8 @@ fn run(allocator: std.mem.Allocator, o: Options) !Outcome {
         net.out.server_done_resends = srv.iterator()[0].conn.early_handshake_done_resends;
     }
     net.out.client_early_copies = cli.conn.early_handshake_retransmits;
+    net.out.server_open = srv.iterator().len > 0 and srv.iterator()[0].conn.closeState() == .open;
+    net.out.client_open = cli.conn.closeState() == .open;
     if (o.verbose) std.debug.print("[handshake_loss] done={} at={d}us flights={d} dropped={d} client: {d} datagrams ({d} initial, {d} handshake, {d} dropped) server: {d} datagrams, {d} B out for {d} B in before validation\n", .{ net.out.done, net.out.done_at_us, net.out.flights, net.out.flights_dropped, net.out.client_datagrams, net.out.client_initials, net.out.client_handshakes, net.out.client_dropped, net.out.server_datagrams, net.server_bytes_out, net.server_bytes_in });
     return net.out;
 }
@@ -670,6 +753,89 @@ test "handshake loss: the server does not probe its 1-RTT data while the handsha
     try std.testing.expect(out.done);
     try std.testing.expect(out.done_at_us > 1 * us_per_s);
     try std.testing.expectEqual(@as(usize, 0), out.server_lone_1rtt_before_done);
+}
+
+test "handshake loss: one damaged datagram ends no connection" {
+    // The interop simulator's `handshakecorruption` changes one byte
+    // in the first 51 bytes of a datagram: the first byte, the
+    // version, the connection IDs and their lengths, the token length,
+    // the Length field, the packet number. A receive buffer that is
+    // too small cuts a datagram short. A packet that cannot be
+    // authenticated is a packet to drop (RFC 9000 section 12.2), and
+    // loss recovery repairs it. It is never a reason to close: anyone
+    // who can write one datagram could end the connection.
+    //
+    // FOUND 2026-10-03 with this sweep, on the code before: 75 of
+    // 2448 cases with one changed byte ended the connection. A changed
+    // length field made `Connection.handle` return an error (four
+    // different ones), and an error from `handle` ends the connection
+    // in `Server.feed` and in the bundled client loop. And one case
+    // left a connection that could not finish: the server had taken
+    // the client's connection ID from the damaged header of the first
+    // datagram and kept it.
+    var runs: usize = 0;
+    var damaged: usize = 0;
+    var failures: usize = 0;
+    //
+    // The wide certificate: with it the first four datagrams of each
+    // end are every shape a handshake has (an Initial packet alone,
+    // Initial + Handshake, Handshake alone, Handshake + 1-RTT, 1-RTT).
+    const cuts = [_]usize{ 1, 2, 5, 6, 7, 14, 15, 16, 22, 23, 24, 25, 26, 27, 30, 40, 50, 60, 100, 200, 600, 1199 };
+    for ([_]Cert{.wide}) |cert| {
+        for (1..5) |index| {
+            for ([_]bool{ false, true }) |to_client| {
+                for (0..51 * 3 + cuts.len) |case| {
+                    const d: Damage = if (case < 51 * 3)
+                        .{ .index = index, .kind = .flip, .offset = case / 3, .flip = ([_]u8{ 0xff, 0x01, 0x40 })[case % 3] }
+                    else
+                        .{ .index = index, .kind = .cut, .offset = cuts[case - 51 * 3] };
+                    runs += 1;
+                    const out = run(std.testing.allocator, .{
+                        .cert = cert,
+                        .damage_client = if (to_client) .{} else d,
+                        .damage_server = if (to_client) d else .{},
+                        .until_confirmed = true,
+                    }) catch |e| {
+                        failures += 1;
+                        if (print_damage_failures) std.debug.print("[handshake_loss] damage cert={t} to_client={} index={d} {t} offset={d} flip={x}: error {t}\n", .{ cert, to_client, index, d.kind, d.offset, d.flip, e });
+                        continue;
+                    };
+                    damaged += out.damaged;
+                    if (!out.confirmed or !out.server_open or !out.client_open) {
+                        failures += 1;
+                        if (print_damage_failures) std.debug.print("[handshake_loss] damage cert={t} to_client={} index={d} {t} offset={d} flip={x}: confirmed={} server_open={} client_open={}\n", .{ cert, to_client, index, d.kind, d.offset, d.flip, out.confirmed, out.server_open, out.client_open });
+                    }
+                }
+            }
+        }
+    }
+    // The sweep did damage datagrams (it is not a sweep of nothing).
+    try std.testing.expect(damaged > runs / 2);
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
+/// Set to true to print each case of the damage sweep that fails.
+const print_damage_failures = false;
+
+test "handshake loss: a first datagram with a damaged Source Connection ID Length does not poison the connection" {
+    // The one case of the sweep above that did not end the connection
+    // and did not let it finish. The client's ClientHello arrives with
+    // its Source Connection ID Length changed from 8 to 9. The packet
+    // does not authenticate and is dropped, and the client's next copy
+    // is fine. But the server had made the connection from the
+    // header of the first datagram, with a 9-byte ID for the client,
+    // and kept it. The client could read the server's long-header
+    // packets (they say how long the ID is) and none of its 1-RTT
+    // packets (they do not), so it never got HANDSHAKE_DONE.
+    const out = try run(std.testing.allocator, .{
+        .damage_client = .{ .index = 1, .kind = .flip, .offset = 14, .flip = 0x01 },
+        .until_confirmed = true,
+    });
+    try std.testing.expectEqual(@as(usize, 1), out.damaged);
+    try std.testing.expect(out.confirmed);
+    // One probe timeout of the client (1 s with no RTT sample) for the
+    // ClientHello that was dropped, and then a normal handshake.
+    try std.testing.expect(out.confirmed_at_us < 1100 * us_per_ms);
 }
 
 const SweepStats = struct {

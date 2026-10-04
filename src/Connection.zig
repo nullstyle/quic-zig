@@ -335,6 +335,10 @@ next_alternative_address_sequence: u64 = 0,
 /// distinguishes "explicitly empty" from "never set".
 peer_dcid: ConnectionId = .{},
 peer_dcid_set: bool = false,
+/// Server only: `peer_dcid` was taken from an Initial packet that
+/// authenticated. Until then it holds what `acceptInitial` read from
+/// the header of the first datagram, which nothing had authenticated.
+peer_cid_authenticated: bool = false,
 /// SCID we identify ourselves with — appears as SCID on outgoing
 /// long-header packets, and the peer puts it (or another CID we
 /// issued) as DCID on every incoming packet. Zero-length is valid.

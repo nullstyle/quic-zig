@@ -409,6 +409,14 @@ pub fn versionListContains(vn: wire_header_mod.VersionNegotiation, version: u32)
     return false;
 }
 
+/// The shortest datagram that can be a 1-RTT packet on `app_path`:
+/// the first byte, the connection ID, four bytes from which the packet
+/// number is taken, and the header-protection sample (RFC 9001
+/// §5.4.2). A shorter one is never given to the AEAD.
+pub fn minShortPacketLen(app_path: *const PathState) usize {
+    return 1 + @as(usize, app_path.path.local_cid.len) + 4 + protection.sample_len;
+}
+
 pub fn openApplicationPacket(
     conn: *Connection,
     pt_buf: *[max_recv_plaintext]u8,
@@ -489,9 +497,14 @@ fn tryOpenApplicationPacketWithEpoch(
         .largest_received = largest_received,
         .multipath_path_id = multipath_path_id,
         .mask = hp_mask,
-    }) catch |e| switch (e) {
-        boringssl.crypto.aead.Error.Auth => return null,
-        else => return e,
+    }) catch {
+        // Every error of the open is about bytes that nothing has
+        // authenticated (a datagram too short for the
+        // header-protection sample, a tag that does not verify): this
+        // epoch's keys do not open the packet, and the caller drops
+        // it. It must not leave `handle` as an error; see
+        // `openLongOrDrop` in recv_packet_handlers.zig.
+        return null;
     };
     if (opened.key_phase != epoch.key_phase) return null;
     return .{ .opened = opened, .slot = slot };

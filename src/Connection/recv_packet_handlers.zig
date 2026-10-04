@@ -118,6 +118,14 @@ pub fn handleShort(
             conn.enterStatelessReset(now_us);
             return bytes.len;
         }
+        // A datagram too short to hold a packet number and the
+        // header-protection sample never reached the AEAD. It is a
+        // malformed packet, not a forgery to count against the
+        // integrity limit (RFC 9001 §6.6).
+        if (bytes.len < conn_recv_dispatch.minShortPacketLen(app_path)) {
+            conn_qlog.emitPacketDropped(conn, .application, @intCast(bytes.len), .header_decode_failure);
+            return bytes.len;
+        }
         conn_qlog.emitPacketDropped(conn, .application, @intCast(bytes.len), .decryption_failure);
         conn_keys.noteApplicationAuthFailure(
             conn,
@@ -226,9 +234,22 @@ pub fn handleInitial(
 
     // Server side: discover peer's CIDs from the very first Initial.
     if (conn.role == .server) {
-        if (!conn.peer_dcid_set) {
-            conn.peer_dcid = ConnectionId.fromSlice(opened.scid.slice());
-            conn.peer_dcid_set = true;
+        // RFC 9000 §7.2: the server takes the client's connection ID
+        // from the first Initial packet it receives, and a packet that
+        // fails authentication was not received. `acceptInitial` read
+        // an ID from the header of the first DATAGRAM, before anything
+        // was authenticated. If that datagram was damaged in its
+        // Source Connection ID Length (or was not the client's), the
+        // ID is wrong, and every packet to it is one the client cannot
+        // use: a short header has no ID length, so the client reads
+        // the packet number from the wrong place. This packet is the
+        // first whose header the AEAD tag covers.
+        if (!conn.peer_cid_authenticated) {
+            const client_scid = ConnectionId.fromSlice(opened.scid.slice());
+            if (!conn.peer_dcid_set or !ConnectionId.eql(conn.peer_dcid, client_scid)) {
+                try conn.setPeerDcid(client_scid.slice());
+            }
+            conn.peer_cid_authenticated = true;
         }
         if (!conn.initial_dcid_set) {
             conn.initial_dcid = ConnectionId.fromSlice(opened.dcid.slice());
@@ -440,12 +461,24 @@ fn openLongOrDrop(
         .handshake => long_packet_mod.openHandshake(pt_buf, bytes, opts),
         // Short-header packets take `openApplicationPacket` instead.
         .application => unreachable,
-    }) catch |e| switch (e) {
-        boringssl.crypto.aead.Error.Auth => {
-            conn_qlog.emitPacketDropped(conn, lvl, @intCast(bytes.len), .decryption_failure);
-            return null;
-        },
-        else => return e,
+    }) catch |e| {
+        // Every error of the open is about bytes that nothing has
+        // authenticated: the AEAD tag is checked last. A header that
+        // does not parse (a connection-ID length, the token length or
+        // the Length field says more than the datagram holds) is a
+        // packet to drop, the same as a tag that does not verify.
+        //
+        // It must not leave `handle` as an error. An error out of
+        // `handle` ends the connection: `Server.feed` closes it, the
+        // bundled client loop returns. Then one datagram from anyone
+        // who saw a connection ID would end the connection, and so
+        // would one bit that the network changed.
+        const reason: conn_qlog.QlogPacketDropReason = if (e == boringssl.crypto.aead.Error.Auth)
+            .decryption_failure
+        else
+            .header_decode_failure;
+        conn_qlog.emitPacketDropped(conn, lvl, @intCast(bytes.len), reason);
+        return null;
     };
     if (opened.reserved_bits != 0) {
         conn.close(true, transport_error_protocol_violation, "non-zero long-header reserved bits");

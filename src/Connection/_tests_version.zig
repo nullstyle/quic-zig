@@ -391,6 +391,132 @@ test "acceptInitial rejects a well-formed non-Initial long header [RFC9368 §3.2
     try std.testing.expect(conn.initial_wire_version == null);
 }
 
+/// A server connection that has taken its first datagram, with the
+/// client's Initial keys for the test to seal more packets with.
+const InitialPeer = struct {
+    const odcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
+    const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+    /// A PING frame and PADDING: an Initial packet may carry both, and
+    /// neither needs the TLS stack.
+    const ping_and_padding = [_]u8{0x01} ++ @as([31]u8, @splat(0));
+
+    fn keys() !short_packet_mod.PacketKeys {
+        const init_keys = try initial_keys_mod.deriveInitialKeys(&odcid, false);
+        return short_packet_mod.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret);
+    }
+
+    /// An Initial packet from a client that calls itself `scid`.
+    fn seal(dst: []u8, scid: []const u8, pn: u64) !usize {
+        const k = try keys();
+        return long_packet_mod.sealInitial(dst, .{
+            .dcid = &odcid,
+            .scid = scid,
+            .pn = pn,
+            .payload = &ping_and_padding,
+            .keys = &k,
+        });
+    }
+};
+
+test "server: the client's connection ID comes from the first Initial packet that authenticates, and from no later one" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try conn.setLocalScid(&InitialPeer.server_scid);
+
+    const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    const other_scid = [_]u8{ 0xe0, 0xe1, 0xe2, 0xe3, 0xe4 };
+
+    // The first datagram names `other_scid` as the client, and it does
+    // not authenticate: one byte of it was changed on the way. (Or it
+    // is not from the client at all.) `acceptInitial` reads the ID from
+    // the header, as `Server.feed` has it do for the first datagram.
+    var first: [256]u8 = undefined;
+    const first_len = try InitialPeer.seal(&first, &other_scid, 0);
+    first[first_len - 1] ^= 0x01;
+    try conn.acceptInitial(first[0..first_len], .{});
+    try conn.handle(first[0..first_len], null, 1_000);
+    try std.testing.expectEqualSlices(u8, &other_scid, conn.peer_dcid.slice());
+    try std.testing.expect(!conn.peer_cid_authenticated);
+
+    // The second one is the client's, and it authenticates. Its Source
+    // Connection ID is the client's ID (RFC 9000 §7.2).
+    var second: [256]u8 = undefined;
+    const second_len = try InitialPeer.seal(&second, &client_scid, 1);
+    try conn.handle(second[0..second_len], null, 2_000);
+    try std.testing.expect(conn.peer_cid_authenticated);
+    try std.testing.expectEqualSlices(u8, &client_scid, conn.peer_dcid.slice());
+    try std.testing.expectEqualSlices(u8, &client_scid, conn.primaryPath().path.peer_cid.slice());
+
+    // Anyone who saw the first datagram can seal an Initial packet
+    // that authenticates: the keys come from the Destination
+    // Connection ID in it. A later packet with another Source
+    // Connection ID does not move the connection.
+    var third: [256]u8 = undefined;
+    const third_len = try InitialPeer.seal(&third, &other_scid, 2);
+    try conn.handle(third[0..third_len], null, 3_000);
+    try std.testing.expectEqualSlices(u8, &client_scid, conn.peer_dcid.slice());
+    try std.testing.expectEqualSlices(u8, &client_scid, conn.primaryPath().path.peer_cid.slice());
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+}
+
+test "handle: a long-header packet whose header does not parse is a packet to drop, not an error" {
+    // `handle` returned `error.ConnIdTooLong`,
+    // `error.DeclaredLengthExceedsInput`, `error.PayloadTooShort` and
+    // `error.InsufficientBytes` for these, and an error from `handle`
+    // ends the connection in `Server.feed` and in the client loop.
+    // Nothing had authenticated the bytes the errors were about.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try conn.setLocalScid(&InitialPeer.server_scid);
+
+    const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    var good: [256]u8 = undefined;
+    const good_len = try InitialPeer.seal(&good, &client_scid, 0);
+    try conn.acceptInitial(good[0..good_len], .{});
+
+    // The header: first byte, version (4), DCID length at 5, DCID (8),
+    // SCID length at 14, SCID (4), token length at 19, Length at 20.
+    const Change = struct { offset: usize, value: u8 };
+    const changes = [_]Change{
+        // The SCID is longer than a connection ID can be.
+        .{ .offset = 14, .value = 21 },
+        // The SCID is longer than the datagram.
+        .{ .offset = 14, .value = 20 },
+        // The token is longer than the datagram.
+        .{ .offset = 19, .value = 0x3f },
+        // The Length says more than the datagram holds.
+        .{ .offset = 20, .value = 0x3f },
+        // The Length says less than a packet number and a tag.
+        .{ .offset = 20, .value = 3 },
+    };
+    for (changes) |change| {
+        var damaged: [256]u8 = undefined;
+        @memcpy(damaged[0..good_len], good[0..good_len]);
+        damaged[change.offset] = change.value;
+        try conn.handle(damaged[0..good_len], null, 1_000);
+        try std.testing.expectEqual(CloseState.open, conn.closeState());
+    }
+    // Cut short at every length.
+    for (1..good_len) |len| {
+        var cut: [256]u8 = undefined;
+        @memcpy(cut[0..len], good[0..len]);
+        try conn.handle(cut[0..len], null, 1_000);
+        try std.testing.expectEqual(CloseState.open, conn.closeState());
+    }
+    // None of them was received.
+    try std.testing.expect(conn.pnSpaceForLevel(.initial).received.largest == null);
+
+    // The packet as it was sent is still good.
+    try conn.handle(good[0..good_len], null, 2_000);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pnSpaceForLevel(.initial).received.largest);
+}
+
 test "peekNextBidi returns the id a limit-blocked retry will reuse" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
