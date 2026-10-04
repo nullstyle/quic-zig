@@ -18,6 +18,15 @@ pub fn installTestApplicationWriteSecret(conn: *Connection) !void {
     try conn.installApplicationSecret(.write, material);
 }
 
+/// Say that the handshake is confirmed, for a connection that a test
+/// built by hand (secrets installed, no handshake). The latch is the
+/// one the real path sets when it discards the Handshake keys: a
+/// server at the client's Finished, a client at HANDSHAKE_DONE. A key
+/// update may start only behind it (RFC 9001 §6.1).
+pub fn markTestHandshakeConfirmed(conn: *Connection) void {
+    conn.handshake_keys_discarded = true;
+}
+
 pub fn installTestApplicationReadSecret(conn: *Connection) !void {
     var material: SecretMaterial = .{ .cipher_protocol_id = 0x1301 };
     material.secret_len = 32;

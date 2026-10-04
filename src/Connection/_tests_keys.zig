@@ -21,6 +21,7 @@ const transport_error_aead_limit_reached = state.transport_error_aead_limit_reac
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const util = @import("_test_util.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
+const markTestHandshakeConfirmed = util.markTestHandshakeConfirmed;
 const installTestApplicationReadSecret = util.installTestApplicationReadSecret;
 const installTestEarlyDataReadSecret = util.installTestEarlyDataReadSecret;
 const installTestEarlyDataWriteSecret = util.installTestEarlyDataWriteSecret;
@@ -132,6 +133,7 @@ test "local key update waits for ACK and three PTOs before the next update" {
     defer conn.destroy();
 
     try installTestApplicationWriteSecret(conn);
+    markTestHandshakeConfirmed(conn);
     try conn.setPeerDcid(&.{});
 
     try conn.requestKeyUpdate(1_000_000);
@@ -171,6 +173,7 @@ test "automatic write key update happens before configured packet limit" {
     defer conn.destroy();
 
     try installTestApplicationWriteSecret(conn);
+    markTestHandshakeConfirmed(conn);
     conn.setApplicationKeyUpdateLimitsForTesting(.{
         .confidentiality_limit = 4,
         .proactive_update_threshold = 1,
@@ -200,6 +203,7 @@ test "application packet limit counts across paths before proactive key update" 
     defer conn.destroy();
 
     try installTestApplicationWriteSecret(conn);
+    markTestHandshakeConfirmed(conn);
     conn.setApplicationKeyUpdateLimitsForTesting(.{
         .confidentiality_limit = 8,
         .proactive_update_threshold = 2,
@@ -240,6 +244,7 @@ test "non-zero path ACK clears local key update gate" {
     defer conn.destroy();
 
     try installTestApplicationWriteSecret(conn);
+    markTestHandshakeConfirmed(conn);
     try conn.setPeerDcid(&.{0xaa});
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));
@@ -545,4 +550,29 @@ test "server discards Handshake keys at handshake-complete [RFC9001 §4.1.2 ¶1]
     try std.testing.expect(conn.levels[hsk_idx].read == null);
     try std.testing.expect(conn.levels[hsk_idx].write == null);
     try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.handshake).count);
+}
+
+test "a key update waits for the handshake to be confirmed, not only for the keys (RFC 9001 §6.1)" {
+    // "An endpoint MUST NOT initiate a key update prior to having
+    // confirmed the handshake." The 1-RTT write keys are there one
+    // flight earlier (a client has them with the server's Finished,
+    // and the confirmation is HANDSHAKE_DONE). Both ways to start an
+    // update wait: the embedder's request, and the automatic one in
+    // front of the packet limit.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    try installTestApplicationWriteSecret(conn);
+    try std.testing.expect(!conn.handshake_keys_discarded);
+    try std.testing.expect(!conn.canInitiateKeyUpdateAt(1_000_000));
+    try std.testing.expectError(Error.KeyUpdateBlocked, conn.requestKeyUpdate(1_000_000));
+    try std.testing.expect(!conn.keyUpdateStatus().write_key_phase);
+
+    markTestHandshakeConfirmed(conn);
+    try std.testing.expect(conn.canInitiateKeyUpdateAt(1_000_000));
+    try conn.requestKeyUpdate(1_000_000);
+    try std.testing.expect(conn.keyUpdateStatus().write_key_phase);
 }

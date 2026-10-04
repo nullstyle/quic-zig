@@ -307,10 +307,24 @@ pub fn maybeRespondToPeerKeyUpdate(conn: *Connection, now_us: u64) Error!void {
 }
 
 /// True if the embedder may call `requestKeyUpdate` right now
-/// (RFC 9001 §6). Returns false while a previous update is still
-/// awaiting an ACK or while the cooldown deadline is in the future.
+/// (RFC 9001 §6). Returns false before the handshake is confirmed,
+/// while a previous update is still awaiting an ACK, or while the
+/// cooldown deadline is in the future.
 pub fn canInitiateKeyUpdateAt(conn: *const Connection, now_us: u64) bool {
     if (conn.app_write_current == null) return false;
+    // RFC 9001 §6.1 ¶2: "An endpoint MUST NOT initiate a key update
+    // prior to having confirmed the handshake". 1-RTT write keys are
+    // there earlier: a client has them when its handshake is COMPLETE
+    // (it has the server's Finished), one flight before it is
+    // CONFIRMED (HANDSHAKE_DONE, §4.1.2). `handshake_keys_discarded`
+    // is the confirmation latch of both roles.
+    //
+    // Until v0.26.0 only the keys were asked for. MEASURED 2026-10-04
+    // with the interop client, which asks "as soon as the handshake
+    // completes": its very first 1-RTT packet was in key phase 1 (all
+    // 2517 of a run), and the runner's `keyupdate` check against a
+    // quic-go server failed 4 runs of 4.
+    if (!conn.handshake_keys_discarded) return false;
     if (conn.app_write_update_pending_ack) return false;
     if (conn.app_next_local_update_after_us) |deadline| {
         if (now_us < deadline) return false;

@@ -65,6 +65,17 @@ changes.
   parameters are inside the TLS handshake and the first packet
   headers are not, so checks 2 and 3 are how an endpoint knows that
   nobody changed the IDs, or put a Retry in, on the way.
+- **A key update waits for the handshake to be confirmed.** RFC 9001
+  section 6.1: an endpoint MUST NOT start a key update before that.
+  `requestKeyUpdate` asked only for 1-RTT write keys, and a client
+  has those one flight earlier (it is confirmed by HANDSHAKE_DONE).
+  It now returns `error.KeyUpdateBlocked` until the handshake is
+  confirmed, and `canInitiateKeyUpdateAt` says false. An embedder
+  that asks "as soon as the handshake is done" and treats
+  `KeyUpdateBlocked` as "try again" needs no change. Found with the
+  interop client, which asked that early: its very first 1-RTT packet
+  was in key phase 1, and the runner's `keyupdate` test against a
+  quic-go server failed 4 runs of 4.
 - **A close during the handshake reaches the peer.** A
   CONNECTION_CLOSE went at one encryption level, and when 1-RTT write
   keys were there, that level was 1-RTT. A server has those keys as

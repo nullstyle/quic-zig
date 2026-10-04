@@ -23,6 +23,7 @@ const transport_error_protocol_violation = state.transport_error_protocol_violat
 const conn_qlog = @import("qlog.zig");
 const util = @import("_test_util.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
+const markTestHandshakeConfirmed = util.markTestHandshakeConfirmed;
 const installTestApplicationReadSecret = util.installTestApplicationReadSecret;
 const TestQlogRecorder = util.TestQlogRecorder;
 
@@ -37,6 +38,7 @@ test "qlog callback records application key update lifecycle" {
     conn.setQlogCallback(TestQlogRecorder.callback, &recorder);
     try installTestApplicationReadSecret(conn);
     try installTestApplicationWriteSecret(conn);
+    markTestHandshakeConfirmed(conn);
     try std.testing.expect(recorder.contains(.application_read_key_installed));
     try std.testing.expect(recorder.contains(.application_write_key_installed));
 

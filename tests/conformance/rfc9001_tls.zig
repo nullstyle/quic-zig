@@ -31,6 +31,7 @@
 //!   RFC9001 §5.2 ¶2  MUST       Initial header-protection key derived with label "quic hp" [KAT]
 //!   RFC9001 §5.2 ¶1  MUST       Initial keys use the v1 fixed salt 38762cf7…cad ccbb7f0a
 //!   RFC9001 §6.1 ¶2  MUST       refuse first key update before handshake confirmation
+//!   RFC9001 §6.1 ¶2  MUST NOT   initiate a key update between handshake completion and confirmation
 //!   RFC9001 §6.5 ¶1  MUST       refuse second key update until peer ACKs the new keys
 //!   RFC9001 §5.3 ¶3  MUST       AEAD nonce = static_iv XOR PN (PN packed into low bytes)
 //!   RFC9001 §5.3 ¶3  MUST       PN=0 leaves the static IV unchanged in the nonce
@@ -858,13 +859,14 @@ test "MUST discard Initial keys once Handshake keys are available [RFC9001 §5.7
 test "MUST refuse the first key update before handshake confirmation [RFC9001 §6.1 ¶2]" {
     // §6.1 ¶2: "An endpoint MUST NOT initiate a key update prior to
     // having confirmed the handshake." quic surfaces this as
-    // `Connection.requestKeyUpdate` returning `Error.KeyUpdateBlocked`
-    // when no application write epoch has been installed — which is
-    // the gating precondition implied by the spec, since the
-    // application keys come from the handshake itself. A fresh
-    // `HandshakePair` has neither side past TLS Finished yet, so
-    // calling `requestKeyUpdate` on the client must reject with the
-    // documented blocked-error variant.
+    // `Connection.requestKeyUpdate` returning `Error.KeyUpdateBlocked`.
+    // This test is the first half: no application write epoch has
+    // been installed yet. A fresh `HandshakePair` has neither side
+    // past TLS Finished, so calling `requestKeyUpdate` on the client
+    // must reject with the documented blocked-error variant. The
+    // second half (keys there, handshake not confirmed yet) is the
+    // next test; until v0.26.0 this comment took the two for the
+    // same thing, and the library allowed the update there.
     var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
     defer pair.deinit();
 
@@ -875,6 +877,62 @@ test "MUST refuse the first key update before handshake confirmation [RFC9001 §
         quic.conn.state.Error.KeyUpdateBlocked,
         pair.clientConn().requestKeyUpdate(0),
     );
+}
+
+test "MUST NOT initiate a key update between handshake completion and handshake confirmation [RFC9001 §6.1 ¶2]" {
+    // §6.1 ¶2: "An endpoint MUST NOT initiate a key update prior to
+    // having confirmed the handshake." A client's handshake is
+    // COMPLETE when it has the server's Finished (it has 1-RTT keys
+    // then), and CONFIRMED only when it has HANDSHAKE_DONE (§4.1.2).
+    // The test above covers "no 1-RTT keys yet"; this one covers the
+    // flight in between, where the keys are there and the update is
+    // still forbidden.
+    //
+    // Until v0.26.0 `requestKeyUpdate` asked only for 1-RTT keys. The
+    // interop client asked "as soon as the handshake completes", so
+    // its very first 1-RTT packet was in key phase 1. MEASURED
+    // 2026-10-04 against a quic-go server: all 2517 1-RTT packets of
+    // the client in phase 1; the runner's keyupdate check failed in 4
+    // runs of 4 (it could not read the server's packets any more).
+    var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    const cli = pair.clientConn();
+    try cli.advance();
+
+    // ClientHello to the server, the server's flight to the client.
+    while (try cli.poll(&pair.rx_buf, 1_000)) |len| {
+        _ = try pair.server.feed(pair.rx_buf[0..len], pair.peer_addr, 1_000);
+    }
+    for (pair.server.iterator()) |slot| {
+        while (try slot.conn.poll(&pair.rx_buf, 2_000)) |len| {
+            try cli.handle(pair.rx_buf[0..len], null, 2_000);
+        }
+    }
+
+    // Complete, with 1-RTT write keys, and not confirmed.
+    try std.testing.expect(cli.handshakeDone());
+    try std.testing.expect(cli.keyUpdateStatus().write_epoch != null);
+    try std.testing.expect(!cli.handshake_keys_discarded);
+    try std.testing.expect(!cli.canInitiateKeyUpdateAt(3_000));
+    try std.testing.expectError(
+        quic.conn.state.Error.KeyUpdateBlocked,
+        cli.requestKeyUpdate(3_000),
+    );
+    try std.testing.expect(!cli.keyUpdateStatus().write_key_phase);
+
+    // The client's Finished to the server, HANDSHAKE_DONE to the
+    // client: confirmed, and the update may start.
+    while (try cli.poll(&pair.rx_buf, 4_000)) |len| {
+        _ = try pair.server.feed(pair.rx_buf[0..len], pair.peer_addr, 4_000);
+    }
+    for (pair.server.iterator()) |slot| {
+        while (try slot.conn.poll(&pair.rx_buf, 5_000)) |len| {
+            try cli.handle(pair.rx_buf[0..len], null, 5_000);
+        }
+    }
+    try std.testing.expect(cli.handshake_keys_discarded);
+    try cli.requestKeyUpdate(1_000_000);
+    try std.testing.expect(cli.keyUpdateStatus().write_key_phase);
 }
 
 test "MUST refuse a second key update until the first is acknowledged [RFC9001 §6.5 ¶1]" {

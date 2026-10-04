@@ -878,6 +878,12 @@ pub const Error = error{
     ConnectionIdAlreadyInUse,
     EmptyEarlyDataContext,
     KeyUpdateUnavailable,
+    /// `requestKeyUpdate` may not start an update now: there are no
+    /// 1-RTT write keys yet, the handshake is not confirmed yet (RFC
+    /// 9001 §6.1; a client is confirmed by HANDSHAKE_DONE, one flight
+    /// after it has the keys), the last update has no acknowledgment
+    /// yet, or the wait after it is not over. Not fatal: ask again
+    /// later (`canInitiateKeyUpdateAt` says when it would work).
     KeyUpdateBlocked,
     DatagramUnavailable,
     DatagramTooLarge,
