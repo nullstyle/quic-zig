@@ -159,6 +159,18 @@ pub fn setInitialDcid(conn: *Connection, dcid: []const u8) Error!void {
     if (!conn.original_initial_dcid_set) {
         conn.original_initial_dcid = ConnectionId.fromSlice(dcid);
         conn.original_initial_dcid_set = true;
+        // A server names this ID in its transport parameters
+        // (`original_destination_connection_id`, RFC 9000 §7.3). If
+        // the parameters were set before the first Initial packet was
+        // here, they have no value for it yet: `setTransportParams`
+        // fills it in now, and pushes the parameters to TLS again
+        // (TLS has not used them: it has not seen the ClientHello).
+        if (conn.role == .server and
+            conn.local_transport_params_set and
+            conn.local_transport_params.original_destination_connection_id == null)
+        {
+            try conn.setTransportParams(conn.local_transport_params);
+        }
     }
     conn.initial_dcid = ConnectionId.fromSlice(dcid);
     conn.initial_dcid_set = true;

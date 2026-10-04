@@ -927,3 +927,96 @@ test "RETIRE_CONNECTION_ID fast-path skips sequences already retired" {
     try std.testing.expectEqual(closes_before + 1, conn.incoming_retire_cid_count);
     try std.testing.expectEqual(@as(u64, 2), conn.smallestLiveLocalCidSeq(0).?);
 }
+
+test "a server's transport parameters name the client's first Destination Connection ID, in either order of the two calls (RFC 9000 §7.3)" {
+    // "An endpoint MUST treat ... the absence of the
+    // original_destination_connection_id transport parameter from the
+    // server as a connection error". A server made from a bare
+    // `Connection` (no `Server` wrapper) that did not set the value
+    // sent none until v0.26.0. The connection owns the value: it is
+    // the Destination Connection ID of the first Initial packet.
+    const allocator = std.testing.allocator;
+    const odcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
+
+    // Parameters first, the client's first packet later.
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        try conn.setLocalScid(&.{ 0xb0, 0xb1, 0xb2, 0xb3 });
+        try conn.setTransportParams(.{ .initial_max_data = 1024 * 1024 });
+        try std.testing.expect(conn.localTransportParams().original_destination_connection_id == null);
+
+        try conn.setInitialDcid(&odcid);
+        const filled = conn.localTransportParams().original_destination_connection_id orelse
+            return error.MissingOriginalDestinationConnectionId;
+        try std.testing.expectEqualSlices(u8, &odcid, filled.slice());
+
+        // Only the FIRST ID is the original one.
+        try conn.setInitialDcid(&.{ 9, 9, 9, 9, 9, 9, 9, 9 });
+        try std.testing.expectEqualSlices(u8, &odcid, conn.localTransportParams().original_destination_connection_id.?.slice());
+    }
+
+    // The client's first packet first, parameters later.
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        try conn.setLocalScid(&.{ 0xb0, 0xb1, 0xb2, 0xb3 });
+        try conn.setInitialDcid(&odcid);
+        try conn.setTransportParams(.{ .initial_max_data = 1024 * 1024 });
+        const filled = conn.localTransportParams().original_destination_connection_id orelse
+            return error.MissingOriginalDestinationConnectionId;
+        try std.testing.expectEqualSlices(u8, &odcid, filled.slice());
+    }
+}
+
+test "a server's original_destination_connection_id from the caller is kept (a server that sent a Retry sets it)" {
+    // After a Retry the connection sees only the client's SECOND
+    // Initial packet, whose Destination Connection ID is the Retry's
+    // Source Connection ID. The original one is from before the
+    // Retry, and only the caller knows it.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try conn.setLocalScid(&.{ 0xb0, 0xb1, 0xb2, 0xb3 });
+
+    const before_retry = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+    const retry_scid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
+    try conn.setTransportParams(.{
+        .initial_max_data = 1024 * 1024,
+        .original_destination_connection_id = ConnectionId.fromSlice(&before_retry),
+        .retry_source_connection_id = ConnectionId.fromSlice(&retry_scid),
+    });
+    try conn.setInitialDcid(&retry_scid);
+    try std.testing.expectEqualSlices(u8, &before_retry, conn.localTransportParams().original_destination_connection_id.?.slice());
+
+    // The other order of the two calls.
+    try conn.setTransportParams(.{
+        .initial_max_data = 1024 * 1024,
+        .original_destination_connection_id = ConnectionId.fromSlice(&before_retry),
+        .retry_source_connection_id = ConnectionId.fromSlice(&retry_scid),
+    });
+    try std.testing.expectEqualSlices(u8, &before_retry, conn.localTransportParams().original_destination_connection_id.?.slice());
+}
+
+test "a client's transport parameters never get an original_destination_connection_id" {
+    // It is a server-only parameter (RFC 9000 §18.2): a server closes
+    // the connection when a client sends it.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try conn.setLocalScid(&.{ 0xc0, 0xc1, 0xc2, 0xc3 });
+
+    try conn.setTransportParams(.{ .initial_max_data = 1024 * 1024 });
+    try conn.setInitialDcid(&.{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 });
+    try std.testing.expect(conn.localTransportParams().original_destination_connection_id == null);
+    try conn.setTransportParams(.{ .initial_max_data = 1024 * 1024 });
+    try std.testing.expect(conn.localTransportParams().original_destination_connection_id == null);
+}

@@ -347,10 +347,19 @@ next_alternative_address_sequence: u64 = 0,
 /// distinguishes "explicitly empty" from "never set".
 peer_dcid: ConnectionId = .{},
 peer_dcid_set: bool = false,
-/// Server only: `peer_dcid` was taken from an Initial packet that
-/// authenticated. Until then it holds what `acceptInitial` read from
-/// the header of the first datagram, which nothing had authenticated.
+/// An Initial packet of the peer has authenticated, and
+/// `peer_initial_scid` is its Source Connection ID. On a server,
+/// `peer_dcid` holds until then what `acceptInitial` read from the
+/// header of the first datagram, which nothing had authenticated.
 peer_cid_authenticated: bool = false,
+/// The Source Connection ID of the peer's FIRST Initial packet that
+/// authenticated (valid when `peer_cid_authenticated`). RFC 9000
+/// section 7.2: a later Initial packet with another Source Connection
+/// ID is discarded. Section 7.3: the peer's
+/// `initial_source_connection_id` transport parameter must be this
+/// ID. `peer_dcid` starts as this ID and can move on later
+/// (NEW_CONNECTION_ID); this field does not.
+peer_initial_scid: ConnectionId = .{},
 /// SCID we identify ourselves with — appears as SCID on outgoing
 /// long-header packets, and the peer puts it (or another CID we
 /// issued) as DCID on every incoming packet. Zero-length is valid.
@@ -2284,8 +2293,15 @@ pub fn localTransportParams(self: *const Connection) TransportParams {
 /// already been latched (`setLocalScid`), fold it into the advertised
 /// parameters here. If not, `setLocalScid` back-fills and re-pushes it when
 /// it runs, so the two calls may happen in either order. A caller may also
-/// set `params.initial_source_connection_id` directly, or omit it entirely
-/// when talking only to lenient peers.
+/// set `params.initial_source_connection_id` directly. A peer closes the
+/// connection when the parameter is missing (quic-zig from v0.26.0, quic-go,
+/// and every other peer that follows §7.3).
+///
+/// Original Destination Connection ID (same section, server only): filled
+/// in the same way from the Destination Connection ID of the client's first
+/// Initial packet, when the caller left it null. A server that answered
+/// with a Retry must set it itself, with `retry_source_connection_id`: the
+/// connection never saw the Initial packet from before the Retry.
 pub fn setTransportParams(self: *Connection, params: TransportParams) !void {
     var local = try normalizeLocalTransportParams(params);
     // RFC 9000 §7.3: every endpoint MUST advertise
@@ -2297,6 +2313,16 @@ pub fn setTransportParams(self: *Connection, params: TransportParams) !void {
     // strict peers (e.g. quic-go closes with TRANSPORT_PARAMETER_ERROR).
     if (self.initial_source_cid_set) {
         local.initial_source_connection_id = self.initial_source_cid;
+    }
+    // The same for a server's `original_destination_connection_id`: a
+    // client MUST close when it is missing. Until v0.26.0 a server made
+    // from a bare `Connection` (no `Server` wrapper, no value given)
+    // left it out, and this library's own client did not check.
+    if (self.role == .server and
+        local.original_destination_connection_id == null and
+        self.original_initial_dcid_set)
+    {
+        local.original_destination_connection_id = self.original_initial_dcid;
     }
     var buf: [1024]u8 = undefined;
     const n = try local.encode(&buf);
@@ -3679,15 +3705,55 @@ pub fn installPeerTransportStatelessResetToken(self: *Connection) Error!void {
     self.peer_transport_reset_token_installed = true;
 }
 
+/// RFC 9000 section 7.3: the connection IDs in the peer's transport
+/// parameters must be the ones that were on the wire. The parameters
+/// are inside the TLS handshake and the packet headers of the first
+/// flights are not, so this is how an endpoint knows that nobody
+/// changed the IDs on the way (and that no Retry was put in, or taken
+/// out).
+///
+/// - `initial_source_connection_id`, from either end: absent is
+///   TRANSPORT_PARAMETER_ERROR; so is a value that is not the Source
+///   Connection ID of the peer's Initial packets.
+/// - `original_destination_connection_id`, from a server: absent is
+///   TRANSPORT_PARAMETER_ERROR; so is a value that is not the
+///   Destination Connection ID of the client's first Initial packet.
+/// - `retry_source_connection_id`, from a server: there, and right,
+///   exactly when the client took a Retry.
+///
+/// Until v0.26.0 the first was not looked at, and a server that left
+/// the second out passed.
 pub fn validatePeerTransportConnectionIds(self: *Connection) void {
     const params = self.cached_peer_transport_params orelse return;
-    if (params.original_destination_connection_id) |odcid| {
-        if (self.original_initial_dcid_set and
-            !ConnectionId.eql(odcid, self.original_initial_dcid))
-        {
-            self.close(true, transport_error_transport_parameter, "original destination cid mismatch");
-            return;
-        }
+    // The checks compare the parameters with what was on the wire.
+    // When the peer's parameters come in packets, an Initial packet of
+    // the peer has authenticated before they are here (they are in
+    // CRYPTO data that follows such a packet). A connection with no
+    // such packet got the peer's handshake some other way (`peer`: two
+    // connections whose TLS bytes are piped into each other, with no
+    // packets); it has no wire to compare with.
+    if (!self.peer_cid_authenticated) return;
+    const iscid = params.initial_source_connection_id orelse {
+        self.close(true, transport_error_transport_parameter, "missing initial source cid");
+        return;
+    };
+    if (!ConnectionId.eql(iscid, self.peer_initial_scid)) {
+        self.close(true, transport_error_transport_parameter, "initial source cid mismatch");
+        return;
+    }
+    // The rest is about parameters that only a server sends
+    // (`validatePeerTransportRole`, which runs first, closes when a
+    // client sent one).
+    if (self.role == .server) return;
+    const odcid = params.original_destination_connection_id orelse {
+        self.close(true, transport_error_transport_parameter, "missing original destination cid");
+        return;
+    };
+    if (self.original_initial_dcid_set and
+        !ConnectionId.eql(odcid, self.original_initial_dcid))
+    {
+        self.close(true, transport_error_transport_parameter, "original destination cid mismatch");
+        return;
     }
     if (self.retry_accepted) {
         const retry_source = params.retry_source_connection_id orelse {

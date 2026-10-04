@@ -36,8 +36,41 @@ changes.
   Length field of two bytes for a value that fits one (RFC 9000
   section 16 allows it).
 
+- **A peer that leaves a connection ID out of its transport
+  parameters is refused.** From the checks under "Fixed": a peer with
+  no `initial_source_connection_id`, and a server with no
+  `original_destination_connection_id`, now get
+  TRANSPORT_PARAMETER_ERROR. This library's own endpoints always sent
+  the first one. A server made from a bare `Connection` (no `Server`
+  wrapper) sent no `original_destination_connection_id` unless the
+  embedder set it; it is filled in now (see "Fixed"), so such a
+  server needs no change. One that answers with a Retry itself must
+  set it, with `retry_source_connection_id`, as RFC 9000 always
+  wanted.
+
 ### Fixed
 
+- **The connection-ID rules of RFC 9000 sections 7.2, 7.3 and
+  17.2.5.2.** Four checks were missing. (1) A later Initial packet
+  with another Source Connection ID is now dropped, at both ends. The
+  client took the ID of every Initial packet that authenticated, and
+  anyone who saw the ClientHello can make one (the Initial keys come
+  from an ID that is on the wire): one such packet, and the client
+  sent the rest of its handshake to an ID the server did not know.
+  (2) The peer's `initial_source_connection_id` must be there and
+  must be the ID of its Initial packets. It was not looked at. (3) A
+  server's `original_destination_connection_id` must be there; only a
+  wrong value closed. (4) A Retry that comes after an Initial packet
+  of the server is discarded; only a second Retry was. The transport
+  parameters are inside the TLS handshake and the first packet
+  headers are not, so checks 2 and 3 are how an endpoint knows that
+  nobody changed the IDs, or put a Retry in, on the way.
+- **A server made from a bare `Connection` sends
+  `original_destination_connection_id`.** `setTransportParams` and
+  `setInitialDcid` fill it in from the client's first Initial packet,
+  in either order of the calls, when the embedder left it null. A
+  client that follows RFC 9000 closes a handshake without it (this
+  library's own did not check).
 - **A handshake datagram is 1200 bytes at most.** Each packet of a
   coalesced datagram was capped at 1200 on its own, so the datagram
   could be much longer. Measured with 4096-byte send buffers: client

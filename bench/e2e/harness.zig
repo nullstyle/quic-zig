@@ -123,6 +123,15 @@ pub const Pair = struct {
         if (!pair.client.handshakeDone() or !pair.server.handshakeDone()) {
             return error.HandshakeStalled;
         }
+        // A handshake that completes in TLS can still end the
+        // connection (a transport parameter that an end refuses). The
+        // transfer loops below wait for progress and do not look at
+        // the connection's state: with a closed pair they turn for
+        // ever. (Seen 2026-10-04, while a new transport-parameter
+        // check was wrong for this shortcut: the test run hung.)
+        if (pair.client.closeState() != .open or pair.server.closeState() != .open) {
+            return error.PairClosedInHandshake;
+        }
 
         try pair.client.setPeerDcid(&server_cid);
         try pair.client.setLocalScid(&client_cid);

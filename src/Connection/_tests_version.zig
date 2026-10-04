@@ -248,13 +248,19 @@ test "Retry source CID transport parameter is validated" {
 
     const odcid = [_]u8{ 1, 1, 2, 3, 5, 8, 13, 21 };
     const retry_scid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3 };
+    const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
     try conn.setInitialDcid(&odcid);
     conn.retry_accepted = true;
     conn.retry_source_cid = ConnectionId.fromSlice(&retry_scid);
     conn.retry_source_cid_set = true;
+    // The server's first Initial packet has authenticated (the checks
+    // run only with a wire to compare with).
+    conn.peer_initial_scid = ConnectionId.fromSlice(&server_scid);
+    conn.peer_cid_authenticated = true;
 
     conn.cached_peer_transport_params = .{
         .original_destination_connection_id = ConnectionId.fromSlice(&odcid),
+        .initial_source_connection_id = ConnectionId.fromSlice(&server_scid),
         .retry_source_connection_id = ConnectionId.fromSlice(&.{ 0xaa, 0xbb }),
     };
     conn.validatePeerTransportConnectionIds();
@@ -827,3 +833,273 @@ test "server validatePeerTransportRole accepts when initial_wire_version is unse
 // handshake on receipt of HANDSHAKE_DONE, and §4.9.2 says an endpoint
 // MUST discard its handshake keys at confirmation. The three tests
 // below pin the behavior at three abstraction levels.
+
+/// The other direction of `InitialPeer`: Initial packets from a server
+/// to a client connection whose first Destination Connection ID was
+/// `InitialPeer.odcid`.
+const InitialServerPeer = struct {
+    const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+
+    /// A TLS context that can start a QUIC handshake: `handle` drives
+    /// TLS for every Initial packet, and BoringSSL refuses to start
+    /// QUIC without TLS 1.3 and an ALPN list.
+    fn tlsContext() !boringssl.tls.Context {
+        const protos = [_][]const u8{"hq-test"};
+        return boringssl.tls.Context.initClient(.{
+            .verify = .none,
+            .min_version = boringssl.raw.TLS1_3_VERSION,
+            .max_version = boringssl.raw.TLS1_3_VERSION,
+            .alpn = &protos,
+        });
+    }
+
+    /// A client connection that has its ClientHello ready to send,
+    /// with the IDs a client has before its first packet.
+    fn client(allocator: std.mem.Allocator, ctx: boringssl.tls.Context) !*Connection {
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        errdefer conn.destroy();
+        try conn.setInitialDcid(&InitialPeer.odcid);
+        try conn.setPeerDcid(&InitialPeer.odcid);
+        try conn.setLocalScid(&client_scid);
+        try conn.setTransportParams(.{});
+        try conn.advance();
+        return conn;
+    }
+
+    /// An Initial packet from a server that calls itself `scid`.
+    fn seal(dst: []u8, scid: []const u8, pn: u64) !usize {
+        const init_keys = try initial_keys_mod.deriveInitialKeys(&InitialPeer.odcid, true);
+        const k = try short_packet_mod.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret);
+        return long_packet_mod.sealInitial(dst, .{
+            .dcid = &client_scid,
+            .scid = scid,
+            .pn = pn,
+            .payload = &InitialPeer.ping_and_padding,
+            .keys = &k,
+        });
+    }
+};
+
+test "server: a later Initial packet with another Source Connection ID is dropped whole (RFC 9000 7.2)" {
+    // "Any further changes to the Destination Connection ID are only
+    // permitted if the values are taken from NEW_CONNECTION_ID frames;
+    // if subsequent Initial packets include a different Source
+    // Connection ID, they MUST be discarded." Anyone who saw the first
+    // ClientHello can seal such a packet (the Initial keys come from
+    // the Destination Connection ID in it), so a packet that is kept
+    // lets that someone put frames into the handshake.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try conn.setLocalScid(&InitialPeer.server_scid);
+
+    const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    const other_scid = [_]u8{ 0xe0, 0xe1, 0xe2, 0xe3, 0xe4 };
+
+    var first: [256]u8 = undefined;
+    const first_len = try InitialPeer.seal(&first, &client_scid, 0);
+    try conn.acceptInitial(first[0..first_len], .{});
+    try conn.handle(first[0..first_len], null, 1_000);
+    try std.testing.expect(conn.peer_cid_authenticated);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pnSpaceForLevel(.initial).received.largest);
+
+    // The same keys, another Source Connection ID, packet number 5.
+    // Nothing of it may count: not its packet number, not its PING.
+    var other: [256]u8 = undefined;
+    const other_len = try InitialPeer.seal(&other, &other_scid, 5);
+    try conn.handle(other[0..other_len], null, 2_000);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pnSpaceForLevel(.initial).received.largest);
+    try std.testing.expectEqualSlices(u8, &client_scid, conn.peer_dcid.slice());
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+
+    // The control: the next packet of the real client is read.
+    var next: [256]u8 = undefined;
+    const next_len = try InitialPeer.seal(&next, &client_scid, 1);
+    try conn.handle(next[0..next_len], null, 3_000);
+    try std.testing.expectEqual(@as(?u64, 1), conn.pnSpaceForLevel(.initial).received.largest);
+}
+
+test "client: the server's connection ID comes from its first Initial packet, and a later one with another ID is dropped whole (RFC 9000 7.2)" {
+    // "Once a client has received a valid Initial packet from the
+    // server, it MUST discard any subsequent packet it receives on
+    // that connection with a different Source Connection ID."
+    const allocator = std.testing.allocator;
+    var ctx = try InitialServerPeer.tlsContext();
+    defer ctx.deinit();
+    const conn = try InitialServerPeer.client(allocator, ctx);
+    defer conn.destroy();
+
+    const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+    const other_scid = [_]u8{ 0xe0, 0xe1, 0xe2, 0xe3, 0xe4 };
+
+    var first: [256]u8 = undefined;
+    const first_len = try InitialServerPeer.seal(&first, &server_scid, 0);
+    try conn.handle(first[0..first_len], null, 1_000);
+    try std.testing.expectEqualSlices(u8, &server_scid, conn.peer_dcid.slice());
+    try std.testing.expectEqual(@as(?u64, 0), conn.pnSpaceForLevel(.initial).received.largest);
+
+    // Until v0.26.0 the client took the ID of EVERY Initial packet
+    // that authenticated: one packet from someone who saw the
+    // ClientHello, and the client sent the rest of its handshake to
+    // an ID the server does not know.
+    var other: [256]u8 = undefined;
+    const other_len = try InitialServerPeer.seal(&other, &other_scid, 5);
+    try conn.handle(other[0..other_len], null, 2_000);
+    try std.testing.expectEqualSlices(u8, &server_scid, conn.peer_dcid.slice());
+    try std.testing.expectEqualSlices(u8, &server_scid, conn.primaryPath().path.peer_cid.slice());
+    try std.testing.expectEqual(@as(?u64, 0), conn.pnSpaceForLevel(.initial).received.largest);
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+
+    // The control: the next packet of the real server is read.
+    var next: [256]u8 = undefined;
+    const next_len = try InitialServerPeer.seal(&next, &server_scid, 1);
+    try conn.handle(next[0..next_len], null, 3_000);
+    try std.testing.expectEqual(@as(?u64, 1), conn.pnSpaceForLevel(.initial).received.largest);
+}
+
+const IscidCase = enum { missing, wrong, right };
+
+test "server: a client's initial_source_connection_id must be there and must be the ID of its Initial packets (RFC 9000 7.3)" {
+    // "An endpoint MUST treat the absence of the
+    // initial_source_connection_id transport parameter from either
+    // endpoint ... as a connection error of type
+    // TRANSPORT_PARAMETER_ERROR", and a value that is not the Source
+    // Connection ID of the peer's Initial packets as
+    // TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION. The parameter
+    // is inside the TLS handshake, so it is the proof that nobody
+    // changed the connection IDs on the way.
+    for ([_]IscidCase{ .missing, .wrong, .right }) |case| {
+        const allocator = std.testing.allocator;
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        try conn.setLocalScid(&InitialPeer.server_scid);
+
+        const client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+        var first: [256]u8 = undefined;
+        const first_len = try InitialPeer.seal(&first, &client_scid, 0);
+        try conn.acceptInitial(first[0..first_len], .{});
+        try conn.handle(first[0..first_len], null, 1_000);
+        try std.testing.expect(conn.peer_cid_authenticated);
+
+        conn.cached_peer_transport_params = .{
+            .initial_source_connection_id = switch (case) {
+                .missing => null,
+                .wrong => ConnectionId.fromSlice(&.{ 0xee, 0xee, 0xee, 0xee }),
+                .right => ConnectionId.fromSlice(&client_scid),
+            },
+        };
+        conn.validatePeerTransportConnectionIds();
+
+        if (case == .right) {
+            try std.testing.expect(conn.lifecycle.pending_close == null);
+        } else {
+            try std.testing.expect(conn.lifecycle.pending_close != null);
+            try std.testing.expectEqual(transport_error_transport_parameter, conn.lifecycle.pending_close.?.error_code);
+            try std.testing.expectEqualStrings(
+                if (case == .missing) "missing initial source cid" else "initial source cid mismatch",
+                conn.lifecycle.pending_close.?.reason,
+            );
+        }
+    }
+}
+
+test "client: a server's initial_source_connection_id must be there and must be the ID of its Initial packets (RFC 9000 7.3)" {
+    for ([_]IscidCase{ .missing, .wrong, .right }) |case| {
+        const allocator = std.testing.allocator;
+        var ctx = try InitialServerPeer.tlsContext();
+        defer ctx.deinit();
+        const conn = try InitialServerPeer.client(allocator, ctx);
+        defer conn.destroy();
+
+        const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+        var first: [256]u8 = undefined;
+        const first_len = try InitialServerPeer.seal(&first, &server_scid, 0);
+        try conn.handle(first[0..first_len], null, 1_000);
+
+        conn.cached_peer_transport_params = .{
+            .original_destination_connection_id = ConnectionId.fromSlice(&InitialPeer.odcid),
+            .initial_source_connection_id = switch (case) {
+                .missing => null,
+                .wrong => ConnectionId.fromSlice(&.{ 0xee, 0xee, 0xee, 0xee }),
+                .right => ConnectionId.fromSlice(&server_scid),
+            },
+        };
+        conn.validatePeerTransportConnectionIds();
+
+        if (case == .right) {
+            try std.testing.expect(conn.lifecycle.pending_close == null);
+        } else {
+            try std.testing.expect(conn.lifecycle.pending_close != null);
+            try std.testing.expectEqual(transport_error_transport_parameter, conn.lifecycle.pending_close.?.error_code);
+            try std.testing.expectEqualStrings(
+                if (case == .missing) "missing initial source cid" else "initial source cid mismatch",
+                conn.lifecycle.pending_close.?.reason,
+            );
+        }
+    }
+}
+
+test "client: a server with no original_destination_connection_id is a TRANSPORT_PARAMETER_ERROR (RFC 9000 7.3)" {
+    // "... or the absence of the original_destination_connection_id
+    // transport parameter from the server". Until v0.26.0 only a
+    // WRONG value closed; a server that left the parameter out passed.
+    const allocator = std.testing.allocator;
+    var ctx = try InitialServerPeer.tlsContext();
+    defer ctx.deinit();
+    const conn = try InitialServerPeer.client(allocator, ctx);
+    defer conn.destroy();
+
+    const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+    var first: [256]u8 = undefined;
+    const first_len = try InitialServerPeer.seal(&first, &server_scid, 0);
+    try conn.handle(first[0..first_len], null, 1_000);
+
+    conn.cached_peer_transport_params = .{
+        .initial_source_connection_id = ConnectionId.fromSlice(&server_scid),
+    };
+    conn.validatePeerTransportConnectionIds();
+
+    try std.testing.expect(conn.lifecycle.pending_close != null);
+    try std.testing.expectEqual(transport_error_transport_parameter, conn.lifecycle.pending_close.?.error_code);
+    try std.testing.expectEqualStrings("missing original destination cid", conn.lifecycle.pending_close.?.reason);
+}
+
+test "client: a Retry that comes after an Initial packet of the server is discarded (RFC 9000 17.2.5.2)" {
+    // "After the client has received and processed an Initial or
+    // Retry packet from the server, it MUST discard any subsequent
+    // Retry packets that it receives." Anyone who saw the ClientHello
+    // can make a Retry that verifies (the integrity tag is keyed with
+    // the first Destination Connection ID), and a Retry that is taken
+    // starts the handshake again from nothing.
+    const allocator = std.testing.allocator;
+    var ctx = try InitialServerPeer.tlsContext();
+    defer ctx.deinit();
+    const conn = try InitialServerPeer.client(allocator, ctx);
+    defer conn.destroy();
+
+    const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+    var first: [256]u8 = undefined;
+    const first_len = try InitialServerPeer.seal(&first, &server_scid, 0);
+    try conn.handle(first[0..first_len], null, 1_000);
+    try std.testing.expectEqualSlices(u8, &server_scid, conn.peer_dcid.slice());
+
+    const retry_scid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
+    var packet: [256]u8 = undefined;
+    const retry_len = try long_packet_mod.sealRetry(&packet, .{
+        .original_dcid = &InitialPeer.odcid,
+        .dcid = &InitialServerPeer.client_scid,
+        .scid = &retry_scid,
+        .retry_token = "a token from the side",
+    });
+    try conn.handle(packet[0..retry_len], null, 2_000);
+
+    try std.testing.expect(!conn.retry_accepted);
+    try std.testing.expectEqual(@as(usize, 0), conn.retry_token.items.len);
+    try std.testing.expectEqualSlices(u8, &server_scid, conn.peer_dcid.slice());
+    try std.testing.expectEqualSlices(u8, &InitialPeer.odcid, conn.initial_dcid.slice());
+    try std.testing.expectEqual(CloseState.open, conn.closeState());
+}

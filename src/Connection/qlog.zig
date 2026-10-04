@@ -91,7 +91,9 @@ pub const QlogPacketDropReason = enum {
     decryption_failure,
     /// Long-header packet for an unsupported QUIC version.
     unsupported_version,
-    /// Short-header DCID didn't map to any active local CID.
+    /// Short-header DCID didn't map to any active local CID; or an
+    /// Initial packet whose Source Connection ID is not the one of
+    /// the peer's first Initial packet (RFC 9000 §7.2).
     unknown_connection_id,
     /// Packet payload exceeded the local `max_udp_payload_size`.
     payload_too_large,

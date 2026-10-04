@@ -233,25 +233,46 @@ pub fn handleInitial(
         if (conn.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
     )) orelse return unopened_len;
 
-    // Server side: discover peer's CIDs from the very first Initial.
-    if (conn.role == .server) {
-        // RFC 9000 §7.2: the server takes the client's connection ID
-        // from the first Initial packet it receives, and a packet that
-        // fails authentication was not received. `acceptInitial` read
-        // an ID from the header of the first DATAGRAM, before anything
-        // was authenticated. If that datagram was damaged in its
-        // Source Connection ID Length (or was not the client's), the
-        // ID is wrong, and every packet to it is one the client cannot
-        // use: a short header has no ID length, so the client reads
-        // the packet number from the wrong place. This packet is the
-        // first whose header the AEAD tag covers.
-        if (!conn.peer_cid_authenticated) {
-            const client_scid = ConnectionId.fromSlice(opened.scid.slice());
-            if (!conn.peer_dcid_set or !ConnectionId.eql(conn.peer_dcid, client_scid)) {
-                try conn.setPeerDcid(client_scid.slice());
-            }
-            conn.peer_cid_authenticated = true;
+    // RFC 9000 §7.2: an endpoint takes the peer's connection ID from
+    // the FIRST Initial packet it receives, and a packet that fails
+    // authentication was not received. This packet is one whose header
+    // the AEAD tag covers.
+    //
+    // Server: `acceptInitial` read an ID from the header of the first
+    // DATAGRAM, before anything was authenticated. If that datagram
+    // was damaged in its Source Connection ID Length (or was not the
+    // client's), the ID is wrong, and every packet to it is one the
+    // client cannot use: a short header has no ID length, so the
+    // client reads the packet number from the wrong place.
+    //
+    // Both roles: a LATER Initial packet with another Source
+    // Connection ID is discarded whole ("if subsequent Initial packets
+    // include a different Source Connection ID, they MUST be
+    // discarded"; "Once a client has received a valid Initial packet
+    // from the server, it MUST discard any subsequent packet it
+    // receives on that connection with a different Source Connection
+    // ID"). Anyone who saw the first ClientHello can seal an Initial
+    // packet that authenticates: the keys come from the Destination
+    // Connection ID in it. Until v0.26.0 the server read the frames of
+    // such a packet (it kept its ID since v0.25.0), and the client
+    // took the ID of EVERY Initial packet: one packet from the side,
+    // and the client sent the rest of its handshake to an ID the
+    // server does not know. The rest of the datagram is still read
+    // (§12.2).
+    const packet_scid = ConnectionId.fromSlice(opened.scid.slice());
+    if (conn.peer_cid_authenticated) {
+        if (!ConnectionId.eql(conn.peer_initial_scid, packet_scid)) {
+            conn_qlog.emitPacketDropped(conn, .initial, @intCast(opened.bytes_consumed), .unknown_connection_id);
+            return opened.bytes_consumed;
         }
+    } else {
+        if (!conn.peer_dcid_set or !ConnectionId.eql(conn.peer_dcid, packet_scid)) {
+            try conn.setPeerDcid(packet_scid.slice());
+        }
+        conn.peer_initial_scid = packet_scid;
+        conn.peer_cid_authenticated = true;
+    }
+    if (conn.role == .server) {
         if (!conn.initial_dcid_set) {
             conn.initial_dcid = ConnectionId.fromSlice(opened.dcid.slice());
             conn.initial_dcid_set = true;
@@ -262,12 +283,6 @@ pub fn handleInitial(
         conn_qlog.emitConnectionStartedOnce(
             conn,
         );
-    }
-    if (conn.role == .client) {
-        const server_scid = ConnectionId.fromSlice(opened.scid.slice());
-        if (!ConnectionId.eql(conn.primaryPath().path.peer_cid, server_scid)) {
-            try conn.setPeerDcid(server_scid.slice());
-        }
     }
 
     return finishOpenedPacket(
@@ -293,7 +308,15 @@ pub fn handleRetry(
     now_us: u64,
 ) Error!usize {
     _ = now_us;
-    if (conn.role != .client or conn.retry_accepted or conn.inner.handshakeDone()) {
+    // RFC 9000 §17.2.5.2: "After the client has received and processed
+    // an Initial or Retry packet from the server, it MUST discard any
+    // subsequent Retry packets that it receives." A Retry needs no
+    // secret to make (its integrity tag is keyed with the first
+    // Destination Connection ID, which is on the wire), so one that
+    // comes in the middle of a handshake is from the side, and taking
+    // it would throw the handshake away. Until v0.26.0 only a second
+    // Retry was refused, not a Retry after an Initial packet.
+    if (conn.role != .client or conn.retry_accepted or conn.peer_cid_authenticated or conn.inner.handshakeDone()) {
         return bytes.len;
     }
     const parsed = wire_header_mod.parse(bytes, 0) catch return bytes.len;
