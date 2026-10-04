@@ -592,6 +592,203 @@ test "RETIRE_CONNECTION_ID emits with retransmit metadata and requeues on loss" 
     try std.testing.expectEqual(@as(u64, 7), conn.pending_frames.retire_connection_ids.items[0].sequence_number);
 }
 
+test "a lost NEW_CONNECTION_ID for an ID that the peer has retired is not issued again, and is no error" {
+    // FOUND 2026-10-04, the first time the interop CLIENT ran the
+    // handshake-loss cells (quic-go server, 30% of the datagrams lost):
+    // the client ended with `error: ConnectionIdLimitExceeded` on its
+    // 40th connection. READ from the code, then held by this test: a
+    // packet with NEW_CONNECTION_ID frames went out; the peer got the
+    // frames (from that packet or from a copy) and retired one of the
+    // IDs; the endpoint gave it a new ID in its place. Then the packet
+    // was declared lost, and the loss path queued the frame of the
+    // retired ID again as a NEW issuance: over the peer's limit, an
+    // error, and an error out of loss detection ends the connection.
+    const allocator = std.testing.allocator;
+    // With the peer's limit used up (the error), and with room in it
+    // (the retired ID came back to life).
+    for ([_]u64{ 3, 4 }) |limit| {
+        var ctx = try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
+
+        try installTestApplicationWriteSecret(conn);
+        try conn.setPeerDcid(&.{0xaa});
+        conn.cached_peer_transport_params = .{ .active_connection_id_limit = limit };
+        try conn.setLocalScid(&.{0xa0});
+        try conn.queueNewConnectionId(1, 0, &.{0xa1}, @splat(0xa1));
+        try conn.queueNewConnectionId(2, 0, &.{0xa2}, @splat(0xa2));
+
+        // The two frames go out (in one packet or in two).
+        var packet_buf: [default_mtu]u8 = undefined;
+        while (conn.pending_frames.new_connection_ids.items.len > 0) {
+            _ = (try conn.pollLevel(.application, &packet_buf, 1_000_000)).?;
+        }
+        const tracker = &conn.primaryPath().sent;
+        var frames_sent: usize = 0;
+        for (tracker.packets[0..tracker.count]) |*packet| {
+            for (packet.retransmit_frames.items) |frame| {
+                try std.testing.expect(frame == .new_connection_id);
+                frames_sent += 1;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 2), frames_sent);
+
+        // The peer retires ID 1, and gets ID 3 in its place.
+        conn.handleRetireConnectionId(.{ .sequence_number = 1 });
+        try std.testing.expectEqual(@as(u64, 3), conn.nextLocalConnectionIdSequence(0));
+        const queued = try conn.replenishConnectionIds(&.{
+            .{ .connection_id = &.{0xa3}, .stateless_reset_token = @splat(0xa3) },
+        });
+        try std.testing.expectEqual(@as(usize, 1), queued);
+        const budget_before = conn.localConnectionIdIssueBudget(0);
+        try std.testing.expectEqual(@as(usize, if (limit == 3) 0 else 1), budget_before);
+        conn.pending_frames.new_connection_ids.clearRetainingCapacity();
+
+        // Every packet that carried one of the frames is declared
+        // lost.
+        for (tracker.packets[0..tracker.count]) |*packet| {
+            _ = try conn.dispatchLostControlFrames(packet);
+        }
+
+        // ID 2 is still in use: its frame is queued again. ID 1 is
+        // not in the queue and not a local ID again.
+        try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.new_connection_ids.items.len);
+        try std.testing.expectEqual(@as(u64, 2), conn.pending_frames.new_connection_ids.items[0].sequence_number);
+        var ids: usize = 0;
+        for (conn.local_cids.items) |item| {
+            try std.testing.expect(item.sequence_number != 1);
+            ids += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 3), ids);
+        try std.testing.expectEqual(budget_before, conn.localConnectionIdIssueBudget(0));
+    }
+}
+
+test "a lost PATH_NEW_CONNECTION_ID for an ID that the peer has retired is not issued again" {
+    // The multipath twin of the test above: the same loss path, the
+    // path-scoped frame.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    markTestMultipathNegotiated(conn, 1);
+    conn.cached_peer_transport_params = .{
+        .initial_max_path_id = 1,
+        .active_connection_id_limit = 3,
+    };
+    const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0xc1}), ConnectionId.fromSlice(&.{0xd1}));
+    _ = try conn.replenishPathConnectionIds(path_id, &.{
+        .{ .connection_id = &.{0xc2}, .stateless_reset_token = @splat(0xc2) },
+        .{ .connection_id = &.{0xc3}, .stateless_reset_token = @splat(0xc3) },
+    });
+
+    // A packet that carried both frames.
+    var lost: state.SentPacketTracker.SentPacket = .{
+        .pn = 0,
+        .sent_time_us = 1_000_000,
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+    };
+    defer lost.deinit(allocator);
+    for (conn.pending_frames.path_new_connection_ids.items) |item| {
+        try lost.addRetransmitFrame(allocator, .{ .path_new_connection_id = .{
+            .path_id = item.path_id,
+            .sequence_number = item.sequence_number,
+            .retire_prior_to = item.retire_prior_to,
+            .connection_id = item.connection_id,
+            .stateless_reset_token = item.stateless_reset_token,
+        } });
+    }
+    try std.testing.expectEqual(@as(usize, 2), lost.retransmit_frames.items.len);
+    conn.pending_frames.path_new_connection_ids.clearRetainingCapacity();
+
+    // The peer retires ID 1 of the path and gets ID 3 in its place:
+    // its limit is used up again.
+    conn.handlePathRetireConnectionId(.{ .path_id = path_id, .sequence_number = 1 });
+    _ = try conn.replenishPathConnectionIds(path_id, &.{
+        .{ .connection_id = &.{0xc4}, .stateless_reset_token = @splat(0xc4) },
+    });
+    try std.testing.expectEqual(@as(usize, 0), conn.localConnectionIdIssueBudget(path_id));
+    conn.pending_frames.path_new_connection_ids.clearRetainingCapacity();
+
+    // The packet is declared lost: ID 2 is sent again, ID 1 is not.
+    try std.testing.expect(try conn.dispatchLostControlFrames(&lost));
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.path_new_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 2), conn.pending_frames.path_new_connection_ids.items[0].sequence_number);
+    for (conn.local_cids.items) |item| {
+        if (item.path_id == path_id) try std.testing.expect(item.sequence_number != 1);
+    }
+    try std.testing.expectEqual(@as(usize, 0), conn.localConnectionIdIssueBudget(path_id));
+}
+
+test "a connection ID sequence number is used once, also when the newest ID is retired" {
+    // RFC 9000 section 5.1.1: "The sequence number on each newly
+    // issued connection ID MUST increase by 1." The next number was
+    // taken from the IDs that are still in use, so after the peer
+    // retired the NEWEST one, the next ID got that number again, with
+    // another connection ID. A peer may close the connection for that
+    // (section 19.15, PROTOCOL_VIOLATION).
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    conn.cached_peer_transport_params = .{ .active_connection_id_limit = 2 };
+    try conn.setLocalScid(&.{0xa0});
+    try conn.queueNewConnectionId(1, 0, &.{0xa1}, @splat(0xa1));
+    try std.testing.expectEqual(@as(u64, 2), conn.nextLocalConnectionIdSequence(0));
+
+    conn.handleRetireConnectionId(.{ .sequence_number = 1 });
+    try std.testing.expectEqual(@as(u64, 2), conn.nextLocalConnectionIdSequence(0));
+    const queued = try conn.replenishConnectionIds(&.{
+        .{ .connection_id = &.{0xa2}, .stateless_reset_token = @splat(0xa2) },
+    });
+    try std.testing.expectEqual(@as(usize, 1), queued);
+    var found = false;
+    for (conn.local_cids.items) |item| {
+        if (item.cid.len == 1 and item.cid.bytes[0] == 0xa2) {
+            try std.testing.expectEqual(@as(u64, 2), item.sequence_number);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+    try std.testing.expectEqual(@as(u64, 3), conn.nextLocalConnectionIdSequence(0));
+
+    // Sequence 0 too: retire everything, and the numbers still go up.
+    conn.handleRetireConnectionId(.{ .sequence_number = 2 });
+    try std.testing.expectEqual(@as(u64, 3), conn.nextLocalConnectionIdSequence(0));
+}
+
+test "a lost NEW_CONNECTION_ID for an ID that is still in use is sent again" {
+    // The control for the test above: the frame still means something,
+    // so the loss path queues it.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    try installTestApplicationWriteSecret(conn);
+    try conn.setPeerDcid(&.{0xaa});
+    conn.cached_peer_transport_params = .{ .active_connection_id_limit = 2 };
+    try conn.setLocalScid(&.{0xa0});
+    try conn.queueNewConnectionId(1, 0, &.{0xa1}, @splat(0xa1));
+
+    var packet_buf: [default_mtu]u8 = undefined;
+    _ = (try conn.pollLevel(.application, &packet_buf, 1_000_000)).?;
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_frames.new_connection_ids.items.len);
+    const sent = &conn.primaryPath().sent.packets[0];
+
+    try std.testing.expect(try conn.dispatchLostControlFrames(sent));
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.new_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.pending_frames.new_connection_ids.items[0].sequence_number);
+}
+
 test "peer cid registration enforces active cid limit per path" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

@@ -16,6 +16,7 @@ const conn_paths = @import("paths.zig");
 const conn_streams = @import("streams.zig");
 const conn_datagram = @import("datagram.zig");
 const conn_flow = @import("flow.zig");
+const conn_cids = @import("cids.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
 const EncryptionLevel = state_mod.EncryptionLevel;
@@ -469,13 +470,24 @@ pub fn dispatchLostControlFramesOnPath(
                 any = conn_flow.requeueStreamsBlocked(conn, sb) or any;
             },
             .new_connection_id => |nc| {
-                try conn.queueNewConnectionId(
-                    nc.sequence_number,
-                    nc.retire_prior_to,
-                    nc.connection_id.slice(),
-                    nc.stateless_reset_token,
-                );
-                any = true;
+                // Only an ID that is still ours is sent again. The peer
+                // may have retired it since this packet left (it had
+                // the frame from another copy of the packet), and a
+                // retired ID is gone from `local_cids`. Queued again,
+                // its frame would be a NEW issuance: over the peer's
+                // limit (`error.ConnectionIdLimitExceeded` out of loss
+                // detection, which ends the connection; found with a
+                // quic-go server under 30% loss), or, with room in the
+                // limit, a retired ID that comes back to life.
+                if (conn_cids.localCidSequenceExists(conn, 0, nc.sequence_number)) {
+                    try conn.queueNewConnectionId(
+                        nc.sequence_number,
+                        nc.retire_prior_to,
+                        nc.connection_id.slice(),
+                        nc.stateless_reset_token,
+                    );
+                    any = true;
+                }
             },
             .retire_connection_id => |rc| {
                 try conn.queueRetireConnectionId(rc.sequence_number);
@@ -530,14 +542,17 @@ pub fn dispatchLostControlFramesOnPath(
                 any = true;
             },
             .path_new_connection_id => |nc| {
-                try conn.queuePathNewConnectionId(
-                    nc.path_id,
-                    nc.sequence_number,
-                    nc.retire_prior_to,
-                    nc.connection_id.slice(),
-                    nc.stateless_reset_token,
-                );
-                any = true;
+                // As for `.new_connection_id` above.
+                if (conn_cids.localCidSequenceExists(conn, nc.path_id, nc.sequence_number)) {
+                    try conn.queuePathNewConnectionId(
+                        nc.path_id,
+                        nc.sequence_number,
+                        nc.retire_prior_to,
+                        nc.connection_id.slice(),
+                        nc.stateless_reset_token,
+                    );
+                    any = true;
+                }
             },
             .path_retire_connection_id => |rc| {
                 try conn.queuePathRetireConnectionId(rc.path_id, rc.sequence_number);

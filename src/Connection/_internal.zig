@@ -148,10 +148,18 @@ pub fn refreshConnectionIdEventsForPath(conn: *Connection, path_id: u32) void {
 }
 
 /// One past the highest local-CID sequence number ever issued on
-/// `path_id`. Used to gate RETIRE_CONNECTION_ID validity per
-/// RFC 9000 §19.16 ("MUST treat receipt of a RETIRE_CONNECTION_ID with
-/// a sequence number that has not been issued as a connection error of
-/// type PROTOCOL_VIOLATION").
+/// `path_id`: the number the next ID gets. RFC 9000 §5.1.1: "The
+/// sequence number on each newly issued connection ID MUST increase by
+/// 1."
+///
+/// "Ever" is the point. A retired ID leaves `local_cids`, so the IDs
+/// that are still in use do not say what was issued: until 0.26.0 this
+/// looked only at them, and after the peer retired the NEWEST ID the
+/// next one got its number again, with another connection ID (a peer
+/// may close for that, §19.15). The path keeps the mark
+/// (`PathState.next_local_cid_seq`, the same one that gates
+/// RETIRE_CONNECTION_ID). A path ID that has IDs and no path state yet
+/// (IDs given out ahead for multipath) has only its live IDs to go by.
 pub fn nextLocalCidSequence(conn: *const Connection, path_id: u32) u64 {
     var next: u64 = 0;
     for (conn.local_cids.items) |item| {
@@ -159,5 +167,6 @@ pub fn nextLocalCidSequence(conn: *const Connection, path_id: u32) u64 {
             next = item.sequence_number + 1;
         }
     }
+    if (conn.paths.getConst(path_id)) |path| next = @max(next, path.next_local_cid_seq);
     return next;
 }
