@@ -313,9 +313,24 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run quic tests");
 
+    // `zig build test -Dtest-filter='handshake loss'` runs only the
+    // tests whose full name contains that text, in both test binaries.
+    // It is a compile-time option, like `-Dconformance-filter` below:
+    // the default test runner takes no filter at run time. Nothing in
+    // CI passes it. A filter that matches no test is a green run of
+    // zero tests, so read the count.
+    const test_filter = b.option(
+        []const u8,
+        "test-filter",
+        "Run only the unit and integration tests whose name contains this text",
+    );
+    const test_filters: []const []const u8 =
+        if (test_filter) |f| &.{f} else &.{};
+
     const unit_tests = b.addTest(.{
         .root_module = quic_mod,
         .use_llvm = use_llvm_for_tests,
+        .filters = test_filters,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
@@ -331,7 +346,7 @@ pub fn build(b: *std.Build) void {
     });
     tests_mod.addImport("quic", quic_mod);
     tests_mod.addImport("boringssl", boringssl_mod);
-    const integration_tests = b.addTest(.{ .root_module = tests_mod });
+    const integration_tests = b.addTest(.{ .root_module = tests_mod, .filters = test_filters });
     const run_integration_tests = b.addRunArtifact(integration_tests);
     test_step.dependOn(&run_integration_tests.step);
 
