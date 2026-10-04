@@ -100,6 +100,8 @@ pub fn handleShort(
             conn.enterStatelessReset(now_us);
         } else {
             conn_qlog.emitPacketDropped(conn, .application, @intCast(bytes.len), .keys_unavailable);
+            // The peer is done with the handshake and we are not.
+            conn_loss.repeatHandshakeAckEarly(conn);
         }
         return bytes.len;
     }

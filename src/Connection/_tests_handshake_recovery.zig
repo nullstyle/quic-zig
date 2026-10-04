@@ -549,3 +549,130 @@ test "1-RTT probe timer: a connection with no handshake over packets (keys set b
     const deadline = conn_loss.ptoDeadlineForApplicationPath(conn, path).?;
     try std.testing.expectEqual(start_us + conn_loss.ptoDurationForApplicationPath(conn, path), deadline);
 }
+
+// ------------------------------------------------ the ACK, again
+
+test "probe timeout: a probe in a handshake space says again what has arrived there" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+    installHandshakeSecrets(conn);
+
+    // The client's Handshake packet 6 arrived, and the ACK for it went
+    // out once, in a packet that the network may have lost.
+    const hs = conn.pnSpaceForLevel(.handshake);
+    hs.recordReceivedPacket(6, start_us / 1000, true);
+    try std.testing.expect(hs.received.pending_ack);
+    hs.received.markAckSent();
+    try std.testing.expect(!hs.received.pending_ack);
+
+    // The server's flight is in flight in both spaces.
+    try sendCrypto(conn, .initial, 0, 0, "server-hello");
+    try sendCrypto(conn, .handshake, 0, 0, "certificate");
+    const deadline = conn_loss.ptoDeadlineForLevel(conn, .handshake).?;
+
+    // Before the timeout nothing asks for the ACK.
+    try conn.tick(deadline - 1);
+    try std.testing.expect(!hs.received.pending_ack);
+
+    try conn.tick(deadline);
+    try std.testing.expectEqual([2]u32{ 1, 1 }, conn.pto_count);
+    // The probe carries the ACK again.
+    try std.testing.expect(hs.received.pending_ack);
+    // A space in which nothing has arrived has nothing to say.
+    try std.testing.expect(!conn.pnSpaceForLevel(.initial).received.pending_ack);
+}
+
+test "a 1-RTT packet before its keys: the Handshake ACK goes out again, bounded" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+    installHandshakeSecrets(conn);
+    const hs = conn.pnSpaceForLevel(.handshake);
+
+    // A short header and 39 bytes: a 1-RTT packet as far as anyone
+    // without the keys can tell.
+    var one_rtt: [40]u8 = @splat(0x5a);
+    one_rtt[0] = 0x40;
+
+    // No Handshake packet of the client has arrived: nothing to say.
+    try conn.handle(&one_rtt, null, start_us);
+    try std.testing.expect(!hs.received.pending_ack);
+    try std.testing.expectEqual(@as(u8, 0), conn.early_handshake_ack_repeats);
+
+    // The client's Handshake packet 6 arrived, and the ACK went out.
+    hs.recordReceivedPacket(6, start_us / 1000, true);
+    hs.received.markAckSent();
+    try conn.handle(&one_rtt, null, start_us + 1_000);
+    try std.testing.expect(hs.received.pending_ack);
+    try std.testing.expectEqual(@as(u8, 1), conn.early_handshake_ack_repeats);
+
+    // While that ACK is still owed, more such packets use up nothing.
+    try conn.handle(&one_rtt, null, start_us + 2_000);
+    try conn.handle(&one_rtt, null, start_us + 3_000);
+    try std.testing.expectEqual(@as(u8, 1), conn.early_handshake_ack_repeats);
+
+    // Up to the limit for one connection, and no further.
+    var sent: u8 = 1;
+    while (sent < conn_loss.max_early_handshake_retransmits) : (sent += 1) {
+        hs.received.markAckSent();
+        try conn.handle(&one_rtt, null, start_us + 10_000);
+        try std.testing.expect(hs.received.pending_ack);
+    }
+    try std.testing.expectEqual(conn_loss.max_early_handshake_retransmits, conn.early_handshake_ack_repeats);
+    hs.received.markAckSent();
+    try conn.handle(&one_rtt, null, start_us + 20_000);
+    try std.testing.expect(!hs.received.pending_ack);
+    try std.testing.expectEqual(conn_loss.max_early_handshake_retransmits, conn.early_handshake_ack_repeats);
+}
+
+test "a 1-RTT packet before its keys: nothing without Handshake keys, with the keys gone, or when closing" {
+    var one_rtt: [40]u8 = @splat(0x5a);
+    one_rtt[0] = 0x40;
+
+    // No Handshake keys yet: there is nothing to send an ACK in.
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(std.testing.allocator, ctx);
+        defer conn.destroy();
+        const hs = conn.pnSpaceForLevel(.handshake);
+        hs.recordReceivedPacket(6, start_us / 1000, true);
+        hs.received.markAckSent();
+        try conn.handle(&one_rtt, null, start_us);
+        try std.testing.expect(!hs.received.pending_ack);
+        try std.testing.expectEqual(@as(u8, 0), conn.early_handshake_ack_repeats);
+    }
+    // The Handshake keys are discarded: the space is closed.
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(std.testing.allocator, ctx);
+        defer conn.destroy();
+        installHandshakeSecrets(conn);
+        const hs = conn.pnSpaceForLevel(.handshake);
+        hs.recordReceivedPacket(6, start_us / 1000, true);
+        hs.received.markAckSent();
+        conn.discardHandshakeKeys();
+        try conn.handle(&one_rtt, null, start_us);
+        try std.testing.expect(!hs.received.pending_ack);
+        try std.testing.expectEqual(@as(u8, 0), conn.early_handshake_ack_repeats);
+    }
+    // The connection is closing: only CONNECTION_CLOSE goes out.
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(std.testing.allocator, ctx);
+        defer conn.destroy();
+        installHandshakeSecrets(conn);
+        const hs = conn.pnSpaceForLevel(.handshake);
+        hs.recordReceivedPacket(6, start_us / 1000, true);
+        hs.received.markAckSent();
+        conn.close(true, 0x01, "test");
+        conn_loss.repeatHandshakeAckEarly(conn);
+        try std.testing.expect(!hs.received.pending_ack);
+        try std.testing.expectEqual(@as(u8, 0), conn.early_handshake_ack_repeats);
+    }
+}

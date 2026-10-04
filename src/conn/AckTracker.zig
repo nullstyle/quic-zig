@@ -136,6 +136,16 @@ pub fn markAckSent(self: *AckTracker) void {
     self.ack_eliciting_since_ack = 0;
 }
 
+/// Owe the ACK again, although nothing new has arrived: the packet
+/// that carried it may be lost, and nothing else sends it a second
+/// time. Nothing happens if no packet was ever received. Returns true
+/// if an ACK is owed now that was not owed before.
+pub fn repeatAck(self: *AckTracker) bool {
+    if (self.largest == null or self.pending_ack) return false;
+    self.pending_ack = true;
+    return true;
+}
+
 /// Receive timestamp (ms) used to compute the `ack_delay` field
 /// of the next outgoing ACK frame, or null if no ACK is scheduled.
 pub fn ackDelayBaseMs(self: *const AckTracker) ?u64 {
