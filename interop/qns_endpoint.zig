@@ -461,6 +461,11 @@ const ClientMode = enum {
     normal,
     resumption,
     zerortt,
+    /// One connection for each request, one after the other. The
+    /// runner's `handshakeloss` and `handshakecorruption` cells give
+    /// the client this test case with 50 requests, and count the
+    /// handshakes on the wire.
+    multiconnect,
 };
 
 const ClientConnectionOptions = struct {
@@ -1585,8 +1590,23 @@ fn dispatchInbound(ctx: DispatchInboundCtx) !void {
 
         if (opts.retry and !sc.retry_sent and !new_token_validated) {
             sc.retry_original_dcid = quic.conn.path.ConnectionId.fromSlice(ids.dcid);
-            const token = try retryToken(msg.from, now_us, ids.dcid, &sc.retry_source_cid);
-            const n = try sc.conn.writeRetry(tx, msg.data, &sc.retry_source_cid, &token);
+            // What a client sends must never end the server. Until
+            // v0.26.0 these two lines were `try`: a first Destination
+            // Connection ID of 19 or 20 bytes (quic-go picks 8 to 20)
+            // did not fit the token, and the process exited with
+            // `error: OutputTooSmall` (MEASURED 2026-10-04: 4 runs of
+            // 20 of the `retry` cell). The token holds every legal
+            // input now; a datagram that still cannot be answered (it
+            // does not start with an Initial packet, for example) is
+            // dropped.
+            const token = retryToken(msg.from, now_us, ids.dcid, &sc.retry_source_cid) catch |err| {
+                std.debug.print("retry: no token for this datagram ({s}); dropped\n", .{@errorName(err)});
+                return;
+            };
+            const n = sc.conn.writeRetry(tx, msg.data, &sc.retry_source_cid, &token) catch |err| {
+                std.debug.print("retry: no Retry packet for this datagram ({s}); dropped\n", .{@errorName(err)});
+                return;
+            };
             try sock.send(io, &msg.from, tx[0..n]);
             sc.retry_sent = true;
             return;
@@ -1845,6 +1865,29 @@ fn runClient(
                 },
             );
         },
+        .multiconnect => {
+            // A full handshake each time: no session and no token from
+            // the connection before. The test is about the handshake
+            // when the network loses 30% of the datagrams, and the
+            // runner counts the handshakes it sees. A connection that
+            // fails ends the run: a second try would be one handshake
+            // too many.
+            for (0..downloads.len) |i| {
+                try runClientConnection(
+                    allocator,
+                    io,
+                    client_tls,
+                    server_name_z,
+                    server_addr,
+                    downloads_dir,
+                    downloads[i .. i + 1],
+                    .{
+                        .qlog_sink = if (qlog_sink) |*sink| sink else null,
+                        .versions = opts.versions,
+                    },
+                );
+            }
+        },
     }
 }
 
@@ -1856,6 +1899,7 @@ fn captureSessionTicket(user_data: ?*anyopaque, session: boringssl.tls.Session) 
 fn clientMode(testcase: []const u8) ClientMode {
     if (std.mem.eql(u8, testcase, "resumption")) return .resumption;
     if (std.mem.eql(u8, testcase, "zerortt")) return .zerortt;
+    if (std.mem.eql(u8, testcase, "multiconnect")) return .multiconnect;
     return .normal;
 }
 
@@ -3014,17 +3058,15 @@ fn retryTokenValidationResult(
 }
 
 fn retryAddressContext(dst: []u8, peer: Net.IpAddress) []const u8 {
-    // The bound context fits inside `retry_token.max_address_len`
-    // (22 bytes, mirroring `path.Address.bytes`). The v6 form is
-    // 1 (family) + 16 (addr) + 2 (port) = 19 bytes; we deliberately
-    // omit the 4-byte IPv6 flow label so the budget is met. Including
-    // the flow label was the original shape but pushed the v6 form to
-    // 23 bytes — `validateBoundInputs` (`src/conn/retry_token.zig`)
-    // returns `Error.ContextTooLong`, and the qns server crashed on
+    // The v6 form is 1 (family) + 16 (addr) + 2 (port) = 19 bytes: no
+    // 4-byte IPv6 flow label. With the label the form is 23 bytes,
+    // and at the time `retry_token.max_address_len` was 22: `mint`
+    // returned `Error.ContextTooLong`, and the qns server crashed on
     // every IPv4-mapped-IPv6 client (every quic-interop-runner peer
     // since the wrapper started inheriting the binary's `[::]:443`
-    // dual-stack default). The flow label adds no useful binding —
-    // it's a hint for ECMP routing, not part of peer identity.
+    // dual-stack default). The limit is 23 now, and the label still
+    // stays out: it adds no useful binding — it's a hint for ECMP
+    // routing, not part of peer identity.
     var pos: usize = 0;
     switch (peer) {
         .ip4 => |ip4| {
@@ -3382,6 +3424,11 @@ test "QNS client mode follows TESTCASE" {
     try std.testing.expectEqual(ClientMode.normal, clientMode("transfer"));
     try std.testing.expectEqual(ClientMode.resumption, clientMode("resumption"));
     try std.testing.expectEqual(ClientMode.zerortt, clientMode("zerortt"));
+    try std.testing.expectEqual(ClientMode.multiconnect, clientMode("multiconnect"));
+    // The runner's handshakeloss and handshakecorruption cells use the
+    // test case name `multiconnect`; their own names never reach the
+    // client.
+    try std.testing.expectEqual(ClientMode.normal, clientMode("handshakeloss"));
 }
 
 test "QNS server/client versions follow TESTCASE=versionnegotiation" {

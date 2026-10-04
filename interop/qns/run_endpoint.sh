@@ -82,10 +82,6 @@ case "${ROLE:-server}" in
     exec "$@"
     ;;
   client)
-    if [ "${TESTCASE:-}" = "multiconnect" ]; then
-      echo "quic-zig qns client does not support TESTCASE=${TESTCASE}" >&2
-      exit 127
-    fi
     server_arg="${SERVER:-}"
     if [ -z "${server_arg}" ] && [ -n "${REQUESTS:-}" ]; then
       first_request=${REQUESTS%% *}
