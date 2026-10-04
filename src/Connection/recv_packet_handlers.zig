@@ -216,10 +216,11 @@ pub fn handleInitial(
     try conn_keys.ensureInitialKeys(
         conn,
     );
+    const unopened_len = unopenedLongPacketLen(bytes);
     const r_keys_opt = conn.initial_keys_read;
     const r_keys = r_keys_opt orelse {
         conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .keys_unavailable);
-        return bytes.len;
+        return unopened_len;
     };
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
@@ -230,7 +231,7 @@ pub fn handleInitial(
         .initial,
         &r_keys,
         if (conn.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
-    )) orelse return bytes.len;
+    )) orelse return unopened_len;
 
     // Server side: discover peer's CIDs from the very first Initial.
     if (conn.role == .server) {
@@ -340,19 +341,20 @@ pub fn handleZeroRtt(
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
+    const unopened_len = unopenedLongPacketLen(bytes);
     if (conn.role != .server) {
         conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .other);
-        return bytes.len;
+        return unopened_len;
     }
     if (conn.inner.earlyDataStatus() == .rejected) {
         conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .keys_unavailable);
-        return bytes.len;
+        return unopened_len;
     }
 
     const r_keys_opt = try conn.packetKeys(.early_data, .read);
     const r_keys = r_keys_opt orelse {
         conn_qlog.emitPacketDropped(conn, .early_data, @intCast(bytes.len), .keys_unavailable);
-        return bytes.len;
+        return unopened_len;
     };
     const app_path = conn_paths.pathForId(conn, conn.current_incoming_path_id);
     const app_pn_space = &app_path.app_pn_space;
@@ -366,7 +368,7 @@ pub fn handleZeroRtt(
         .early_data,
         &r_keys,
         largest_received,
-    )) orelse return bytes.len;
+    )) orelse return unopened_len;
 
     return finishOpenedPacket(
         conn,
@@ -388,13 +390,14 @@ pub fn handleHandshake(
     bytes: []u8,
     now_us: u64,
 ) Error!usize {
+    const unopened_len = unopenedLongPacketLen(bytes);
     const r_keys_opt = try conn.packetKeys(.handshake, .read);
     const r_keys = r_keys_opt orelse {
         conn_qlog.emitPacketDropped(conn, .handshake, @intCast(bytes.len), .keys_unavailable);
         // A client that still sends Handshake packets after the server
         // discarded the keys does not have HANDSHAKE_DONE.
         conn_loss.resendHandshakeDoneEarly(conn);
-        return bytes.len;
+        return unopened_len;
     };
 
     var pt_buf: [max_recv_plaintext]u8 = undefined;
@@ -405,7 +408,7 @@ pub fn handleHandshake(
         .handshake,
         &r_keys,
         if (conn.pnSpaceForLevel(.handshake).received.largest) |l| l else 0,
-    )) orelse return bytes.len;
+    )) orelse return unopened_len;
 
     const incoming_path = conn_paths.pathForId(conn, conn.current_incoming_path_id);
     // RFC 9000 §8.1: a successfully decrypted Handshake packet from the
@@ -428,6 +431,25 @@ pub fn handleHandshake(
     );
 }
 
+/// What a long-header handler returns for a packet it did not open
+/// (no keys for the level any more, or the packet did not
+/// authenticate): the length of that one packet, so that the datagram
+/// loop goes on to the packet behind it. RFC 9000 §12.2: "the receiver
+/// MAY either discard or buffer the packet for subsequent processing
+/// and MUST attempt to process the remaining packets." If the header
+/// does not tell where the packet ends, the rest of the datagram goes
+/// with it.
+///
+/// The case that matters most is a peer that still coalesces a packet
+/// of a level we have discarded in front of one we need: a client's
+/// `[Initial: ACK][Handshake: Finished]` after the server discarded
+/// its Initial keys (RFC 9001 §4.9.1), a server's
+/// `[Initial: ServerHello][Handshake: ...]` retransmission after the
+/// client did.
+fn unopenedLongPacketLen(bytes: []const u8) usize {
+    return long_packet_mod.peekPacketLen(bytes) orelse bytes.len;
+}
+
 /// Open one long-header packet at `lvl` — `.initial`, `.early_data`,
 /// or `.handshake`, the three levels whose wire-open functions share
 /// `InitialOpenOptions`/`LongOpenResult` — owning the two tails every
@@ -441,8 +463,7 @@ pub fn handleHandshake(
 ///     post-HP first byte the bits live in.
 ///
 /// Returns null when the packet was dropped or the violation close
-/// fired; the caller responds by consuming the rest of the datagram
-/// (`return bytes.len`).
+/// fired; the caller then returns `unopenedLongPacketLen`.
 fn openLongOrDrop(
     conn: *Connection,
     pt_buf: *[max_recv_plaintext]u8,

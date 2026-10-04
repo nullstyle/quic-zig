@@ -288,6 +288,38 @@ pub const InitialOpenOptions = struct {
     largest_received: u64 = 0,
 };
 
+/// The length on the wire of the long-header packet at the start of
+/// `src`, read from the fields in front of the packet number. Header
+/// protection does not cover them (RFC 9001 §5.4.1), so no key is
+/// needed. Null if the header does not parse, if the type has no
+/// Length field (Retry, Version Negotiation), or if the Length says
+/// more than `src` holds.
+///
+/// For a receiver that does not open a packet (the keys are gone, or
+/// the tag does not verify): RFC 9000 §12.2 says it MUST still try the
+/// packets behind it in the datagram. Nothing here is authenticated.
+/// A wrong Length only moves the place where the next packet is looked
+/// for, and that packet has its own tag.
+pub fn peekPacketLen(src: []const u8) ?usize {
+    if (src.len < 5 or src[0] & 0x80 == 0) return null;
+    const version = std.mem.readInt(u32, src[1..5], .big);
+    if (version == 0) return null;
+    const long_type = header.longTypeFromBits(version, @intCast((src[0] >> 4) & 0x03));
+    if (long_type == .retry) return null;
+    const common = header.peekLongCommon(src) catch return null;
+    var pos: usize = common.end_pos;
+    if (long_type == .initial) {
+        const token_len = varint.decode(src[pos..]) catch return null;
+        pos += token_len.bytes_read;
+        if (token_len.value > src.len - pos) return null;
+        pos += @intCast(token_len.value);
+    }
+    const length = varint.decode(src[pos..]) catch return null;
+    pos += length.bytes_read;
+    if (length.value > src.len - pos) return null;
+    return pos + @as(usize, @intCast(length.value));
+}
+
 /// Open a protected Initial packet from `src`, writing plaintext into
 /// `pt_dst`. Returns the recovered PN, plaintext slice, CIDs, token,
 /// and `bytes_consumed` for advancing through coalesced datagrams.
@@ -992,6 +1024,85 @@ test "Initial coalesced with Handshake: bytes_consumed lets us advance" {
     try testing.expectEqual(h_len, o2.bytes_consumed);
 }
 
+test "peekPacketLen: the length of a sealed packet, with no key" {
+    const dcid: [8]u8 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const scid: [4]u8 = .{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const init_keys = try initial_mod.deriveInitialKeys(&dcid, true);
+    const i_keys = try short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret);
+    const hs_secret = fromHex(
+        "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b",
+    );
+    const hs_keys = try short_packet.derivePacketKeys(.aes128_gcm_sha256, &hs_secret);
+
+    // Three packets in one datagram: an Initial with a token, a 0-RTT
+    // and a Handshake packet.
+    var dgram: [2048]u8 = undefined;
+    const i_len = try sealInitial(&dgram, .{
+        .dcid = &dcid,
+        .scid = &scid,
+        .token = "a token",
+        .pn = 0,
+        .payload = "I0",
+        .keys = &i_keys,
+    });
+    const z_len = try sealZeroRtt(dgram[i_len..], .{
+        .dcid = &dcid,
+        .scid = &scid,
+        .pn = 0,
+        .payload = "Z0",
+        .keys = &hs_keys,
+    });
+    const h_len = try sealHandshake(dgram[i_len + z_len ..], .{
+        .dcid = &dcid,
+        .scid = &scid,
+        .pn = 0,
+        .payload = "H0",
+        .keys = &hs_keys,
+    });
+    const total = i_len + z_len + h_len;
+
+    try testing.expectEqual(@as(?usize, i_len), peekPacketLen(dgram[0..total]));
+    try testing.expectEqual(@as(?usize, z_len), peekPacketLen(dgram[i_len..total]));
+    try testing.expectEqual(@as(?usize, h_len), peekPacketLen(dgram[i_len + z_len .. total]));
+    // The last packet alone is the whole of its input.
+    try testing.expectEqual(@as(?usize, h_len), peekPacketLen(dgram[i_len + z_len ..][0..h_len]));
+
+    // A packet cut short has no length: every prefix of each one.
+    for (0..i_len) |n| try testing.expectEqual(@as(?usize, null), peekPacketLen(dgram[0..n]));
+    for (0..h_len) |n| try testing.expectEqual(@as(?usize, null), peekPacketLen(dgram[i_len + z_len ..][0..n]));
+
+    // A Length that says more than there is. The Length of the
+    // Handshake packet is at 1 + 4 + 1 + 8 + 1 + 4 = 19, in one byte
+    // (the packet is small).
+    var damaged: [2048]u8 = undefined;
+    @memcpy(damaged[0..h_len], dgram[i_len + z_len ..][0..h_len]);
+    try testing.expectEqual(@as(usize, h_len - 20), damaged[19]);
+    damaged[19] = 0x3f;
+    try testing.expect(h_len - 20 < 0x3f);
+    try testing.expectEqual(@as(?usize, null), peekPacketLen(damaged[0..h_len]));
+}
+
+test "peekPacketLen: null for a packet with no Length field" {
+    // A short header.
+    var short: [41]u8 = @splat(0);
+    short[0] = 0x40;
+    try testing.expectEqual(@as(?usize, null), peekPacketLen(&short));
+    // Version Negotiation: the version field is zero.
+    var vneg: [45]u8 = @splat(0);
+    vneg[0] = 0xc0;
+    try testing.expectEqual(@as(?usize, null), peekPacketLen(&vneg));
+    // Retry.
+    const original_dcid: [8]u8 = .{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var packet: [256]u8 = undefined;
+    const len = try sealRetry(&packet, .{
+        .original_dcid = &original_dcid,
+        .dcid = &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd },
+        .scid = &[_]u8{ 1, 3, 3, 7, 5, 8, 13, 21 },
+        .retry_token = "retry-token",
+    });
+    try testing.expectEqual(@as(?usize, null), peekPacketLen(packet[0..len]));
+}
+
 // -- fuzz harness --------------------------------------------------------
 //
 // Drive the structural coalesced-datagram walker with arbitrary
@@ -1028,6 +1139,14 @@ fn fuzzCoalescedWalker(_: void, smith: *std.testing.Smith) anyerror!void {
 
     while (pos < input.len and iters < max_iters) : (iters += 1) {
         const slice = input[pos..];
+        // `peekPacketLen` is the walker the receive path uses for a
+        // packet it does not open. It never reads past its input, and
+        // it never stands still.
+        const peeked = peekPacketLen(slice);
+        if (peeked) |n| {
+            try std.testing.expect(n > 0);
+            try std.testing.expect(n <= slice.len);
+        }
         const parsed = header.parse(slice, dcid_len_for_short) catch return;
 
         // Compute the on-wire packet length. Long-header
@@ -1056,6 +1175,9 @@ fn fuzzCoalescedWalker(_: void, smith: *std.testing.Smith) anyerror!void {
         // - advance must be > 0 (no infinite loop on degenerate
         //   payload_length=0 inputs).
         if (advance == 0 or advance > slice.len) return;
+        // Where the full header parse finds a packet that fits, the
+        // peek finds the same end.
+        try std.testing.expectEqual(@as(?usize, advance), peeked);
         pos += advance;
     }
 

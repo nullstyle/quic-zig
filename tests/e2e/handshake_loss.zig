@@ -755,6 +755,33 @@ test "handshake loss: the server does not probe its 1-RTT data while the handsha
     try std.testing.expectEqual(@as(usize, 0), out.server_lone_1rtt_before_done);
 }
 
+test "handshake loss: a Handshake packet behind an Initial packet that does not open is still read (RFC 9000 12.2)" {
+    // The client's first answer is two packets in one datagram: an
+    // Initial packet (the ACK for the ServerHello) and a Handshake
+    // packet. One byte of the Initial packet is changed on the way.
+    // That packet does not authenticate. The Handshake packet behind
+    // it is intact, and the server must read it: "the receiver ...
+    // MUST attempt to process the remaining packets."
+    //
+    // What shows it from the outside: a Handshake packet from the
+    // client validates its address (RFC 9000 section 8.1). With the
+    // packet read, the server has the address validated after the
+    // client's second datagram, as with no damage at all.
+    const control = try run(std.testing.allocator, .{ .cert = .wide, .until_confirmed = true });
+    try std.testing.expectEqual(@as(usize, 2), control.validated_by_client_datagram);
+
+    // Offset 40 is in the protected payload of the Initial packet (its
+    // header is 26 bytes), so the Length field is as it was sent.
+    const out = try run(std.testing.allocator, .{
+        .cert = .wide,
+        .damage_client = .{ .index = 2, .kind = .flip, .offset = 40 },
+        .until_confirmed = true,
+    });
+    try std.testing.expectEqual(@as(usize, 1), out.damaged);
+    try std.testing.expect(out.confirmed);
+    try std.testing.expectEqual(@as(usize, 2), out.validated_by_client_datagram);
+}
+
 test "handshake loss: one damaged datagram ends no connection" {
     // The interop simulator's `handshakecorruption` changes one byte
     // in the first 51 bytes of a datagram: the first byte, the

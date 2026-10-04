@@ -223,3 +223,86 @@ test "unauthenticated datagram: a datagram too short to be a packet ends no open
     for (0..20) |_| try pair.lb.step(&idle);
     try pair.expectBothOpen();
 }
+
+/// A long-header packet of type `type_bits` (QUIC v1: 0 = Initial,
+/// 1 = 0-RTT, 2 = Handshake) for the connection ID `dcid`, with a
+/// payload that no key opens. Returns its length.
+fn unopenablePacket(dst: []u8, type_bits: u8, dcid: []const u8) usize {
+    var pos: usize = 0;
+    dst[pos] = 0xc0 | (type_bits << 4);
+    pos += 1;
+    @memcpy(dst[pos..][0..4], &[_]u8{ 0, 0, 0, 1 });
+    pos += 4;
+    dst[pos] = @intCast(dcid.len);
+    pos += 1;
+    @memcpy(dst[pos..][0..dcid.len], dcid);
+    pos += dcid.len;
+    // No Source Connection ID.
+    dst[pos] = 0;
+    pos += 1;
+    // An Initial packet has a token length: no token.
+    if (type_bits == 0) {
+        dst[pos] = 0;
+        pos += 1;
+    }
+    // Length, as a two-byte varint: 1200 bytes of packet number and
+    // payload. The server discards a datagram of less than 1200 bytes
+    // that begins with an Initial packet before any connection sees
+    // it (RFC 9000 section 14.1), so the packet is that large.
+    const body: usize = 1200;
+    dst[pos] = 0x40 | @as(u8, @intCast(body >> 8));
+    dst[pos + 1] = @intCast(body & 0xff);
+    pos += 2;
+    @memset(dst[pos..][0..body], 0xa5);
+    pos += body;
+    return pos;
+}
+
+test "unauthenticated datagram: a packet that cannot be opened does not hide the packet behind it (RFC 9000 12.2)" {
+    // "If decryption fails (because the keys are not available or for
+    // any other reason), the receiver MAY either discard or buffer the
+    // packet for subsequent processing and MUST attempt to process the
+    // remaining packets."
+    //
+    // On an open connection the Initial and Handshake keys are gone. A
+    // peer that still puts a packet of those levels in front of a
+    // 1-RTT packet (a client that has not seen HANDSHAKE_DONE sends
+    // its Finished that way) must not lose the 1-RTT packet.
+    const allocator = std.testing.allocator;
+    const idle: quic.testing.NullDriver = .{};
+    for ([_]u8{ 0, 1, 2 }) |type_bits| {
+        var pair: Pair = undefined;
+        try pair.init(allocator);
+        defer pair.deinit();
+
+        // To the server: [a packet it cannot open][the 1-RTT packet
+        // with "hello"], delivered once.
+        const stream = try pair.cli.conn.openNextBidi();
+        _ = try pair.cli.conn.streamWrite(stream.id, "hello");
+        var real: [4096]u8 = undefined;
+        const real_len = (try pair.cli.conn.poll(&real, pair.lb.now_us)) orelse return error.TestUnexpectedResult;
+        try std.testing.expect((real[0] & 0x80) == 0);
+        const server_cid_len: usize = pair.srv.local_cid_len;
+        var both: [4096]u8 = undefined;
+        var front = unopenablePacket(&both, type_bits, real[1..][0..server_cid_len]);
+        @memcpy(both[front..][0..real_len], real[0..real_len]);
+        _ = try pair.srv.feed(both[0 .. front + real_len], quic.testing.loopback_addr, pair.lb.now_us);
+        try pair.expectBothOpen();
+        var got: [16]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 5), try pair.serverConn().streamRead(stream.id, &got));
+        try std.testing.expectEqualStrings("hello", got[0..5]);
+
+        // To the client: the same, with the server's answer.
+        for (0..20) |_| try pair.lb.step(&idle);
+        _ = try pair.serverConn().streamWrite(stream.id, "world");
+        const answer_len = (try pair.serverConn().poll(&real, pair.lb.now_us)) orelse return error.TestUnexpectedResult;
+        try std.testing.expect((real[0] & 0x80) == 0);
+        const client_cid_len: usize = pair.cli.conn.local_scid.len;
+        front = unopenablePacket(&both, type_bits, real[1..][0..client_cid_len]);
+        @memcpy(both[front..][0..answer_len], real[0..answer_len]);
+        try pair.cli.conn.handle(both[0 .. front + answer_len], null, pair.lb.now_us);
+        try pair.expectBothOpen();
+        try std.testing.expectEqual(@as(usize, 5), try pair.cli.conn.streamRead(stream.id, &got));
+        try std.testing.expectEqualStrings("world", got[0..5]);
+    }
+}
