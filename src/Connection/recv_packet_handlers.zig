@@ -370,6 +370,9 @@ pub fn handleHandshake(
     const r_keys_opt = try conn.packetKeys(.handshake, .read);
     const r_keys = r_keys_opt orelse {
         conn_qlog.emitPacketDropped(conn, .handshake, @intCast(bytes.len), .keys_unavailable);
+        // A client that still sends Handshake packets after the server
+        // discarded the keys does not have HANDSHAKE_DONE.
+        conn_loss.resendHandshakeDoneEarly(conn);
         return bytes.len;
     };
 

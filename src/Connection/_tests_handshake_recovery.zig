@@ -235,6 +235,99 @@ test "discarding the keys of a space drops its queued and its unacknowledged CRY
     try std.testing.expect(!conn.canSend());
 }
 
+// ---------------------------------------------- HANDSHAKE_DONE again
+
+/// A server whose handshake is complete: HANDSHAKE_DONE was queued and
+/// sent in 1-RTT packet 0, and the Handshake keys are discarded.
+fn serverAfterHandshake(conn: *Connection) !void {
+    conn.handshake_done_queued_once = true;
+    conn.handshake_keys_discarded = true;
+    var packet: state.SentPacketTracker.SentPacket = .{
+        .pn = 0,
+        .sent_time_us = start_us,
+        .bytes = 30,
+        .ack_eliciting = true,
+        .in_flight = true,
+    };
+    try packet.addRetransmitFrame(conn.allocator, .{ .handshake_done = .{} });
+    try conn.sentForLevel(.application).record(packet);
+    conn.pnSpaceForLevel(.application).next_pn = 1;
+}
+
+test "HANDSHAKE_DONE again: a late Handshake packet queues it, once per cue, up to the limit" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+    try serverAfterHandshake(conn);
+    try std.testing.expect(!conn.pending_handshake_done);
+
+    conn_loss.resendHandshakeDoneEarly(conn);
+    try std.testing.expect(conn.pending_handshake_done);
+    try std.testing.expectEqual(@as(u8, 1), conn.early_handshake_done_resends);
+
+    // A second cue before the frame went out queues nothing more and
+    // uses up nothing.
+    conn_loss.resendHandshakeDoneEarly(conn);
+    try std.testing.expectEqual(@as(u8, 1), conn.early_handshake_done_resends);
+
+    // The send path takes the frame; the next cue queues it again,
+    // until the limit.
+    var round: usize = 1;
+    while (round < conn_loss.max_early_handshake_retransmits) : (round += 1) {
+        conn.pending_handshake_done = false;
+        conn_loss.resendHandshakeDoneEarly(conn);
+        try std.testing.expect(conn.pending_handshake_done);
+    }
+    try std.testing.expectEqual(conn_loss.max_early_handshake_retransmits, conn.early_handshake_done_resends);
+    conn.pending_handshake_done = false;
+    conn_loss.resendHandshakeDoneEarly(conn);
+    try std.testing.expect(!conn.pending_handshake_done);
+    try std.testing.expectEqual(conn_loss.max_early_handshake_retransmits, conn.early_handshake_done_resends);
+}
+
+test "HANDSHAKE_DONE again: not after the client acknowledged it" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+    try serverAfterHandshake(conn);
+    try std.testing.expect(!conn.handshake_done_acked);
+
+    try ackThrough(conn, .application, 0, start_us + 10_000);
+    try std.testing.expect(conn.handshake_done_acked);
+
+    conn_loss.resendHandshakeDoneEarly(conn);
+    try std.testing.expect(!conn.pending_handshake_done);
+    try std.testing.expectEqual(@as(u8, 0), conn.early_handshake_done_resends);
+}
+
+test "HANDSHAKE_DONE again: only a server, only after its first HANDSHAKE_DONE, only with the keys gone, never when closing" {
+    const Case = enum { ok, client, before_first, keys_still_there, closing };
+    for ([_]Case{ .ok, .client, .before_first, .keys_still_there, .closing }) |case| {
+        var server_ctx = try boringssl.tls.Context.initServer(.{});
+        defer server_ctx.deinit();
+        var client_ctx = try boringssl.tls.Context.initClient(.{});
+        defer client_ctx.deinit();
+        const conn = if (case == .client)
+            try newClient(&client_ctx)
+        else
+            try Connection.createServer(std.testing.allocator, server_ctx);
+        defer conn.destroy();
+
+        try serverAfterHandshake(conn);
+        switch (case) {
+            .ok, .client => {},
+            .before_first => conn.handshake_done_queued_once = false,
+            .keys_still_there => conn.handshake_keys_discarded = false,
+            .closing => conn.close(true, 0x0a, "test"),
+        }
+        conn_loss.resendHandshakeDoneEarly(conn);
+        try std.testing.expectEqual(case == .ok, conn.pending_handshake_done);
+        try std.testing.expectEqual(@as(u8, if (case == .ok) 1 else 0), conn.early_handshake_done_resends);
+    }
+}
+
 // ------------------------------------------- RFC 9002 §6.2.2.1, §6.2.1
 
 test "anti-deadlock: a client with nothing in flight probes at the Initial level until it has Handshake keys" {

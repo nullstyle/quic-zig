@@ -355,12 +355,44 @@ pub fn retransmitHandshakeCryptoEarly(conn: *Connection) Error!void {
     if (any) conn.early_handshake_retransmits += 1;
 }
 
+/// The same idea as `retransmitHandshakeCryptoEarly`, one step later
+/// in the handshake. A server discards its Handshake keys the moment
+/// the handshake completes, so it never acknowledges the client's
+/// Finished in a Handshake packet: the client learns that the
+/// handshake is confirmed from HANDSHAKE_DONE alone, and sends its
+/// Finished again and again until it has it. So a Handshake packet
+/// that arrives at a server AFTER the discard says one thing: the
+/// client does not have HANDSHAKE_DONE. Queue it again now.
+///
+/// MEASURED 2026-10-03 (quic-interop-runner `handshakeloss`, quic-go
+/// client): the first packet with HANDSHAKE_DONE was lost. The client
+/// sent its Finished again at 0.18, 0.36, 0.7, 1.4, 2.8, 5.7, 11, 23
+/// and 46 s, and the server (which could not open those packets any
+/// more) ignored them. The server had no RTT sample, so its own probe
+/// timer sent HANDSHAKE_DONE again at 2, 10 and 43 s only; all three
+/// were lost, and the client gave up at 53 s.
+///
+/// The cue cannot be authenticated (the keys are gone), so it only
+/// queues one small frame the client is owed in any case, at most
+/// `max_early_handshake_retransmits` times, and never after the
+/// client acknowledged a HANDSHAKE_DONE.
+pub fn resendHandshakeDoneEarly(conn: *Connection) void {
+    if (conn.role != .server or !conn.handshake_keys_discarded) return;
+    if (conn.lifecycle.closed or conn.lifecycle.pending_close != null) return;
+    if (!conn.handshake_done_queued_once or conn.handshake_done_acked) return;
+    if (conn.pending_handshake_done) return;
+    if (conn.early_handshake_done_resends >= max_early_handshake_retransmits) return;
+    conn.pending_handshake_done = true;
+    conn.early_handshake_done_resends += 1;
+}
+
 pub fn dispatchAckedControlFrames(
     conn: *Connection,
     packet: *const SentPacketTracker.SentPacket,
 ) void {
     for (packet.retransmit_frames.items) |frame| {
         switch (frame) {
+            .handshake_done => conn.handshake_done_acked = true,
             .reset_stream => |rs| {
                 const s = conn.streams.get(rs.stream_id) orelse continue;
                 if (s.send.reset) |r| {

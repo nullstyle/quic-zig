@@ -159,6 +159,10 @@ const Options = struct {
     loss_to_client: u8 = 0,
     max_burst: u8 = 3,
     seed: u64 = 0,
+    /// Run until the client has CONFIRMED the handshake (it got
+    /// HANDSHAKE_DONE and discarded its Handshake keys), not only until
+    /// both ends have the TLS handshake done.
+    until_confirmed: bool = false,
     /// Stop when this much virtual time has gone by.
     budget_us: u64 = 40 * us_per_s,
     verbose: bool = trace_every_run,
@@ -174,6 +178,10 @@ const Outcome = struct {
     /// Virtual time from the start at which both ends reported the
     /// handshake done.
     done_at_us: u64 = 0,
+    /// Virtual time from the start at which the client confirmed the
+    /// handshake (only with `until_confirmed`).
+    confirmed: bool = false,
+    confirmed_at_us: u64 = 0,
     /// Times (from the start) at which the server put a datagram with
     /// CRYPTO data on the wire, delivered or not.
     flight_us: [max_marks]u64 = @splat(0),
@@ -193,6 +201,9 @@ const Outcome = struct {
     /// again on a cue from the peer (RFC 9002 section 6.2.3).
     server_early_copies: usize = 0,
     client_early_copies: usize = 0,
+    /// How many times the server queued HANDSHAKE_DONE again because
+    /// the client still sent Handshake packets.
+    server_done_resends: usize = 0,
 };
 
 const Net = struct {
@@ -386,9 +397,14 @@ fn run(allocator: std.mem.Allocator, o: Options) !Outcome {
     try cli.conn.advance();
     while (net.sinceStart() < o.budget_us) {
         try net.exchange();
-        if (cli.conn.handshakeDone() and net.serverDone()) {
+        if (!net.out.done and cli.conn.handshakeDone() and net.serverDone()) {
             net.out.done = true;
             net.out.done_at_us = net.sinceStart();
+        }
+        if (net.out.done and !o.until_confirmed) break;
+        if (cli.conn.handshake_keys_discarded) {
+            net.out.confirmed = true;
+            net.out.confirmed_at_us = net.sinceStart();
             break;
         }
         // A connection that gave up (handshake timeout, idle timeout)
@@ -398,7 +414,10 @@ fn run(allocator: std.mem.Allocator, o: Options) !Outcome {
         try cli.conn.tick(lb.now_us);
         lb.now_us += us_per_ms;
     }
-    if (srv.iterator().len > 0) net.out.server_early_copies = srv.iterator()[0].conn.early_handshake_retransmits;
+    if (srv.iterator().len > 0) {
+        net.out.server_early_copies = srv.iterator()[0].conn.early_handshake_retransmits;
+        net.out.server_done_resends = srv.iterator()[0].conn.early_handshake_done_resends;
+    }
     net.out.client_early_copies = cli.conn.early_handshake_retransmits;
     if (o.verbose) std.debug.print("[handshake_loss] done={} at={d}us flights={d} dropped={d} client: {d} datagrams ({d} initial, {d} handshake, {d} dropped) server: {d} datagrams, {d} B out for {d} B in before validation\n", .{ net.out.done, net.out.done_at_us, net.out.flights, net.out.flights_dropped, net.out.client_datagrams, net.out.client_initials, net.out.client_handshakes, net.out.client_dropped, net.out.server_datagrams, net.server_bytes_out, net.server_bytes_in });
     return net.out;
@@ -441,6 +460,15 @@ test "handshake loss: with no loss, nothing is sent twice" {
     try std.testing.expectEqual(@as(usize, 1), split.flights);
     try std.testing.expectEqual(@as(usize, 0), split.server_early_copies);
     try std.testing.expectEqual(@as(usize, 0), split.client_early_copies);
+
+    // To the end of the handshake: the client has HANDSHAKE_DONE at
+    // once, and the server sent it once.
+    for ([_]Cert{ .small, .wide, .huge }) |cert| {
+        const out = try run(std.testing.allocator, .{ .cert = cert, .until_confirmed = true });
+        try std.testing.expect(out.confirmed);
+        try std.testing.expect(out.confirmed_at_us < 100 * us_per_ms);
+        try std.testing.expectEqual(@as(usize, 0), out.server_done_resends);
+    }
 }
 
 test "handshake loss: the flight is lost 5 times, and each retry of the client brings a copy (RFC 9002 6.2.3)" {
@@ -561,6 +589,45 @@ test "handshake loss: a server at its anti-amplification limit, and a client who
     try std.testing.expectEqual(@as(usize, 3), out.client_dropped);
     try std.testing.expect(out.done);
     try std.testing.expect(out.done_at_us < 1 * us_per_s);
+}
+
+test "handshake loss: HANDSHAKE_DONE is lost 3 times, and each Finished of the client brings it again" {
+    // The client's first Finished is lost, so the server completes the
+    // handshake on the client's retry, with no RTT sample of its own
+    // (nothing it sent was acknowledged in a packet it got). It sends
+    // HANDSHAKE_DONE and discards its Handshake keys. That datagram is
+    // lost, and the next two. The client goes on sending its Finished
+    // (it has no other way to know); the server cannot open those
+    // packets any more, but each one says "I do not have
+    // HANDSHAKE_DONE".
+    //
+    // MEASURED 2026-10-03 on the code before the rule: the server
+    // ignored them, and sent HANDSHAKE_DONE again at its own probe
+    // timeout: confirmed at 1027 ms. With the rule: at 19 ms.
+    const out = try run(std.testing.allocator, .{
+        .drop_client = .{ .first = 2, .count = 1 },
+        .drop_server = .{ .first = 2, .count = 3 },
+        .until_confirmed = true,
+    });
+    try std.testing.expect(out.confirmed);
+    try std.testing.expect(out.confirmed_at_us < 100 * us_per_ms);
+    try std.testing.expectEqual(@as(usize, 3), out.server_done_resends);
+}
+
+test "handshake loss: the limit on HANDSHAKE_DONE resends holds, and the probe timer works behind it" {
+    // Nothing of the server arrives for 600 ms after the handshake.
+    // The client sends its Finished 9 times in that time; the server
+    // answers 8 of them (`max_early_handshake_retransmits`), and then
+    // its probe timer takes over.
+    const out = try run(std.testing.allocator, .{
+        .drop_client = .{ .first = 2, .count = 1 },
+        .drop_server = .{ .first = 2, .count = 12 },
+        .until_confirmed = true,
+    });
+    try std.testing.expect(out.confirmed);
+    try std.testing.expectEqual(@as(usize, 8), out.server_done_resends);
+    try std.testing.expect(out.confirmed_at_us > 900 * us_per_ms);
+    try std.testing.expect(out.confirmed_at_us < 3 * us_per_s);
 }
 
 const SweepStats = struct {

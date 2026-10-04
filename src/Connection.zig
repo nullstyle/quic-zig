@@ -280,6 +280,13 @@ handshake_probe_anchor_us: ?u64 = null,
 /// peer showed that it is still waiting (RFC 9002 §6.2.3). Capped by
 /// `loss.max_early_handshake_retransmits`.
 early_handshake_retransmits: u8 = 0,
+/// Server only. Latched when the client acknowledges a packet that
+/// carried HANDSHAKE_DONE. Until then a Handshake packet from the
+/// client is a cue to send it again (`loss.resendHandshakeDoneEarly`).
+handshake_done_acked: bool = false,
+/// How many times that cue made this connection queue HANDSHAKE_DONE
+/// again. Capped by `loss.max_early_handshake_retransmits` too.
+early_handshake_done_resends: u8 = 0,
 
 /// Per-encryption-level outbox of CRYPTO bytes the TLS bridge
 /// has handed us via `add_handshake_data`. `poll` packs these
