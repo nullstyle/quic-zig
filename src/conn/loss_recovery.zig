@@ -31,6 +31,18 @@ const RttEstimator = @import("RttEstimator.zig").RttEstimator;
 const granularity_us = @import("RttEstimator.zig").granularity_us;
 
 /// kPacketThreshold from RFC 9002 §6.1.1: 3.
+///
+/// These three thresholds are FIXED. A packet that arrives later than
+/// they allow is declared lost although it arrives, and the congestion
+/// controller cannot tell that from real loss. MEASURED 2026-10-03
+/// (bench cell `impairment_reorder10pct`: nothing dropped, 10% of the
+/// packets 5 ms late on a 2 ms path): 10.4% of the packets declared
+/// lost, CUBIC and NewReno at 15 Mbit/s on a path with no rate limit,
+/// BBR at about 20 Mbit/s once its startup ends. With thresholds wide
+/// enough for that reordering the same runs are 9 times faster for
+/// CUBIC. RFC 9002 §6.1 allows thresholds that adapt when a loss
+/// turns out to be spurious; this implementation does not detect a
+/// spurious loss yet. See the note at that cell in bench/e2e_main.zig.
 pub const packet_threshold: u64 = 3;
 /// kTimeThreshold numerator from RFC 9002 §6.1.2.
 pub const time_threshold_num: u64 = 9;

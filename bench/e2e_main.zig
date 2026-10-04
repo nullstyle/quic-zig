@@ -39,8 +39,9 @@
 //!
 //! One seed is one draw. A virtual-time cell is exact for its seed, and
 //! a different seed can give a very different time (MEASURED 2026-10-03:
-//! `impairment_reorder10pct` took 100 to 280 ms for 20 seeds and more
-//! than a second for 4). So before a conclusion is drawn from one cell:
+//! `impairment_reorder10pct` over 24 seeds: median 151 ms, and six
+//! seeds between 0.9 and 3.4 s; see the note at that cell for why). So
+//! before a conclusion is drawn from one cell:
 //!
 //!  - `--cell NAME`  run only that impairment, fairness or churn cell;
 //!  - `--seed N`     give the impairment cells this seed;
@@ -142,6 +143,43 @@ const impairment_cells = [_]harness.ImpairmentOptions{
     .{ .name = "impairment_loss0pct", .loss_permille = 0 },
     .{ .name = "impairment_loss1pct", .loss_permille = 10 },
     .{ .name = "impairment_loss5pct", .loss_permille = 50 },
+    // What this cell measures is not what its name says, and its one
+    // committed seed (106 ms) hides it. MEASURED 2026-10-03.
+    //
+    // The network drops nothing. It holds 10% of the packets back by
+    // 5 ms, on a path with a 2 ms round trip. The sender's loss
+    // detection has the fixed thresholds of RFC 9002 (3 packets, 9/8
+    // of the RTT), and a packet that is 5 ms late is past both: 100 ms
+    // into one run, 853 of 8169 packets (10.4%) were declared lost,
+    // and every one of them arrived. To a congestion controller that
+    // is a path with 10% loss:
+    //
+    //     --sweep 24      min       median    max
+    //     bbr             103 ms    151 ms    3412 ms
+    //     cubic          4197 ms   4364 ms    4553 ms
+    //     new_reno       4097 ms   4287 ms    4432 ms
+    //
+    // CUBIC and NewReno are at the floor in every run. BBR is fast only
+    // for as long as its startup lasts: it leaves startup when one
+    // round has 6 loss events at a loss rate above 2%. In a slow seed
+    // that happens in the first 20 ms, with a bandwidth estimate of
+    // 7.5 MB/s, and from then on every probe meets "loss" again: the
+    // window stays at about 5 packets (2.7 MB/s) for the whole
+    // transfer. In a fast seed startup reaches 266 MB/s first, and the
+    // 8 MiB are through before the same decline gets far. So there is
+    // no tail here: there is one slow state, and a transfer that is
+    // short enough to outrun it three times in four.
+    //
+    // The proof, one variable: with thresholds wide enough for this
+    // reordering (a temporary edit: packet threshold off, time
+    // threshold 5 times the RTT) the same 24 seeds give 206 to 306 ms
+    // for bbr and 404 to 517 ms for cubic.
+    //
+    // Not fixed. A sender can find out that a "lost" packet arrived
+    // (the ACK for it comes later), widen its thresholds, and take the
+    // controller's reaction back; RFC 9002 section 6.1 allows that and
+    // does not specify it. That is a feature with its own design, and
+    // this cell with `--sweep` is the instrument for it.
     .{ .name = "impairment_reorder10pct", .loss_permille = 0, .reorder_permille = 100 },
     // Bottleneck cells: a rate-limited link with a finite buffer, so
     // an overshooting slow start builds a standing queue and inflates
