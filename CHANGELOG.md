@@ -5,7 +5,15 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.24.1] - 2026-10-03
+
+A build fix, with no change to the library code: `src/` is the same as
+in 0.24.0. The package now accepts the `optimize` build option that
+its own documentation told consumers to pass. Without it, an
+application that followed the docs got quic-zig and BoringSSL compiled
+in Debug inside its release build. **If you depend on quic-zig, at any
+version, check your build**: `zig build --verbose`, and read the `-O`
+flag in front of `-Mquic=`. Verified toolchain: 0.17.0.
 
 ### Fixed
 
