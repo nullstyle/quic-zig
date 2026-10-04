@@ -746,6 +746,175 @@ tag (`git archive`, the files of the tag tarball; hash
 no `invalid option` line, and ran (`consumer-smoke ok: quic-zig
 0.25.0`).
 
+## v0.26.0 small-repairs release
+
+v0.26.0 is about one sentence: a connection that a correct peer starts
+must come up, and a close in the handshake must reach the peer. It
+has no security fix. It repairs five rules of RFC 9000 and RFC 9001
+that were missing or wrong, and it records five faults and limits
+that it found and did not fix.
+
+**What was repaired, and how each was found.**
+
+- The Retry token had room for 45 bytes of client address and
+  connection IDs. An IPv6 client with a first connection ID above 14
+  bytes got no Retry. Known since v0.25.0 (the `retry` cell with a
+  quic-go client failed in exactly the runs with a 19 or 20 byte ID).
+  A test through `Server.feed` for every legal length was red for 6
+  of 26 cases, and the larger token (114 bytes) made a second,
+  hand-written copy of the old size panic in the send path. There is
+  one constant now.
+- A handshake datagram could be longer than 1200 bytes (1353 and 1310
+  measured), a server's first flight was never padded, and a client's
+  Initial packet with only an ACK came out at 1201 bytes. A size check
+  at the end of every run of `tests/e2e/handshake_loss.zig` was red
+  for 19 of its 20 tests. An older test in the repository recorded a
+  real path that lost the 1353-byte datagram; it held the recovery,
+  not the cause.
+- Three connection-ID checks of RFC 9000 section 7.3 were missing,
+  and a client took the Source Connection ID of every Initial packet
+  that authenticated. Found by reading; each has a red-first test.
+  The first version of the check closed 22 e2e tests of ours: a
+  server built on a bare `Connection` never sent
+  `original_destination_connection_id`, and our own client had not
+  looked. The library fills it in now.
+- A CONNECTION_CLOSE during the handshake went at one level, and a
+  peer in the middle of the handshake could not read it. Found by a
+  test written for it (`tests/e2e/handshake_close.zig`).
+- A key update was allowed one flight before the handshake was
+  confirmed. This was the cause of an interop failure that had no
+  known cause (the client role, `keyupdate` against quic-go, 4 runs
+  of 4 on two releases): the interop client asked that early, its
+  first 1-RTT packet was in key phase 1, and the runner could not
+  read the capture after that.
+
+**What the interop client could not do before.** It could not run
+`multiconnect`, so the two handshake-loss tests never ran in the
+client role. They run now, and the first run under 30% loss found a
+fault in the library within 39 downloads (a lost NEW_CONNECTION_ID
+for a retired ID was issued again and ended the connection). The
+client's `zerortt` test failed against every server because the
+client did not keep the server's transport parameters with the
+session; that is in the interop program, and the library gap behind
+it (the number of 0-RTT streams is not bounded) is recorded.
+
+**Found and not fixed.** All are in the CHANGELOG under "Measured,
+not changed", with their numbers.
+
+- A client retries a silent handshake with one datagram for each
+  probe timeout (1, 3, 7, 15 s). Against a quic-go server, which
+  gives up after 5 s of silence, the client role passed
+  `handshakeloss` in 5 runs of 10 and `handshakecorruption` in 2 of
+  10. All 13 failed cells were read and are this one cause.
+- Against a quiche server (8 of 10 and 8 of 10): three failed cells
+  are a ServerHello that quiche sends again only at 1, 5 and 21 s,
+  whatever the client sends; one is a Handshake packet that arrived
+  before its keys and was dropped.
+- A lost CONNECTION_CLOSE is in practice not sent again.
+- Remembered transport parameters do not bound the number of 0-RTT
+  streams.
+
+**The pass criteria, as written before the work, and what happened.**
+
+- S1 (Retry for all 26 cases; quic-go x `retry` 20 of 20; the interop
+  endpoint never exits on client input): met. 20 of 20, with a 19 or
+  20 byte ID in 4 of the runs.
+- S2 (no handshake datagram above 1200 bytes; a server datagram with
+  an ack-eliciting Initial packet is 1200; at most 3 times the bytes
+  received): met, checked in every run of the handshake-loss tests.
+  A no-loss flight is 1 datagram of 1200 bytes with the small
+  certificate (was 831), 3 with the wide one, 6 with the largest.
+- S3 (quic-go x `handshakecorruption` and x `handshakeloss`, 20 local
+  runs each, at least 19 of 20, a median of at most 45 s, no failed
+  run a stall of ours): met on the release code. 20 of 20 at 37.3 s
+  and 19 of 20 at 42.1 s. The failed run: the simulator dropped all
+  six datagrams of the server for one connection inside the 5 s that
+  the quic-go client waits. A batch on the code after the
+  datagram-size change had the same counts and the same reading.
+- S4 (the connection-ID tests pass for both roles; the wide matrix in
+  both roles has no cell that passed on v0.25.0 and fails now): met.
+- S5 (the peer has the error code of a handshake close within one
+  round trip, each phase, each role): met.
+- S6 (the gated experiment, an ACK repeat in the Handshake space
+  alone): not met, and the change is not in the code. It was
+  built on its own branch after the release commit (4 unit tests, 7
+  mutants killed). The plan asked for four numbers on a batch with a
+  quiche client; one is "no round-trip estimate above 1 s in any quiche
+  log". Run 3 broke it: the repeat was the client's first sample,
+  2.137 s on a 30 ms path, its probe timer went to 6.4, 12.9 and
+  25.7 s, and its connection timed out with no file. The batch was
+  stopped at 9 runs (7 passed; the second failed run lost all five
+  copies of its ClientHello). The idea was that a peer in the
+  Handshake space has a sample from the Initial space. It has none
+  when the datagram with the one Initial ACK was lost. The note is at
+  `firePtoAtLevel` in `src/Connection/loss.zig`, and the CHANGELOG has
+  it under "Unreleased".
+- S7 (the client role runs the two handshake-loss tests against three
+  servers, 5 runs each, every failed run read; `zerortt` passes or
+  the cause is written down; the cause of `keyupdate` against quic-go
+  is written down): met. Both now pass (3 runs of 3 against each
+  server).
+- S8 (the 18 virtual-time bench cells print the same lines, or each
+  difference is explained): met. The same lines as on v0.25.0 after
+  the datagram-size change, after the connection-ID change, after the
+  close change, and on the release code.
+- S9 (five gates real on the tag commit; the wide matrix in both
+  roles, two runs of the server role; a mutant for every new guard;
+  the fuzz gate counts at least 43 sites):
+  met. The gates and the matrix are below. 51 mutants
+  for the release, each killed by a test (one lived at first and got
+  its test), and 7 more for the experiment. The fuzz gate counts 43
+  sites.
+
+**The gates on the release commit.** Tagged 2026-10-04 at `6c1dc5b`,
+each gate read at its evidence line.
+
+- `test`: six jobs, every step green; 1,903 tests in Debug and 1,863
+  in ReleaseSafe on the four Unix jobs, 1,840 on Windows; in the
+  consumer-smoke step, `check-modes: 6 of 6 as expected` and no
+  `invalid option` line.
+- rc-fuzz: `n_runs=2,224,649 unique_runs=11,985 pcs_len=43,417` across
+  43 sites (floor 1,935,000), no failing site.
+- `quic-go-interop`: `interop evidence: pairs=1 cells=2 succeeded=2
+  failed=0 known_failed=0 unsupported=0 skipped=0 flaky_passed=0
+  flaky_failed=0`.
+- QNS image: built from that commit.
+- pin-lint: `zig pins agree: 0.17.0`.
+
+The wide matrix, quic-zig as server, 16 tests, quic-go, quiche and
+ngtcp2 clients, in CI:
+
+- Run 37242740162, on the release commit: `interop evidence: pairs=3
+  cells=48 succeeded=43 failed=0 known_failed=0 unsupported=4
+  skipped=0 flaky_passed=0 flaky_failed=1`.
+- Run 37240916279, on `3a9f95d` (the commit before; the same source):
+  the same line.
+
+The cell that both runs name as flaky is `quiche:multiplexing`: it
+failed in both, as it does in a part of the runs of every release
+since v0.24.0 (the record of v0.24.0 has the cause). Its captures are
+in the artifacts of the runs and were not read (this session
+downloads nothing); the same cell passed in the local run below. No
+other cell failed.
+
+The same tests without the goodput measurement, local, on the image
+of the release code (`3a9f95d`). quic-zig as the server: `interop
+evidence: pairs=3 cells=45 succeeded=41 failed=0 known_failed=0
+unsupported=4 skipped=0 flaky_passed=0 flaky_failed=0`. quic-zig as
+the client against the three servers: `interop evidence: pairs=3
+cells=45 succeeded=43 failed=0 known_failed=0 unsupported=2 skipped=0
+flaky_passed=0 flaky_failed=0` (v0.25.0: 33 passed, 4 failed, 8 not
+supported). One run of each; the client role's two handshake-loss
+cells passed in that run and do not pass every time (above).
+
+A fresh consumer outside the repository, built from an archive of the
+tag (`git archive`, the files of the tag tarball; hash
+`quic-0.26.0-DnSYvXvxNwDWO2vGjU5Puuv1FlpgAmBahRmUxawCD_KE`), with
+`.optimize = optimize` and `-Doptimize=ReleaseSafe`: it compiled with
+`-Osafe` for the application, for `quic` and for `boringssl`, printed
+no `invalid option` line, and ran (`consumer-smoke ok: quic-zig
+0.26.0`).
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig
