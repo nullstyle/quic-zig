@@ -65,6 +65,22 @@ changes.
   parameters are inside the TLS handshake and the first packet
   headers are not, so checks 2 and 3 are how an endpoint knows that
   nobody changed the IDs, or put a Retry in, on the way.
+- **A close during the handshake reaches the peer.** A
+  CONNECTION_CLOSE went at one encryption level, and when 1-RTT write
+  keys were there, that level was 1-RTT. A server has those keys as
+  soon as its flight is built, and the client can read 1-RTT only
+  with the whole flight: a client in the middle of the handshake could
+  not read the server's close. It learned no error code and waited
+  for its own timeout. The same for a server that did not have the
+  client's Finished. Now the close goes into one datagram at every
+  level the endpoint has write keys for (RFC 9000 section 10.2.3),
+  and the close that is sent again in the closing state too. After
+  the handshake is confirmed there is only 1-RTT, as before.
+- **An application close in an Initial or Handshake packet carries no
+  reason.** Such a close is sent as a transport close with
+  APPLICATION_ERROR, and RFC 9000 section 10.2.3 says its Reason
+  Phrase MUST be cleared. It went along when
+  `reveal_close_reason_on_wire` was on.
 - **A server made from a bare `Connection` sends
   `original_destination_connection_id`.** `setTransportParams` and
   `setInitialDcid` fill it in from the client's first Initial packet,

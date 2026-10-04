@@ -269,6 +269,11 @@ poll_datagram_used: usize = 0,
 /// rest of the datagram is known. Null outside `pollDatagram`: a
 /// direct `pollLevel(.initial, ...)` pads its own packet.
 poll_initial: ?*conn_send.InitialInDatagram = null,
+/// Set by `pollDatagram` while it builds one datagram: a
+/// CONNECTION_CLOSE went into it (at each level that has keys). The
+/// close stays pending until the datagram is complete, and counts as
+/// one emit. False outside `pollDatagram`.
+poll_close_emitted: bool = false,
 /// PTO backoff count for Initial and Handshake. Application PTO
 /// backoff is per-path in `PathState.pto_count`. Reset when an
 /// ACK newly acknowledges ack-eliciting data in that space.

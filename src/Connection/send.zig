@@ -130,6 +130,8 @@ pub fn pollDatagram(
     defer conn.poll_initial = null;
     conn.poll_datagram_used = 0;
     defer conn.poll_datagram_used = 0;
+    conn.poll_close_emitted = false;
+    defer conn.poll_close_emitted = false;
 
     var pos: usize = 0;
     // Initial first (must lead a coalesced datagram).
@@ -168,6 +170,13 @@ pub fn pollDatagram(
     const app_dst = if (pos == 0) dst else long_dst;
     if (pos < app_dst.len) {
         if (try pollLevelOnPath(conn, .application, app_path_id, app_dst[pos..], now_us)) |n| pos += n;
+    }
+    // A CONNECTION_CLOSE went into this datagram, at each level that
+    // has keys (see the close step of `pollLevelOnPath`). It counts as
+    // one emit.
+    if (conn.poll_close_emitted) {
+        noteCloseEmitted(conn, now_us);
+        conn_qlog.emitConnectionStateIfChanged(conn);
     }
     if (pos == 0) return null;
 
@@ -641,18 +650,33 @@ pub fn pollLevelOnPath(
     // the only frame we emit, and we mark the connection
     // closed once it goes on the wire.
     if (conn.lifecycle.pending_close) |info| {
-        // RFC 9000 §10.2.3 ¶6: emit CONNECTION_CLOSE at the highest
-        // available encryption level. When 1-RTT write keys are
-        // installed, defer emission from Initial / Handshake / 0-RTT
-        // to .application — this preserves the original CC variant
-        // (transport vs. application) end-to-end. Without this, a
-        // server that calls `close(false, ...)` post-handshake while
-        // it still holds Handshake keys would emit the
-        // application-variant CC at .handshake first (line 5159
-        // clears `pending_close` after the first seal), forcing a
-        // §10.2.3 ¶4 conversion to 0x1c on the wire and losing the
-        // application error code on the receive side.
-        if (lvl != .application and conn.app_write_current != null) {
+        // RFC 9000 §10.2.3: the close must be in a packet that the
+        // peer can read, and during the handshake the two ends do not
+        // have the same keys at the same time. A server has 1-RTT
+        // WRITE keys as soon as its flight is built; the client can
+        // read 1-RTT only when it has the whole flight. A client that
+        // has sent a Handshake packet has no Initial keys. A server
+        // has 1-RTT READ keys only with the client's Finished. So ("a
+        // server SHOULD send a CONNECTION_CLOSE frame in both
+        // Handshake and Initial packets", "an endpoint SHOULD send a
+        // CONNECTION_CLOSE frame in both Handshake and 1-RTT
+        // packets") `pollDatagram` puts the close into ONE datagram
+        // at EVERY level this endpoint has write keys for. "Has keys"
+        // is the whole rule: Initial keys go when the peer is known
+        // to be past them, Handshake keys when the handshake is
+        // confirmed, and after that there is only 1-RTT, where the
+        // close has gone alone since before this rule.
+        //
+        // Until v0.26.0 the close went at ONE level, and with 1-RTT
+        // write keys that level was 1-RTT: a peer in the middle of
+        // the handshake could not read it, learned no error code, and
+        // waited for its own timeout.
+        //
+        // A direct `pollLevel(lvl, ...)` has no datagram to share:
+        // there the close still waits for the highest level (and an
+        // application close then keeps its own code and reason).
+        const in_datagram = conn.poll_initial != null;
+        if (!in_datagram and lvl != .application and conn.app_write_current != null) {
             return null;
         }
         // Secure-by-default redaction: keep the reason off the wire
@@ -688,7 +712,14 @@ pub fn pollLevelOnPath(
             .is_transport = wire_is_transport,
             .error_code = wire_error_code,
             .frame_type = wire_frame_type,
-            .reason_phrase = wire_reason,
+            // §10.2.3 ¶3, for the conversion above: "Endpoints MUST
+            // clear the value of the Reason Phrase field". An
+            // Initial or Handshake packet is not protected the way
+            // 1-RTT is, and the reason is the application's own
+            // words. (Until v0.26.0 the reason went with the
+            // converted frame when the embedder had turned
+            // `reveal_close_reason_on_wire` on.)
+            .reason_phrase = if (force_transport_at_level) &[_]u8{} else wire_reason,
         };
         const wrote = try frame_mod.encode(
             pl_buf[0..max_payload],
@@ -701,8 +732,11 @@ pub fn pollLevelOnPath(
         // `noteCloseEmit` further below (it needs the sealed-byte
         // count and the timer derived from PTO). Before the seal,
         // clear `pending_close` so a recursive `close()` from a
-        // mid-emit error path doesn't double-queue the frame.
-        conn.lifecycle.pending_close = null;
+        // mid-emit error path doesn't double-queue the frame. Inside
+        // `pollDatagram` the close stays pending for the levels
+        // behind this one, and `pollDatagram` does both when the
+        // datagram is complete.
+        if (!in_datagram) conn.lifecycle.pending_close = null;
         // No ack-eliciting flag — CONNECTION_CLOSE isn't
         // ack-eliciting per §13.2.1, but we do still want to
         // record it (it occupies a PN). Skip stream/CRYPTO/etc.
@@ -785,9 +819,13 @@ pub fn pollLevelOnPath(
         // retransmits leave the deadline at its original value
         // (extending it would let a chatty peer keep the slot
         // alive past §10.2 ¶5's bound).
-        const closing_deadline = now_us + conn.drainingDurationUs();
-        conn.lifecycle.noteCloseEmit(now_us, closing_deadline);
-        conn.lifecycle.updateDrainingDeadline(closing_deadline);
+        if (in_datagram) {
+            // One emit for the whole datagram (the counter is the
+            // exponent of the back-off for the next one).
+            conn.poll_close_emitted = true;
+        } else {
+            noteCloseEmitted(conn, now_us);
+        }
         conn.qlog_packets_sent +|= 1;
         conn.qlog_bytes_sent +|= n_close;
         if (lvl == .initial and conn.poll_initial != null) {
@@ -795,7 +833,7 @@ pub fn pollLevelOnPath(
         } else {
             conn_qlog.emitPacketSent(conn, lvl, pn, @intCast(n_close), 1);
         }
-        conn_qlog.emitConnectionStateIfChanged(
+        if (!in_datagram) conn_qlog.emitConnectionStateIfChanged(
             conn,
         );
         return n_close;
@@ -1533,6 +1571,14 @@ pub fn pollLevelOnPath(
     }
 
     return n;
+}
+
+/// A CONNECTION_CLOSE has left (in one packet, or in the packets of
+/// one datagram): the connection is in the closing state now.
+fn noteCloseEmitted(conn: *Connection, now_us: u64) void {
+    const closing_deadline = now_us + conn.drainingDurationUs();
+    conn.lifecycle.noteCloseEmit(now_us, closing_deadline);
+    conn.lifecycle.updateDrainingDeadline(closing_deadline);
 }
 
 /// Leave with `pollDatagram` what it needs to seal this Initial packet
