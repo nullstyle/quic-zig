@@ -264,6 +264,22 @@ pto_count: [2]u32 = .{ 0, 0 },
 /// PING probes requested by PTO for Initial and Handshake when no
 /// retransmittable data is immediately available.
 pending_ping: [2]bool = .{ false, false },
+/// Client only. Latched when an ACK frame arrives in a Handshake
+/// packet: from then on the server has validated our address (it can
+/// only acknowledge Handshake packets it could open), and the
+/// anti-deadlock probe of RFC 9002 §6.2.2.1 is no longer needed.
+received_handshake_ack: bool = false,
+/// Client only. When the anti-deadlock probe timer last started
+/// again: the last time an ACK arrived in an Initial or Handshake
+/// packet, or the last time the probe fired. Null until the first
+/// ACK: before that the ClientHello is in flight and the normal
+/// probe timer runs. See `loss.antiDeadlockLevel`.
+handshake_probe_anchor_us: ?u64 = null,
+/// How many times this connection has sent its unacknowledged
+/// handshake CRYPTO data again before the probe timeout, because the
+/// peer showed that it is still waiting (RFC 9002 §6.2.3). Capped by
+/// `loss.max_early_handshake_retransmits`.
+early_handshake_retransmits: u8 = 0,
 
 /// Per-encryption-level outbox of CRYPTO bytes the TLS bridge
 /// has handed us via `add_handshake_data`. `poll` packs these
@@ -2189,7 +2205,7 @@ pub fn deinit(self: *Connection) void {
         conn_keys.freeLevelKeys(&level.read_keys);
         conn_keys.freeLevelKeys(&level.write_keys);
     }
-    conn_keys.discardInitialKeys(self);
+    conn_keys.wipeInitialKeys(self);
     zeroAppKeyEpoch(&self.app_read_previous);
     zeroAppKeyEpoch(&self.app_read_current);
     zeroAppKeyEpoch(&self.app_read_next);

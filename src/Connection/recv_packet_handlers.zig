@@ -25,6 +25,7 @@ const state_mod = @import("../Connection.zig");
 const conn_paths = @import("paths.zig");
 const conn_keys = @import("keys.zig");
 const conn_qlog = @import("qlog.zig");
+const conn_loss = @import("loss.zig");
 const conn_recv_dispatch = @import("recv_dispatch.zig");
 const Connection = state_mod.Connection;
 const Error = state_mod.Error;
@@ -519,7 +520,40 @@ fn finishOpenedPacket(
     conn.qlog_packets_received +|= 1;
     conn_qlog.emitPacketReceived(conn, lvl, pn, @intCast(ret_len), cls.frame_count);
     if (!duplicate_pn) {
+        const handshake_level = lvl == .initial or lvl == .handshake;
+        const crypto_before = cryptoReceived(conn, lvl);
         try conn_recv_dispatch.dispatchFrames(conn, lvl, payload, now_us);
+        // RFC 9002 §6.2.3: an Initial or Handshake packet that asks for
+        // an answer (CRYPTO or PING; nothing else at these levels does)
+        // and brought no new CRYPTO data is the peer's retry. It did
+        // not get our flight: send the unacknowledged part again now.
+        // A packet with a number we already have is the network's
+        // duplicate, not a retry, and never gets here.
+        if (handshake_level and cls.ack_eliciting and
+            !cryptoReceived(conn, lvl).isMoreThan(crypto_before))
+        {
+            try conn_loss.retransmitHandshakeCryptoEarly(conn);
+        }
     }
     return ret_len;
+}
+
+/// How much CRYPTO data arrived at one level: delivered in order, and
+/// held out of order. A packet that changes neither brought nothing
+/// new.
+const CryptoReceived = struct {
+    delivered: u64,
+    held: usize,
+
+    fn isMoreThan(self: CryptoReceived, before: CryptoReceived) bool {
+        return self.delivered > before.delivered or self.held > before.held;
+    }
+};
+
+fn cryptoReceived(conn: *const Connection, lvl: EncryptionLevel) CryptoReceived {
+    const idx = lvl.idx();
+    return .{
+        .delivered = conn.crypto_recv_offset[idx],
+        .held = conn.crypto_pending_bytes[idx],
+    };
 }

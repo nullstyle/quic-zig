@@ -131,8 +131,45 @@ pub fn lossDeadlineForApplicationPath(conn: *const Connection, path: *const Path
 }
 
 pub fn ptoDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 {
-    const sent_at = oldestAckElicitingSentTime(conn.sentForLevelConst(lvl)) orelse return null;
-    return sent_at +| ptoDurationForLevel(conn, lvl);
+    if (oldestAckElicitingSentTime(conn.sentForLevelConst(lvl))) |sent_at| {
+        return sent_at +| ptoDurationForLevel(conn, lvl);
+    }
+    // Nothing in flight at this level. A client may still owe a probe.
+    if (antiDeadlockLevel(conn) != lvl) return null;
+    const anchor = conn.handshake_probe_anchor_us orelse return null;
+    return anchor +| ptoDurationForLevel(conn, lvl);
+}
+
+/// RFC 9002 §6.2.2.1: the level at which a CLIENT owes a probe even
+/// though it has nothing in flight, or null.
+///
+/// A server may send only 3 times what it received until it has
+/// validated the client's address (RFC 9000 §8.1). If the client's
+/// packets are lost, the server can be at that limit with a part of
+/// its flight unsent, or with a lost flight it may not send again. It
+/// can do nothing. The client has acknowledged all it got, so it has
+/// nothing in flight, and its normal probe timer is off. If the client
+/// now waits, nobody sends again (MEASURED 2026-10-03, in
+/// tests/e2e/handshake_loss.zig: a 5.4 KB certificate, the client's
+/// three ACK datagrams lost; both ends were silent until the handshake
+/// timeout). So the client keeps its probe timer running until it
+/// knows that the server validated its address: until an ACK arrives
+/// in a Handshake packet, or the handshake is confirmed (then both
+/// handshake spaces have no keys, and there is no level to probe at).
+///
+/// The probe goes out in a Handshake packet if the client has
+/// Handshake keys (the server validates the address when it opens
+/// one), and in an Initial packet if not (padded to 1200 bytes like
+/// every client Initial, so it buys the server 3600 bytes).
+pub fn antiDeadlockLevel(conn: *const Connection) ?EncryptionLevel {
+    if (conn.role != .client) return null;
+    if (conn.received_handshake_ack) return null;
+    inline for (.{ EncryptionLevel.initial, EncryptionLevel.handshake }) |lvl| {
+        if (oldestAckElicitingSentTime(conn.sentForLevelConst(lvl)) != null) return null;
+    }
+    if (conn.levels[EncryptionLevel.handshake.idx()].write != null) return .handshake;
+    if (!conn.initial_keys_discarded) return .initial;
+    return null;
 }
 
 pub fn ptoDeadlineForApplicationPath(conn: *const Connection, path: *const PathState) ?u64 {
@@ -225,6 +262,97 @@ fn requeueSentCryptoForPacket(
         i += 1;
     }
     return any;
+}
+
+/// True if a packet with this number at `lvl` still owns CRYPTO data
+/// that nobody acknowledged.
+fn packetOwnsSentCrypto(conn: *const Connection, lvl: EncryptionLevel, pn: u64) bool {
+    for (conn.sent_crypto[lvl.idx()].items) |chunk| {
+        if (chunk.pn == pn) return true;
+    }
+    return false;
+}
+
+/// How many times one connection sends its unacknowledged handshake
+/// CRYPTO data again before the probe timeout. RFC 9002 §6.2.3 allows
+/// it "a limited number of times", and says that once recovers from a
+/// single loss.
+///
+/// The number is a bound, not a rate: the retransmissions come at the
+/// pace of the peer's own retries, and the peer backs off. It exists
+/// for a peer that never stops asking. After the limit the probe
+/// timer does the work, as it did before this rule.
+///
+/// MEASURED 2026-10-03, tests/e2e/handshake_loss.zig: 4000 handshakes,
+/// a ClientHello of two packets, 30% of the datagrams toward the
+/// client lost and never more than 3 in a row (the interop
+/// simulator's rule), a 10 s budget. Limit 0 is this rule off and
+/// everything else as it is:
+///
+///     limit   not done   900 ms or more   90th percentile
+///       0        32          1199            1000 ms
+///       1         8           612            1000 ms
+///       2         4           417            1000 ms
+///       3         0           346              10 ms
+///     4 to 8      0           346              10 ms
+///
+/// (The 346 are handshakes where the client had no RTT sample when
+/// the flight was lost: its first probe timeout is 1 s whatever the
+/// server does.) The gain ends at 3 there because that network never
+/// loses a fourth datagram in a row. A real network has outages. The
+/// peer's retries come each twice as late as the one before, so 8 of
+/// them cover 255 times its first probe timeout: on a path with a
+/// 1 ms round trip that is a quarter of a second, and after that our
+/// own 1 s probe timer is near. MEASURED the same day: an outage of
+/// 100 ms toward the client, handshake done at 134 ms with a limit of
+/// 8, and at 1019 ms with a limit of 4.
+pub const max_early_handshake_retransmits: u8 = 8;
+
+/// RFC 9002 §6.2.3, "Speeding up handshake completion". The peer just
+/// sent an Initial or Handshake packet that asks for an answer and
+/// brought no new CRYPTO data: its handshake data again, or a PING.
+/// A peer does that when its probe timer ran out, so it does not have
+/// our flight. Waiting for our own probe timer costs a second and
+/// more, because a flight that nobody acknowledged gives no RTT
+/// sample (MEASURED 2026-10-03: a server answered seven such retries
+/// with an ACK alone and sent its flight at 0, 1, 3, 7 and 15 s; the
+/// client gave up at 10 s).
+///
+/// So put every unacknowledged CRYPTO byte of the Initial and
+/// Handshake spaces back into the retransmission queue now. The
+/// packets that carried them leave the tracker: their data now
+/// belongs to the packets that will carry it next, and the probe
+/// timer starts again from those. This is not a loss (no loss
+/// counter, no qlog loss event, no congestion signal) and not a probe
+/// timeout (the backoff is untouched: nothing was acknowledged).
+///
+/// What limits it: the send path's anti-amplification accounting
+/// (RFC 9000 §8.1), unchanged; `max_early_handshake_retransmits` per
+/// connection; and one retransmission for each received datagram at
+/// most, because a second cue finds the data already queued.
+pub fn retransmitHandshakeCryptoEarly(conn: *Connection) Error!void {
+    if (conn.lifecycle.closed or conn.lifecycle.pending_close != null) return;
+    if (conn.early_handshake_retransmits >= max_early_handshake_retransmits) return;
+    var any = false;
+    inline for (.{ EncryptionLevel.initial, EncryptionLevel.handshake }) |lvl| {
+        const space_active = switch (lvl) {
+            .initial => !conn.initial_keys_discarded,
+            .handshake => !conn.handshake_keys_discarded,
+            else => unreachable,
+        };
+        if (space_active) {
+            const sent = conn.sentForLevel(lvl);
+            var i: u32 = 0;
+            while (i < sent.count) : (i += 1) {
+                if (sent.packets[i].dead) continue;
+                if (!packetOwnsSentCrypto(conn, lvl, sent.packets[i].pn)) continue;
+                var gone = sent.removeAt(i);
+                defer gone.deinit(conn.allocator);
+                any = (try requeueLostPacket(conn, lvl, &gone)) or any;
+            }
+        }
+    }
+    if (any) conn.early_handshake_retransmits += 1;
 }
 
 pub fn dispatchAckedControlFrames(
@@ -824,9 +952,18 @@ fn firePtoOn(conn: *Connection, target: LossTarget) Error!PtoOutcome {
 fn firePtoAtLevel(
     conn: *Connection,
     lvl: EncryptionLevel,
+    now_us: u64,
 ) Error!bool {
     switch (try firePtoOn(conn, levelTarget(conn, lvl))) {
-        .nothing_eligible => return false,
+        .nothing_eligible => {
+            // The client's anti-deadlock probe (see
+            // `antiDeadlockLevel`): nothing to send again, so a PING.
+            // The timer starts again from now, and the backoff below
+            // doubles it, so a server that takes long is not flooded.
+            if (antiDeadlockLevel(conn) != lvl) return false;
+            conn.pendingPingForLevel(lvl).* = true;
+            conn.handshake_probe_anchor_us = now_us;
+        },
         .probe => conn.pendingPingForLevel(lvl).* = false,
         .regular => |r| conn.pendingPingForLevel(lvl).* = !r.requeued,
     }
@@ -862,7 +999,7 @@ pub fn fireDuePtoAtLevel(
 ) Error!void {
     const deadline = ptoDeadlineForLevel(conn, lvl) orelse return;
     if (now_us < deadline) return;
-    _ = try firePtoAtLevel(conn, lvl);
+    _ = try firePtoAtLevel(conn, lvl, now_us);
 }
 
 pub fn fireDuePtoOnApplicationPath(

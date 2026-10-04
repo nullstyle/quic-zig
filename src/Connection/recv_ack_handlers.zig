@@ -287,7 +287,21 @@ fn apply(
             rtt_sampled = true;
         }
     }
-    if (ctx.any_ack_eliciting_newly_acked) target.pto_count.* = 0;
+    // RFC 9002 §6.2.1: an ACK of new ack-eliciting data resets the
+    // PTO backoff, with one exception. A client that is not yet sure
+    // the server validated its address keeps the backoff on an ACK in
+    // an Initial packet: the server may be slow (or at its
+    // anti-amplification limit), and the client's probes
+    // (`loss.antiDeadlockLevel`) must back off, not repeat at the
+    // pace of the round trip.
+    const client_initial_ack = conn.role == .client and target.lvl == .initial;
+    if (ctx.any_ack_eliciting_newly_acked and !client_initial_ack) target.pto_count.* = 0;
+    if (conn.role == .client and (target.lvl == .initial or target.lvl == .handshake)) {
+        // The anti-deadlock probe timer starts again at every ACK of
+        // the handshake spaces (RFC 9002 §A.8, SetLossDetectionTimer).
+        conn.handshake_probe_anchor_us = now_us;
+        if (target.lvl == .handshake) conn.received_handshake_ack = true;
+    }
     if (target.isApplication()) {
         const cc = &target.path.path.cc;
         if (ctx.in_flight_bytes_acked > 0) {

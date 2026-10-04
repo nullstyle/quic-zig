@@ -496,6 +496,16 @@ pub fn discardExpiredApplicationReadKeys(conn: *Connection, now_us: u64) void {
 /// discarded key material so it can't be recovered from a memory
 /// dump after the discard point.
 pub fn discardInitialKeys(conn: *Connection) void {
+    wipeInitialKeys(conn);
+    conn.initial_keys_discarded = true;
+    dropSpaceRecoveryState(conn, .initial, 0);
+}
+
+/// Free and zero the Initial packet keys, and nothing else. The key
+/// half of `discardInitialKeys`, on its own for `Connection.deinit`:
+/// teardown wipes the keys after the trackers and the CRYPTO queues
+/// are already freed, so it must not run the recovery half.
+pub fn wipeInitialKeys(conn: *Connection) void {
     if (conn.initial_keys_read) |*k| {
         k.deinitAead();
         std.crypto.secureZero(u8, std.mem.asBytes(k));
@@ -506,7 +516,33 @@ pub fn discardInitialKeys(conn: *Connection) void {
     }
     conn.initial_keys_read = null;
     conn.initial_keys_write = null;
-    conn.initial_keys_discarded = true;
+}
+
+/// Drop what the loss recovery of a handshake space still holds when
+/// its keys go: the sent packets, the CRYPTO data that waits for an
+/// ACK, the CRYPTO data that waits for retransmission, and the probe
+/// state. RFC 9002 §6.4: packets of a discarded space leave the bytes
+/// in flight, and its timers stop.
+///
+/// The retransmission queue matters most. Data in it can never be
+/// sent without the keys, and `canSend` counts that queue, so a chunk
+/// left there made `canSend` say "yes" for the rest of the connection
+/// while `poll` had nothing. A chunk gets there when a probe timeout
+/// or the peer's retry (`loss.retransmitHandshakeCryptoEarly`) queues
+/// the flight just before the handshake moves on.
+///
+/// `pn_idx` is the index of the space in the connection-level arrays
+/// (`sent`, `pto_count`, `pending_ping`): 0 for Initial, 1 for
+/// Handshake.
+fn dropSpaceRecoveryState(conn: *Connection, lvl: EncryptionLevel, pn_idx: usize) void {
+    conn.clearSentTracker(&conn.sent[pn_idx]);
+    conn.pto_count[pn_idx] = 0;
+    conn.pending_ping[pn_idx] = false;
+    const idx = lvl.idx();
+    for (conn.crypto_retx[idx].items) |chunk| conn.allocator.free(chunk.data);
+    conn.crypto_retx[idx].clearAndFree(conn.allocator);
+    for (conn.sent_crypto[idx].items) |chunk| conn.allocator.free(chunk.data);
+    conn.sent_crypto[idx].clearAndFree(conn.allocator);
 }
 
 /// RFC 9001 §4.9.2: "An endpoint MUST discard its handshake keys
@@ -564,9 +600,7 @@ pub fn discardHandshakeKeys(conn: *Connection) void {
     // Initial uses idx 0 in connPnIdx mapping; Handshake is idx 1.
     // See `connPnIdx` for the rationale (the array indices ride
     // the connection-level PN-space layout, not `EncryptionLevel.idx`).
-    conn.clearSentTracker(&conn.sent[1]);
-    conn.pto_count[1] = 0;
-    conn.pending_ping[1] = false;
+    dropSpaceRecoveryState(conn, .handshake, 1);
     conn.handshake_keys_discarded = true;
 }
 

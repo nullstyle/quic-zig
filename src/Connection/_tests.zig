@@ -47,6 +47,7 @@ test {
     _ = @import("_tests_delivery.zig");
     _ = @import("_tests_flow.zig");
     _ = @import("_tests_fuzz.zig");
+    _ = @import("_tests_handshake_recovery.zig");
     _ = @import("_tests_keys.zig");
     _ = @import("_tests_lifecycle.zig");
     _ = @import("_tests_loss.zig");
