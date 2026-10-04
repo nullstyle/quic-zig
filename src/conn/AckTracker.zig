@@ -130,20 +130,15 @@ pub fn contains(self: *const AckTracker, pn: u64) bool {
 /// Acknowledge that we've sent an ACK frame covering everything
 /// we know about. The state stays — we may need to repeat
 /// these acks if our frame is lost — but `pending_ack` clears.
+///
+/// The repeat comes only with the next ack-eliciting packet of the
+/// peer. Do not set `pending_ack` again on a timer: a late ACK is a
+/// wrong round-trip sample for a peer whose first copy was lost
+/// (measured; see `firePtoAtLevel` in Connection/loss.zig).
 pub fn markAckSent(self: *AckTracker) void {
     self.pending_ack = false;
     self.delayed_ack_armed = false;
     self.ack_eliciting_since_ack = 0;
-}
-
-/// Owe the ACK again, although nothing new has arrived: the packet
-/// that carried it may be lost, and nothing else sends it a second
-/// time. Nothing happens if no packet was ever received. Returns true
-/// if an ACK is owed now that was not owed before.
-pub fn repeatAck(self: *AckTracker) bool {
-    if (self.largest == null or self.pending_ack) return false;
-    self.pending_ack = true;
-    return true;
 }
 
 /// Receive timestamp (ms) used to compute the `ack_delay` field

@@ -609,34 +609,18 @@ test "handshake loss: an outage of 100 ms toward the client costs the client's n
     try std.testing.expect(out.done_at_us < 200 * us_per_ms);
 }
 
-test "handshake loss: the limit on early copies holds, and a probe that repeats the ACK brings the flight behind it" {
+test "handshake loss: the limit on early copies holds, and the probe timer works behind it" {
     // The flight is lost 9 times: the first copy and the 8 early ones
     // (`max_early_handshake_retransmits`). The server answers the
-    // client's next retry, at 0.5 s, with an ACK alone, and that ACK
-    // arrives: the first datagram of the server that the client gets.
-    //
-    // The client's next probe, at 1 s, says so: a probe carries the
-    // ACK of its space again. The ACK acknowledges a packet that the
-    // server sent after the ServerHello, so the server knows that the
-    // ServerHello is lost and sends it again at once. The client
-    // acknowledges that, the server has its first RTT sample, and the
-    // rest of the flight is overdue by it and follows.
-    //
-    // Before a probe repeated the ACK, the client's probe said
-    // nothing, and the tenth copy waited for the server's own probe
-    // timeout, 1 s after the ninth: the handshake was done at 1.263 s
-    // (measured with that one line off). Now: 1.035 s.
+    // client's next retries with an ACK alone, and the tenth copy goes
+    // out at the server's probe timeout, 1 s after the ninth.
     const out = try run(std.testing.allocator, .{ .split_client_hello = true, .drop_server_flights = 9 });
     try std.testing.expect(out.done);
     try std.testing.expectEqual(@as(usize, 9), out.flights_dropped);
-    try std.testing.expectEqual(@as(usize, 8), out.server_early_copies);
+    try std.testing.expectEqual(@as(usize, 10), out.flights);
     try std.testing.expect(out.flight_us[8] < 400 * us_per_ms);
-    // Nothing with CRYPTO data between the ninth copy and the client's
-    // probe at 1 s: the limit holds. Then the ServerHello alone, and
-    // the Handshake part of the flight in the next datagram.
-    try std.testing.expect(out.flight_us[9] > 900 * us_per_ms);
-    try std.testing.expectEqual(@as(usize, 11), out.flights);
-    try std.testing.expect(out.done_at_us < 1100 * us_per_ms);
+    const wait_us = out.flight_us[9] - out.flight_us[8];
+    try std.testing.expect(wait_us >= 900 * us_per_ms and wait_us <= 1100 * us_per_ms);
     // The client asked all that time. Its probes back off (RFC 9002
     // section 6.2.1: an ACK in an Initial packet does not reset a
     // client's backoff), so there are few of them: the two packets of

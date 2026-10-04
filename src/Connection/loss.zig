@@ -178,30 +178,6 @@ pub fn ptoDeadlineForApplicationPath(conn: *const Connection, path: *const PathS
     return sent_at +| ptoDurationForApplicationPath(conn, path);
 }
 
-/// A 1-RTT packet arrived and we have no keys to read it: the peer is
-/// done with the handshake and we are not. The last flight of the peer
-/// did not arrive (a server: the client's Finished), and the peer may
-/// not know that. Owe our Handshake ACK again: it tells the peer which
-/// of its Handshake packets we have, and so which are lost.
-///
-/// MEASURED 2026-10-03 (the same failed run as at `firePtoAtLevel`):
-/// between its two tries of the Finished the quiche client sent 1-RTT
-/// probes (it probes that space although the handshake is not
-/// confirmed). They arrived, the server could not read them, and it
-/// said nothing.
-///
-/// The packet that asks for this is not authenticated (we have no key
-/// for it), so the answer is small (an ACK), never more than one per
-/// packet, and bounded for the connection.
-pub fn repeatHandshakeAckEarly(conn: *Connection) void {
-    if (conn.lifecycle.closed or conn.lifecycle.pending_close != null) return;
-    // No Handshake keys to send an ACK with: not yet, or not any more
-    // (the discard clears them).
-    if (conn.levels[EncryptionLevel.handshake.idx()].write == null) return;
-    if (conn.early_handshake_ack_repeats >= max_early_handshake_retransmits) return;
-    if (conn.pnSpaceForLevel(.handshake).received.repeatAck()) conn.early_handshake_ack_repeats += 1;
-}
-
 /// RFC 9002 §6.2.1: the probe timer of the Application Data space is
 /// not set until the handshake is confirmed. Before that the peer may
 /// not have the keys to open a 1-RTT probe, or we may not have the
@@ -1052,21 +1028,31 @@ fn firePtoAtLevel(
         .regular => |r| conn.pendingPingForLevel(lvl).* = !r.requeued,
     }
     conn.ptoCountForLevel(lvl).* +|= 1;
-    // The probe also says again what has arrived in this space. An
-    // ACK goes out once, when the peer's packet comes. If that one
-    // packet is lost, the peer does not learn what we have until it
-    // sends something new, and a peer that waits for our ACK to find
-    // out which of its packets were lost waits for its own timer.
+    // The probe does NOT say again what has arrived in this space (it
+    // does not set `received.pending_ack`). An ACK goes out once, when
+    // the peer's packet comes, and it looks like a gain to repeat it
+    // with every probe: a peer whose copy was lost learns what we
+    // have. TRIED 2026-10-03 (05c72b4) AND TAKEN BACK.
     //
-    // MEASURED 2026-10-03 (interop `handshakeloss`, a quiche client):
-    // the client's Finished was lost twice and its Handshake PING
-    // arrived. The server's ACK for the PING was lost. Four seconds
-    // later the server's probe got through, with the flight and with
-    // no ACK. With the ACK the client would have seen that packets
-    // older than its PING were lost and sent its Finished again at
-    // once; it sent it at its own timeout, 4 s later, and that copy
-    // was lost too.
-    _ = conn.pnSpaceForLevel(lvl).received.repeatAck();
+    // For the peer whose copy was lost, the repeat is the FIRST
+    // acknowledgement of its packet, and it takes a round-trip sample
+    // from it. RFC 9002 §5.3 does not subtract the ACK delay from a
+    // first sample, however true the delay we report.
+    //
+    // MEASURED (interop `handshakecorruption`, a quiche client, 30% of
+    // the datagrams lost each way): a client whose first flight from
+    // us was lost got the ACK of its ClientHello 1 s late, with the
+    // flight that this probe timeout sent again. Its smoothed round
+    // trip went from the 333 ms default to 1048 ms on a 38 ms path
+    // (922 ms after the next sample), its probe timer to 3.5 s, and
+    // its close took 10.5 s. The quiche log had `srtt` above 1 s on
+    // 71 lines of one run, and on none without the repeat. The time
+    // after the client's handshake, summed over a run: 243 s and
+    // 120 s with the repeat; 59 s, 59 s and 94 s without. 1 run of 4
+    // passed; 9 of 10 without.
+    //
+    // A repeat is safe only if the peer already has a sample, and we
+    // cannot see that from here.
     return true;
 }
 

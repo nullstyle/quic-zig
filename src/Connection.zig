@@ -287,10 +287,6 @@ handshake_done_acked: bool = false,
 /// How many times that cue made this connection queue HANDSHAKE_DONE
 /// again. Capped by `loss.max_early_handshake_retransmits` too.
 early_handshake_done_resends: u8 = 0,
-/// How many times a 1-RTT packet that arrived before its keys made
-/// this connection owe its Handshake ACK again
-/// (`loss.repeatHandshakeAckEarly`). Capped by the same constant.
-early_handshake_ack_repeats: u8 = 0,
 
 /// Per-encryption-level outbox of CRYPTO bytes the TLS bridge
 /// has handed us via `add_handshake_data`. `poll` packs these
