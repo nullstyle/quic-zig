@@ -510,6 +510,76 @@ window of 20 for the interop server was tried and taken back the same
 day: it made the quiche cell pass 15 runs of 15 and made `zerortt`
 fail for every client (the CHANGELOG has both stories).
 
+## v0.24.1 build-option release
+
+v0.24.1 changes no library code: `src/` is the same as in v0.24.0. It
+makes the package accept the `optimize` build option, which its own
+documentation had told consumers to pass.
+
+**What was wrong, and for how long.** The package builds in Debug or
+in ReleaseSafe and nothing else, so its mode option was the boolean
+`release`. README.md and EMBEDDING.md showed
+`b.dependency("quic", .{ .target = target, .optimize = optimize })`.
+Zig reports an unknown dependency option
+(`error: invalid option: "optimize"`), goes on, and exits 0; quic-zig
+then built in its default mode. Measured on the v0.24.0 tarball with
+`zig build --verbose -Doptimize=ReleaseSafe` in a fresh consumer:
+`-Osafe` for the application, `-Odebug` for `quic` and for
+`boringssl`. A consumer that followed the docs, or passed no mode,
+shipped a Debug QUIC stack and a Debug BoringSSL inside its release
+build, unless it was built with `zig build --release`. Every
+downstream checkout read on 2026-10-03 does one or the other. This is
+as old as the build-mode policy; any performance number a consumer
+took that way is a Debug number.
+
+**Why nothing caught it.** The in-tree consumer smoke had the same
+wrong line. CI ran it in Debug only and read its last line
+(`consumer-smoke ok`), and the step printed the `error:` line above in
+every run and passed. It was found the day v0.24.0 shipped, by
+building a fresh consumer of the published tarball and reading all of
+its output. That is the fifth green signal in this record that said
+nothing (the fuzz gate, the weekly fuzz job, the interop matrix, the
+interop hard gate, and this step).
+
+**What v0.24.1 does.** `optimize` is an option: Debug gives Debug,
+ReleaseSafe gives ReleaseSafe, ReleaseFast and ReleaseSmall stop the
+build with the build-mode message. `release` works as before, and a
+release asked for by either option is a release.
+`tools/consumer-smoke/check-modes.sh` is the contract as a consumer
+sees it (both spellings, three application modes, nothing compiled;
+it fails on any `invalid option` line), and CI runs it. Five mutants
+of the mode rule, the v0.24.0 behaviour among them, each fail the case
+they should.
+
+**The gates on the release commit.** Tagged 2026-10-03 at `4564995`,
+each gate read at its evidence line.
+
+- `test`: six jobs, every step green; 1,811 tests in Debug and 1,771
+  in ReleaseSafe on the four Unix jobs, 1,748 on Windows; in the
+  consumer-smoke step, `check-modes: 6 of 6 as expected` and no
+  `invalid option` line.
+- rc-fuzz: `n_runs=2,066,947 unique_runs=10,204 pcs_len=41,855` across
+  41 sites (floor 1,845,000), no failing site.
+- `quic-go-interop`: `interop evidence: pairs=1 cells=2 succeeded=2
+  failed=0 known_failed=0 unsupported=0 skipped=0 flaky_passed=0
+  flaky_failed=0`.
+- QNS image: built from that commit.
+- pin-lint: `zig pins agree: 0.17.0`.
+
+The matrix dispatched on the same commit (run 37165403359; quic-zig as
+server; 7 tests; quic-go, quiche and ngtcp2 clients): `interop
+evidence: pairs=3 cells=21 succeeded=19 failed=0 known_failed=0
+unsupported=1 skipped=0 flaky_passed=1 flaky_failed=0`.
+
+A fresh consumer outside the repository, with the `optimize` spelling
+and `-Doptimize=ReleaseSafe`: built from the
+published tag tarball (hash
+`quic-0.24.1-DnSYvRqMNADDwuJG9qlOxfaaUIGacBiERjfZ5DINt3RH`), it
+compiled with `-Osafe` for the application, for `quic` and for
+`boringssl`, printed no `invalid option` line, and ran
+(`consumer-smoke ok: quic-zig 0.24.1`). The same consumer passes the
+six build-mode checks.
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig
