@@ -5,6 +5,142 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Fixed
+
+- **A server sends its handshake flight again when the client
+  retries.** (RFC 9002 section 6.2.3.) A flight that nobody
+  acknowledged gives no RTT sample, so the server's probe timeout was
+  1 s and then doubled: the flight went out at 0, 1, 3, 7 and 15 s. A
+  client that asked again in between (its ClientHello once more, or a
+  PING) got an ACK and nothing else. Measured with a quic-go client
+  through the interop runner's 30% loss: the client asked seven times
+  and gave up at 10 s. Now an Initial or Handshake packet that asks
+  for an answer and brings no new CRYPTO data is taken for what it is,
+  the peer's retry: every unacknowledged CRYPTO byte of both handshake
+  spaces goes out again at once. Both roles do it. It is bounded by
+  the anti-amplification limit (unchanged), by 8 copies for one
+  connection (`loss.max_early_handshake_retransmits`; measured: the
+  gain ends at 3 in a network that never loses 4 in a row, and an
+  outage of 100 ms needs 7), and by one copy for each received
+  datagram. A packet with a number we already have is the network's
+  duplicate, not a retry. It is not a loss and not a probe timeout:
+  no loss counter, no qlog loss event, the backoff untouched.
+- **A client with nothing in flight keeps probing.** (RFC 9002
+  sections 6.2.2.1 and 6.2.1.) A server may send 3 times what it
+  received until it has validated the client's address. With a
+  certificate of 5.4 KB it is at that limit with a part of its flight
+  unsent. If the client's ACKs were then lost, the server could send
+  nothing, the client had nothing in flight and so no timer, and both
+  ends were silent until the handshake timeout. Reproduced in
+  `tests/e2e/handshake_loss.zig`. The client now keeps a probe timer
+  until an ACK arrives in a Handshake packet; the probe is a PING in a
+  Handshake packet if it has the keys, else in an Initial packet. And
+  a client no longer resets its backoff on an ACK in an Initial
+  packet, so the probes come each twice as late as the one before.
+- **A client that still sends its Finished gets HANDSHAKE_DONE again
+  at once.** A server discards its Handshake keys the moment the
+  handshake completes, so it can neither open nor acknowledge the
+  client's later Handshake packets: the client learns that the
+  handshake is confirmed from HANDSHAKE_DONE alone. When that frame
+  was lost, the server ignored the client's repeated Finished and
+  sent HANDSHAKE_DONE again only at its own probe timeout (measured:
+  at 2, 10 and 43 s, all lost; the client gave up at 53 s). A
+  Handshake packet that arrives after the discard now queues the
+  frame again: at most 8 times, and never after the client
+  acknowledged one.
+- **No probe timer for 1-RTT data until the handshake is confirmed.**
+  (RFC 9002 section 6.2.1, a MUST.) A server with 1-RTT data in its
+  first flight (the interop server sends NEW_CONNECTION_ID there)
+  probed it a second later, while the client still had no 1-RTT keys.
+  Measured in a failed `handshakecorruption` run: twice that useless
+  probe was the one datagram the network let through between two runs
+  of three corrupted ones. "Confirmed" is the moment the Handshake
+  keys are discarded (a server: when the handshake completes; a
+  client: at HANDSHAKE_DONE). A connection whose handshake does not
+  run over packets (keys installed by hand) is not affected.
+- **More than 4096 packets in flight no longer ends the connection.**
+  The sent-packet tracker of a path holds 4096 packets. When it was
+  full, `poll` returned `error.TooManyInFlight`, after the packet was
+  built and its frames had left their queues, and an embedder's loop
+  ends a connection on a `poll` error. 4096 packets is a window of
+  4.9 MB in 1200-byte packets and of 0.4 MB in 100-byte packets.
+  Reproduced two ways: 10,000 small packets with no ACKs, and a bench
+  cell at 1 Gbit/s with a 100 ms round trip. A full tracker is now
+  back-pressure, like a full congestion window: no ack-eliciting
+  packet is built (probes included) until an ACK, a loss or a probe
+  timeout frees a slot. ACKs and CONNECTION_CLOSE still go, and
+  `nextTimerDeadline` gives no pacing deadline in that state. The
+  capacity is unchanged, and it is now the most packets a path keeps
+  in flight; see "Measured, not changed" below.
+- **Discarding the keys of a handshake space drops what the space
+  still held.** CRYPTO data that waited for retransmission when its
+  keys went stayed in the queue for the life of the connection, and
+  `canSend` then said "yes" while `poll` had nothing. The Initial
+  space also kept its sent packets (they counted in
+  `congestionBytesInFlight`). Both spaces now drop their sent packets,
+  their unacknowledged and their queued CRYPTO data, and their probe
+  state at the discard.
+
+### Measured, not changed
+
+- **The sent-packet tracker limits a fast, long path.** New bench cell
+  `impairment_fat_window_1gbit_rtt100ms` (1 Gbit/s, 100 ms round trip,
+  16 streams): 272 vMbps with the shipped 4096 slots, 448 with 8192,
+  479 with 16384, 157 with 2048. More slots cost memory for every
+  connection; that is its own decision. Until this release the cell
+  did not finish (`error: TooManyInFlight`).
+- **Reordering beyond the fixed loss thresholds is loss to every
+  controller.** The bench cell `impairment_reorder10pct` drops
+  nothing; it holds 10% of the packets back by 5 ms on a 2 ms path.
+  The thresholds of RFC 9002 (3 packets, 9/8 of the RTT) declare each
+  of them lost: 10.4% of the packets, all of which arrived. Over 24
+  seeds: CUBIC 4.2 to 4.6 s and NewReno 4.1 to 4.4 s in every run; BBR
+  0.1 to 3.4 s (median 0.15 s), fast only while its startup lasts.
+  With thresholds wide enough for that reordering (a temporary edit)
+  the same seeds take 0.2 to 0.3 s with BBR and 0.4 to 0.5 s with
+  CUBIC. The cell's one committed seed (106 ms) hid this. The cure is
+  a feature (find out that a "lost" packet arrived, widen the
+  thresholds, take back the controller's reaction); it is not in this
+  release. The notes are at the cell in `bench/e2e_main.zig` and at
+  `packet_threshold` in `src/conn/loss_recovery.zig`.
+- **One handshake datagram can be larger than 1200 bytes.** Each
+  coalesced packet is capped at the MTU on its own, so Initial +
+  Handshake together reached 1310 bytes in a test with a wide
+  certificate (the bundled loops pass 1500-byte buffers). And a
+  server does not pad a datagram with an ack-eliciting Initial packet
+  to 1200 bytes (RFC 9000 section 14.1 says it must). Both are
+  recorded, not changed.
+- **A probe timeout sends again what was in the oldest packet only.**
+  RFC 9002 section 6.2.4 allows two packets. With two small packets
+  in flight the probes take turns.
+
+### Tools and tests
+
+- `zig build test -Dtest-filter='text'` runs only the tests whose name
+  contains the text (a development option; CI does not pass it).
+- `zig build bench-e2e -- --cell NAME --seed N --sweep K`: one cell,
+  a chosen seed, or K seeds with the minimum, the median and the
+  maximum. One seed is one draw.
+- `tests/e2e/handshake_loss.zig`: a real server and client over a
+  network that the test controls one datagram at a time (13 tests).
+  Every run also checks, from the outside, that the server sends at
+  most 3 times what it was given before it validates the address.
+- `src/Connection/_tests_handshake_recovery.zig` (17 unit tests), a
+  fuzz harness for the send path with a tracker of 4 to 12 slots, and
+  49 mutants of the new rules, each killed by a test.
+- Interop, local, quic-go client, 30% loss or corruption each way,
+  50 connections a run: `handshakecorruption` passed 13 runs of 20
+  and `handshakeloss` 12 of 20 on 0.24.1; 19 of 20 and 18 of 20 on this
+  release. Every failed run was read in its capture. On the way, two of
+  them were stalls of ours (the third and the fourth fix above came from
+  them). The three that are left are not: in each, the server sent its
+  flight 4 to 6 times inside the 5 s that quic-go gives a handshake,
+  each time at once on the client's retry or at its probe timeout, and
+  the simulator lost every copy. So 20 of 20 is not a property this
+  test can show; "no failed run is a stall" is.
+
 ## [0.24.1] - 2026-10-03
 
 A build fix, with no change to the library code: `src/` is the same as
