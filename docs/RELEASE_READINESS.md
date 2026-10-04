@@ -580,6 +580,172 @@ compiled with `-Osafe` for the application, for `quic` and for
 (`consumer-smoke ok: quic-zig 0.24.1`). The same consumer passes the
 six build-mode checks.
 
+## v0.25.0 no-stalls release
+
+v0.25.0 is about one sentence: a connection must not stall, and must
+not die, because packets were lost, damaged or many. It has a
+security fix that every older release needs, six fixes for the
+handshake under loss, and one for a large window. It records five
+faults and limits that it found and did not fix, and one fix that it
+tried and took back.
+
+**The security fix, and why nothing had found it.** `Connection.handle`
+returned an error for a packet whose header did not parse, and an
+error from `handle` ends the connection (`Server.feed` closes it; the
+bundled client loop returns). Nothing had authenticated those bytes. A
+datagram of 12 bytes with a connection ID in it closed an open
+connection. The code is in every tag. Three things should have found
+it and did not:
+
+- The fuzz harness for the receive path seals its packets, and takes
+  every error but `OutOfMemory` as fine.
+- The interop runner's `handshakecorruption` test changes one byte in
+  the first 51 bytes of a datagram. The changed datagram does not
+  reach the endpoint: in a local run with 336 corrupted datagrams
+  neither end saw one packet that failed to decrypt. The UDP checksum
+  removes them. To the endpoints that test is a loss test.
+- No test gave a damaged datagram to `handle`.
+
+It was found by writing the test that `handshakecorruption` means to
+be: one changed byte, or a cut, in each of the first datagrams of a
+handshake, with a real server and client in memory. 75 of 2448 cases
+ended the connection. The same sweep then found that the server kept a
+client connection ID that it had read from a datagram that did not
+authenticate. There is now a fuzz harness for bytes that do not
+authenticate (the gate counts 43 sites). Those are the sixth and the
+seventh green signal in this record that said nothing: a fuzz harness
+that takes every error as fine, and a corruption test whose corruption
+does not arrive.
+
+**How the handshake faults were found.** One was measured before the
+sprint (`server x quic-go x handshakecorruption` failed about 2 runs
+in 5). The others were found one failed run at a time. A run that
+failed after a fix was not taken as "the remaining failure rate": its
+capture was read (the simulator's verdict for each datagram, the
+client's log, the packets). Three times it showed a stall of ours, and
+each became a fix: a lost HANDSHAKE_DONE that the server sent again
+only at 2, 10 and 43 s; a 1-RTT probe before the handshake was done,
+which took the one datagram the network let through; and Initial
+packets sent long after RFC 9001 section 4.9.1 says to stop, which a
+quiche client answers by dropping the whole datagram.
+
+**One fix was wrong, and the same method found that too.** A failed
+run suggested that a handshake probe should repeat its ACK. It was
+built, passed its unit tests and 8 mutants, made one e2e scenario
+faster, and left the bench cells as they were. One CI matrix run on
+it was green. The local batch on it passed 1 run of 4: for a peer
+whose first copy of the ACK was lost, the repeat is the first
+acknowledgement, and a first round-trip sample is not corrected for
+ACK delay (RFC 9002 section 5.3). A quiche client's estimate went to
+1048 ms on a 38 ms path, and its close took 10.5 s. The change was
+taken back the same day, and the reason is written where the change
+would go (`firePtoAtLevel` in `src/Connection/loss.zig`). A fix that
+comes from one failed run of an intermittent cell is not a fix until
+the batch has run on it, and one green matrix run is not that batch.
+
+**Old faults that the reading turned up, not fixed here.** The Retry
+token has no room for a first connection ID of 19 or 20 bytes (the
+`retry` cell with a quic-go client failed in exactly those runs: 2 of
+6 on this release, 2 of 14 on v0.24.1). The interop client fails
+`keyupdate` against quic-go (4 runs of 4, on v0.24.1 too) and does
+not implement the two handshake-loss cells. All are in the CHANGELOG
+under "Measured, not changed" or in its test notes.
+
+**The pass criteria, as written before the work, and what happened.**
+
+- S1 (quic-go x `handshakecorruption` and x `handshakeloss`, local,
+  20 runs of each, all pass): met. 20 of 20 and 20 of 20 on the
+  release code (13 and 12 of 20 on v0.24.1), and a passing run takes
+  40 to 41 s where it took 75 to 78 s (medians). It is not a property
+  the test can promise: on the code two fixes earlier it was 19 and
+  18 of 20, and each of those three failed runs was the network
+  losing every copy of a flight inside the 5 s that quic-go gives a
+  handshake. With an ngtcp2 client: 5 of 5 and 5 of 5 (v0.24.1: 5 of
+  5 and 4 of 5).
+- Not a criterion, and not as good: with a quiche client the two
+  cells passed 14 of 15 and 16 of 20 runs (v0.24.1: 5 of 5 and 4 of
+  5). This release is not shown to be better with quiche. The five
+  failed runs on the release code were read. In one the server never
+  got a ClientHello (all five copies lost). In one every Handshake
+  packet of the client was lost. In three the client's Finished was
+  lost three times in 42 s, and each probe of the client in between
+  was lost or the server's ACK for it was; one ACK more would have
+  told the client at once that its Finished was lost. That is the
+  repeat that was tried and taken back (above), so this is open. The
+  one failed run on v0.24.1 was the stall that this release removes
+  (an ACK alone for each retry of the client).
+- S2 (flight lost 5 times, done before the server's second probe
+  timeout): met. Done at 36 ms; the code before never finished.
+- S3 (never more than 3 times the bytes received from an unvalidated
+  address): met; every run of `tests/e2e/handshake_loss.zig` checks it
+  from the outside.
+- S4 (10,000 small packets with no ACKs: no error, the connection
+  stays open, and it finishes when ACKs come): met.
+- S5 (no run of the reorder or 5% loss cell more than 3 times the
+  cell's median): NOT met for the reorder cell, and not attempted.
+  The cause was found: the cell reorders by more than the fixed loss
+  thresholds allow, so 10% of the packets are declared lost although
+  all arrive, and every controller slows down as for real loss. The
+  cure is a feature. By the rule set before the sprint, that track
+  stopped there.
+- S6 (the other virtual-time cells byte-identical or explained): met.
+  The 17 older cells print the same line as on v0.24.1.
+- S7 (five gates real on the release commit; the wide matrix, both
+  roles): the five gates are real. The matrix ran in both roles and
+  was read; it is not all green. Both are below.
+
+**The gates on the release commit.** Tagged 2026-10-04 at `67f0fea`,
+each gate read at its evidence line.
+
+- `test`: six jobs, every step green; 1,859 tests in Debug and 1,819
+  in ReleaseSafe on the four Unix jobs, 1,796 on Windows; in the
+  consumer-smoke step, `check-modes: 6 of 6 as expected` and no
+  `invalid option` line.
+- rc-fuzz: `n_runs=2,164,314 unique_runs=13,100 pcs_len=42,647` across
+  43 sites (floor 1,935,000), no failing site.
+- `quic-go-interop`: `interop evidence: pairs=1 cells=2 succeeded=2
+  failed=0 known_failed=0 unsupported=0 skipped=0 flaky_passed=0
+  flaky_failed=0`.
+- QNS image: built from that commit.
+- pin-lint: `zig pins agree: 0.17.0`.
+
+The wide matrix, quic-zig as server, 16 tests, quic-go, quiche and
+ngtcp2 clients. Two runs on the release commit:
+
+- Run 37192405690: `interop evidence: pairs=3 cells=48 succeeded=43
+  failed=0 known_failed=0 unsupported=4 skipped=0 flaky_passed=0
+  flaky_failed=1`.
+- Run 37192403891: `interop evidence: pairs=3 cells=48 succeeded=42
+  failed=1 known_failed=0 unsupported=4 skipped=0 flaky_passed=1
+  flaky_failed=0`.
+
+The failed cell of the second run is `quiche:handshakeloss`. Its
+capture is in the run's artifact and was not read (this session
+downloads nothing). The same cell on the same code has 20 local runs
+(8 of them made after that CI run), and each failed one was read: see
+"Not a criterion" above. The cell that the first run names as flaky is
+`quiche:multiplexing`, as in every release since v0.24.0.
+
+Two runs on the same code a few commits earlier: run 37187540007
+(`6a2426b`), `interop evidence: pairs=3 cells=48 succeeded=43 failed=0
+known_failed=0 unsupported=4 skipped=0 flaky_passed=1 flaky_failed=0`;
+and run 37184022357 (`729e54e`), `succeeded=42 failed=1` with
+`quic-go:retry` (the Retry token, above).
+
+The same tests with quic-zig as the client, local, against the three
+servers: `interop evidence: pairs=3 cells=45 succeeded=33 failed=4
+known_failed=0 unsupported=8 skipped=0 flaky_passed=0 flaky_failed=0`.
+The four are `zerortt` against each server and `keyupdate` against
+quic-go, and both fail the same way with the v0.24.1 image.
+
+A fresh consumer outside the repository, built from an archive of the
+tag (`git archive`, the files of the tag tarball; hash
+`quic-0.25.0-DnSYvcRANgAnmiJVo3UPd3XOuezmr8Ia1mXeqXgow4vw`), with
+`.optimize = optimize` and `-Doptimize=ReleaseSafe`: it compiled with
+`-Osafe` for the application, for `quic` and for `boringssl`, printed
+no `invalid option` line, and ran (`consumer-smoke ok: quic-zig
+0.25.0`).
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig

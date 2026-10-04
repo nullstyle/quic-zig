@@ -235,21 +235,28 @@ Verified toolchain: 0.17.0.
   20 and 20 of 20 on this release, and a passing run takes 40 to 41 s
   where it took 75 to 78 s (medians). An ngtcp2 client: 5 of 5 and 5
   of 5, at 55 to 57 s (0.24.1: 5 of 5 and 4 of 5, at 80 to 86 s). A
-  quiche client: 14 of 15 and 11 of 12.
+  quiche client: 14 of 15 and 16 of 20 (0.24.1: 5 of 5 and 4 of 5).
+  With quiche this release is not shown to be better. (The tagged
+  text said "11 of 12" for the second cell: 8 more runs after the tag
+  had 3 failures.)
 - Every failed run on the way was read in its capture (the
   simulator's verdict for each datagram, the client's log). Three
   times it showed a stall of ours, and each became a fix above. Once
   it showed that a fix of ours was wrong, and that fix is gone (see
-  "An ACK in the handshake is said once"). The two quiche runs that
-  still failed are not stalls: in one the server never got a
-  ClientHello (all five copies lost), in the other the client's
-  Finished was lost three times in 42 s. A run can always fail that
-  way: the network may lose every copy inside the time that a client
-  gives a handshake.
+  "An ACK in the handshake is said once"). The five quiche runs that
+  still failed were read too. In one the server never got a
+  ClientHello (all five copies lost). In one every Handshake packet
+  of the client was lost. In three the client's Finished was lost
+  three times in 42 s, and each probe of the client in between was
+  lost or the server's ACK for it was; one ACK more would have told
+  the client at once that its Finished was lost, and that is the
+  repeat that was tried and taken back. A run can always fail in the
+  first two ways. The third is open.
 - Interop in CI, the wide matrix (16 tests, three clients, quic-zig
-  as the server) on the code of this release: every cell that the
-  peers support passed in one run; in another, all but `retry` with
-  quic-go (see "A Retry token has no room ..." above).
+  as the server) on the code of this release, four runs: every cell
+  that the peers support passed in two; one failed `retry` with
+  quic-go (see "A Retry token has no room ..." above); one failed
+  `handshakeloss` with quiche.
 - Interop, local, quic-zig as the client, the same tests against
   three servers: 33 cells passed. `zerortt` fails against all three
   and `keyupdate` against quic-go, both the same on 0.24.1 (measured
