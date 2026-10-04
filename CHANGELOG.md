@@ -5,7 +5,23 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.26.0] - 2026-10-04
+
+"Every legal peer connects": small repairs, each a rule of RFC 9000
+or RFC 9001 that was missing or wrong. A server with Retry on answers
+every legal client. No handshake datagram is longer than 1200 bytes,
+and those that must be 1200 bytes are. The connection IDs of the
+handshake are checked. A close during the handshake reaches the peer.
+A key update waits for the handshake to be confirmed. **Three things
+can need a change in an embedder:** the token types are 114 bytes
+(were 96); a peer that leaves a connection ID out of its transport
+parameters is refused; `requestKeyUpdate` returns
+`error.KeyUpdateBlocked` until the handshake is confirmed. All three
+are under "Changed" or "Fixed". On the wire, a server's first flight
+is padded to 1200 bytes. The 18 virtual-time bench cells print the
+same lines as on 0.25.0. Five more faults and limits were found and
+measured and are not fixed here: they are under "Measured, not
+changed". Verified toolchain: 0.17.0.
 
 ### Changed
 
@@ -20,7 +36,6 @@ changes.
   hold both. `retry_token.mint` and `new_token.mint` no longer return
   `OutputTooSmall` for fields within their limits (only for an output
   buffer that is too short).
-
 - **A server's first flight is padded.** A datagram of a server that
   holds an ack-eliciting Initial packet (the ServerHello, a copy of
   it, a probe) is now 1200 bytes, as RFC 9000 section 14.1 says it
@@ -35,7 +50,6 @@ changes.
   come out one byte over. A padded Initial packet may now have a
   Length field of two bytes for a value that fits one (RFC 9000
   section 16 allows it).
-
 - **A peer that leaves a connection ID out of its transport
   parameters is refused.** From the checks under "Fixed": a peer with
   no `initial_source_connection_id`, and a server with no
@@ -153,6 +167,138 @@ changes.
   came from the IDs still in use, so after the peer retired the
   newest ID, the next ID got its number again (RFC 9000 section
   5.1.1; a peer may close for it, section 19.15).
+
+### Measured, not changed
+
+The first three come from the interop client, which ran the runner's
+two handshake-loss tests for the first time in this release (30% loss
+each way, 50 connections a run; two batches of 5 runs for each
+server, so N = 10; there is no older number). Against an ngtcp2
+server both tests passed 10 runs of 10. Every failed run was read in
+its capture.
+
+- **A client retries a silent handshake slowly, one datagram at a
+  time.** A client that hears nothing sends again at 1, 3, 7 and 15 s:
+  the first probe timeout of RFC 9002 (1 s), doubled each time, and
+  one datagram for each (section 6.2.4 allows two). A quic-go server
+  sends three datagrams, then waits for the client, and gives the
+  connection up when 5 s pass with no packet from it (measured). So
+  three lost datagrams in a row can end a handshake there. Against a
+  quic-go server `handshakeloss` passed 5 runs of 10 and
+  `handshakecorruption` 2 of 10. All 13 failed cells are this: the
+  server heard nothing from the client for 6 to 15 s, or never again.
+  In 9 the client's handshake then timed out. In 4 the server took
+  the late ClientHello for a new connection, the download was good,
+  and the runner counted 51 handshakes for 50 requests. A quic-go
+  endpoint probes with two datagrams and starts at 200 ms (the same
+  captures). This library's server answers each retry of a client at
+  once, and it passes these tests (see "Tools and tests"). The cure
+  for the client changes when every connection sends; it is not in
+  this release.
+- **A client whose ClientHello is acknowledged, and whose ServerHello
+  is lost, can only wait.** It has nothing to send again, so its
+  probe is a PING. A quiche server answers a PING with an ACK and
+  nothing else, and a second copy of the ClientHello the same way
+  (measured); it sends its ServerHello again on its own timer only,
+  1, 5 and 21 s after the first. When those copies are lost too, the
+  client's handshake timeout (30 s) comes first. Against a quiche
+  server the two tests passed 8 runs of 10 and 8 of 10, and 3 of the
+  4 failed cells are this. Nothing that this client could send would
+  have changed them. (This library's own server takes such a PING as
+  the peer's retry and sends its flight again, since 0.25.0.)
+- **A Handshake packet that arrives before its keys is dropped.** The
+  fourth failed cell with quiche. The server's Handshake packets
+  arrived before its ServerHello (the copies of the ServerHello were
+  lost until the one of 5 s). The client could not read them and did
+  not keep them (RFC 9000 section 12.2 allows a receiver to keep such
+  a packet), so at 5 s it had the keys and nothing to read with them.
+  quiche's next copy (10 s) was lost, and the client's own probes
+  came late: its first round-trip sample was 2 s on a 30 ms path,
+  because the ACK that it got for its ClientHello was a copy sent 2 s
+  after the first, and RFC 9002 section 5.3 does not correct a first
+  sample. Its probes went at 11 s (lost) and 23 s (answered with an
+  ACK only), and its handshake timed out at 30 s. (A late copy of an
+  ACK is what made 0.25.0 take its own ACK repeat back; here a peer
+  does it to us.)
+- **A CONNECTION_CLOSE that is lost is in practice not sent again.**
+  In the closing state a packet from the peer is answered with the
+  close again only if two probe timeouts have passed since the last
+  one, and the closing state ends after three. So one copy goes, and
+  a second one only for a packet that arrives in the last third of
+  the closing state. A peer that misses the copy waits for its own
+  timeout. RFC 9000 section 10.2.1 asks for a limit on these answers
+  and leaves the rate open. Found with a test of this release
+  (`tests/e2e/handshake_close.zig`): it saw a second copy only when
+  it gave the peer's packet inside that window. The policy is in
+  `shouldRearmCloseRepeat` in `src/conn/lifecycle.zig`.
+- **Remembered transport parameters limit the bytes of 0-RTT data,
+  not the number of streams.** `setRememberedPeerTransportParams`
+  gives the early streams their flow-control credit. The count of
+  streams a client may open is not bounded by the remembered
+  `initial_max_streams_bidi` and `initial_max_streams_uni` until the
+  server's new parameters arrive (RFC 9000 section 7.4.1 wants the
+  remembered limits kept). The interop client counts by hand. An
+  embedder that opens 0-RTT streams must do the same.
+- **Still open from 0.25.0, as written there:** the sent-packet
+  tracker limits a fast, long path; reordering beyond the fixed
+  thresholds is loss to every controller; an ACK in the handshake is
+  said once (the repeat in the Handshake space alone, an experiment
+  that the plan for this release allowed, is not in it); a probe
+  timeout sends again what was in the oldest packet only.
+
+### Tools and tests
+
+- `tests/e2e/handshake_loss.zig`: every run now also checks the size
+  of each datagram of both ends (none above 1200 bytes in the
+  handshake but a DPLPMTUD probe, a probe alone, and exactly 1200
+  where RFC 9000 section 14.1 wants it). The flight of a server with
+  no loss, in datagrams: 1 of 1200 bytes with the small certificate
+  (was 1 of 831), 3 of 1200, 1166 and 336 bytes with the wide one
+  (was 1310, 1166 and 190), 6 with the largest.
+- `tests/e2e/handshake_close.zig` (7 tests): a close in each phase of
+  the handshake, from each end; the peer has the error code within one
+  round trip.
+- A Retry round trip through `Server.feed` for 26 cases (each first
+  ID length from 8 to 20, an IPv4 and an IPv6 client); conformance
+  tests for RFC 9000 sections 14.1 and 14.2 and for RFC 9001 section
+  6.1; unit tests for the connection-ID rules at both ends.
+- 51 mutants of the new rules, each killed by a test. One lived at
+  first (the packets of one datagram did not share the
+  anti-amplification allowance, and no test saw it); it has its test
+  now.
+- The interop client program runs `multiconnect`, so the runner's
+  `handshakeloss` and `handshakecorruption` tests run in the client
+  role for the first time; it sends its 0-RTT requests within the
+  limits it remembers from the first connection; and the interop
+  server drops a datagram that its Retry path cannot answer (it
+  exited).
+- Interop, local, quic-zig as the server, a quic-go client. `retry`:
+  20 runs of 20 (4 of them with a first ID of 19 or 20 bytes; on
+  0.25.0 exactly those runs failed). `handshakecorruption` and
+  `handshakeloss`, 30% each way, 50 connections a run: 20 runs of 20
+  and 19 of 20 on the code of this release, and a passing run takes
+  37 and 42 s (medians; 0.25.0: 20 of 20 and 20 of 20, 40 and 41 s).
+  A batch earlier in the work (after the change of the datagram
+  size) had the same counts. Both failed runs were read, and neither
+  is a stall: the simulator dropped every datagram of the server for
+  one connection (its flight four times in 2.4 s in one run, seven
+  times in 3.3 s in the other) inside the 5 s that a quic-go client
+  waits.
+- Interop, local, the wide matrix (15 tests) on the code of this
+  release. quic-zig as the client against quic-go, ngtcp2 and quiche
+  servers: 43 cells passed, none failed, 2 are not supported by the
+  peer (0.25.0: 33 passed, 4 failed, 8 not supported, 6 of them by
+  our client). `zerortt` now passes against all three (the runner saw
+  0 bytes of 0-RTT data before, 10413 to 10417 now) and `keyupdate`
+  against quic-go (see "A key update waits ..."); in a batch of their
+  own the two tests passed 3 runs of 3 against each server. quic-zig
+  as the server against the three clients: 41 passed, none failed, 4
+  not supported by the peer.
+- The numbers of the client role under loss are under "Measured, not
+  changed". The interop simulator's rule "at most 3 losses in a row"
+  is for a direction, not for a connection: datagrams of other
+  connections take the turns that pass (measured; it matters when a
+  failed run is read).
 
 ## [0.25.0] - 2026-10-04
 
