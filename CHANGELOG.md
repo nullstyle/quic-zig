@@ -5,6 +5,31 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Measured, not changed
+
+- **The ACK repeat in the Handshake space alone was tried and is not
+  in the code.** 0.25.0 took back a repeat of the handshake ACK in
+  both spaces: for a peer whose first copy was lost, a late ACK is a
+  wrong first round-trip sample. The same change for the Handshake
+  space alone was built after 0.26.0 (a probe timeout there, and a
+  1-RTT packet that arrives before its keys, owe the Handshake ACK
+  again; 4 unit tests, 7 mutants killed), on the idea that a peer in
+  the Handshake space has a sample from the Initial space. It has
+  none when the datagram with the one Initial ACK was lost. Measured
+  with a quiche client under 30% loss, in run 3 of 9: the repeat made
+  the client send its lost Finished again at once, and it was the
+  client's first sample, 2.137 s on a 30 ms path (the ACK carried the
+  true delay of 2.10 s; RFC 9002 section 5.3 does not correct a first
+  sample). The client's probe timer went to 6.4, 12.9 and 25.7 s, and
+  the connection timed out with no file. The rule set before the test
+  was "no round-trip estimate above 1 s in any run", so the batch
+  stopped there: 7 runs of 9 passed (the other failed run lost all
+  five copies of its ClientHello). A repeat is safe only for a peer
+  that is known to have a sample; the note is at `firePtoAtLevel` in
+  `src/Connection/loss.zig`.
+
 ## [0.26.0] - 2026-10-04
 
 "Every legal peer connects": small repairs, each a rule of RFC 9000

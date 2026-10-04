@@ -1066,8 +1066,29 @@ fn firePtoAtLevel(
     // 120 s with the repeat; 59 s, 59 s and 94 s without. 1 run of 4
     // passed; 9 of 10 without.
     //
-    // A repeat is safe only if the peer already has a sample, and we
-    // cannot see that from here.
+    // TRIED AGAIN 2026-10-04 FOR THE HANDSHAKE SPACE ALONE, AND NOT
+    // SHIPPED (the change above with `lvl == .handshake`, and the
+    // Handshake ACK owed again for a 1-RTT packet that arrives before
+    // its keys). The idea: a peer that sends Handshake packets has a
+    // sample from the Initial space. It has none when the datagram
+    // with our one Initial ACK was lost; the copy of the flight that
+    // it gets then has no ACK in it.
+    //
+    // MEASURED (interop `handshakeloss`, a quiche client, run 3 of 9):
+    // the client got our flight 2 s late, with no ACK. Its Finished
+    // was lost twice. Its Handshake PING arrived, and our ACK for it
+    // was lost. 2.1 s later its 1-RTT packets came, and we said the
+    // Handshake ACK again, with the true delay in it (2.10 s). It did
+    // what it was built for: the client sent its Finished again at
+    // once and had HANDSHAKE_DONE 35 ms later. It was also the
+    // client's first sample: 2.137 s on a 30 ms path. Its probe timer
+    // went to 6.4 s, 12.9 s and 25.7 s, its request was lost twice
+    // more, and the connection timed out after 42.6 s with no file.
+    //
+    // So: a repeat is safe only for a peer that is KNOWN to have a
+    // sample. That is a peer that has acknowledged a packet of ours
+    // which carried an ACK frame for an ack-eliciting packet of its
+    // own. Nothing here keeps that fact yet.
     return true;
 }
 

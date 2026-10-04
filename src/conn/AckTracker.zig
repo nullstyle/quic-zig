@@ -132,9 +132,10 @@ pub fn contains(self: *const AckTracker, pn: u64) bool {
 /// these acks if our frame is lost — but `pending_ack` clears.
 ///
 /// The repeat comes only with the next ack-eliciting packet of the
-/// peer. Do not set `pending_ack` again on a timer: a late ACK is a
-/// wrong round-trip sample for a peer whose first copy was lost
-/// (measured; see `firePtoAtLevel` in Connection/loss.zig).
+/// peer. Do not set `pending_ack` again on a timer, or for a packet
+/// that cannot be read: a late ACK is a wrong round-trip sample for a
+/// peer whose first copy was lost (measured twice, in both handshake
+/// spaces; see `firePtoAtLevel` in Connection/loss.zig).
 pub fn markAckSent(self: *AckTracker) void {
     self.pending_ack = false;
     self.delayed_ack_armed = false;
