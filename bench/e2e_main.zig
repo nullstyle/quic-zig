@@ -188,6 +188,32 @@ const impairment_cells = [_]harness.ImpairmentOptions{
         .max_queue_delay_us = 25_000,
         .total_bytes = 4 << 20,
     },
+    // A path that wants more packets in flight than the sent-packet
+    // tracker holds (`SentPacketTracker.max_tracked`, 4096). 1 Gbit/s
+    // with a 100 ms round trip is 12.5 MB in flight: about 10,400
+    // packets of 1200 bytes. Sixteen streams, because one stream
+    // buffers 1 MiB at most.
+    //
+    // MEASURED 2026-10-03 (M5 Max, Zig 0.17.0, ReleaseSafe, bbr):
+    //
+    //     tracker slots   goodput
+    //         2048        157 vMbps
+    //         4096        272 vMbps   (shipped)
+    //         8192        448 vMbps
+    //        16384        479 vMbps
+    //
+    // So the tracker is what limits this path, and twice the slots
+    // gives 65% more. That is a finding, not yet a decision: slots
+    // cost memory for every connection. Until v0.24.1 this cell did
+    // not finish at all: the 4097th packet in flight made `poll`
+    // return `TooManyInFlight`.
+    .{
+        .name = "impairment_fat_window_1gbit_rtt100ms",
+        .bottleneck_bytes_per_s = 125_000_000,
+        .one_way_delay_us = 50_000,
+        .streams = 16,
+        .total_bytes = 256 << 20,
+    },
 };
 
 // The fairness matrix is fixed (specific matchups), NOT varied by

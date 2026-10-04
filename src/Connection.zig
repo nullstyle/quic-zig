@@ -3951,7 +3951,10 @@ pub fn nextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline {
         // runs last and only when the pacer is actually short.
         if (self.pacing_enabled and path.path.state != .retiring) {
             const cc = &path.path.cc;
-            if (cc.sendAllowance(path.sent.bytes_in_flight) > 0) {
+            // A full tracker blocks like a full window: only an ACK or
+            // a loss opens it, never the pacer's clock. Without this
+            // test the deadline would be "now" again at every call.
+            if (cc.sendAllowance(path.sent.bytes_in_flight) > 0 and !path.sent.isFull()) {
                 if (path.path.pacer.nextReadyUs(
                     now_us,
                     @min(@as(u64, @intCast(path.pmtu)), default_mtu),

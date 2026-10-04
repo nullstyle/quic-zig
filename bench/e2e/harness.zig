@@ -394,6 +394,8 @@ pub const ImpairmentOptions = struct {
     /// Safety bound on virtual time; heavy loss cells that fail to
     /// finish inside it return error.ImpairmentStalled.
     max_virtual_us: u64 = 600 * std.time.us_per_s,
+    /// One-way delay of the link. The round trip is twice this.
+    one_way_delay_us: u64 = 1_000,
 };
 
 pub const ImpairmentResult = struct {
@@ -425,6 +427,7 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .seed = opts.seed,
         .loss_permille = opts.loss_permille,
         .reorder_permille = opts.reorder_permille,
+        .base_delay_us = opts.one_way_delay_us,
         .bottleneck_bytes_per_s = opts.bottleneck_bytes_per_s,
         .max_queue_delay_us = opts.max_queue_delay_us,
     });

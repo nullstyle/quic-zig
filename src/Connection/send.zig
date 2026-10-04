@@ -214,6 +214,22 @@ pub fn pollLevelOnPath(
     const pn_space = conn.pnSpaceForLevelOnPath(lvl, app_path);
     const sent_tracker = conn.sentForLevelOnPath(lvl, app_path);
     const pending_ping = conn.pendingPingForLevelOnPath(lvl, app_path);
+    // A full tracker has no slot for one more ack-eliciting packet,
+    // and a packet that is not tracked can never be acknowledged or
+    // declared lost. So a full tracker closes the gate that a full
+    // congestion window closes, and more: nothing ack-eliciting is
+    // built at all, probes included, until an ACK or a loss frees a
+    // slot. (A probe timeout frees one itself: it takes the oldest
+    // packet out before it asks for a probe.) ACK and CONNECTION_CLOSE
+    // are not tracked and still go.
+    //
+    // The question is asked HERE, before a frame leaves its queue and
+    // before a packet number is used. When `record` refuses, at the
+    // end of this function, the packet is sealed and its frames are
+    // gone from their queues: a refusal there cannot be undone.
+    // MEASURED 2026-10-03, before this gate: the 4097th small packet
+    // in flight made `poll` return `TooManyInFlight`.
+    const tracker_full = sent_tracker.isFull();
     // RFC 8899 DPLPMTUD probes can grow the plaintext above 1200
     // bytes (up to `pmtud_config.max_mtu`). `max_recv_plaintext`
     // is the AEAD-supported ceiling on either direction; sizing
@@ -265,6 +281,7 @@ pub fn pollLevelOnPath(
     // can set `pmtud_config.max_mtu` accordingly.
     var probe_target_size: ?u16 = null;
     if (lvl == .application and
+        !tracker_full and
         conn.pmtud_config.enable and
         app_path.pmtudIsSearching() and
         app_path.path.isValidated())
@@ -339,7 +356,7 @@ pub fn pollLevelOnPath(
     // path's bucket, and a receive-mostly endpoint whose polls never
     // reached it would freeze its bucket at whatever debt the exempt
     // ACK sends left behind.
-    const cwnd_blocked = conn.congestionBlockedOnPath(lvl, app_path);
+    const cwnd_blocked = tracker_full or conn.congestionBlockedOnPath(lvl, app_path);
     const pacing_blocked =
         conn.pacingBlockedOnPath(lvl, app_path, now_us, @min(@as(u64, @intCast(app_path.pmtu)), @as(u64, @intCast(dst.len))));
     const congestion_blocked = cwnd_blocked or pacing_blocked;
@@ -382,6 +399,7 @@ pub fn pollLevelOnPath(
     // ordinary CID-rotation paths don't trigger this fast path.
     const emit_path_challenge_first = blk: {
         if (lvl != .application) break :blk false;
+        if (tracker_full) break :blk false;
         if (path_response_addr_overrides_current) break :blk false;
         if (conn.pending_frames.path_challenge == null) break :blk false;
         if (conn.pending_frames.path_challenge_path_id != app_path.id) break :blk false;
@@ -536,7 +554,11 @@ pub fn pollLevelOnPath(
         };
         if (lvl == .application) conn_keys.recordApplicationPacketProtected(conn, &close_packet);
         if (conn.ecn_enabled) pn_space.ect_marked_sent +|= 1;
-        try sent_tracker.record(close_packet);
+        // The close packet is not ack-eliciting: nothing waits for its
+        // ACK, and it is not in flight. A full tracker must not stop
+        // it (the close would be lost: `pending_close` is cleared
+        // above), so it then goes out untracked.
+        if (!tracker_full) try sent_tracker.record(close_packet);
         // RFC 9000 §10.2.1 closing state. The first emit arms a
         // 3*PTO closing-state deadline; subsequent §10.2.1 ¶3
         // retransmits leave the deadline at its original value
@@ -649,7 +671,7 @@ pub fn pollLevelOnPath(
 
     // 1a) PTO probe PING. A lost PING is not retransmitted as a
     // frame, but a later PTO will queue another probe.
-    if (!path_response_addr_overrides_current and lvl != .early_data and pending_ping.* and pl_pos + 1 <= max_payload) {
+    if (!tracker_full and !path_response_addr_overrides_current and lvl != .early_data and pending_ping.* and pl_pos + 1 <= max_payload) {
         const ping_len = try frame_mod.encode(
             pl_buf[pl_pos..max_payload],
             .{ .ping = .{} },
@@ -943,7 +965,7 @@ pub fn pollLevelOnPath(
     // path's CC to initial values via
     // `resetPathRecoveryAfterMigration`.
     var path_response_used_addr_override = false;
-    if (lvl == .application and conn.pending_frames.path_response != null and
+    if (!tracker_full and lvl == .application and conn.pending_frames.path_response != null and
         conn.pending_frames.path_response_path_id == app_path.id and pl_pos + 9 <= max_payload)
     {
         if (conn.pending_frames.path_response_addr) |addr| {
@@ -959,7 +981,7 @@ pub fn pollLevelOnPath(
         conn.pending_frames.path_response_addr = null;
         ack_eliciting = true;
     }
-    if (!path_response_used_addr_override and
+    if (!tracker_full and !path_response_used_addr_override and
         lvl == .application and conn.pending_frames.path_challenge != null and
         conn.pending_frames.path_challenge_path_id == app_path.id and pl_pos + 9 <= max_payload)
     {

@@ -10,6 +10,7 @@ const Connection = state.Connection;
 const ConnectionId = state.ConnectionId;
 const EncryptionLevel = state.EncryptionLevel;
 const SendStream = state.SendStream;
+const SentPacketTracker = state.SentPacketTracker;
 const Stream = state.Stream;
 const frame_mod = state.frame_mod;
 const frame_types = state.frame_types;
@@ -1541,5 +1542,274 @@ const window_seed_blocked = windowSeed(0, 6, &.{
 test "fuzz: Connection stream window under frames, reads, replies and ticks" {
     try std.testing.fuzz({}, fuzzConnStreamWindow, .{
         .corpus = &.{ &window_seed_churn, &window_seed_last_id, &window_seed_bidi, &window_seed_blocked },
+    });
+}
+
+// Send-path fuzz harness against a small sent-packet tracker.
+//
+// The tracker is the one hard bound on how many ack-eliciting packets a
+// path may have in flight. Until v0.24.1 a full tracker made `poll`
+// return `TooManyInFlight`, after the packet was built and its frames
+// had left their queues. Now a full tracker is back-pressure (see
+// `tracker_full` in send.zig). A tracker of 4096 slots is too large for
+// a fuzzer to fill by chance, so this harness gives the connection one
+// of 4 to 12 slots and then does everything that makes a packet:
+// stream data, a keep-alive PING, a PATH_RESPONSE, an ACK that is owed,
+// probe timeouts, a close.
+//
+// After every operation:
+//
+// - No call returned an error. `pollDatagram` returns a datagram or
+//   null, whatever the state of the tracker.
+// - The tracker holds at most its capacity.
+// - A poll with a full tracker adds no packet to it.
+// - An ACK that is owed goes out, full tracker or not.
+// - After `close`, the next poll gives the CONNECTION_CLOSE.
+//
+// At the end, with no close: every byte the application wrote is sent
+// once ACKs come. A full tracker stops the sender; it does not strand
+// the data.
+const SendOp = enum(u8) {
+    /// The application writes 1 to 256 bytes.
+    write,
+    /// One `pollDatagram`, into a buffer of 64 to 304 bytes.
+    poll,
+    /// The peer acknowledges one live packet (the `pick`-th).
+    ack_one,
+    /// The peer acknowledges everything that was sent.
+    ack_all,
+    /// 1 ms to 256 ms go by, and `tick` runs.
+    tick,
+    /// A packet of the peer arrived: an ACK is owed.
+    peer_packet,
+    /// The application asks for a PING.
+    ping,
+    /// The peer challenged the path: a PATH_RESPONSE is owed.
+    path_response,
+    /// The application closes the connection.
+    close,
+};
+
+fn fuzzConnSendSmallTracker(_: void, smith: *std.testing.Smith) anyerror!void {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try conn.setLocalScid(&.{ 9, 9, 9, 9 });
+    try conn.setTransportParams(.{
+        .initial_max_data = 1 << 22,
+        .initial_max_stream_data_bidi_local = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_streams_bidi = 16,
+    });
+    try util.installTestApplicationWriteSecret(conn);
+    conn.setRememberedPeerTransportParams(.{
+        .initial_max_data = 1 << 22,
+        .initial_max_stream_data_bidi_remote = 1 << 22,
+    });
+    // No handshake in this fixture: its timeout must not end the run.
+    conn.handshake_timeout_us = 0;
+    // The tracker is the gate under test, so the window never binds.
+    // Pacing is one more draw: its deadline logic reads the tracker.
+    conn.ccForApplication().setCwndForTest(1 << 30);
+    conn.pacing_enabled = smith.valueRangeAtMost(u8, 0, 1) == 1;
+
+    const capacity = smith.valueRangeAtMost(u32, 4, 12);
+    const path = conn.primaryPath();
+    path.sent.deinit(allocator);
+    path.sent = try SentPacketTracker.init(allocator, capacity);
+    const tracker = conn.sentForLevel(.application);
+    try std.testing.expectEqual(capacity, tracker.capacity());
+
+    const s = try conn.openBidi(0);
+    const data: [256]u8 = @splat('d');
+    var written: usize = 0;
+    var now_us: u64 = 1_000_000;
+    var dgram: [512]u8 = undefined;
+    var closed = false;
+
+    const num_ops = smith.valueRangeAtMost(u32, 0, 128);
+    var i: u32 = 0;
+    while (i < num_ops) : (i += 1) {
+        const op: SendOp = @fromBackingInt(@intCast(smith.valueRangeAtMost(u8, 0, 8)));
+        const pick = smith.valueRangeAtMost(u8, 0, 15);
+        const arg = smith.valueRangeAtMost(u8, 0, 255);
+
+        switch (op) {
+            .write => written += try conn.streamWrite(s.id, data[0 .. @as(usize, arg) + 1]),
+            .poll => {
+                const full = tracker.isFull();
+                const live = tracker.liveCount();
+                const owed_ack = conn.primaryPath().app_pn_space.received.pending_ack;
+                const got = try conn.pollDatagram(dgram[0 .. 64 + @as(usize, arg & 0xf) * 16], now_us);
+                if (full) try std.testing.expectEqual(live, tracker.liveCount());
+                if (owed_ack) {
+                    try std.testing.expect(got != null);
+                    try std.testing.expect(!conn.primaryPath().app_pn_space.received.pending_ack);
+                }
+            },
+            .ack_one => {
+                var pns: [16]u64 = undefined;
+                const live = tracker.livePns(&pns);
+                if (live.len > 0) {
+                    const pn = live[pick % live.len];
+                    now_us += 1_000;
+                    try conn.handleAckAtLevel(.application, .{
+                        .largest_acked = pn,
+                        .ack_delay = 0,
+                        .first_range = 0,
+                        .range_count = 0,
+                        .ranges_bytes = &.{},
+                        .ecn_counts = null,
+                    }, now_us);
+                }
+            },
+            .ack_all => {
+                const next_pn = conn.pnSpaceForLevel(.application).next_pn;
+                if (next_pn > 0) {
+                    now_us += 1_000;
+                    try conn.handleAckAtLevel(.application, .{
+                        .largest_acked = next_pn - 1,
+                        .ack_delay = 0,
+                        .first_range = next_pn - 1,
+                        .range_count = 0,
+                        .ranges_bytes = &.{},
+                        .ecn_counts = null,
+                    }, now_us);
+                    try std.testing.expectEqual(@as(u32, 0), tracker.liveCount());
+                }
+            },
+            .tick => {
+                now_us += (@as(u64, arg) + 1) * 1_000;
+                try conn.tick(now_us);
+            },
+            .peer_packet => conn.primaryPath().app_pn_space.received.add(i, now_us / 1_000),
+            .ping => conn.requestPing(),
+            .path_response => conn.queuePathResponseOnPath(0, @splat(arg), null),
+            .close => {
+                conn.close(false, 0, "");
+                const got = try conn.pollDatagram(&dgram, now_us);
+                try std.testing.expect(got != null);
+                try std.testing.expect(conn.closeState() != .open);
+                closed = true;
+            },
+        }
+        try std.testing.expect(tracker.liveCount() <= tracker.capacity());
+        if (closed or conn.closeState() != .open) return;
+    }
+
+    // Liveness. The peer acknowledges whatever is in flight, again and
+    // again: everything the application wrote goes out.
+    var rounds: usize = 0;
+    while (s.send.hasPendingChunk() or tracker.liveCount() > 0) : (rounds += 1) {
+        try std.testing.expect(rounds < 4096);
+        now_us += 100_000;
+        while (try conn.pollDatagram(&dgram, now_us)) |_| {}
+        const next_pn = conn.pnSpaceForLevel(.application).next_pn;
+        if (next_pn == 0) break;
+        try conn.handleAckAtLevel(.application, .{
+            .largest_acked = next_pn - 1,
+            .ack_delay = 0,
+            .first_range = next_pn - 1,
+            .range_count = 0,
+            .ranges_bytes = &.{},
+            .ecn_counts = null,
+        }, now_us);
+    }
+    try std.testing.expect(!s.send.hasPendingChunk());
+    try std.testing.expectEqual(@as(u64, written), s.send.writtenBytes());
+    try std.testing.expectEqual(s.send.writtenBytes(), s.send.ackedFloor());
+}
+
+/// One operation of the send harness, as its three draws.
+const SendSeedOp = struct {
+    op: SendOp,
+    pick: u8 = 0,
+    arg: u8 = 0,
+};
+
+/// A seed for the send harness: pacing, tracker capacity, operation
+/// count, then three words per operation (see `windowSeed` for how
+/// `Smith` reads them).
+fn sendSeed(
+    comptime pacing: bool,
+    comptime capacity: u32,
+    comptime ops: []const SendSeedOp,
+) [(3 + 3 * ops.len) * 8]u8 {
+    var buf: [(3 + 3 * ops.len) * 8]u8 = undefined;
+    var at: usize = 0;
+    const put = struct {
+        fn word(b: []u8, pos: *usize, v: u64) void {
+            std.mem.writeInt(u64, b[pos.*..][0..8], v, .little);
+            pos.* += 8;
+        }
+    }.word;
+    put(&buf, &at, @intFromBool(pacing));
+    put(&buf, &at, capacity);
+    put(&buf, &at, ops.len);
+    for (ops) |o| {
+        put(&buf, &at, @backingInt(o.op));
+        put(&buf, &at, o.pick);
+        put(&buf, &at, o.arg);
+    }
+    return buf;
+}
+
+// Fill a tracker of four slots with small packets, poll two more times
+// into the full tracker, then everything that is not stream data: a
+// PING, a PATH_RESPONSE, an owed ACK, a probe timeout, an ACK of one
+// packet in the middle, and a close through the full tracker.
+const send_seed_full = sendSeed(false, 4, &.{
+    .{ .op = .write, .arg = 255 },
+    .{ .op = .write, .arg = 255 },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .ping },
+    .{ .op = .poll },
+    .{ .op = .path_response, .arg = 7 },
+    .{ .op = .poll },
+    .{ .op = .peer_packet },
+    .{ .op = .poll },
+    .{ .op = .tick, .arg = 255 },
+    .{ .op = .tick, .arg = 255 },
+    .{ .op = .tick, .arg = 255 },
+    .{ .op = .tick, .arg = 255 },
+    .{ .op = .poll },
+    .{ .op = .ack_one, .pick = 2 },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .close },
+});
+
+// The same start with pacing on, and no close: the end of the harness
+// must still get every byte out.
+const send_seed_paced = sendSeed(true, 5, &.{
+    .{ .op = .write, .arg = 255 },
+    .{ .op = .write, .arg = 255 },
+    .{ .op = .write, .arg = 255 },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .ack_all },
+    .{ .op = .poll },
+    .{ .op = .poll },
+    .{ .op = .tick, .arg = 100 },
+    .{ .op = .poll },
+});
+
+test "fuzz: Connection send path against a small sent-packet tracker" {
+    try std.testing.fuzz({}, fuzzConnSendSmallTracker, .{
+        .corpus = &.{ &send_seed_full, &send_seed_paced },
     });
 }

@@ -253,10 +253,24 @@ pub const SentPacket = struct {
 /// more than a few hundred live packets; 4096 gives high-BDP headroom
 /// (the highest observed across this repo's full test + impairment +
 /// smoke corpus is 915). Capacity is a per-tracker choice made at
-/// `init`, so a PN space that provably needs less pays for less. When
-/// a tracker is live-full, `record` returns `Error.TooManyInFlight` —
-/// a connection-fatal condition the caller should map to a
-/// CONNECTION_CLOSE.
+/// `init`, so a PN space that provably needs less pays for less.
+///
+/// A full tracker is back-pressure, not an error. The send path asks
+/// `isFull` before it builds an ack-eliciting packet and builds none
+/// while the answer is yes, exactly as it does for a full congestion
+/// window; an ACK, a loss or a probe timeout frees a slot. `record`
+/// still returns `Error.TooManyInFlight` for a caller that does not
+/// ask first. Until v0.24.1 the send path did not ask: with more than
+/// 4096 packets in flight (a window of 5.5 MB in full packets, of
+/// 0.4 MB in 100-byte packets) that error left `poll`, and an
+/// embedder's loop ended the connection.
+///
+/// So this number is also the most packets one path keeps in flight,
+/// and on a fast, long path it is what limits the rate. MEASURED
+/// 2026-10-03, bench cell `impairment_fat_window_1gbit_rtt100ms`
+/// (1 Gbit/s, 100 ms round trip): 272 vMbps with 4096 slots, 448 with
+/// 8192, 479 with 16384, 157 with 2048. More slots is a decision with
+/// a memory cost for every connection; it is not made here.
 pub const max_tracked: usize = 4096;
 
 /// Initial/Handshake-space tracker capacity. Those spaces carry the
@@ -279,12 +293,10 @@ pub const max_tracked: usize = 4096;
 ///   only after ~288 KiB of the flight was already acknowledged —
 ///   i.e. a chain well past 0.5 MiB.
 ///
-/// Failure mode if exceeded anyway: `record` returns
-/// `Error.TooManyInFlight` and the connection closes. The one traffic
-/// shape that can approach the cap — a peer soliciting ACK-carrying
-/// Initial packets indefinitely while acknowledging none of them — is
-/// a flood, and closing on it is the intended defense outcome (the
-/// crypto-flood limiter throttles it long before this backstop).
+/// If a space fills anyway, the send path sends nothing ack-eliciting
+/// in it until a slot is free (see `max_tracked`); the probe timeout
+/// frees one. ACKs are not tracked, so a peer that only solicits ACKs
+/// cannot fill a space.
 pub const initial_handshake_max_tracked: usize = 256;
 
 /// Errors raised by the sent-packet tracker.
@@ -397,9 +409,16 @@ pub fn liveCount(self: *const SentPacketTracker) u32 {
     return self.count - self.dead_count;
 }
 
+/// True when every slot holds a live packet, so `record` would refuse
+/// one more. The send path asks this BEFORE it builds an ack-eliciting
+/// packet (see `Connection/send.zig`, `tracker_full`).
+pub fn isFull(self: *const SentPacketTracker) bool {
+    return self.liveCount() >= self.capacity();
+}
+
 /// Record a newly-sent packet. PNs must be strictly increasing.
 pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
-    if (self.liveCount() >= self.capacity()) return Error.TooManyInFlight;
+    if (self.isFull()) return Error.TooManyInFlight;
     if (self.count >= self.capacity() or self.dead_count >= self.compactThreshold()) {
         // liveCount < capacity, so compaction always frees a slot.
         self.compact();

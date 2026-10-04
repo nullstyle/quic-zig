@@ -102,3 +102,277 @@ test "pollLevel caps ACK ranges to packet budget" {
     try std.testing.expectEqual(@as(u64, 198), decoded.frame.ack.largest_acked);
     try std.testing.expect(decoded.frame.ack.range_count < tracked_lower_ranges);
 }
+
+/// A client that can send 1-RTT stream data with no handshake, no
+/// pacing, and a congestion window that never binds: the only thing
+/// left to stop the sender is the sent-packet tracker.
+fn prepareUnboundSender(conn: *Connection) !void {
+    try conn.setPeerDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try conn.setLocalScid(&.{ 9, 9, 9, 9 });
+    try conn.setTransportParams(.{
+        .initial_max_data = 1 << 22,
+        .initial_max_stream_data_bidi_local = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_streams_bidi = 16,
+    });
+    try installTestApplicationWriteSecret(conn);
+    conn.setRememberedPeerTransportParams(.{
+        .initial_max_data = 1 << 22,
+        .initial_max_stream_data_bidi_remote = 1 << 22,
+    });
+    conn.pacing_enabled = false;
+    conn.ccForApplication().setCwndForTest(1 << 30);
+}
+
+/// Acknowledge every 1-RTT packet sent so far, in one ACK frame.
+fn ackEverythingSent(conn: *Connection, now_us: u64) !void {
+    const largest = conn.pnSpaceForLevel(.application).next_pn - 1;
+    try conn.handleAckAtLevel(.application, .{
+        .largest_acked = largest,
+        .ack_delay = 0,
+        .first_range = largest,
+        .range_count = 0,
+        .ranges_bytes = &.{},
+        .ecn_counts = null,
+    }, now_us);
+}
+
+test "a full sent-packet tracker stops the sender; the connection stays open and goes on when ACKs come" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareUnboundSender(conn);
+
+    // A 100-byte datagram carries 46 bytes of stream data, so this is
+    // 10,000 packets: more than twice what the tracker holds.
+    const per_packet: usize = 46;
+    const packets: usize = 10_000;
+    const s = try conn.openBidi(0);
+    var data: [4096]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    var written: usize = 0;
+    while (written < packets * per_packet) {
+        const want = @min(data.len, packets * per_packet - written);
+        const n = try conn.streamWrite(s.id, data[0..want]);
+        try std.testing.expect(n > 0);
+        written += n;
+    }
+
+    const tracker = conn.sentForLevel(.application);
+    const cap = tracker.capacity();
+    var small: [100]u8 = undefined;
+    var now_us: u64 = 1_000_000;
+    var emitted: usize = 0;
+    var rounds: usize = 0;
+    while (true) : (rounds += 1) {
+        try std.testing.expect(rounds < 16);
+        // Send until `pollDatagram` has nothing more. It must never
+        // return an error: a full tracker is a reason to wait, like a
+        // full congestion window.
+        var in_round: usize = 0;
+        while (try conn.pollDatagram(&small, now_us)) |_| {
+            emitted += 1;
+            in_round += 1;
+            try std.testing.expect(in_round <= cap);
+        }
+        try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+        if (tracker.liveCount() == 0) break;
+        // The first round stops because the tracker is full, with
+        // data still to send.
+        if (rounds == 0) {
+            try std.testing.expectEqual(cap, tracker.liveCount());
+            try std.testing.expect(s.send.hasPendingChunk());
+        }
+        now_us += 10_000;
+        try ackEverythingSent(conn, now_us);
+        try std.testing.expectEqual(@as(u32, 0), tracker.liveCount());
+    }
+    try std.testing.expectEqual(packets, emitted);
+    try std.testing.expect(!s.send.hasPendingChunk());
+}
+
+test "a full sent-packet tracker does not stop an ACK or a CONNECTION_CLOSE" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareUnboundSender(conn);
+
+    const s = try conn.openBidi(0);
+    var data: [4096]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    var written: usize = 0;
+    while (written < 300_000) written += try conn.streamWrite(s.id, &data);
+
+    const tracker = conn.sentForLevel(.application);
+    var small: [100]u8 = undefined;
+    const now_us: u64 = 1_000_000;
+    while (try conn.pollDatagram(&small, now_us)) |_| {}
+    try std.testing.expectEqual(tracker.capacity(), tracker.liveCount());
+
+    // A packet from the peer wants an ACK. An ACK is not tracked, so
+    // it goes out through a full tracker.
+    const received = &conn.primaryPath().app_pn_space.received;
+    received.add(0, 1_000);
+    try std.testing.expect(received.pending_ack);
+    const ack = (try conn.pollDatagram(&small, now_us)).?;
+    try std.testing.expect(ack.len > 0);
+    try std.testing.expect(!received.pending_ack);
+    try std.testing.expectEqual(tracker.capacity(), tracker.liveCount());
+
+    // The application closes. The CONNECTION_CLOSE goes out too.
+    conn.close(false, 0, "done");
+    const close = (try conn.pollDatagram(&small, now_us)).?;
+    try std.testing.expect(close.len > 0);
+    try std.testing.expect(conn.closeState() != .open);
+}
+
+test "a full sent-packet tracker gives no pacing deadline: only an ACK or a loss opens it" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try prepareUnboundSender(conn);
+    conn.pacing_enabled = true;
+
+    const s = try conn.openBidi(0);
+    var data: [4096]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    var written: usize = 0;
+    while (written < 300_000) written += try conn.streamWrite(s.id, &data);
+
+    // The pacer lets a burst out and then blocks: data is waiting, the
+    // window has room, the bucket is short.
+    const now_us: u64 = 1_000_000;
+    var pkt: [2048]u8 = undefined;
+    var burst: usize = 0;
+    while (try conn.pollDatagram(&pkt, now_us)) |_| burst += 1;
+    try std.testing.expect(burst > 0 and burst < 64);
+    try std.testing.expect(conn.canSend());
+
+    // The control: with room in the tracker that state gives a pacing
+    // deadline.
+    const tracker = conn.sentForLevel(.application);
+    try std.testing.expect(!tracker.isFull());
+    const open = conn.nextTimerDeadline(now_us).?;
+    try std.testing.expectEqual(state.TimerKind.pacing, open.kind);
+
+    // Fill the tracker by hand (the pacer would take long to let 4096
+    // packets out). Nothing else changes.
+    var pn = conn.pnSpaceForLevel(.application).next_pn;
+    while (!tracker.isFull()) : (pn += 1) {
+        try tracker.record(.{
+            .pn = pn,
+            .sent_time_us = now_us,
+            .bytes = 100,
+            .ack_eliciting = true,
+            .in_flight = true,
+        });
+    }
+    conn.pnSpaceForLevel(.application).next_pn = pn;
+
+    // Now the pacer's clock opens nothing. A pacing deadline would
+    // wake the embedder for a poll that sends nothing, again and
+    // again.
+    const full = conn.nextTimerDeadline(now_us).?;
+    try std.testing.expect(full.kind != .pacing);
+    try std.testing.expect((try conn.pollDatagram(&pkt, open.at_us)) == null);
+}
+
+/// Fill the 1-RTT tracker of an `prepareUnboundSender` client with
+/// small stream packets, and leave stream data waiting.
+fn fillTrackerWithStreamData(conn: *Connection, now_us: u64) !void {
+    const s = try conn.openBidi(0);
+    var data: [4096]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    var written: usize = 0;
+    while (written < 300_000) written += try conn.streamWrite(s.id, &data);
+    var small: [100]u8 = undefined;
+    while (try conn.pollDatagram(&small, now_us)) |_| {}
+    try std.testing.expect(conn.sentForLevel(.application).isFull());
+    try std.testing.expect(s.send.hasPendingChunk());
+}
+
+/// The peer acknowledges the oldest packet in the 1-RTT tracker: one
+/// slot is free.
+fn ackOldest(conn: *Connection, now_us: u64) !void {
+    var pns: [1]u64 = undefined;
+    const tracker = conn.sentForLevel(.application);
+    var i: u32 = 0;
+    while (tracker.packets[i].dead) i += 1;
+    pns[0] = tracker.packets[i].pn;
+    try conn.handleAckAtLevel(.application, .{
+        .largest_acked = pns[0],
+        .ack_delay = 0,
+        .first_range = 0,
+        .range_count = 0,
+        .ranges_bytes = &.{},
+        .ecn_counts = null,
+    }, now_us);
+    try std.testing.expect(!tracker.isFull());
+}
+
+test "a full sent-packet tracker holds back every ack-eliciting frame, and each one goes out when a slot is free" {
+    // Each of these frames is built outside the congestion gate on
+    // purpose (a probe must get past a full window). A full tracker
+    // is different: there is no slot to record the packet in. The
+    // frame must stay queued, not be built and lost.
+    const Case = enum { ping, path_response, path_challenge, path_challenge_first, pmtud_probe };
+    for ([_]Case{ .ping, .path_response, .path_challenge, .path_challenge_first, .pmtud_probe }) |case| {
+        const allocator = std.testing.allocator;
+        var ctx = try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
+        try prepareUnboundSender(conn);
+        try std.testing.expect(conn.markPathValidated(0));
+        if (case == .pmtud_probe) conn.setPmtudConfig(.{ .enable = true });
+
+        const now_us: u64 = 1_000_000;
+        try fillTrackerWithStreamData(conn, now_us);
+        const tracker = conn.sentForLevel(.application);
+        const path = conn.primaryPath();
+        const token: [8]u8 = @splat(0x5a);
+        switch (case) {
+            .ping => conn.requestPing(),
+            .path_response => conn.queuePathResponseOnPath(0, token, null),
+            .path_challenge, .path_challenge_first => {
+                conn.pending_frames.path_challenge = token;
+                conn.pending_frames.path_challenge_path_id = 0;
+                if (case == .path_challenge_first) {
+                    path.pending_migration_reset = true;
+                    path.path.validator.status = .pending;
+                }
+            },
+            .pmtud_probe => try std.testing.expect(path.pmtudIsSearching()),
+        }
+
+        // Full: nothing goes out, no error, and the frame is still
+        // queued.
+        var pkt: [2048]u8 = undefined;
+        const next_pn = conn.pnSpaceForLevel(.application).next_pn;
+        try std.testing.expect((try conn.pollDatagram(&pkt, now_us)) == null);
+        try std.testing.expectEqual(next_pn, conn.pnSpaceForLevel(.application).next_pn);
+        try std.testing.expect(tracker.isFull());
+        switch (case) {
+            .ping => try std.testing.expect(path.pending_ping),
+            .path_response => try std.testing.expect(conn.pending_frames.path_response != null),
+            .path_challenge, .path_challenge_first => try std.testing.expect(conn.pending_frames.path_challenge != null),
+            .pmtud_probe => try std.testing.expect(path.pmtudIsSearching()),
+        }
+
+        // One slot free: the frame goes out.
+        try ackOldest(conn, now_us + 10_000);
+        try std.testing.expect((try conn.pollDatagram(&pkt, now_us + 10_000)) != null);
+        switch (case) {
+            .ping => try std.testing.expect(!path.pending_ping),
+            .path_response => try std.testing.expect(conn.pending_frames.path_response == null),
+            .path_challenge, .path_challenge_first => try std.testing.expect(conn.pending_frames.path_challenge == null),
+            .pmtud_probe => try std.testing.expect(!path.pmtudIsSearching()),
+        }
+    }
+}
