@@ -5,7 +5,7 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [0.25.0] - 2026-10-03
+## [0.25.0] - 2026-10-04
 
 "No stalls under stress": a connection must not stall, and must not
 die, because packets were lost, damaged or many. **It has a security
@@ -14,9 +14,10 @@ who saw a packet of a connection ended that connection.** Six faults
 in the handshake under loss are fixed (each is a rule of RFC 9002,
 RFC 9001 or RFC 9000 that was missing), and more than 4096 packets in
 flight no longer ends a connection. No API is removed or renamed, and
-nothing changes on a path with no loss. Two more faults were found
-and measured and are not fixed here: they are under "Measured, not
-changed". Verified toolchain: 0.17.0.
+nothing changes on a path with no loss. Five more faults and limits
+were found and measured and are not fixed here: they are under
+"Measured, not changed", with one fix that was tried and taken back.
+Verified toolchain: 0.17.0.
 
 ### Security
 
