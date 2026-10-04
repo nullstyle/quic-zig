@@ -630,7 +630,14 @@ Everything the packaged loop was doing for you:
   not a single cached peer address — or migration, multipath, and
   VN/Retry peers get the wrong destination.
 - **Contain per-connection errors.** A malformed peer must not tear
-  down the loop; the packaged loop swallows per-slot failures.
+  down the loop; the packaged loop swallows per-slot failures. An
+  error from `Connection.handle` (or from `Server.feed` for one slot)
+  is fatal for that connection and for nothing else: close it and go
+  on. A datagram that does not authenticate is never such an error.
+  Since 0.25.0 `handle` drops it; before that it returned an error
+  for a header that did not parse, and a loop that closed the
+  connection on that error could be made to close it by anyone who
+  saw one of its packets.
 - **Skip terminal slots, keep closing ones.** `closeState() == .closed`
   slots are done, but closing/draining ones still need `tick` so
   CONNECTION_CLOSE retransmits (RFC 9000 §10.2.1).

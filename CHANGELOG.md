@@ -7,6 +7,40 @@ changes.
 
 ## [Unreleased]
 
+### Security
+
+- **One datagram could end a connection.** `Connection.handle`
+  returned an error for a packet whose header did not parse
+  (`error.ConnIdTooLong`, `error.DeclaredLengthExceedsInput`,
+  `error.PayloadTooShort`, `error.InsufficientBytes`,
+  `error.InsufficientCiphertext`). An error from `handle` is fatal:
+  `Server.feed` closes the connection with INTERNAL_ERROR, and the
+  bundled client loop returns. Nothing had authenticated the bytes
+  those errors were about. So a datagram of 12 bytes (the first byte
+  of a short header, the connection ID, three more bytes) from anyone
+  who saw one packet of a connection ended it. So did a datagram that
+  a small receive buffer cut short, and one changed bit in a length
+  field. **Every release before this one has it** (the code is from
+  2026-05-04, before v0.1.0-pre.1). Now every failure of an open is a
+  dropped packet (qlog `packet_dropped`, `header_decode_failure` or
+  `decryption_failure`). A datagram too short to reach the AEAD is not
+  counted against the integrity limit. Found by a sweep in
+  `tests/e2e/handshake_loss.zig` (one changed byte in the first 51
+  bytes, or a cut, in each of the first four datagrams of each end):
+  75 of 2448 cases with a changed byte ended the connection before.
+  The interop runner's `handshakecorruption` test could not find it:
+  the datagrams it corrupts do not reach the endpoints (measured: no
+  packet that failed to decrypt, at either end, in a run with 336
+  corrupted datagrams; the UDP checksum removes them).
+- **A server took the client's connection ID from a datagram that did
+  not authenticate.** It read the ID from the header of the first
+  datagram and kept it. A ClientHello with a damaged Source
+  Connection ID Length was dropped, as it must be, but the server then
+  sent every packet to the wrong ID, and the client could read none
+  of the 1-RTT packets (found by the same sweep). The server now takes
+  the ID from the first Initial packet that authenticates (RFC 9000
+  section 7.2), and from no later one.
+
 ### Fixed
 
 - **A server sends its handshake flight again when the client
@@ -60,6 +94,26 @@ changes.
   keys are discarded (a server: when the handshake completes; a
   client: at HANDSHAKE_DONE). A connection whose handshake does not
   run over packets (keys installed by hand) is not affected.
+- **Initial keys go when the standard says.** (RFC 9001 section
+  4.9.1, a MUST for both ends.) Both ends kept their Initial keys, and
+  sent Initial packets, until the handshake was done. Now the server
+  discards them when a Handshake packet from the client authenticates,
+  and the client when it first sends a Handshake packet. This matters
+  because each end puts its Initial packet first in a datagram, and a
+  peer that cannot open the first packet may drop the whole datagram.
+  Measured with a quiche client through the interop runner's 30%
+  loss, on the code with the first fix above and without this one: 3
+  runs of 5 passed, and the cell failed in CI. In the failed runs,
+  every answer of the server to the client's Handshake PING began
+  with a ServerHello that the client could not read any more; the
+  client dropped each datagram whole and gave up after 32 and 38 s.
+- **A packet that is not opened no longer hides the packets behind
+  it.** (RFC 9000 section 12.2, a MUST.) A long-header packet with no
+  keys for its level, or with a tag that did not verify, took the
+  rest of its datagram with it: a Handshake packet behind an Initial
+  packet, a 1-RTT packet behind a Handshake packet. The receiver now
+  skips that one packet (its length is in the unprotected part of the
+  header) and reads the next.
 - **More than 4096 packets in flight no longer ends the connection.**
   The sent-packet tracker of a path holds 4096 packets. When it was
   full, `poll` returned `error.TooManyInFlight`, after the packet was
@@ -105,6 +159,32 @@ changes.
   thresholds, take back the controller's reaction); it is not in this
   release. The notes are at the cell in `bench/e2e_main.zig` and at
   `packet_threshold` in `src/conn/loss_recovery.zig`.
+- **An ACK in the handshake is said once, and it stays that way.** A
+  peer whose copy of our ACK was lost does not learn what we have
+  until it sends something new. Repeating the ACK with each probe
+  looked like the cure, was built, and was taken back the same day:
+  for that peer the repeat is the first acknowledgement of its
+  packet, it takes its round-trip sample from it, and the first
+  sample is not corrected for the ACK delay (RFC 9002 section 5.3).
+  Measured with a quiche client: its estimate went to 1048 ms on a
+  38 ms path, its close took 10.5 s, and 1 run of 4 passed where 9 of
+  10 pass without the repeat. The note is at `firePtoAtLevel` in
+  `src/Connection/loss.zig`.
+- **A Retry token has no room for a long first connection ID.** The
+  token is 96 bytes, and its three bound fields (client address,
+  original Destination Connection ID, retry Source Connection ID)
+  share 45 of them. For a client with an IPv6 address and a server
+  with the default 8-byte connection ID, the client's first
+  Destination Connection ID may be 14 bytes at most; RFC 9000 allows
+  20, and quic-go picks 8 to 20 at random. A `Server` with
+  `retry_token_key` set drops the Initial packet of such a client (no
+  Retry, no error), and the client times out. Read in
+  `src/Server/dos.zig`; measured through the interop endpoint, which
+  has its own copy of the logic and room for 18 bytes: the `retry`
+  cell with a quic-go client fails exactly in the runs with a 19 or
+  20 byte ID (2 of 6 on this release, 2 of 14 on 0.24.1). The fix is
+  a larger token, which changes the size of `quic.RetryToken`; it is
+  not in this release.
 - **One handshake datagram can be larger than 1200 bytes.** Each
   coalesced packet is capped at the MTU on its own, so Initial +
   Handshake together reached 1310 bytes in a test with a wide
@@ -124,22 +204,47 @@ changes.
   a chosen seed, or K seeds with the minimum, the median and the
   maximum. One seed is one draw.
 - `tests/e2e/handshake_loss.zig`: a real server and client over a
-  network that the test controls one datagram at a time (13 tests).
-  Every run also checks, from the outside, that the server sends at
-  most 3 times what it was given before it validates the address.
-- `src/Connection/_tests_handshake_recovery.zig` (17 unit tests), a
-  fuzz harness for the send path with a tracker of 4 to 12 slots, and
-  49 mutants of the new rules, each killed by a test.
-- Interop, local, quic-go client, 30% loss or corruption each way,
-  50 connections a run: `handshakecorruption` passed 13 runs of 20
-  and `handshakeloss` 12 of 20 on 0.24.1; 19 of 20 and 18 of 20 on this
-  release. Every failed run was read in its capture. On the way, two of
-  them were stalls of ours (the third and the fourth fix above came from
-  them). The three that are left are not: in each, the server sent its
-  flight 4 to 6 times inside the 5 s that quic-go gives a handshake,
-  each time at once on the client's retry or at its probe timeout, and
-  the simulator lost every copy. So 20 of 20 is not a property this
-  test can show; "no failed run is a stall" is.
+  network that the test controls one datagram at a time (18 tests).
+  It can lose a datagram, deliver it twice, change one byte of it or
+  cut it short. Every run also checks, from the outside, that the
+  server sends at most 3 times what it was given before it validates
+  the address.
+- `tests/e2e/unauthenticated_datagram.zig` (3 tests): damaged copies
+  of real packets, and packets that no key opens, given to both ends
+  of an open connection.
+- `src/Connection/_tests_handshake_recovery.zig` (17 unit tests); two
+  new fuzz harnesses (the send path with a tracker of 4 to 12 slots;
+  `handle` with bytes that do not authenticate), so `rc-fuzz` now
+  counts 43 sites; and 67 mutants of the new rules, each killed by a
+  test.
+- Interop, local, quic-zig as the server, 30% loss or corruption each
+  way, 50 connections a run. A quic-go client: `handshakecorruption`
+  passed 13 runs of 20 and `handshakeloss` 12 of 20 on 0.24.1; 20 of
+  20 and 20 of 20 on this release, and a passing run takes 40 to 41 s
+  where it took 75 to 78 s (medians). An ngtcp2 client: 5 of 5 and 5
+  of 5, at 55 to 57 s (0.24.1: 5 of 5 and 4 of 5, at 80 to 86 s). A
+  quiche client: 14 of 15 and 11 of 12.
+- Every failed run on the way was read in its capture (the
+  simulator's verdict for each datagram, the client's log). Three
+  times it showed a stall of ours, and each became a fix above. Once
+  it showed that a fix of ours was wrong, and that fix is gone (see
+  "An ACK in the handshake is said once"). The two quiche runs that
+  still failed are not stalls: in one the server never got a
+  ClientHello (all five copies lost), in the other the client's
+  Finished was lost three times in 42 s. A run can always fail that
+  way: the network may lose every copy inside the time that a client
+  gives a handshake.
+- Interop in CI, the wide matrix (16 tests, three clients, quic-zig
+  as the server) on the code of this release: every cell that the
+  peers support passed in one run; in another, all but `retry` with
+  quic-go (see "A Retry token has no room ..." above).
+- Interop, local, quic-zig as the client, the same tests against
+  three servers: 33 cells passed. `zerortt` fails against all three
+  and `keyupdate` against quic-go, both the same on 0.24.1 (measured
+  for `keyupdate`: 4 runs of 4 on each). The interop client program
+  does not implement the two handshake-loss cells, so the client's
+  handshake under loss is held by `tests/e2e/handshake_loss.zig`
+  alone.
 
 ## [0.24.1] - 2026-10-03
 
