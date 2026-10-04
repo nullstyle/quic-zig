@@ -471,6 +471,11 @@ const ClientMode = enum {
 const ClientConnectionOptions = struct {
     session: ?boringssl.tls.Session = null,
     early_data: bool = false,
+    /// With `early_data`: the server's transport parameters from the
+    /// connection that gave the session (`TicketStore.peer_params`).
+    /// Without them a stream opened before the handshake has no send
+    /// credit, and no 0-RTT packet leaves.
+    remembered_peer_params: ?quic.tls.TransportParams = null,
     wait_for_ticket: ?*TicketStore = null,
     qlog_sink: ?*QlogSink = null,
     /// Capture inbound NEW_TOKEN frames for replay on a follow-up
@@ -561,6 +566,13 @@ const TicketStore = struct {
     allocator: std.mem.Allocator,
     latest: ?[]u8 = null,
     failed: bool = false,
+    /// The server's transport parameters on the connection that gave
+    /// the ticket. A client that sends 0-RTT data on the next
+    /// connection sends it within THESE limits (RFC 9000 section
+    /// 7.4.1): the new connection's own parameters come with the
+    /// server's flight, after the early data has left. TLS keeps the
+    /// session, not these; the client must.
+    peer_params: ?quic.tls.TransportParams = null,
 
     fn init(allocator: std.mem.Allocator) TicketStore {
         return .{ .allocator = allocator };
@@ -1857,6 +1869,7 @@ fn runClient(
                 .{
                     .session = session,
                     .early_data = mode == .zerortt,
+                    .remembered_peer_params = if (mode == .zerortt) tickets.peer_params else null,
                     .qlog_sink = if (qlog_sink) |*sink| sink else null,
                     .new_token_store = &new_tokens,
                     .initial_token = new_tokens.latest,
@@ -2042,8 +2055,24 @@ fn runClientConnection(
 
     var requests_enabled = false;
     if (conn_opts.early_data) {
-        _ = try startClientRequests(allocator, conn, downloads);
-        requests_enabled = true;
+        // The requests that go as 0-RTT data are written BEFORE the
+        // handshake starts, with the limits of the connection that
+        // gave the session. Until v0.26.0 the client resumed the TLS
+        // session and did not keep those limits: the streams were
+        // opened with no send credit, their data waited for the new
+        // parameters, and it went as 1-RTT data. MEASURED on v0.25.0
+        // against quic-go, ngtcp2 and quiche: TLS said "0-RTT
+        // accepted", and the runner said "0-RTT size: 0. Client
+        // didn't send any 0-RTT data."
+        //
+        // No more streams than the remembered limit (RFC 9000 section
+        // 7.4.1); the rest of the requests start after the handshake,
+        // in the loop below.
+        if (conn_opts.remembered_peer_params) |remembered| {
+            conn.setRememberedPeerTransportParams(remembered);
+            const early_count: usize = @intCast(@min(@as(u64, downloads.len), remembered.initial_max_streams_bidi));
+            _ = try startClientRequests(allocator, conn, downloads[0..early_count]);
+        }
     }
     try conn.advance();
 
@@ -2229,12 +2258,17 @@ fn runClientConnection(
         }
 
         // RFC 9001 §6 application key update for the `keyupdate` testcase.
-        // Fire as soon as the handshake completes so all subsequent stream
-        // traffic rides key_phase=1 — the runner counts packets per phase
-        // and needs many on phase=1 from both sides to pass.
-        // `requestKeyUpdate` returns `KeyUpdateBlocked` if the prior update
-        // is still pending ack or the cooldown hasn't elapsed; treat that
-        // as "try again next tick" rather than fatal.
+        // Ask from the moment the handshake completes, so that most of
+        // the stream traffic rides key_phase=1 — the runner counts
+        // packets per phase and needs some on phase=1 from both sides.
+        // `requestKeyUpdate` returns `KeyUpdateBlocked` until the
+        // handshake is CONFIRMED (HANDSHAKE_DONE, RFC 9001 §6.1), if the
+        // prior update is still pending ack, or if the cooldown hasn't
+        // elapsed; treat that as "try again next tick" rather than
+        // fatal. (Until v0.26.0 the library let the update start before
+        // the confirmation, and the client's first 1-RTT packet was
+        // already in phase 1. Against quic-go that failed the test: see
+        // `Connection/keys.zig canInitiateKeyUpdateAt`.)
         if (!key_update_done and conn.handshakeDone()) {
             conn.requestKeyUpdate(now_us) catch |err| switch (err) {
                 error.KeyUpdateBlocked => {},
@@ -2371,6 +2405,9 @@ fn runClientConnection(
         return error.ConnectionClosedBeforeDownloadsCompleted;
     }
     if (!ticketRequirementMet(conn_opts.wait_for_ticket)) return error.NoSessionTicket;
+    // The ticket is for a later connection; so are this server's
+    // limits (see `TicketStore.peer_params`).
+    if (conn_opts.wait_for_ticket) |store| store.peer_params = conn.cached_peer_transport_params;
     if (conn_opts.early_data) {
         std.debug.print("0-RTT status: {s} ({s})\n", .{
             @tagName(conn.earlyDataStatus()),
