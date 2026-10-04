@@ -173,8 +173,36 @@ pub fn antiDeadlockLevel(conn: *const Connection) ?EncryptionLevel {
 }
 
 pub fn ptoDeadlineForApplicationPath(conn: *const Connection, path: *const PathState) ?u64 {
+    if (applicationPtoHeld(conn)) return null;
     const sent_at = oldestAckElicitingSentTime(&path.sent) orelse return null;
     return sent_at +| ptoDurationForApplicationPath(conn, path);
+}
+
+/// RFC 9002 §6.2.1: the probe timer of the Application Data space is
+/// not set until the handshake is confirmed. Before that the peer may
+/// not have the keys to open a 1-RTT probe, or we may not have the
+/// keys to open its ACK; the handshake spaces have their own timers,
+/// and those are the ones that make progress.
+///
+/// MEASURED 2026-10-03 (quic-interop-runner `handshakecorruption`): a
+/// server sends NEW_CONNECTION_ID in a 1-RTT packet with its first
+/// flight. When the flight was lost, this timer ran out a second
+/// later and sent that frame again, alone, to a client that had no
+/// 1-RTT keys. Twice in one connection that useless packet was the
+/// one datagram the network let through between two runs of three
+/// corrupted ones, and six copies of the flight were lost around it.
+///
+/// "Confirmed" is the moment the Handshake keys are discarded: for a
+/// server when the handshake completes, for a client at
+/// HANDSHAKE_DONE (see `keys.discardHandshakeKeys`). The timer is the
+/// normal one from then on, counted from the send time of the oldest
+/// packet, so a probe that is due goes out at once.
+///
+/// A connection whose handshake does not run over packets has nothing
+/// to wait for: the bench pair and the unit fixtures install their
+/// keys by hand and never set an Initial connection ID.
+pub fn applicationPtoHeld(conn: *const Connection) bool {
+    return conn.initial_dcid_set and !conn.handshake_keys_discarded;
 }
 
 pub fn idleDeadline(conn: *const Connection) ?u64 {

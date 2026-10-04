@@ -482,3 +482,70 @@ test "anti-deadlock: no probe once the handshake is confirmed" {
     conn.discardHandshakeKeys();
     try std.testing.expect(conn_loss.antiDeadlockLevel(conn) == null);
 }
+
+// ------------------------------------------------- RFC 9002 §6.2.1
+
+/// One ack-eliciting 1-RTT packet in flight on the primary path.
+fn sendOneRtt(conn: *Connection) !void {
+    try conn.sentForLevel(.application).record(.{
+        .pn = 0,
+        .sent_time_us = start_us,
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 1;
+}
+
+test "1-RTT probe timer: not before the handshake is confirmed, and at once after" {
+    for ([_]bool{ true, false }) |server| {
+        var server_ctx = try boringssl.tls.Context.initServer(.{});
+        defer server_ctx.deinit();
+        var client_ctx = try boringssl.tls.Context.initClient(.{});
+        defer client_ctx.deinit();
+        const conn = if (server)
+            try Connection.createServer(std.testing.allocator, server_ctx)
+        else
+            try newClient(&client_ctx);
+        defer conn.destroy();
+
+        // A handshake over packets is in progress.
+        try conn.setInitialDcid(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+        try sendOneRtt(conn);
+        const path = conn.primaryPath();
+        try std.testing.expect(conn_loss.ptoDeadlineForApplicationPath(conn, path) == null);
+
+        // Long after the probe timeout would have run out: nothing
+        // fires, the packet stays, no PING is queued.
+        try conn.tick(start_us + 5 * 1_000_000);
+        try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.application).liveCount());
+        try std.testing.expectEqual(@as(u32, 0), path.pto_count);
+        try std.testing.expect(!path.pending_ping);
+
+        // The handshake is confirmed (a server: when it completes; a
+        // client: at HANDSHAKE_DONE). Both discard the Handshake keys
+        // then. The timer is the normal one, from the packet's send
+        // time, so it is already due.
+        conn_keys.discardInitialKeys(conn);
+        // Not yet: a client has the TLS handshake done here, and
+        // still no HANDSHAKE_DONE.
+        try std.testing.expect(conn_loss.ptoDeadlineForApplicationPath(conn, path) == null);
+        conn.discardHandshakeKeys();
+        const deadline = conn_loss.ptoDeadlineForApplicationPath(conn, path).?;
+        try std.testing.expectEqual(start_us + conn_loss.ptoDurationForApplicationPath(conn, path), deadline);
+        try conn.tick(start_us + 5 * 1_000_000 + 1_000);
+        try std.testing.expectEqual(@as(u32, 1), path.pto_count);
+    }
+}
+
+test "1-RTT probe timer: a connection with no handshake over packets (keys set by hand) has it from the start" {
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+
+    try sendOneRtt(conn);
+    const path = conn.primaryPath();
+    const deadline = conn_loss.ptoDeadlineForApplicationPath(conn, path).?;
+    try std.testing.expectEqual(start_us + conn_loss.ptoDurationForApplicationPath(conn, path), deadline);
+}

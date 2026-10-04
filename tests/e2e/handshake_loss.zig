@@ -145,8 +145,9 @@ const Options = struct {
     /// Drop `count` datagrams of the client, from its `first`-th
     /// (the ClientHello is the first).
     drop_client: struct { first: usize = 0, count: usize = 0 } = .{},
-    /// Drop `count` datagrams of the server, from its `first`-th.
-    drop_server: struct { first: usize = 0, count: usize = 0 } = .{},
+    /// Drop `count` datagrams of the server, from its `first`-th; or,
+    /// with `until_us`, every one from the `first`-th until that time.
+    drop_server: struct { first: usize = 0, count: usize = 0, until_us: u64 = 0 } = .{},
     /// The network delivers this datagram of the client twice (0 =
     /// none). The server answers the first copy before the second
     /// arrives.
@@ -159,6 +160,10 @@ const Options = struct {
     loss_to_client: u8 = 0,
     max_burst: u8 = 3,
     seed: u64 = 0,
+    /// The server has 1-RTT data to send before the handshake is done
+    /// ("0.5-RTT" data; the interop server's NEW_CONNECTION_ID is
+    /// that): a PING, queued as soon as the server has the connection.
+    server_early_data: bool = false,
     /// Run until the client has CONFIRMED the handshake (it got
     /// HANDSHAKE_DONE and discarded its Handshake keys), not only until
     /// both ends have the TLS handshake done.
@@ -204,6 +209,10 @@ const Outcome = struct {
     /// How many times the server queued HANDSHAKE_DONE again because
     /// the client still sent Handshake packets.
     server_done_resends: usize = 0,
+    /// Datagrams of the server that held a 1-RTT packet and nothing
+    /// else, sent before the server's handshake was done. The client
+    /// cannot open those: it has no 1-RTT keys yet.
+    server_lone_1rtt_before_done: usize = 0,
 };
 
 const Net = struct {
@@ -220,6 +229,7 @@ const Net = struct {
     /// address was not validated.
     server_bytes_in: u64 = 0,
     server_bytes_out: u64 = 0,
+    server_early_data_queued: bool = false,
 
     fn sinceStart(self: *const Net) u64 {
         return self.lb.now_us - self.start_us;
@@ -290,7 +300,12 @@ const Net = struct {
         var held: [8][4096]u8 = undefined;
         var lens: [8]usize = undefined;
         var count: usize = 0;
+        const done_before = self.serverDone();
         for (self.srv.iterator()) |slot| {
+            if (self.o.server_early_data and !self.server_early_data_queued) {
+                slot.conn.requestPing();
+                self.server_early_data_queued = true;
+            }
             while (count < held.len) {
                 const validated_before = self.serverValidated();
                 const len = (try slot.conn.poll(held[count][0..], self.lb.now_us)) orelse break;
@@ -308,9 +323,13 @@ const Net = struct {
             const datagram = held[i][0..lens[i]];
             const s = shape(datagram);
             self.out.server_datagrams += 1;
+            if (!done_before and s.has_short and !s.leads_with_initial and !s.leads_with_handshake) {
+                self.out.server_lone_1rtt_before_done += 1;
+            }
             var verdict: Verdict = .deliver;
             const server_index = self.out.server_datagrams;
             if (server_index >= self.o.drop_server.first and server_index < self.o.drop_server.first + self.o.drop_server.count) verdict = .drop;
+            if (self.o.drop_server.first != 0 and server_index >= self.o.drop_server.first and self.sinceStart() < self.o.drop_server.until_us) verdict = .drop;
             if (s.carries_crypto) {
                 if (self.out.flights < max_marks) self.out.flight_us[self.out.flights] = self.sinceStart();
                 self.out.flights += 1;
@@ -615,19 +634,42 @@ test "handshake loss: HANDSHAKE_DONE is lost 3 times, and each Finished of the c
 }
 
 test "handshake loss: the limit on HANDSHAKE_DONE resends holds, and the probe timer works behind it" {
-    // Nothing of the server arrives for 600 ms after the handshake.
-    // The client sends its Finished 9 times in that time; the server
+    // Nothing of the server arrives for 600 ms after its flight. The
+    // client sends its Finished 9 times in that time; the server
     // answers 8 of them (`max_early_handshake_retransmits`), and then
     // its probe timer takes over.
     const out = try run(std.testing.allocator, .{
         .drop_client = .{ .first = 2, .count = 1 },
-        .drop_server = .{ .first = 2, .count = 12 },
+        .drop_server = .{ .first = 2, .until_us = 600 * us_per_ms },
         .until_confirmed = true,
     });
     try std.testing.expect(out.confirmed);
     try std.testing.expectEqual(@as(usize, 8), out.server_done_resends);
     try std.testing.expect(out.confirmed_at_us > 900 * us_per_ms);
     try std.testing.expect(out.confirmed_at_us < 3 * us_per_s);
+}
+
+test "handshake loss: the server does not probe its 1-RTT data while the handshake is not done (RFC 9002 6.2.1)" {
+    // The server has 1-RTT data in flight from its first flight on (a
+    // PING here; the interop server's NEW_CONNECTION_ID in the capture
+    // this test comes from). The flight is lost 9 times, so the
+    // handshake takes more than a second: long enough for a 1-RTT
+    // probe timer to run out. It must not run. The client has no
+    // 1-RTT keys, so it cannot open such a probe, and the probe is one
+    // more datagram on a path that already loses them.
+    //
+    // MEASURED 2026-10-03 (quic-interop-runner `handshakecorruption`):
+    // the network forwarded the 4th and the 8th datagram of the server
+    // after 3 corrupted ones each time. Both were these probes, and
+    // six copies of the flight around them were corrupted.
+    const out = try run(std.testing.allocator, .{
+        .split_client_hello = true,
+        .drop_server_flights = 9,
+        .server_early_data = true,
+    });
+    try std.testing.expect(out.done);
+    try std.testing.expect(out.done_at_us > 1 * us_per_s);
+    try std.testing.expectEqual(@as(usize, 0), out.server_lone_1rtt_before_done);
 }
 
 const SweepStats = struct {
