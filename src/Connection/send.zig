@@ -121,7 +121,18 @@ pub fn pollDatagram(
     // Handshake next (after Initial keys are dropped post-handshake,
     // there's nothing here; otherwise it's CRYPTO + ACK).
     if (pos < dst.len) {
-        if (try pollLevel(conn, .handshake, dst[pos..], now_us)) |n| pos += n;
+        if (try pollLevel(conn, .handshake, dst[pos..], now_us)) |n| {
+            pos += n;
+            // RFC 9001 §4.9.1: "a client MUST discard Initial keys when
+            // it first sends a Handshake packet". An Initial packet in
+            // front of that Handshake packet in this datagram (the ACK
+            // for the ServerHello) is already sealed. From here the
+            // client sends no Initial packet: a server that discarded
+            // its Initial keys cannot read one, and one that drops a
+            // datagram it cannot begin to read would lose the
+            // Handshake packet behind it.
+            if (conn.role == .client and !conn.initial_keys_discarded) conn_keys.discardInitialKeys(conn);
+        }
     }
     // Application last (the 1-RTT short header MUST be the last
     // packet in a coalesced datagram per §12.2). Only schedule a

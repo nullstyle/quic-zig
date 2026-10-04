@@ -755,6 +755,88 @@ test "handshake loss: the server does not probe its 1-RTT data while the handsha
     try std.testing.expectEqual(@as(usize, 0), out.server_lone_1rtt_before_done);
 }
 
+test "handshake loss: no Initial packet once an end has Handshake packets to go on (RFC 9001 4.9.1)" {
+    // "A client MUST discard Initial keys when it first sends a
+    // Handshake packet and a server MUST discard Initial keys when it
+    // first successfully processes a Handshake packet. Endpoints MUST
+    // NOT send Initial packets after this point."
+    //
+    // An Initial packet after that point is worse than useless. Each
+    // end puts its Initial packet FIRST in a datagram, and a peer that
+    // cannot open the first packet may drop the whole datagram, with
+    // the Handshake packet behind it (quiche does).
+    //
+    // MEASURED 2026-10-03 (quic-interop-runner `handshakecorruption`,
+    // a quiche client): the client's Finished was lost three times.
+    // Its Handshake PINGs arrived, and the server answered each with
+    // ServerHello + Handshake data + its Handshake ACK in one
+    // datagram. quiche logged "dropped invalid packet" for each, never
+    // saw the ACK, kept its 1 s probe timer with no RTT sample, and
+    // gave up after 32 s.
+    //
+    // Here: the client gets the first datagram of a three-datagram
+    // flight (so it has Handshake keys), the rest is lost, and so is
+    // the client's answer. The client's Handshake PING is the first
+    // Handshake packet the server reads. On the code before, the
+    // server answered it with a datagram that began with the
+    // ServerHello, and the client acknowledged that in an Initial
+    // packet of its own.
+    const out = try run(std.testing.allocator, .{
+        .cert = .wide,
+        .drop_server = .{ .first = 2, .count = 2 },
+        .drop_client = .{ .first = 2, .count = 1 },
+        .until_confirmed = true,
+    });
+    try std.testing.expect(out.confirmed);
+    try std.testing.expect(out.client_handshakes >= 1);
+    try std.testing.expectEqual(@as(usize, 0), out.server_initials_after_client_handshake);
+    try std.testing.expectEqual(@as(usize, 0), out.client_initials_after_handshake);
+
+    // The client's half on its own. Every datagram of the client is
+    // lost for the first second, so the server has read no Handshake
+    // packet when its probe timeout sends the ServerHello again, in an
+    // Initial packet. The client has sent Handshake packets by then
+    // (its answer and its probes), so it has no Initial keys and sends
+    // no Initial packet: before, it acknowledged that ServerHello in
+    // one. Its next probe gets through, and the handshake completes.
+    const late = try run(std.testing.allocator, .{
+        .cert = .wide,
+        .drop_server = .{ .first = 2, .count = 2 },
+        .drop_client = .{ .first = 2, .count = 10 },
+        .until_confirmed = true,
+    });
+    try std.testing.expect(late.confirmed);
+    // The server did send its flight again after the first three
+    // datagrams (the probe timeout at 1 s), and the client had sent
+    // Handshake packets before that.
+    try std.testing.expect(late.flights > 3);
+    try std.testing.expect(late.flight_us[3] >= us_per_s);
+    try std.testing.expect(late.client_handshakes >= 10);
+    try std.testing.expectEqual(@as(usize, 0), late.client_initials_after_handshake);
+    try std.testing.expectEqual(@as(usize, 0), late.server_initials_after_client_handshake);
+}
+
+test "handshake loss: a Handshake packet that does not authenticate takes no Initial keys from the server" {
+    // The server discards its Initial keys when it PROCESSES a
+    // Handshake packet: one that authenticated. A packet that only
+    // says it is a Handshake packet proves nothing. If it could make
+    // the server discard, anyone could stop a handshake with one
+    // datagram: the server could no longer read the client's Initial
+    // packets or send its ServerHello again.
+    //
+    // Here the client's first answer is lost, and its second datagram
+    // (a Handshake packet alone) has one byte changed.
+    const out = try run(std.testing.allocator, .{
+        .cert = .wide,
+        .drop_client = .{ .first = 2, .count = 1 },
+        .damage_client = .{ .index = 3, .kind = .flip, .offset = 30 },
+        .until_confirmed = true,
+    });
+    try std.testing.expectEqual(@as(usize, 1), out.damaged);
+    try std.testing.expect(!out.server_initial_keys_gone_after_damage);
+    try std.testing.expect(out.confirmed);
+}
+
 test "handshake loss: a Handshake packet behind an Initial packet that does not open is still read (RFC 9000 12.2)" {
     // The client's first answer is two packets in one datagram: an
     // Initial packet (the ACK for the ServerHello) and a Handshake

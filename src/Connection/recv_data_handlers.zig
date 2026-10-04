@@ -256,14 +256,12 @@ pub fn pumpTlsInbox(conn: *Connection) Error!void {
 /// discards that belong to inbound-packet processing.
 pub fn drainInboxIntoTls(conn: *Connection) Error!void {
     try pumpTlsInbox(conn);
-    // RFC 9001 §5.7 ¶3 / ¶4: discard Initial keys once handshake
-    // confirms. The strict spec timing is "first Handshake packet
-    // sent" (client) / "first Handshake packet processed" (server),
-    // but in quic's flow the client's first Handshake send is
-    // accompanied by an Initial-level ACK that's still needed by
-    // the server, so we wait until handshake confirms — at which
-    // point no further Initial activity is legitimate. Latched +
-    // idempotent.
+    // RFC 9001 §4.9.1: Initial keys go when the client first sends a
+    // Handshake packet (`send.pollDatagram`) and when the server first
+    // processes one (`recv_packet_handlers.handleHandshake`). This is
+    // the backstop for a handshake that completes with neither: no
+    // Initial activity is legitimate once the handshake is done.
+    // Latched + idempotent.
     if (conn.inner.handshakeDone() and !conn.initial_keys_discarded) {
         conn_keys.discardInitialKeys(
             conn,

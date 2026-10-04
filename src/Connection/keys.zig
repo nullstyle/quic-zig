@@ -484,13 +484,15 @@ pub fn discardExpiredApplicationReadKeys(conn: *Connection, now_us: u64) void {
     }
 }
 
-/// RFC 9001 §5.7 ¶3: "Endpoints MUST discard their Initial keys
-/// when they first send a Handshake packet." quic makes the call
-/// stricter: once Handshake-level secrets are installed (which
-/// means the TLS handshake has progressed past Initial) we drop
-/// Initial keys outright. Any further inbound Initial packet is
-/// rejected by `packetKeys` returning null, and the receiver
-/// drops it as `keys_unavailable`.
+/// RFC 9001 §4.9.1: "a client MUST discard Initial keys when it
+/// first sends a Handshake packet and a server MUST discard Initial
+/// keys when it first successfully processes a Handshake packet.
+/// Endpoints MUST NOT send Initial packets after this point." The
+/// callers are those two places and, as a backstop, the completed
+/// handshake. Any further inbound Initial packet is dropped as
+/// `keys_unavailable` (that packet only: the packets behind it in the
+/// datagram are still processed), and the Initial space's recovery
+/// state goes with the keys.
 ///
 /// Idempotent: safe to call multiple times. Securely zeroes the
 /// discarded key material so it can't be recovered from a memory

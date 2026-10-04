@@ -409,8 +409,9 @@ retry_token: std.ArrayList(u8) = .empty,
 /// uses `is_server=true` derivation for write).
 initial_keys_read: ?short_packet_mod.PacketKeys = null,
 initial_keys_write: ?short_packet_mod.PacketKeys = null,
-/// Latched true the first time `discardInitialKeys` fires (i.e.
-/// when Handshake or higher secrets are installed). Once set,
+/// Latched true the first time `discardInitialKeys` fires (the
+/// client's first Handshake packet sent, the server's first one
+/// processed, or the handshake done; RFC 9001 §4.9.1). Once set,
 /// `ensureInitialKeys` is a no-op — the discard is one-way and
 /// any subsequent Initial-level packet can't be sealed/opened
 /// with re-derived keys. RFC 9001 §5.7 ¶3.

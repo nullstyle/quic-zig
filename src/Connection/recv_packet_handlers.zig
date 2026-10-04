@@ -418,6 +418,22 @@ pub fn handleHandshake(
     // validated (e.g. via PATH_RESPONSE during migration).
     if (conn.role == .server) {
         incoming_path.path.markValidated();
+        // RFC 9001 §4.9.1: "a server MUST discard Initial keys when it
+        // first successfully processes a Handshake packet. Endpoints
+        // MUST NOT send Initial packets after this point." The client
+        // has the ServerHello (it has Handshake keys), so nothing in
+        // the Initial space is of use any more, and the client may
+        // already be unable to read an Initial packet.
+        //
+        // This is not only tidiness. The server puts its Initial
+        // packet FIRST in a datagram, and a client that cannot open
+        // the first packet may drop the whole datagram. MEASURED
+        // 2026-10-03 (interop `handshakecorruption`, a quiche client):
+        // every copy of the server's Handshake ACK and flight came
+        // behind a ServerHello that the client could not read any
+        // more, the client logged "dropped invalid packet" for each
+        // datagram, and gave up after 32 s.
+        if (!conn.initial_keys_discarded) conn_keys.discardInitialKeys(conn);
     }
     return finishOpenedPacket(
         conn,
