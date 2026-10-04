@@ -129,12 +129,19 @@ jobs:
       # boringssl module surface (type identity for
       # Client.Config.tls_context_override consumers), including the
       # quic.app Driver/StreamTable/Outbox app-layer probe.
+      # `check-modes.sh` is the build-mode contract a consumer sees:
+      # both ways to pass a mode (`release`, `optimize`), in Debug,
+      # ReleaseSafe and ReleaseFast. It compiles nothing. Through
+      # 0.24.0 this step printed `error: invalid option: "optimize"`
+      # in every run and passed, while the package was being built in
+      # Debug inside release builds; the script fails on that line.
       - name: consumer-smoke (out-of-tree package)
         if: matrix.os == 'ubuntu-latest'
         run: |
           cd tools/consumer-smoke
           zig build --summary all
           zig build run
+          sh check-modes.sh
 
   sanitizer:
     name: sanitizer (sanitize-c=full)

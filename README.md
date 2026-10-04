@@ -107,15 +107,24 @@ const quic_dep = b.dependency("quic", .{
 exe.root_module.addImport("quic", quic_dep.module("quic"));
 ```
 
-Pass `release`, not `optimize`. quic-zig has two build modes, Debug
-and ReleaseSafe (it refuses ReleaseFast and ReleaseSmall: they remove
-the safety checks on the code that parses network input), so its
-option is the boolean `release`. This page said `.optimize = optimize`
-through 0.24.0, and that was wrong: the package has no such option, so
-the build printed `error: invalid option: "optimize"` and went on, and
+quic-zig has two build modes, Debug and ReleaseSafe. It refuses
+ReleaseFast and ReleaseSmall: they remove the safety checks on the
+code that parses network input. `.release = optimize != .debug` gives
+it ReleaseSafe inside an application built in any release mode, and
+works with every release of quic-zig.
+
+From 0.24.1 the usual `.optimize = optimize` works too, for Debug and
+ReleaseSafe (ReleaseFast and ReleaseSmall stop the build with a message
+that says what to pass). **Through 0.24.0 it did not work, and this
+page said to use it.** The package had no `optimize` option, so the
+build printed `error: invalid option: "optimize"` and went on, and
 quic-zig and its BoringSSL were compiled in **Debug** inside a release
-build of the application. To check what you get, run `zig build
---verbose` and read the `-O` flag in front of `-Mquic=`.
+build of the application. If you pin 0.24.0 or older, pass `release`.
+
+To check what you get, run `zig build --verbose` and read the `-O`
+flag in front of `-Mquic=`. When several packages in one build depend
+on quic-zig, each must pass the same options with the same values, or
+the build makes two `quic` modules whose types do not match.
 
 Application code imports it as:
 

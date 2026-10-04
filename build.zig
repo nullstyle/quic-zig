@@ -105,6 +105,24 @@ fn boringsslDependency(
     });
 }
 
+/// The mode this package builds in: Debug or ReleaseSafe, nothing
+/// else. `from_release` is what `-Drelease` / `zig build --release`
+/// resolved to; `requested` is the `optimize` option, when one was
+/// passed. A release asked for by either is a release: the fault this
+/// guards against is a Debug library inside a release build.
+fn pickOptimize(
+    from_release: std.lang.Optimize,
+    requested: ?std.lang.Optimize,
+) error{UnsafeModeRefused}!std.lang.Optimize {
+    if (from_release == .fast or from_release == .small) return error.UnsafeModeRefused;
+    if (requested) |mode| switch (mode) {
+        .fast, .small => return error.UnsafeModeRefused,
+        .safe => return .safe,
+        .debug => {},
+    };
+    return if (from_release == .safe) .safe else .debug;
+}
+
 // Build-mode policy (secure-by-default: ReleaseSafe keeps runtime
 // safety checks on parser surfaces).
 //
@@ -127,31 +145,53 @@ fn boringsslDependency(
 // controlled panic. The benchmark harness below defaults to
 // `ReleaseSafe`; use `-Dbench-unsafe-release-fast=true` only when you
 // intentionally want unsafe peak-speed measurements.
+//
+// Two options select the mode, and a release asked for by either one
+// is a release:
+//   - `release` (boolean), and `zig build --release`, which every
+//     package in a build follows;
+//   - `optimize`, the option most packages have, so that the usual
+//     `b.dependency("quic", .{ .target = target, .optimize = optimize })`
+//     does what it says. Through 0.24.0 this package had no `optimize`
+//     option. Zig reported that line as `error: invalid option:
+//     "optimize"`, went on, and built quic-zig and BoringSSL in Debug
+//     inside the consumer's release build (MEASURED on the 0.24.0
+//     tarball: `-Osafe -Mroot=... -Odebug -Mquic=... -Odebug
+//     -Mboringssl=...`). A wrong option that turns safety checks off
+//     would be worse; one that silently turns optimization off was bad
+//     enough, and every downstream of this package had it.
+// `tools/consumer-smoke` builds against both spellings and stops when
+// the `quic` module is not in the mode it asked for.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{
-        // 'zig build --release' selects the preferred mode; point it
-        // at ReleaseSafe so the ordinary "release" spelling cannot
-        // silently disable runtime safety checks on the parser.
-        .preferred_optimize_mode = .safe,
-    });
-    // Enforce the build-mode policy declared above. The prose warning
-    // is not enough: with the current toolchain `-Drelease` is boolean
-    // and resolves to the preferred mode below, but a future toolchain
-    // (or a programmatic caller) could select fast/small directly —
-    // reject both so the network-input parser can never be compiled
-    // with runtime safety off, turning documented non-peer-reachable
-    // invariants into UB on adversarial input. Benchmarks opt into
-    // ReleaseFast separately via -Dbench-unsafe-release-fast, which
-    // does not require (and should not be combined with) a fast/small
-    // main tree.
-    if (optimize == .fast or optimize == .small) {
+    const optimize = pickOptimize(
+        b.standardOptimizeOption(.{
+            // 'zig build --release' selects the preferred mode; point it
+            // at ReleaseSafe so the ordinary "release" spelling cannot
+            // silently disable runtime safety checks on the parser.
+            .preferred_optimize_mode = .safe,
+        }),
+        b.option(
+            std.lang.Optimize,
+            "optimize",
+            "Debug or ReleaseSafe (the same as -Drelease). ReleaseFast and ReleaseSmall are refused.",
+        ),
+    ) catch {
+        // Enforce the build-mode policy declared above. The prose
+        // warning is not enough: reject both so the network-input
+        // parser can never be compiled with runtime safety off, turning
+        // documented non-peer-reachable invariants into UB on
+        // adversarial input. Benchmarks opt into ReleaseFast separately
+        // via -Dbench-unsafe-release-fast, which does not require (and
+        // should not be combined with) a fast/small main tree.
         @panic("ReleaseFast/ReleaseSmall are unsupported for quic-zig: " ++
-            "internet-facing builds must use -Drelease, which resolves " ++
-            "to ReleaseSafe (see the build-mode policy comment above). " ++
+            "internet-facing builds must use -Drelease (or " ++
+            "-Doptimize=ReleaseSafe), which resolves to ReleaseSafe (see " ++
+            "the build-mode policy comment above). An application built " ++
+            "in ReleaseFast passes `.release = true` to this package. " ++
             "Benchmarks opt into ReleaseFast via " ++
             "-Dbench-unsafe-release-fast.");
-    }
+    };
     const is_windows = target.result.os.tag == .windows;
     const sanitize_c: ?std.zig.SanitizeC = if (b.option(
         []const u8,
