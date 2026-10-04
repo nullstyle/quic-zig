@@ -21,6 +21,9 @@
 //!   RFC9000 §13.3   MUST     STREAM keys are tracked on each sent packet for ack/loss routing
 //!   RFC9000 §13.3   NORMATIVE PADDING / PING are absent from the retransmit-frame union (Table 3)
 //!   RFC9000 §14     MUST     client first-flight Initial datagram is >= 1200 bytes
+//!   RFC9000 §14.1   MUST     every client datagram with an Initial packet is >= 1200 bytes (ACK-only too)
+//!   RFC9000 §14.1   MUST     a server datagram with an ack-eliciting Initial packet is >= 1200 bytes
+//!   RFC9000 §14.2   MUST NOT a handshake datagram is larger than 1200 bytes (coalesced packets share it)
 //!   RFC9000 §14     MUST     server discards v1 Initial UDP < 1200 bytes
 //!   RFC9000 §14     MUST NOT §14 size gate fires on a non-v1 long-header datagram
 //!   RFC9000 §14     NORMATIVE the on-wire v1 minimum constant equals 1200 (RFC default_mtu)
@@ -420,6 +423,147 @@ test "MUST pad the client first-flight Initial UDP datagram to >= 1200 bytes [RF
     try std.testing.expect((tx[0] & 0xc0) == 0xc0);
     // §14 ¶1 floor.
     try std.testing.expect(n >= 1200);
+}
+
+/// One handshake between a real server and a real client, both
+/// polled with 4096-byte buffers (so only the endpoint limits what it
+/// sends). Every datagram is given to `Sizes` before it is delivered.
+const Sizes = struct {
+    /// Datagrams that hold a long-header packet, and the longest one.
+    client_long: usize = 0,
+    server_long: usize = 0,
+    longest_long: usize = 0,
+    /// Datagrams of the client that begin with an Initial packet, and
+    /// how many of them are shorter than 1200 bytes.
+    client_initial: usize = 0,
+    client_initial_short: usize = 0,
+    /// The server's first datagram (it begins with the Initial packet
+    /// that carries the ServerHello: an ack-eliciting one).
+    server_first: usize = 0,
+    server_first_is_initial: bool = false,
+
+    fn see(self: *Sizes, datagram: []const u8, from_server: bool) void {
+        const long = (datagram[0] & 0x80) != 0;
+        const initial = long and ((datagram[0] & 0x30) >> 4) == 0;
+        if (long) {
+            if (from_server) self.server_long += 1 else self.client_long += 1;
+            self.longest_long = @max(self.longest_long, datagram.len);
+        }
+        if (from_server) {
+            if (self.server_first == 0) {
+                self.server_first = datagram.len;
+                self.server_first_is_initial = initial;
+            }
+        } else if (initial) {
+            self.client_initial += 1;
+            if (datagram.len < 1200) self.client_initial_short += 1;
+        }
+    }
+};
+
+fn handshakeSizes() !Sizes {
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try fixture.buildServer();
+    defer srv.deinit();
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = std.testing.allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer cli.deinit();
+
+    var sizes: Sizes = .{};
+    var buf: [4096]u8 = undefined;
+    const addr = quic.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x0e), .port = 4433 } };
+    try cli.conn.advance();
+    var step: u64 = 0;
+    while (step < 64) : (step += 1) {
+        const now_us = step * 1_000;
+        while (try cli.conn.poll(&buf, now_us)) |len| {
+            sizes.see(buf[0..len], false);
+            _ = try srv.feed(buf[0..len], addr, now_us);
+        }
+        for (srv.iterator()) |slot| {
+            while (try slot.conn.poll(&buf, now_us)) |len| {
+                sizes.see(buf[0..len], true);
+                try cli.conn.handle(buf[0..len], null, now_us);
+            }
+        }
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        if (cli.conn.handshakeDone() and srv.iterator().len > 0 and srv.iterator()[0].conn.handshakeDone()) break;
+    }
+    try std.testing.expect(cli.conn.handshakeDone());
+    return sizes;
+}
+
+test "MUST expand a server datagram that carries an ack-eliciting Initial packet to >= 1200 bytes [RFC9000 §14.1 ¶2]" {
+    // RFC 9000 §14.1 ¶2: "Similarly, a server MUST expand the payload
+    // of all UDP datagrams carrying ack-eliciting Initial packets to
+    // at least the smallest allowed maximum datagram size of 1200
+    // bytes." The ServerHello is CRYPTO data: ack-eliciting. Until
+    // v0.26.0 the server never padded: with this certificate its
+    // whole flight was one datagram of 831 bytes.
+    const sizes = try handshakeSizes();
+    try std.testing.expect(sizes.server_first_is_initial);
+    try std.testing.expect(sizes.server_first >= 1200);
+}
+
+test "MUST expand every client datagram that carries an Initial packet, ACK-only ones included [RFC9000 §14.1 ¶1]" {
+    // RFC 9000 §14.1 ¶1: "A client MUST expand the payload of all UDP
+    // datagrams carrying Initial packets". ALL of them: also the one
+    // that only acknowledges the ServerHello. (A server drops a
+    // shorter datagram that begins with an Initial packet, and the
+    // ACK with it.)
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try fixture.buildServer();
+    defer srv.deinit();
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = std.testing.allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer cli.deinit();
+
+    var buf: [4096]u8 = undefined;
+    const addr = quic.conn.path.Address{ .ipv4 = .{ .addr = @splat(0x0f), .port = 4433 } };
+    try cli.conn.advance();
+    const hello_len = (try cli.conn.poll(&buf, 1_000)) orelse return error.NoInitialEmitted;
+    try std.testing.expect(hello_len >= 1200);
+    _ = try srv.feed(buf[0..hello_len], addr, 1_000);
+
+    // Of the server's first datagram the client gets the Initial
+    // packet only (the ServerHello), not the Handshake packet behind
+    // it. So the client has an ACK to send in an Initial packet, and
+    // nothing else at all.
+    const flight_len = (try srv.iterator()[0].conn.poll(&buf, 2_000)) orelse return error.NoServerFlight;
+    const initial_len = quic.wire.long_packet.peekPacketLen(buf[0..flight_len]) orelse return error.NotALongHeader;
+    try std.testing.expect(initial_len < flight_len);
+    try cli.conn.handle(buf[0..initial_len], null, 2_000);
+
+    const ack_len = (try cli.conn.poll(&buf, 3_000)) orelse return error.NoAckEmitted;
+    // An Initial packet, alone in its datagram.
+    try std.testing.expect((buf[0] & 0xf0) == 0xc0);
+    try std.testing.expectEqual(ack_len, quic.wire.long_packet.peekPacketLen(buf[0..ack_len]).?);
+    try std.testing.expect(ack_len >= 1200);
+}
+
+test "MUST NOT send a handshake datagram larger than 1200 bytes: coalesced packets share one datagram's size [RFC9000 §14.2 ¶1]" {
+    // RFC 9000 §14.2 ¶1: "In the absence of these mechanisms [PMTUD],
+    // QUIC endpoints SHOULD NOT send datagrams larger than the
+    // smallest allowed maximum datagram size", and §14.1's padding
+    // rule is for the DATAGRAM. Nothing has probed the path during
+    // the handshake. Until v0.26.0 each packet of a coalesced
+    // datagram was capped on its own: the client's padded Initial
+    // packet plus its Handshake packet made 1250 bytes.
+    const sizes = try handshakeSizes();
+    try std.testing.expect(sizes.client_long >= 2);
+    try std.testing.expect(sizes.server_long >= 1);
+    try std.testing.expectEqual(@as(usize, 1200), sizes.longest_long);
 }
 
 // ---------------------------------------------------------------- §20.1 transport error codes

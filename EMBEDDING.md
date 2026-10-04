@@ -545,6 +545,16 @@ Both feed paths (`conn.handle` / `Server.feed`) take the datagram as a
 mutable `[]u8` — header unprotection rewrites the bytes in place — so
 receive into a mutable buffer, never a `[]const u8` slice.
 
+The send buffer you give to `poll` / `pollDatagram` must be at least
+1200 bytes. A handshake datagram (one that holds an Initial or a
+Handshake packet) is never longer than 1200 bytes, whatever the buffer
+holds, and it is exactly 1200 when RFC 9000 section 14.1 wants it
+padded. Only a datagram with a 1-RTT packet alone can be longer: up to
+the path's MTU, and a DPLPMTUD probe up to `pmtud_config.max_mtu`. Size
+the buffer for that (1500 is enough for the defaults). With a buffer
+under 1200 bytes a client gets `error.OutputTooSmall` for a datagram
+with an Initial packet, and a server sends no ServerHello.
+
 ```zig
 // Client bootstrap: `Client.connect` deliberately does NOT call
 // `advance`, so 0-RTT data can be staged before the first flight.

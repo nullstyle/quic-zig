@@ -109,35 +109,55 @@ pub fn pollDatagram(
     conn.queueHandshakeDoneIfReady();
     try conn.refreshEarlyDataStatus();
     conn.poll_addr_override = null;
+
+    // The budget is for the DATAGRAM. A datagram that holds a packet
+    // with a long header is `conn.mtu` bytes at most (1200; the peer's
+    // `max_udp_payload_size` can only lower it, and not below 1200):
+    // RFC 9000 section 14.2, nothing larger before the path is
+    // probed, and a probe is a 1-RTT packet alone in its datagram.
+    // Each packet gets what the ones in front of it left
+    // (`poll_datagram_used`).
+    //
+    // Until v0.26.0 each PACKET was capped at the MTU on its own, and
+    // `dst` was the rest of the caller's buffer. MEASURED with a
+    // 4096-byte buffer: server Initial + Handshake 1310 bytes, client
+    // padded Initial + Handshake ACK 1250, Handshake + 1-RTT 1313,
+    // Initial + Handshake + 1-RTT 1453, Handshake + a PMTUD probe
+    // 2427. A path that carries 1232 bytes dropped each of them.
+    const long_dst = dst[0..@min(dst.len, conn.mtu)];
+    var initial: InitialInDatagram = .{};
+    conn.poll_initial = &initial;
+    defer conn.poll_initial = null;
+    conn.poll_datagram_used = 0;
+    defer conn.poll_datagram_used = 0;
+
     var pos: usize = 0;
     // Initial first (must lead a coalesced datagram).
-    if (try pollLevel(conn, .initial, dst[pos..], now_us)) |n| pos += n;
+    if (try pollLevel(conn, .initial, long_dst, now_us)) |n| pos += n;
+    conn.poll_datagram_used = pos;
     // Client 0-RTT uses a long header but shares the Application
-    // packet-number space. If the Initial padded this datagram to
-    // the caller's MTU, this simply waits for the next poll.
-    if (pos < dst.len) {
-        if (try pollLevel(conn, .early_data, dst[pos..], now_us)) |n| pos += n;
+    // packet-number space. If the Initial filled this datagram, this
+    // simply waits for the next poll.
+    if (pos < long_dst.len) {
+        if (try pollLevel(conn, .early_data, long_dst[pos..], now_us)) |n| pos += n;
     }
+    conn.poll_datagram_used = pos;
     // Handshake next (after Initial keys are dropped post-handshake,
     // there's nothing here; otherwise it's CRYPTO + ACK).
-    if (pos < dst.len) {
-        if (try pollLevel(conn, .handshake, dst[pos..], now_us)) |n| {
+    var sent_handshake = false;
+    if (pos < long_dst.len) {
+        if (try pollLevel(conn, .handshake, long_dst[pos..], now_us)) |n| {
             pos += n;
-            // RFC 9001 §4.9.1: "a client MUST discard Initial keys when
-            // it first sends a Handshake packet". An Initial packet in
-            // front of that Handshake packet in this datagram (the ACK
-            // for the ServerHello) is already sealed. From here the
-            // client sends no Initial packet: a server that discarded
-            // its Initial keys cannot read one, and one that drops a
-            // datagram it cannot begin to read would lose the
-            // Handshake packet behind it.
-            if (conn.role == .client and !conn.initial_keys_discarded) conn_keys.discardInitialKeys(conn);
+            sent_handshake = true;
         }
     }
+    conn.poll_datagram_used = pos;
     // Application last (the 1-RTT short header MUST be the last
     // packet in a coalesced datagram per §12.2). Only schedule a
     // non-zero path when there are no Initial/Handshake bytes already
-    // in this datagram.
+    // in this datagram. A 1-RTT packet alone has the caller's whole
+    // buffer (its own limit is the path's MTU, and a PMTUD probe is
+    // larger than that on purpose).
     const app_path_id = if (pos == 0)
         conn_paths.applicationPathForPoll(
             conn,
@@ -145,10 +165,37 @@ pub fn pollDatagram(
     else
         conn.primaryPath().id;
     const app_start_pos = pos;
-    if (pos < dst.len) {
-        if (try pollLevelOnPath(conn, .application, app_path_id, dst[pos..], now_us)) |n| pos += n;
+    const app_dst = if (pos == 0) dst else long_dst;
+    if (pos < app_dst.len) {
+        if (try pollLevelOnPath(conn, .application, app_path_id, app_dst[pos..], now_us)) |n| pos += n;
     }
     if (pos == 0) return null;
+
+    // RFC 9000 section 14.1: the datagram is complete, so the padding
+    // that an Initial packet in it needs is known now.
+    if (initial.sealed) {
+        const before = pos;
+        pos = try padInitialDatagram(conn, long_dst, pos, &initial);
+        conn_qlog.emitPacketSentWithPayload(
+            conn,
+            .initial,
+            initial.pn,
+            @intCast(initial.len + (pos - before)),
+            initial.payload[0..initial.payload_len],
+        );
+    }
+
+    // RFC 9001 §4.9.1: "a client MUST discard Initial keys when it
+    // first sends a Handshake packet". An Initial packet in front of
+    // that Handshake packet in this datagram (the ACK for the
+    // ServerHello) is sealed by now, padding and all (which is why
+    // this is not done at the Handshake level above: the padding
+    // needs the keys). From here the client sends no Initial packet:
+    // a server that discarded its Initial keys cannot read one, and
+    // one that drops a datagram it cannot begin to read would lose
+    // the Handshake packet behind it.
+    if (sent_handshake and conn.role == .client and !conn.initial_keys_discarded) conn_keys.discardInitialKeys(conn);
+
     conn.last_activity_us = now_us;
     const out_path = conn_paths.pathForId(conn, app_path_id);
     const out_addr = if (pos > app_start_pos) conn.poll_addr_override orelse out_path.peerAddress() else out_path.peerAddress();
@@ -168,6 +215,124 @@ pub fn pollDatagram(
         .to = out_addr,
         .path_id = out_path.id,
     };
+}
+
+/// RFC 9000 section 14.1: the least a datagram may be that holds an
+/// Initial packet of a client, or an ack-eliciting Initial packet of
+/// a server. It is also the size that every QUIC path carries.
+pub const min_initial_datagram_len: usize = default_mtu;
+
+/// What `pollDatagram` keeps of the Initial packet it has sealed, so
+/// that it can seal it a second time with PADDING frames behind the
+/// payload.
+///
+/// The padding belongs to the datagram, not to the packet: a client's
+/// `[Initial][Handshake]` must be 1200 bytes together. How much the
+/// Initial packet must grow is known only when the packets behind it
+/// are built, and those are built with the room the Initial packet
+/// left. So the Initial packet is sealed without padding, the rest of
+/// the datagram is built, and if the datagram is short, the Initial
+/// packet is sealed again, longer, and the rest moves back. Only the
+/// second sealing leaves this endpoint: one packet number, one
+/// plaintext on the wire.
+pub const InitialInDatagram = struct {
+    sealed: bool = false,
+    /// Length of the sealed packet, without padding.
+    len: usize = 0,
+    pn: u64 = 0,
+    largest_acked: ?u64 = null,
+    quic_bit: u1 = 1,
+    /// The packet asks for an acknowledgment (a server pads only for
+    /// such a packet).
+    ack_eliciting: bool = false,
+    /// The sent-packet tracker holds a record of the packet, whose
+    /// size must follow the padding.
+    tracked: bool = false,
+    payload_len: usize = 0,
+    payload: [max_recv_plaintext]u8 = undefined,
+};
+
+/// Seal one Initial packet of this connection into `dst`. The one
+/// place that knows what every Initial packet carries: the version,
+/// the two connection IDs, and (client) the token of a Retry, which
+/// RFC 9000 section 8.1.2 wants in ALL Initial packets after it.
+fn sealInitialPacket(
+    conn: *Connection,
+    dst: []u8,
+    pn: u64,
+    largest_acked: ?u64,
+    payload: []const u8,
+    keys: *const PacketKeys,
+    quic_bit: u1,
+    pad_to: usize,
+) Error!usize {
+    const scid = conn.longHeaderScid();
+    return try long_packet_mod.sealInitial(dst, .{
+        .version = conn.version,
+        .dcid = conn.peer_dcid.slice(),
+        .scid = scid.slice(),
+        .token = if (conn.role == .client) conn.retry_token.items else &.{},
+        .pn = pn,
+        .largest_acked = largest_acked,
+        .payload = payload,
+        .keys = keys,
+        .pad_to = pad_to,
+        .quic_bit = quic_bit,
+    });
+}
+
+/// Must the datagram that holds this Initial packet be 1200 bytes?
+/// RFC 9000 section 14.1: every datagram of a client that carries an
+/// Initial packet (ACK-only ones too: a server drops a shorter
+/// datagram that begins with an Initial packet); a datagram of a
+/// server that carries an ack-eliciting Initial packet.
+fn initialNeedsExpansion(conn: *const Connection, ack_eliciting: bool) bool {
+    return conn.role == .client or ack_eliciting;
+}
+
+/// Make a datagram that holds an Initial packet at least 1200 bytes
+/// long (RFC 9000 section 14.1): seal the Initial packet again with
+/// PADDING frames behind its payload, and move the packets behind it
+/// back. `dst` is the datagram's budget, `pos` the bytes in it.
+/// Returns the new length.
+fn padInitialDatagram(
+    conn: *Connection,
+    dst: []u8,
+    pos: usize,
+    initial: *const InitialInDatagram,
+) Error!usize {
+    if (!initialNeedsExpansion(conn, initial.ack_eliciting)) return pos;
+    if (pos >= min_initial_datagram_len) return pos;
+    // `pollLevelOnPath` builds such a packet only when the datagram
+    // may become this long (the buffer, and for a server the
+    // anti-amplification allowance). The one packet it builds without
+    // that check is a client's CONNECTION_CLOSE, which must not fail
+    // for a short buffer: it then goes as it is.
+    if (dst.len < min_initial_datagram_len) return pos;
+    const pad = min_initial_datagram_len - pos;
+    const keys = conn.initial_keys_write orelse return pos;
+    if (pos > initial.len) {
+        // The slices overlap, and the bytes move toward the end.
+        @memmove(dst[initial.len + pad .. pos + pad], dst[initial.len..pos]);
+    }
+    const n = try sealInitialPacket(
+        conn,
+        dst[0 .. initial.len + pad],
+        initial.pn,
+        initial.largest_acked,
+        initial.payload[0..initial.payload_len],
+        &keys,
+        initial.quic_bit,
+        initial.len + pad,
+    );
+    std.debug.assert(n == initial.len + pad);
+    // Padding is bytes on the wire: it counts toward the bytes in
+    // flight (RFC 9002 section 2: PADDING makes a packet count), and
+    // `pollDatagram` counts the whole datagram against the
+    // anti-amplification limit and the pacer.
+    if (initial.tracked) _ = conn.sentForLevel(.initial).growPacket(initial.pn, pad);
+    conn.qlog_bytes_sent +|= pad;
+    return pos + pad;
 }
 
 // Doc comment lives on the `Connection.pollLevel` thunk in Connection.zig.
@@ -266,7 +431,11 @@ pub fn pollLevelOnPath(
     var sent_datagram: ?SentPacketTracker.SentDatagram = null;
     var crypto_copy: ?[]u8 = null;
     var retx_crypto_index: ?usize = null;
+    // The part of the first retransmission chunk that did not fit this
+    // packet (see the CRYPTO step). It replaces the chunk at commit.
+    var retx_crypto_rest: ?[]u8 = null;
     errdefer if (crypto_copy) |bytes| conn.allocator.free(bytes);
+    errdefer if (retx_crypto_rest) |bytes| conn.allocator.free(bytes);
 
     // Header overhead (worst case) varies by long/short.
     const packet_dcid: *const ConnectionId = if (lvl == .application)
@@ -290,9 +459,16 @@ pub fn pollLevelOnPath(
     // carry larger datagrams than the peer's handshake-time
     // advertised receive size. Embedders that want a tighter cap
     // can set `pmtud_config.max_mtu` accordingly.
+    //
+    // A probe is alone in its datagram (`poll_datagram_used == 0`):
+    // behind a Handshake packet the DATAGRAM would be longer than the
+    // size the probe stands for, and its loss or its ACK would say
+    // nothing about that size. (MEASURED before v0.26.0: a Handshake
+    // packet + a probe = one datagram of 2427 bytes.)
     var probe_target_size: ?u16 = null;
     if (lvl == .application and
         !tracker_full and
+        conn.poll_datagram_used == 0 and
         conn.pmtud_config.enable and
         app_path.pmtudIsSearching() and
         app_path.path.isValidated())
@@ -306,43 +482,52 @@ pub fn pollLevelOnPath(
         }
     }
 
-    const max_payload: usize = blk: {
-        const dcid_len: usize = packet_dcid.len;
-        const scid_len: usize = packet_scid.len;
-        const long_overhead: usize = 1 + 4 + 1 + dcid_len + 1 + scid_len + 8 + 4 + 16 + 8; // ample
-        const short_overhead: usize = 1 + dcid_len + 4 + 16;
-        const overhead: usize = if (lvl == .application) short_overhead else long_overhead;
+    // How long this packet may become.
+    const packet_room: usize = blk: {
         // The PMTU floor decides how big this packet may become.
         // For .application we read it off the chosen path
         // (DPLPMTUD updates this in step). For Initial/Handshake
         // we use conn.mtu (the connection-wide ceiling — these
         // levels never change per-path). Both are independently
-        // capped against the embedder's caller buffer.
+        // capped against `dst`: the embedder's buffer, or what is
+        // left of the datagram that `pollDatagram` is building.
         const level_mtu: usize = if (lvl == .application) app_path.pmtu else conn.mtu;
-        var packet_capacity = @min(level_mtu, dst.len);
+        var room = @min(level_mtu, dst.len);
         // When we've decided to emit a DPLPMTUD probe, the probe
         // size IS the packet capacity for this build (we want the
         // resulting datagram to be exactly that size). The probe
         // size is already capped at `pmtud_config.max_mtu` and
         // `dst.len` by the scheduler above.
-        if (probe_target_size) |sz| packet_capacity = @min(@as(usize, sz), dst.len);
+        if (probe_target_size) |sz| room = @min(@as(usize, sz), dst.len);
         // RFC 9000 §8.1: anti-amplification applies to ALL bytes the
         // endpoint sends on an unvalidated path, not just 1-RTT.
         // Initial and Handshake bytes count too — otherwise an off-path
         // attacker can spoof a small Initial and force us to emit a
         // full-MTU Initial+Handshake response (a >10x amplification
         // factor when the spoofed Initial is unpadded).
+        //
+        // The path counts a datagram when it is complete, so the
+        // packets that are already in this one are taken off here.
+        // (Until v0.26.0 they were not: each coalesced packet had the
+        // whole allowance.)
         if (!app_path.path.isValidated()) {
-            const allowance = Connection.u64ToUsizeClamped(app_path.path.antiAmpAllowance());
-            packet_capacity = @min(packet_capacity, allowance);
-            if (packet_capacity <= overhead) return null;
+            const allowance = Connection.u64ToUsizeClamped(app_path.path.antiAmpAllowance()) -| conn.poll_datagram_used;
+            room = @min(room, allowance);
         }
-        if (packet_capacity <= overhead) break :blk 0;
+        break :blk room;
+    };
+    const max_payload: usize = blk: {
+        const dcid_len: usize = packet_dcid.len;
+        const scid_len: usize = packet_scid.len;
+        const long_overhead: usize = 1 + 4 + 1 + dcid_len + 1 + scid_len + 8 + 4 + 16 + 8; // ample
+        const short_overhead: usize = 1 + dcid_len + 4 + 16;
+        const overhead: usize = if (lvl == .application) short_overhead else long_overhead;
+        if (packet_room <= overhead) break :blk 0;
         // pl_buf is sized to `max_recv_plaintext` so we can
         // accommodate DPLPMTUD probes that grow above the
         // historical 1200-byte default. The plaintext budget
         // never needs more than that on either direction.
-        break :blk @min(max_recv_plaintext, packet_capacity - overhead);
+        break :blk @min(max_recv_plaintext, packet_room - overhead);
     };
     // `dst[pos..]` arrived too small to seal even an empty packet. This
     // is the routine "no room left in this datagram" outcome — the same
@@ -355,6 +540,21 @@ pub fn pollLevelOnPath(
     // and the validated path's first 1-RTT poll runs against a tiny
     // residual after Initial+Handshake have filled most of the MTU.
     if (max_payload == 0) return null;
+    // RFC 9000 section 14.1: a datagram of a server that holds an
+    // ack-eliciting Initial packet is 1200 bytes at least. When this
+    // datagram cannot become that long (the anti-amplification
+    // allowance does not cover it, or the caller's buffer is shorter),
+    // the server puts nothing into an Initial packet that asks for an
+    // acknowledgment: no CRYPTO data and no PING. An ACK still goes.
+    // The data waits for the client's next datagram, as it does when
+    // the allowance is zero. (Every padded byte counts against the
+    // allowance: `pollDatagram` counts the datagram as it leaves.)
+    //
+    // The Initial packet is first in its datagram, so `packet_room` is
+    // the room of the whole datagram here.
+    const initial_ack_eliciting_blocked = lvl == .initial and
+        conn.role == .server and
+        packet_room < min_initial_datagram_len;
     // Pacing joins the same boolean that scopes cwnd blocking: ACK
     // emission, PTO PINGs, PATH_CHALLENGE, and CONNECTION_CLOSE are
     // outside this gate by construction (they never consult it), so a
@@ -512,16 +712,26 @@ pub fn pollLevelOnPath(
             conn,
         );
         const n_close = switch (lvl) {
-            .initial => try long_packet_mod.sealInitial(dst, .{
-                .version = conn.version,
-                .dcid = packet_dcid.slice(),
-                .scid = packet_scid.slice(),
-                .pn = pn,
-                .largest_acked = largest_acked_close,
-                .payload = pl_buf[0..pl_pos],
-                .keys = &keys,
-                .quic_bit = close_quic_bit,
-            }),
+            // A client's Initial packet with the close is padded like
+            // every other one (a server drops a shorter datagram that
+            // begins with an Initial packet, and with it the close),
+            // and carries the token of a Retry like every other one.
+            // Until v0.26.0 it had neither. A buffer that is too short
+            // for the padding does not stop a close: it then goes as
+            // it is.
+            .initial => try sealInitialPacket(
+                conn,
+                dst,
+                pn,
+                largest_acked_close,
+                pl_buf[0..pl_pos],
+                &keys,
+                close_quic_bit,
+                if (conn.poll_initial == null and initialNeedsExpansion(conn, false) and dst.len >= min_initial_datagram_len)
+                    min_initial_datagram_len
+                else
+                    0,
+            ),
             .handshake => try long_packet_mod.sealHandshake(dst, .{
                 .version = conn.version,
                 .dcid = packet_dcid.slice(),
@@ -580,7 +790,11 @@ pub fn pollLevelOnPath(
         conn.lifecycle.updateDrainingDeadline(closing_deadline);
         conn.qlog_packets_sent +|= 1;
         conn.qlog_bytes_sent +|= n_close;
-        conn_qlog.emitPacketSent(conn, lvl, pn, @intCast(n_close), 1);
+        if (lvl == .initial and conn.poll_initial != null) {
+            noteInitialInDatagram(conn.poll_initial.?, n_close, pn, largest_acked_close, close_quic_bit, false, !tracker_full, pl_buf[0..pl_pos]);
+        } else {
+            conn_qlog.emitPacketSent(conn, lvl, pn, @intCast(n_close), 1);
+        }
         conn_qlog.emitConnectionStateIfChanged(
             conn,
         );
@@ -682,7 +896,7 @@ pub fn pollLevelOnPath(
 
     // 1a) PTO probe PING. A lost PING is not retransmitted as a
     // frame, but a later PTO will queue another probe.
-    if (!tracker_full and !path_response_addr_overrides_current and lvl != .early_data and pending_ping.* and pl_pos + 1 <= max_payload) {
+    if (!tracker_full and !path_response_addr_overrides_current and !initial_ack_eliciting_blocked and lvl != .early_data and pending_ping.* and pl_pos + 1 <= max_payload) {
         const ping_len = try frame_mod.encode(
             pl_buf[pl_pos..max_payload],
             .{ .ping = .{} },
@@ -752,28 +966,43 @@ pub fn pollLevelOnPath(
     // 2) CRYPTO frame: retransmit lost data first, then drain
     // fresh outbox bytes at this level into one frame.
     const out_idx = lvl.idx();
-    if (lvl != .early_data and !congestion_blocked and conn.crypto_retx[out_idx].items.len > 0 and pl_pos + 25 < max_payload) {
+    const crypto_allowed = lvl != .early_data and !congestion_blocked and !initial_ack_eliciting_blocked;
+    if (crypto_allowed and conn.crypto_retx[out_idx].items.len > 0 and pl_pos + 25 < max_payload) {
         const max_data = max_payload - pl_pos - 25;
         const chunk = conn.crypto_retx[out_idx].items[0];
-        if (chunk.data.len <= max_data) {
-            const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
-                .crypto = .{
-                    .offset = chunk.offset,
-                    .data = chunk.data,
-                },
-            });
-            pl_pos += wrote;
-            const copy = try conn.allocator.dupe(u8, chunk.data);
-            crypto_copy = copy;
-            sent_crypto_chunk = .{
-                .level_idx = out_idx,
+        // A chunk that does not fit whole is cut: the front goes now,
+        // the rest stays first in the queue. A chunk is as long as
+        // the room was when its data went out the first time, in a
+        // full packet as a rule. The room is seldom the same again:
+        // an ACK frame or a PING is in front of it now, or an Initial
+        // packet takes part of the datagram. Until v0.26.0 a chunk
+        // that did not fit whole was not sent, and no fresh CRYPTO
+        // data behind it either: with the datagram's budget shared
+        // between its packets, that could be every time.
+        const send_len = @min(chunk.data.len, max_data);
+        const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
+            .crypto = .{
                 .offset = chunk.offset,
-                .data = copy,
-            };
+                .data = chunk.data[0..send_len],
+            },
+        });
+        pl_pos += wrote;
+        const copy = try conn.allocator.dupe(u8, chunk.data[0..send_len]);
+        crypto_copy = copy;
+        sent_crypto_chunk = .{
+            .level_idx = out_idx,
+            .offset = chunk.offset,
+            .data = copy,
+        };
+        if (send_len == chunk.data.len) {
             retx_crypto_index = 0;
-            ack_eliciting = true;
+        } else {
+            // The rest gets its own allocation now, while an error
+            // can still leave everything as it was.
+            retx_crypto_rest = try conn.allocator.dupe(u8, chunk.data[send_len..]);
         }
-    } else if (lvl != .early_data and !congestion_blocked and conn.outbox[out_idx].len > 0 and pl_pos + 25 < max_payload) {
+        ack_eliciting = true;
+    } else if (crypto_allowed and conn.outbox[out_idx].len > 0 and pl_pos + 25 < max_payload) {
         const max_data = max_payload - pl_pos - 25;
         const drain_len = @min(conn.outbox[out_idx].len, max_data);
         const data_slice = conn.outbox[out_idx].buf[0..drain_len];
@@ -1137,26 +1366,28 @@ pub fn pollLevelOnPath(
         conn,
     );
     const n = switch (lvl) {
-        .initial => try long_packet_mod.sealInitial(dst, .{
-            .version = conn.version,
-            .dcid = packet_dcid.slice(),
-            .scid = packet_scid.slice(),
-            .token = if (conn.role == .client) conn.retry_token.items else &.{},
-            .pn = pn,
-            .largest_acked = largest_acked,
-            .payload = pl_buf[0..pl_pos],
-            .keys = &keys,
+        .initial => blk: {
             // RFC 9000 §14.1: a client MUST expand every UDP datagram
             // carrying an Initial packet to ≥1200 bytes, ACK-only
-            // Initials included; only the server side of that rule is
-            // limited to ack-eliciting Initials. Servers drop shorter
+            // Initials included; a server, every datagram with an
+            // ack-eliciting Initial packet. Servers drop shorter
             // Initial-leading datagrams (see `Server.feed`), so an
             // unpadded ACK-only Initial stalls the peer's first flight
-            // until its probe timeouts. The Initial leads a coalesced
-            // datagram, so padding it here pads the datagram.
-            .pad_to = if (conn.role == .client) 1200 else 0,
-            .quic_bit = quic_bit,
-        }),
+            // until its probe timeouts.
+            //
+            // The padding is for the DATAGRAM. Inside `pollDatagram`
+            // the packet is sealed without padding here, and
+            // `padInitialDatagram` seals it again when the rest of the
+            // datagram is known. A direct `pollLevel(.initial, ...)`
+            // has no datagram around it: the packet pads itself.
+            const expand = initialNeedsExpansion(conn, ack_eliciting);
+            // A buffer too short for the padded datagram: an error, as
+            // it always was for a client. (A server does not come here
+            // with an ack-eliciting packet: `initial_ack_eliciting_blocked`.)
+            if (expand and packet_room < min_initial_datagram_len) return Error.OutputTooSmall;
+            const pad_to: usize = if (expand and conn.poll_initial == null) min_initial_datagram_len else 0;
+            break :blk try sealInitialPacket(conn, dst, pn, largest_acked, pl_buf[0..pl_pos], &keys, quic_bit, pad_to);
+        },
         .handshake => try long_packet_mod.sealHandshake(dst, .{
             .version = conn.version,
             .dcid = packet_dcid.slice(),
@@ -1265,6 +1496,13 @@ pub fn pollLevelOnPath(
         const old = conn.crypto_retx[out_idx].orderedRemove(idx);
         conn.allocator.free(old.data);
     }
+    if (retx_crypto_rest) |rest| {
+        const first = &conn.crypto_retx[out_idx].items[0];
+        const sent_len = first.data.len - rest.len;
+        conn.allocator.free(first.data);
+        first.* = .{ .offset = first.offset + sent_len, .data = rest };
+        retx_crypto_rest = null;
+    }
     if ((lvl == .application or lvl == .early_data) and
         ack_eliciting and app_path.pto_probe_count > 0)
     {
@@ -1286,9 +1524,38 @@ pub fn pollLevelOnPath(
     // qlog hooks for the outgoing packet.
     conn.qlog_packets_sent +|= 1;
     conn.qlog_bytes_sent +|= n;
-    conn_qlog.emitPacketSentWithPayload(conn, lvl, pn, @intCast(n), pl_buf[0..pl_pos]);
+    if (lvl == .initial and conn.poll_initial != null) {
+        // `pollDatagram` may make this packet longer (padding). It
+        // reports the packet when its size is final.
+        noteInitialInDatagram(conn.poll_initial.?, n, pn, largest_acked, quic_bit, ack_eliciting, ack_eliciting, pl_buf[0..pl_pos]);
+    } else {
+        conn_qlog.emitPacketSentWithPayload(conn, lvl, pn, @intCast(n), pl_buf[0..pl_pos]);
+    }
 
     return n;
+}
+
+/// Leave with `pollDatagram` what it needs to seal this Initial packet
+/// a second time (see `InitialInDatagram`).
+fn noteInitialInDatagram(
+    initial: *InitialInDatagram,
+    len: usize,
+    pn: u64,
+    largest_acked: ?u64,
+    quic_bit: u1,
+    ack_eliciting: bool,
+    tracked: bool,
+    payload: []const u8,
+) void {
+    initial.sealed = true;
+    initial.len = len;
+    initial.pn = pn;
+    initial.largest_acked = largest_acked;
+    initial.quic_bit = quic_bit;
+    initial.ack_eliciting = ack_eliciting;
+    initial.tracked = tracked;
+    initial.payload_len = payload.len;
+    @memcpy(initial.payload[0..payload.len], payload);
 }
 
 fn encodeFrameIfFits(

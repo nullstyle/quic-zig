@@ -559,6 +559,21 @@ pub fn removeRangeWithError(
     }
 }
 
+/// A tracked packet got `extra` bytes longer before it left the
+/// endpoint (the send path pads the Initial packet of a datagram when
+/// it knows how long the rest of the datagram is). The packet's size
+/// and the in-flight counters follow. Returns false if no live packet
+/// has this number.
+pub fn growPacket(self: *SentPacketTracker, pn: u64, extra: u64) bool {
+    const idx = self.indexOf(pn) orelse return false;
+    const p = &self.packets[idx];
+    if (p.dead) return false;
+    self.subInFlight(p.*);
+    p.bytes += extra;
+    self.addInFlight(p.*);
+    return true;
+}
+
 /// Find the index of the tracked packet with the given PN.
 /// Returns null if no match. O(log N) binary search.
 pub fn indexOf(self: *const SentPacketTracker, pn: u64) ?u32 {
@@ -630,6 +645,35 @@ test "record + remove + bytes_in_flight bookkeeping" {
     try std.testing.expectEqual(@as(u64, 1200), t.bytes_in_flight);
     var pn_buf: [8]u64 = undefined;
     try std.testing.expectEqualSlices(u64, &.{ 0, 2 }, livePns(&t, &pn_buf));
+}
+
+test "growPacket makes a tracked packet longer, and the counters follow" {
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
+    try t.record(.{ .pn = 0, .sent_time_us = 100, .bytes = 300, .ack_eliciting = true, .in_flight = true });
+    try t.record(.{ .pn = 1, .sent_time_us = 110, .bytes = 60, .ack_eliciting = false, .in_flight = false });
+
+    // An in-flight packet: its size and both counters grow.
+    try std.testing.expect(t.growPacket(0, 900));
+    try std.testing.expectEqual(@as(u64, 1200), t.packets[t.indexOf(0).?].bytes);
+    try std.testing.expectEqual(@as(u64, 1200), t.bytes_in_flight);
+    try std.testing.expectEqual(@as(u64, 1200), t.ack_eliciting_in_flight);
+
+    // A packet that is not in flight: its size grows, no counter does.
+    try std.testing.expect(t.growPacket(1, 40));
+    try std.testing.expectEqual(@as(u64, 100), t.packets[t.indexOf(1).?].bytes);
+    try std.testing.expectEqual(@as(u64, 1200), t.bytes_in_flight);
+
+    // What is removed gives back what was added.
+    const removed = t.removeAt(t.indexOf(0).?);
+    try std.testing.expectEqual(@as(u64, 1200), removed.bytes);
+    try std.testing.expectEqual(@as(u64, 0), t.bytes_in_flight);
+    try std.testing.expectEqual(@as(u64, 0), t.ack_eliciting_in_flight);
+
+    // No such packet, or a removed one: nothing changes.
+    try std.testing.expect(!t.growPacket(7, 10));
+    try std.testing.expect(!t.growPacket(0, 10));
+    try std.testing.expectEqual(@as(u64, 0), t.bytes_in_flight);
 }
 
 test "indexOf returns null for missing PNs" {

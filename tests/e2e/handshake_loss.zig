@@ -88,9 +88,17 @@ const Shape = struct {
     leads_with_handshake: bool = false,
     /// Some packet in the datagram is a Handshake packet.
     has_handshake: bool = false,
+    /// Some packet in the datagram has a long header (Initial, 0-RTT
+    /// or Handshake).
+    has_long: bool = false,
     /// The datagram holds a 1-RTT packet.
     has_short: bool = false,
 };
+
+/// RFC 9000 section 14: the size every QUIC path carries, the size a
+/// datagram with an Initial packet must have, and the most an endpoint
+/// may send before it has probed the path for more.
+const min_path_datagram_len: usize = 1200;
 
 /// What a datagram holds, read from the long headers only (nothing is
 /// decrypted). A short header is always last.
@@ -104,6 +112,7 @@ fn shape(datagram: []const u8) Shape {
             break;
         }
         const typ = (first & 0x30) >> 4;
+        out.has_long = true;
         if (pos == 0 and typ == 0) out.leads_with_initial = true;
         if (pos == 0 and typ == 2) out.leads_with_handshake = true;
         if (typ == 2) out.has_handshake = true;
@@ -210,6 +219,10 @@ const Damage = struct {
 /// Set to true to print every datagram of every run (a debugging aid).
 const trace_every_run = false;
 
+/// Every run fails if a datagram breaks a size rule of RFC 9000
+/// section 14 (see the end of `run`). False only to measure.
+const check_datagram_sizes = true;
+
 const max_marks = 64;
 
 const Outcome = struct {
@@ -265,6 +278,26 @@ const Outcome = struct {
     /// The server still has the connection, and it is open.
     server_open: bool = false,
     client_open: bool = false,
+    /// The longest datagram of each end that holds a long-header
+    /// packet (both ends poll with 4096-byte buffers, so nothing but
+    /// the endpoint itself limits it).
+    longest_client_handshake_datagram: usize = 0,
+    longest_server_handshake_datagram: usize = 0,
+    /// Datagrams with a long-header packet that are longer than 1200
+    /// bytes (RFC 9000 section 14.2: not before the path is probed;
+    /// and a probe is a 1-RTT packet alone in its datagram).
+    oversized_handshake_datagrams: usize = 0,
+    /// Datagrams of the client that hold an Initial packet and are
+    /// shorter than 1200 bytes (RFC 9000 section 14.1: MUST NOT be).
+    client_unexpanded_initials: usize = 0,
+    /// Datagrams of the server that hold an ack-eliciting Initial
+    /// packet and are shorter than 1200 bytes (section 14.1 too).
+    server_unexpanded_initials: usize = 0,
+    /// Datagrams of the server that hold an ack-eliciting Initial
+    /// packet (the ServerHello and its copies, and probes).
+    server_ack_eliciting_initials: usize = 0,
+    /// Flight datagrams of the server, by length (the first eight).
+    flight_len: [8]usize = @splat(0),
 };
 
 const Net = struct {
@@ -287,9 +320,68 @@ const Net = struct {
     client_handshake_delivered: bool = false,
     /// The client sent a datagram that holds a Handshake packet.
     client_sent_handshake: bool = false,
+    /// The client's first Destination Connection ID. The Initial keys
+    /// of both directions come from it (RFC 9001 section 5.2), so the
+    /// harness can open every Initial packet, as anyone on the path
+    /// can.
+    first_dcid: [20]u8 = @splat(0),
+    first_dcid_len: usize = 0,
 
     fn sinceStart(self: *const Net) u64 {
         return self.lb.now_us - self.start_us;
+    }
+
+    /// Does the Initial packet at the front of this datagram ask for
+    /// an acknowledgment? Null if the datagram does not lead with an
+    /// Initial packet, or if the packet does not open.
+    fn leadingInitialIsAckEliciting(self: *Net, datagram: []const u8, from_server: bool) ?bool {
+        if (datagram.len < 7 or datagram.len > 4096) return null;
+        if ((datagram[0] & 0x80) == 0 or ((datagram[0] & 0x30) >> 4) != 0) return null;
+        if (self.first_dcid_len == 0) {
+            if (from_server) return null;
+            const n: usize = datagram[5];
+            if (n > self.first_dcid.len or datagram.len < 6 + n) return null;
+            @memcpy(self.first_dcid[0..n], datagram[6 .. 6 + n]);
+            self.first_dcid_len = n;
+        }
+        const init_keys = quic.wire.initial.deriveInitialKeys(self.first_dcid[0..self.first_dcid_len], from_server) catch return null;
+        var keys = quic.wire.short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret) catch return null;
+        defer keys.deinitAead();
+        // The open removes the header protection in place: work on a
+        // copy, the datagram itself goes to its receiver untouched.
+        var copy: [4096]u8 = undefined;
+        @memcpy(copy[0..datagram.len], datagram);
+        var pt: [4096]u8 = undefined;
+        const opened = quic.wire.long_packet.openInitial(&pt, copy[0..datagram.len], .{ .keys = &keys }) catch return null;
+        var it = quic.frame.iter(opened.payload);
+        var ack_eliciting = false;
+        while (it.next() catch return null) |f| switch (f) {
+            .padding, .ack, .connection_close => {},
+            else => ack_eliciting = true,
+        };
+        return ack_eliciting;
+    }
+
+    /// RFC 9000 section 14, checked from the outside for one datagram
+    /// as its sender made it (before the network touches it).
+    fn checkSize(self: *Net, datagram: []const u8, s: Shape, from_server: bool) void {
+        if (s.has_long) {
+            const longest = if (from_server) &self.out.longest_server_handshake_datagram else &self.out.longest_client_handshake_datagram;
+            longest.* = @max(longest.*, datagram.len);
+            if (datagram.len > min_path_datagram_len) self.out.oversized_handshake_datagrams += 1;
+        }
+        if (!s.leads_with_initial) return;
+        if (from_server) {
+            if (self.leadingInitialIsAckEliciting(datagram, true) orelse false) {
+                self.out.server_ack_eliciting_initials += 1;
+                if (datagram.len < min_path_datagram_len) self.out.server_unexpanded_initials += 1;
+            }
+        } else {
+            // Called for the side effect too: the first datagram of
+            // the client gives the keys.
+            _ = self.leadingInitialIsAckEliciting(datagram, false);
+            if (datagram.len < min_path_datagram_len) self.out.client_unexpanded_initials += 1;
+        }
     }
 
     fn randomLoss(self: *Net, percent: u8, burst: *u8) bool {
@@ -326,6 +418,7 @@ const Net = struct {
         if (s.leads_with_handshake) self.out.client_handshakes += 1;
         if (self.client_sent_handshake and s.leads_with_initial) self.out.client_initials_after_handshake += 1;
         if (s.has_handshake) self.client_sent_handshake = true;
+        self.checkSize(datagram, s, false);
         var verdict: Verdict = .deliver;
         const index = self.out.client_datagrams;
         if (index >= self.o.drop_client.first and index < self.o.drop_client.first + self.o.drop_client.count) verdict = .drop;
@@ -401,12 +494,14 @@ const Net = struct {
             if (handshake_seen_before and s.leads_with_initial) {
                 self.out.server_initials_after_client_handshake += 1;
             }
+            self.checkSize(datagram, s, true);
             var verdict: Verdict = .deliver;
             const server_index = self.out.server_datagrams;
             if (server_index >= self.o.drop_server.first and server_index < self.o.drop_server.first + self.o.drop_server.count) verdict = .drop;
             if (self.o.drop_server.first != 0 and server_index >= self.o.drop_server.first and self.sinceStart() < self.o.drop_server.until_us) verdict = .drop;
             if (s.carries_crypto) {
                 if (self.out.flights < max_marks) self.out.flight_us[self.out.flights] = self.sinceStart();
+                if (self.out.flights < self.out.flight_len.len) self.out.flight_len[self.out.flights] = datagram.len;
                 self.out.flights += 1;
                 if (self.out.flights_dropped < self.o.drop_server_flights) verdict = .drop;
                 if (self.sinceStart() < self.o.no_flight_for_us) verdict = .drop;
@@ -521,6 +616,24 @@ fn run(allocator: std.mem.Allocator, o: Options) !Outcome {
     net.out.client_early_copies = cli.conn.early_handshake_retransmits;
     net.out.server_open = srv.iterator().len > 0 and srv.iterator()[0].conn.closeState() == .open;
     net.out.client_open = cli.conn.closeState() == .open;
+    // RFC 9000 section 14, in every run of this file: whatever was
+    // lost or damaged, no end may put a handshake datagram on the wire
+    // that is longer than 1200 bytes, and a datagram with an Initial
+    // packet that must be expanded is expanded.
+    if (check_datagram_sizes and (net.out.oversized_handshake_datagrams != 0 or
+        net.out.client_unexpanded_initials != 0 or
+        net.out.server_unexpanded_initials != 0))
+    {
+        std.debug.print("[handshake_loss] datagram sizes: {d} with a long header are over 1200 B (longest: client {d}, server {d}); with an Initial packet and under 1200 B: client {d}, server {d} (of {d} ack-eliciting)\n", .{
+            net.out.oversized_handshake_datagrams,
+            net.out.longest_client_handshake_datagram,
+            net.out.longest_server_handshake_datagram,
+            net.out.client_unexpanded_initials,
+            net.out.server_unexpanded_initials,
+            net.out.server_ack_eliciting_initials,
+        });
+        return error.DatagramSizeRule;
+    }
     if (o.verbose) std.debug.print("[handshake_loss] done={} at={d}us flights={d} dropped={d} client: {d} datagrams ({d} initial, {d} handshake, {d} dropped) server: {d} datagrams, {d} B out for {d} B in before validation\n", .{ net.out.done, net.out.done_at_us, net.out.flights, net.out.flights_dropped, net.out.client_datagrams, net.out.client_initials, net.out.client_handshakes, net.out.client_dropped, net.out.server_datagrams, net.server_bytes_out, net.server_bytes_in });
     return net.out;
 }
@@ -570,6 +683,57 @@ test "handshake loss: with no loss, nothing is sent twice" {
         try std.testing.expect(out.confirmed);
         try std.testing.expect(out.confirmed_at_us < 100 * us_per_ms);
         try std.testing.expectEqual(@as(usize, 0), out.server_done_resends);
+    }
+}
+
+const print_datagram_sizes = false;
+
+test "handshake loss: a handshake datagram is 1200 bytes at most, and exactly 1200 with an Initial packet that must be expanded (RFC 9000 14.1, 14.2)" {
+    // Both ends poll with 4096-byte buffers here, so only the endpoint
+    // limits what it sends.
+    //
+    // Until v0.26.0 each PACKET of a datagram was capped at 1200 on
+    // its own. MEASURED then: the server's ServerHello + Handshake
+    // datagram was 1310 bytes (wide certificate), the client's padded
+    // Initial + Handshake ACK 1250, an ACK-only client Initial 1201;
+    // and the server did not pad at all: with the small certificate
+    // its whole flight was one datagram of 831 bytes.
+    //
+    // `run` checks the rules in every run of this file. This test
+    // holds the numbers of the plain case.
+    for ([_]Cert{ .small, .wide, .huge }) |cert| {
+        const out = try run(std.testing.allocator, .{ .cert = cert, .until_confirmed = true });
+        try std.testing.expect(out.confirmed);
+        if (print_datagram_sizes) {
+            std.debug.print("[handshake_loss] {t}: {d} flight datagrams {any}; longest with a long header: client {d}, server {d}; ack-eliciting server Initial datagrams: {d}\n", .{
+                cert,                                  out.flights,                           out.flight_len[0..@min(out.flights, out.flight_len.len)],
+                out.longest_client_handshake_datagram, out.longest_server_handshake_datagram, out.server_ack_eliciting_initials,
+            });
+        }
+        try std.testing.expectEqual(@as(usize, 0), out.oversized_handshake_datagrams);
+        try std.testing.expectEqual(@as(usize, 0), out.client_unexpanded_initials);
+        try std.testing.expectEqual(@as(usize, 0), out.server_unexpanded_initials);
+        // The ServerHello goes out in one datagram, and that one is
+        // full: 14.1 gives the least and 14.2 the most.
+        try std.testing.expectEqual(@as(usize, 1), out.server_ack_eliciting_initials);
+        try std.testing.expectEqual(min_path_datagram_len, out.flight_len[0]);
+        try std.testing.expectEqual(min_path_datagram_len, out.longest_server_handshake_datagram);
+        try std.testing.expectEqual(min_path_datagram_len, out.longest_client_handshake_datagram);
+    }
+
+    // The same under loss: copies and probes obey the rules too.
+    var seed: u64 = 1;
+    while (seed <= 40) : (seed += 1) {
+        const out = try run(std.testing.allocator, .{
+            .cert = if (seed % 2 == 0) .wide else .small,
+            .loss_to_server = 30,
+            .loss_to_client = 30,
+            .seed = seed,
+            .until_confirmed = true,
+        });
+        try std.testing.expectEqual(@as(usize, 0), out.oversized_handshake_datagrams);
+        try std.testing.expectEqual(@as(usize, 0), out.client_unexpanded_initials);
+        try std.testing.expectEqual(@as(usize, 0), out.server_unexpanded_initials);
     }
 }
 

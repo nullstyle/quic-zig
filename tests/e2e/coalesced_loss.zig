@@ -2,18 +2,24 @@
 //!
 //! Once the client has the whole server flight it emits ONE datagram that
 //! coalesces the Handshake Finished and its first 1-RTT packet (here:
-//! STREAM "hello"). Initial keys are already gone by then (the client
-//! discards them the moment TLS completes, in `drainInboxIntoTls`), so the
-//! datagram leads with a Handshake packet; and because the path counts as
-//! validated once the handshake completes, that first 1-RTT packet is also
-//! the first DPLPMTUD probe, padded to `initial_mtu + probe_step` = 1264
-//! bytes, which makes the whole datagram ~1353 bytes. A real path has been
-//! observed to lose exactly that datagram. The stack must recover through
-//! loss detection alone: the Finished must be retransmitted so the server
-//! completes the handshake, and the 1-RTT STREAM data must be
-//! retransmitted so the server eventually reads "hello" — even on a path
-//! that never carries a datagram larger than 1252 bytes (IPv4 + UDP on a
-//! 1280-byte MTU link), where every probe-sized retransmission is lost too.
+//! STREAM "hello"). Initial keys are already gone by then, so the datagram
+//! leads with a Handshake packet. The stack must recover from the loss of
+//! that datagram through loss detection alone: the Finished must be
+//! retransmitted so the server completes the handshake, and the 1-RTT
+//! STREAM data must be retransmitted so the server eventually reads
+//! "hello".
+//!
+//! History, and why the second scenario is here. Until v0.26.0 that
+//! datagram was about 1353 bytes: the path counts as validated once the
+//! handshake completes, so the first 1-RTT packet was also the first
+//! DPLPMTUD probe, padded to `initial_mtu + probe_step` = 1264 bytes ON
+//! ITS OWN, behind the Handshake packet. A real path was observed to lose
+//! exactly that datagram, and on a path that never carries more than 1252
+//! bytes (IPv4 + UDP on a 1280-byte MTU link) every probe-sized
+//! retransmission was lost too. The datagram is one handshake datagram
+//! now: 1200 bytes at most (RFC 9000 section 14.2), and a probe is a
+//! 1-RTT packet alone in its datagram. On the narrow path nothing but the
+//! probes is lost.
 
 const std = @import("std");
 const quic = @import("quic");
@@ -101,9 +107,10 @@ const Ctx = struct {
     /// Which kind of client-opened stream carries "hello". qmsg's HELLO
     /// rides a client unidirectional stream (id 2); requests ride bidi.
     stream_kind: enum { bidi, uni },
-    /// The one coalesced datagram that gets dropped, once.
-    dropped: bool = false,
-    dropped_len: usize = 0,
+    /// The coalesced datagram under test was seen, and its length.
+    /// (Policy `once` drops it.)
+    seen: bool = false,
+    seen_len: usize = 0,
     drops: usize = 0,
     verbose: bool = false,
     client_datagrams: usize = 0,
@@ -122,8 +129,8 @@ const Ctx = struct {
         try std.testing.expectEqual(hello.len, n);
     }
 
-    /// Client -> server, dropping the first datagram that coalesces the
-    /// padded Initial ACK, Finished and the 1-RTT STREAM.
+    /// Client -> server. The first datagram that coalesces the Finished
+    /// and the 1-RTT STREAM is the one under test.
     fn pumpClient(self: *Ctx) !void {
         while (try self.cli.conn.poll(self.lb.rx, self.lb.now_us)) |len| {
             const datagram = self.lb.rx[0..len];
@@ -133,16 +140,18 @@ const Ctx = struct {
                 std.debug.print("[coalesced_loss] t={d}us C->S #{d} {d}B: {s} (cli_hs={} stream={?d})\n", .{ self.lb.now_us, self.client_datagrams, len, describe(datagram, &dbuf), self.cli.conn.handshakeDone(), self.stream_id });
             }
             if (leadsWithInitial(datagram)) try std.testing.expect(len >= 1200);
-            const under_test = !self.dropped and self.stream_id != null;
+            const under_test = !self.seen and self.stream_id != null;
             if (under_test) {
                 // The datagram under test: the first one the client emits
                 // once it holds the whole server flight and has 1-RTT data
                 // to send. It carries the Handshake Finished and the first
-                // 1-RTT packet.
-                try std.testing.expect(len > 1300);
+                // 1-RTT packet, and it is one handshake datagram: 1200
+                // bytes at most. (It was 1353: the 1-RTT packet in it was
+                // a DPLPMTUD probe of 1264 bytes.)
+                try std.testing.expect(len <= 1200);
                 try std.testing.expect(leadsWithHandshake(datagram));
-                self.dropped = true;
-                self.dropped_len = len;
+                self.seen = true;
+                self.seen_len = len;
             }
             const drop = switch (self.policy) {
                 .once => under_test,
@@ -206,12 +215,21 @@ const Outcome = struct {
     done_at_step: ?usize,
     done_at_us: u64,
     drops: usize,
-    dropped_len: usize,
+    seen_len: usize,
     client_datagrams: usize,
     server_datagrams: usize,
 };
 
 fn run(allocator: std.mem.Allocator, policy: @FieldType(Ctx, "policy"), stream_kind: @FieldType(Ctx, "stream_kind"), verbose: bool) !Outcome {
+    return runWithClientMtu(allocator, policy, stream_kind, verbose, null);
+}
+
+/// `client_mtu`: set the client connection's `mtu` field by hand (no
+/// embedder can: it is 1200, and the peer's `max_udp_payload_size` can
+/// only lower it). With a larger value a handshake datagram may be
+/// longer than a DPLPMTUD probe, so only the rule itself keeps a probe
+/// out of it.
+fn runWithClientMtu(allocator: std.mem.Allocator, policy: @FieldType(Ctx, "policy"), stream_kind: @FieldType(Ctx, "stream_kind"), verbose: bool, client_mtu: ?usize) !Outcome {
     const protos = [_][]const u8{"hq-test"};
 
     var srv = try quic.Server.init(.{
@@ -231,6 +249,7 @@ fn run(allocator: std.mem.Allocator, policy: @FieldType(Ctx, "policy"), stream_k
         .transport_params = common.defaultParams(),
     });
     defer cli.deinit();
+    if (client_mtu) |mtu| cli.conn.mtu = mtu;
 
     var lb = try quic.testing.Loopback.init(.{
         .allocator = allocator,
@@ -260,12 +279,12 @@ fn run(allocator: std.mem.Allocator, policy: @FieldType(Ctx, "policy"), stream_k
         lb.now_us += 1_000;
     }
     if (verbose) std.debug.print(
-        "[coalesced_loss] dropped={} ({d} bytes) drops={d} client_datagrams={d} server_datagrams={d} done_at_step={?d} t={d}us cli_hs={} srv_slots={d} got={s}\n",
-        .{ ctx.dropped, ctx.dropped_len, ctx.drops, ctx.client_datagrams, ctx.server_datagrams, done_at_step, lb.now_us, cli.conn.handshakeDone(), srv.iterator().len, ctx.got.items },
+        "[coalesced_loss] seen={} ({d} bytes) drops={d} client_datagrams={d} server_datagrams={d} done_at_step={?d} t={d}us cli_hs={} srv_slots={d} got={s}\n",
+        .{ ctx.seen, ctx.seen_len, ctx.drops, ctx.client_datagrams, ctx.server_datagrams, done_at_step, lb.now_us, cli.conn.handshakeDone(), srv.iterator().len, ctx.got.items },
     );
-    // The datagram under test was seen and dropped.
-    try std.testing.expect(ctx.dropped);
-    try std.testing.expect(ctx.dropped_len > 1300);
+    // The datagram under test was seen.
+    try std.testing.expect(ctx.seen);
+    try std.testing.expect(ctx.seen_len <= 1200);
     // Recovery: both handshakes complete and the server read the bytes.
     try std.testing.expect(cli.conn.handshakeDone());
     try std.testing.expect(srv.iterator().len > 0);
@@ -275,7 +294,7 @@ fn run(allocator: std.mem.Allocator, policy: @FieldType(Ctx, "policy"), stream_k
         .done_at_step = done_at_step,
         .done_at_us = lb.now_us,
         .drops = ctx.drops,
-        .dropped_len = ctx.dropped_len,
+        .seen_len = ctx.seen_len,
         .client_datagrams = ctx.client_datagrams,
         .server_datagrams = ctx.server_datagrams,
     };
@@ -289,17 +308,35 @@ test "handshake and first 1-RTT data recover when the coalesced Finished+STREAM 
     try std.testing.expect(out.done_at_step.? < 100);
 }
 
-test "handshake and first 1-RTT data recover on a path that cannot carry datagrams over 1252 bytes" {
-    // Every datagram over 1252 bytes vanishes: the coalesced
-    // Finished+probe datagram and every later DPLPMTUD probe. The
-    // requeued STREAM data must eventually leave in a datagram the
-    // path can carry.
+test "the handshake and the first 1-RTT data lose nothing on a path that cannot carry datagrams over 1252 bytes" {
+    // Every datagram over 1252 bytes vanishes. Until v0.26.0 that was
+    // the coalesced Finished + probe datagram (1353 bytes) and every
+    // probe-sized retransmission of the STREAM data behind it (this
+    // test then said: three of them, at about 28, 81 and 186 ms).
+    // Now the datagram with the Finished and the data is 1200 bytes
+    // at most, so the server has both at once. What the path loses is
+    // the probe alone (a probe is there to be lost on such a path).
     const out = try run(std.testing.allocator, .{ .over = 1252 }, .bidi, false);
-    // The original datagram plus at least one probe-sized retransmission
-    // (with the default probe_threshold of 3 it is three: the requeued
-    // STREAM data rides in the next probe each time, ~28/81/186 ms).
-    try std.testing.expect(out.drops >= 2);
-    try std.testing.expect(out.done_at_step.? < 1000);
+    try std.testing.expect(out.seen_len <= 1200);
+    try std.testing.expect(out.done_at_step.? <= coalesced_arrival_steps);
+}
+
+/// Loop steps (1 ms each) until the server has the handshake and
+/// "hello" when no datagram that matters is lost: the same count with
+/// and without the 1252-byte limit.
+const coalesced_arrival_steps: usize = 3;
+
+test "a DPLPMTUD probe is alone in its datagram, also when a handshake datagram could hold it" {
+    // The probe stands for one datagram size. Behind a Handshake
+    // packet the datagram is longer than that size, and its loss or
+    // its ACK says nothing about the size. With the real MTU of 1200
+    // a probe (1264 bytes) cannot fit behind another packet anyway;
+    // here the client's MTU is raised by hand to 4096, so that only
+    // the rule keeps the probe out of the Finished + STREAM datagram.
+    // `run` checks that this datagram is 1200 bytes at most.
+    const out = try runWithClientMtu(std.testing.allocator, .{ .over = 1252 }, .bidi, false, 4096);
+    try std.testing.expect(out.seen_len <= 1200);
+    try std.testing.expect(out.done_at_step.? <= coalesced_arrival_steps);
 }
 
 test "same recovery when the first 1-RTT data is on a client unidirectional stream" {
@@ -307,6 +344,6 @@ test "same recovery when the first 1-RTT data is on a client unidirectional stre
     try std.testing.expectEqual(@as(usize, 1), once.drops);
     try std.testing.expect(once.done_at_step.? < 100);
     const narrow = try run(std.testing.allocator, .{ .over = 1252 }, .uni, false);
-    try std.testing.expect(narrow.drops >= 2);
-    try std.testing.expect(narrow.done_at_step.? < 1000);
+    try std.testing.expect(narrow.seen_len <= 1200);
+    try std.testing.expect(narrow.done_at_step.? <= coalesced_arrival_steps);
 }

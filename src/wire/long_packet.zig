@@ -129,10 +129,10 @@ pub const InitialSealOptions = struct {
     payload: []const u8,
     /// Initial-level packet keys (derived per RFC 9001 §5.2).
     keys: *const PacketKeys,
-    /// Pad the protected datagram to at least this many bytes by
-    /// appending PADDING frames (0x00) inside the AEAD payload.
-    /// RFC 9000 §14 requires the client's first-flight Initial UDP
-    /// datagram to be ≥ 1200 bytes.
+    /// Make the protected packet exactly this many bytes by appending
+    /// PADDING frames (0x00) inside the AEAD payload. A packet that is
+    /// already as long, or longer, is not changed. RFC 9000 §14
+    /// requires the client's Initial UDP datagrams to be ≥ 1200 bytes.
     pad_to: usize = 0,
     /// Force a specific PN length (1..4). Must accommodate `pn`.
     pn_length_override: ?u8 = null,
@@ -179,28 +179,44 @@ pub fn sealInitial(dst: []u8, opts: InitialSealOptions) Error!usize {
         break :blk x;
     };
 
-    // Find the smallest plaintext length that satisfies both the
-    // sample-floor and pad_to (after accounting for the variable Length
-    // varint).
+    // Find the plaintext length that satisfies the sample-floor, and
+    // that makes the packet exactly `pad_to` bytes when it is shorter.
     var pt_len: usize = @max(opts.payload.len, min_pt_for_sample);
     var length_varint_size: usize = varint.encodedLen(pt_len + 16 + pn_len);
-    var total_size: usize = (header_len_with_pn_no_length_field - pn_len) + length_varint_size + pn_len + pt_len + 16;
+    // Everything but the Length field and the plaintext: the header
+    // up to the token, the packet number, the AEAD tag.
+    const fixed_len: usize = header_len_with_pn_no_length_field + 16;
+    var total_size: usize = fixed_len + length_varint_size + pt_len;
 
     if (total_size < opts.pad_to) {
-        const need = opts.pad_to - total_size;
-        pt_len += need;
-        // Recompute Length varint size (may have grown).
-        const new_length_field_value = pt_len + 16 + pn_len;
-        const new_length_varint_size = varint.encodedLen(new_length_field_value);
-        if (new_length_varint_size != length_varint_size) {
-            // Length varint grew — overshoot the floor by a few
-            // bytes; padding is a floor, not a target.
-            const delta = new_length_varint_size - length_varint_size;
-            length_varint_size = new_length_varint_size;
-            total_size += delta;
-        } else {
-            total_size += need;
+        // `pad_to` is a target, hit exactly: the caller sized a
+        // datagram by it (RFC 9000 section 14.1 says "at least 1200",
+        // section 14.2 says "no more than 1200 until the path is
+        // probed", and a caller's buffer may be exactly that long).
+        //
+        // The padding can make the Length field longer (a value of 63
+        // takes one byte, 64 takes two). Then the field grows FIRST,
+        // and the padding is what is left: one byte less. If the
+        // value then fits one byte again (it is 63), the field stays
+        // at two bytes: a varint need not be the shortest one (RFC
+        // 9000 section 16), and so every size can be made.
+        //
+        // Until v0.26.0 this was "a floor, not a target": a small
+        // payload (an ACK frame, a PING) came out at `pad_to` + 1,
+        // and the size check below used a number that was too small
+        // by the whole padding. MEASURED 2026-10-04: every ACK-only
+        // and PING-only Initial datagram of the client was 1201
+        // bytes on the wire.
+        var padded_pt = opts.pad_to - fixed_len - length_varint_size;
+        const needed = varint.encodedLen(padded_pt + 16 + pn_len);
+        if (needed > length_varint_size) {
+            length_varint_size = needed;
+            padded_pt = opts.pad_to - fixed_len - length_varint_size;
         }
+        // `padded_pt >= pt_len`: the packet was at least one byte
+        // short, and that byte is the longer Length field at worst.
+        pt_len = padded_pt;
+        total_size = fixed_len + length_varint_size + pt_len;
     }
 
     const length_field_value: u64 = @as(u64, pt_len) + 16 + pn_len;
@@ -221,6 +237,7 @@ pub fn sealInitial(dst: []u8, opts: InitialSealOptions) Error!usize {
         .pn_length = pn_length,
         .pn_truncated = truncated,
         .payload_length = length_field_value,
+        .payload_length_bytes = @intCast(length_varint_size),
         .reserved_bits = opts.reserved_bits,
         .quic_bit = opts.quic_bit,
     } });
@@ -743,8 +760,7 @@ test "Initial seal pads to 1200 bytes when pad_to is set" {
         .keys = &keys,
         .pad_to = 1200,
     });
-    try testing.expect(len >= 1200);
-    try testing.expect(len <= 1208); // generous bound — varint reflow
+    try testing.expectEqual(@as(usize, 1200), len);
 
     var pt: [2048]u8 = undefined;
     const opened = try openInitial(&pt, packet[0..len], .{ .keys = &keys });
@@ -753,6 +769,68 @@ test "Initial seal pads to 1200 bytes when pad_to is set" {
     try testing.expectEqualSlices(u8, tiny_payload, opened.payload[0..tiny_payload.len]);
     // The bytes after our payload are PADDING (RFC 9000 §19.1 = 0x00).
     for (opened.payload[tiny_payload.len..]) |b| try testing.expectEqual(@as(u8, 0), b);
+}
+
+test "Initial seal pads to exactly pad_to, for every payload length and every target" {
+    // A datagram is sized by this number, so it must be hit: one byte
+    // more does not fit a buffer of 1200 bytes, and is more than a
+    // sender may put on a path it has not probed (RFC 9000 14.2).
+    const dcid: [8]u8 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const init_keys = try initial_mod.deriveInitialKeys(&dcid, false);
+    const keys = try short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret);
+    const scid: [4]u8 = .{ 9, 9, 9, 9 };
+    const payload_buf: [1100]u8 = @splat(0x01); // PING frames
+
+    // Every payload length around the place where the Length field
+    // goes from one byte to two (a value of 64), up to a full packet,
+    // into a buffer of exactly 1200 bytes.
+    var payload_len: usize = 1;
+    while (payload_len <= payload_buf.len) : (payload_len += if (payload_len < 80) 1 else 53) {
+        var packet: [1200]u8 = undefined;
+        const len = try sealInitial(&packet, .{
+            .dcid = &dcid,
+            .scid = &scid,
+            .pn = 3,
+            .payload = payload_buf[0..payload_len],
+            .keys = &keys,
+            .pad_to = 1200,
+        });
+        try testing.expectEqual(@as(usize, 1200), len);
+        var pt: [2048]u8 = undefined;
+        const opened = try openInitial(&pt, packet[0..len], .{ .keys = &keys });
+        try testing.expectEqual(len, opened.bytes_consumed);
+        try testing.expectEqualSlices(u8, payload_buf[0..payload_len], opened.payload[0..payload_len]);
+        for (opened.payload[payload_len..]) |b| try testing.expectEqual(@as(u8, 0), b);
+    }
+
+    // Every target from one byte more than the packet needs: the
+    // sender that fills a datagram behind other packets asks for
+    // sizes like these (a Length value of 63 or 64 is among them).
+    const small = payload_buf[0..10];
+    var unpadded: [256]u8 = undefined;
+    const base = try sealInitial(&unpadded, .{ .dcid = &dcid, .scid = &scid, .pn = 3, .payload = small, .keys = &keys });
+    var target: usize = base + 1;
+    while (target <= 160) : (target += 1) {
+        var packet: [256]u8 = undefined;
+        const len = try sealInitial(packet[0..target], .{
+            .dcid = &dcid,
+            .scid = &scid,
+            .pn = 3,
+            .payload = small,
+            .keys = &keys,
+            .pad_to = target,
+        });
+        try testing.expectEqual(target, len);
+        var pt: [256]u8 = undefined;
+        const opened = try openInitial(&pt, packet[0..len], .{ .keys = &keys });
+        try testing.expectEqual(len, opened.bytes_consumed);
+        try testing.expectEqualSlices(u8, small, opened.payload[0..small.len]);
+    }
+
+    // A packet that is already longer than the target is not changed.
+    var longer: [256]u8 = undefined;
+    const same = try sealInitial(&longer, .{ .dcid = &dcid, .scid = &scid, .pn = 3, .payload = small, .keys = &keys, .pad_to = base - 1 });
+    try testing.expectEqual(base, same);
 }
 
 test "Initial seal token round-trips through open" {

@@ -801,3 +801,139 @@ test "Server.feed: pre-handshake peer rebind keeps slot routing on the validated
         old_peer_addr,
     ));
 }
+
+test "Server <-> Client: a handshake completes when both ends poll with buffers of exactly 1200 bytes" {
+    // 1200 bytes is the size every QUIC path carries, and an embedder
+    // may size its buffers by it. Until v0.26.0 that did not work: an
+    // ACK-only (or PING-only) Initial packet of the client came out
+    // at 1201 bytes, and `poll` returned an error for it.
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    });
+    defer srv.deinit();
+
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    });
+    defer cli.deinit();
+
+    var buf: [1200]u8 = undefined;
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xb7), .port = 0 } };
+    try cli.conn.advance();
+
+    // The ClientHello.
+    const hello_len = (try cli.conn.poll(&buf, 1_000)) orelse return error.NoFirstInitial;
+    try std.testing.expectEqual(@as(usize, 1200), hello_len);
+    _ = try srv.feed(buf[0..hello_len], peer_addr, 1_000);
+
+    // Of the server's first datagram the client gets the Initial
+    // packet only (the ServerHello); the Handshake packet behind it
+    // is cut off. So the client has an ACK to send in an Initial
+    // packet, and nothing else: the packet that was 1201 bytes.
+    const flight_len = (try srv.iterator()[0].conn.poll(&buf, 2_000)) orelse return error.NoServerFlight;
+    try std.testing.expectEqual(@as(usize, 1200), flight_len);
+    const initial_len = quic.wire.long_packet.peekPacketLen(buf[0..flight_len]) orelse return error.NotALongHeader;
+    try std.testing.expect(initial_len < flight_len);
+    try cli.conn.handle(buf[0..initial_len], null, 2_000);
+    const ack_len = (try cli.conn.poll(&buf, 2_000)) orelse return error.NoAckEmitted;
+    try std.testing.expectEqual(@as(usize, 1200), ack_len);
+    _ = try srv.feed(buf[0..ack_len], peer_addr, 2_000);
+
+    // The rest of the handshake, with the timers running: the server
+    // sends the lost Handshake data again on its probe timeout.
+    var now_us: u64 = 3_000;
+    while (now_us < 10_000_000) : (now_us += 10_000) {
+        while (try cli.conn.poll(&buf, now_us)) |len| {
+            try std.testing.expect(len <= 1200);
+            _ = try srv.feed(buf[0..len], peer_addr, now_us);
+        }
+        for (srv.iterator()) |slot| {
+            while (try slot.conn.poll(&buf, now_us)) |len| {
+                try cli.conn.handle(buf[0..len], null, now_us);
+            }
+        }
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        if (cli.conn.handshakeDone() and srv.iterator()[0].conn.handshakeDone()) break;
+    }
+    try std.testing.expect(cli.conn.handshakeDone());
+    try std.testing.expect(srv.iterator()[0].conn.handshakeDone());
+}
+
+test "Server <-> Client: a client's close in an Initial packet is a 1200-byte datagram, with the token of the Retry" {
+    // RFC 9000 section 14.1: every datagram of a client with an
+    // Initial packet is 1200 bytes at least (a server drops a shorter
+    // one that begins with an Initial packet, and the close with it).
+    // Section 8.1.2: after a Retry the token is in ALL Initial
+    // packets of the client (a server with Retry on answers an
+    // Initial packet without it with another Retry). Until v0.26.0
+    // the Initial packet with a CONNECTION_CLOSE had neither.
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    const retry_key: quic.RetryTokenKey = .{
+        0x86, 0x71, 0x15, 0x0d, 0x9a, 0x2c, 0x5e, 0x04,
+        0x31, 0xa8, 0x6a, 0xf9, 0x18, 0x44, 0xbd, 0x2b,
+        0x4d, 0xee, 0x90, 0x3f, 0xa7, 0x61, 0x0c, 0x55,
+        0xf2, 0x83, 0x1d, 0xb6, 0x95, 0x77, 0x40, 0x29,
+    };
+
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .retry_token_key = retry_key,
+    });
+    defer srv.deinit();
+
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    });
+    defer cli.deinit();
+
+    var rx: [4096]u8 = undefined;
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xb8), .port = 0 } };
+    try cli.conn.advance();
+
+    // First Initial, Retry, second Initial (with the token): the
+    // server has the connection now.
+    const first_len = (try cli.conn.poll(&rx, 1_000)) orelse return error.NoFirstInitial;
+    try std.testing.expectEqual(quic.Server.FeedOutcome.retry_sent, try srv.feed(rx[0..first_len], peer_addr, 1_000));
+    const retry_resp = srv.drainStatelessResponse() orelse return error.NoRetryQueued;
+    var retry_buf: [256]u8 = undefined;
+    @memcpy(retry_buf[0..retry_resp.len], retry_resp.slice());
+    try cli.conn.handle(retry_buf[0..retry_resp.len], null, 1_000);
+    const second_len = (try cli.conn.poll(&rx, 2_000)) orelse return error.NoSecondInitial;
+    try std.testing.expectEqual(quic.Server.FeedOutcome.accepted, try srv.feed(rx[0..second_len], peer_addr, 2_000));
+
+    // The client gives up before it has anything from the server: it
+    // has Initial keys only.
+    cli.conn.close(true, 0x0a, "no");
+    const close_len = (try cli.conn.poll(&rx, 3_000)) orelse return error.NoCloseEmitted;
+    try std.testing.expectEqual(@as(usize, 1200), close_len);
+    const parsed = try quic.wire.header.parse(rx[0..close_len], 0);
+    try std.testing.expect(parsed.header == .initial);
+    try std.testing.expectEqual(quic.conn.retry_token.max_token_len, parsed.header.initial.token.len);
+
+    // And the server reads it.
+    _ = try srv.feed(rx[0..close_len], peer_addr, 3_000);
+    const ev = srv.iterator()[0].conn.closeEvent() orelse return error.ServerDidNotLearnOfTheClose;
+    try std.testing.expectEqual(quic.conn.lifecycle.CloseSource.peer, ev.source);
+    try std.testing.expectEqual(@as(u64, 0x0a), ev.error_code);
+}

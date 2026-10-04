@@ -257,6 +257,18 @@ current_incoming_path_id: u32 = 0,
 current_incoming_addr: ?Address = null,
 last_authenticated_path_id: ?u32 = null,
 poll_addr_override: ?Address = null,
+/// Set by `pollDatagram` while it builds one datagram: the bytes of
+/// the packets that are already in it. A packet that is coalesced
+/// behind them gets what is left of the datagram's budget (its size,
+/// and the anti-amplification allowance), not the whole budget again.
+/// Zero outside `pollDatagram`.
+poll_datagram_used: usize = 0,
+/// Set by `pollDatagram` while it builds one datagram: where the
+/// Initial packet of the datagram leaves what is needed to seal it a
+/// second time with PADDING frames (RFC 9000 section 14.1), when the
+/// rest of the datagram is known. Null outside `pollDatagram`: a
+/// direct `pollLevel(.initial, ...)` pads its own packet.
+poll_initial: ?*conn_send.InitialInDatagram = null,
 /// PTO backoff count for Initial and Handshake. Application PTO
 /// backoff is per-path in `PathState.pto_count`. Reset when an
 /// ACK newly acknowledges ack-eliciting data in that space.
@@ -4016,6 +4028,18 @@ pub const canSend = conn_send.canSend;
 /// pending at each (CRYPTO, ACK, STREAM) into a coalesced
 /// short/long-header datagram per RFC 9000 §12.2. Returns the
 /// total bytes written, or null if nothing was ready.
+///
+/// Sizes (RFC 9000 §14). A datagram that holds an Initial or a
+/// Handshake packet is 1200 bytes at most, whatever the length of
+/// `dst`. A client's datagram with an Initial packet, and a server's
+/// with an ack-eliciting Initial packet, is exactly 1200 (padded). A
+/// datagram with only a 1-RTT packet is as long as the path's MTU, or
+/// as long as a DPLPMTUD probe (up to `pmtud_config.max_mtu`).
+///
+/// So give `dst` at least 1200 bytes, and as many as the largest
+/// probe you want to allow. With fewer than 1200, a client gets
+/// `error.OutputTooSmall` for a datagram with an Initial packet, and
+/// a server sends no ServerHello.
 pub const poll = conn_send.poll;
 
 /// Path-aware outgoing-datagram step. Single-path callers can

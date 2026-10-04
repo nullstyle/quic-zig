@@ -21,8 +21,55 @@ changes.
   `OutputTooSmall` for fields within their limits (only for an output
   buffer that is too short).
 
+- **A server's first flight is padded.** A datagram of a server that
+  holds an ack-eliciting Initial packet (the ServerHello, a copy of
+  it, a probe) is now 1200 bytes, as RFC 9000 section 14.1 says it
+  MUST be. It was never padded: with a small certificate the whole
+  flight was one datagram of 831 bytes. Every padded byte counts
+  against the anti-amplification limit, so a server that may not send
+  1200 bytes yet sends no ServerHello yet (an ACK still goes). In
+  numbers, for that small certificate: before the client's address is
+  validated, its 1200 bytes pay for three copies of the flight (3 x
+  1200), where four fitted before (4 x 831).
+- **`sealInitial`'s `pad_to` is exact.** It was a floor that could
+  come out one byte over. A padded Initial packet may now have a
+  Length field of two bytes for a value that fits one (RFC 9000
+  section 16 allows it).
+
 ### Fixed
 
+- **A handshake datagram is 1200 bytes at most.** Each packet of a
+  coalesced datagram was capped at 1200 on its own, so the datagram
+  could be much longer. Measured with 4096-byte send buffers: client
+  Initial + Handshake + 1-RTT 1353 bytes, server Initial + Handshake
+  1310, a Handshake packet with a DPLPMTUD probe behind it 2427. A
+  path that carries less dropped them (an IPv6 path of the minimum
+  MTU carries 1232 bytes), and an older test in this repository
+  records a real path that did. The bundled loops use 1500-byte
+  buffers, so they sent the 1353 and the 1310. Now the budget is for
+  the datagram (RFC 9000 section 14.2): each packet gets what the
+  ones in front of it left, of the size and of the
+  anti-amplification allowance. A DPLPMTUD probe is alone in its
+  datagram. On a path that carries 1252 bytes the server now has the
+  handshake and the first stream data within 3 ms and nothing but
+  probes is lost; before, the datagram with the client's Finished and
+  that data was lost there, and each probe-sized copy of the data
+  behind it.
+- **A client's datagram with an Initial packet is exactly 1200
+  bytes.** The padding was in the Initial packet, so a Handshake
+  packet behind it made the datagram longer; and an Initial packet
+  with only an ACK or a PING came out at 1201 bytes, which `poll`
+  could not write into a 1200-byte buffer (it returned an error). The
+  padding now belongs to the datagram.
+- **A client's CONNECTION_CLOSE in an Initial packet reaches the
+  server.** That packet was not padded (a server drops a datagram
+  that begins with an Initial packet and is shorter than 1200 bytes)
+  and did not carry the token of a Retry (RFC 9000 section 8.1.2:
+  all Initial packets do).
+- **Lost handshake data is sent again also when it does not fit
+  whole.** A CRYPTO chunk in the retransmission queue was sent only
+  if all of it fitted the packet, and nothing behind it was sent
+  either. It is now cut to what fits.
 - **A server with Retry on answers every legal client.** The Retry
   token had room for 45 bytes of client address and connection IDs.
   The client picks the length of its first Destination Connection ID

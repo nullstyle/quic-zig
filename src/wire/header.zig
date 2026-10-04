@@ -164,6 +164,12 @@ pub const Initial = struct {
     /// tag. On parse, as decoded; on encode, written verbatim — the
     /// caller is responsible for it matching the actual emitted body.
     payload_length: u64,
+    /// Encode only: how many bytes the Length field takes (1, 2, 4 or
+    /// 8). 0 = the shortest that holds the value. A varint need not
+    /// be the shortest one (RFC 9000 section 16), and a sender that
+    /// pads a packet to an exact size needs a Length field whose size
+    /// does not depend on the amount of padding. Ignored on parse.
+    payload_length_bytes: u8 = 0,
     /// Bits 3-2 of the first byte. MUST be 0 in well-formed v1
     /// packets after header protection is removed; preserved here for
     /// round-trip tests.
@@ -641,7 +647,10 @@ fn encodeInitial(dst: []u8, h: Initial) Error!usize {
     @memcpy(dst[pos .. pos + h.token.len], h.token);
     pos += h.token.len;
 
-    pos += try varint.encode(dst[pos..], h.payload_length);
+    pos += if (h.payload_length_bytes == 0)
+        try varint.encode(dst[pos..], h.payload_length)
+    else
+        try varint.encodeFixed(dst[pos..], h.payload_length, h.payload_length_bytes);
 
     if (dst.len < pos + h.pn_length.bytes()) return Error.BufferTooSmall;
     try packet_number.encode(dst[pos..], h.pn_truncated, h.pn_length.bytes());
