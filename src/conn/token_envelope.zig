@@ -8,11 +8,19 @@
 //! non-`.valid` result. This module owns the single copy of that
 //! shared shape:
 //!
-//!     nonce (12)  |  ciphertext (68)  |  tag (16)     = 96 bytes
+//!     nonce (12)  |  ciphertext (86)  |  tag (16)     = 114 bytes
 //!
 //! with an inner plaintext of a fixed header (version, issued_at,
 //! expires_at) followed by length-prefixed bound fields, zero-padded
-//! to 68 bytes before AES-GCM-256 seal.
+//! to 86 bytes before AES-GCM-256 seal.
+//!
+//! The 86 comes from the largest input a token can get: the Retry
+//! token binds a client address context (23 bytes for IPv6) and two
+//! connection IDs (20 bytes each, the QUIC v1 limit), behind 20 bytes
+//! of header and 3 length bytes. Until v0.26.0 the plaintext was 68
+//! bytes, which left 45 for the three fields: an IPv6 client whose
+//! first Destination Connection ID was longer than 14 bytes got no
+//! Retry (and no connection) from a server with 8-byte IDs.
 //!
 //! What stays per-module, deliberately: the `Key` declarations and
 //! rotation cadence (NEW_TOKENs outlive Retry tokens by orders of
@@ -42,7 +50,12 @@ pub const tag_len: usize = AesGcm256.tag_len;
 /// instantiation — THE wire-indistinguishability constant. Bumping it
 /// for one token format alone would break the other's documented
 /// opacity property, so it is deliberately not part of `Config`.
-pub const token_len: usize = 96;
+///
+/// The number is not free: `retry_token.zig` checks at compile time
+/// that a full address context and two connection IDs of full length
+/// fit. A token of another length (one made by an older version of
+/// this library, for example) fails `validate` as `.malformed`.
+pub const token_len: usize = 114;
 
 /// Plaintext payload size: `token_len - nonce_len - tag_len`.
 /// Plaintext is zero-padded to this length before AEAD seal so every
@@ -103,8 +116,8 @@ pub fn Envelope(comptime cfg: Config) type {
         pub const plaintext_fixed_overhead: usize = 4 + 8 + 8 + num_fields;
 
         /// Maximum sum of the bound-field lengths that fits in the
-        /// fixed plaintext budget. The caller's mint enforces this at
-        /// runtime (its error policy is per-module).
+        /// fixed plaintext budget. The caps together are no larger
+        /// (checked below), so fields within their caps always fit.
         pub const max_bound_total: usize = plaintext_len - plaintext_fixed_overhead;
 
         pub const Fields = [num_fields][]const u8;
@@ -112,11 +125,16 @@ pub fn Envelope(comptime cfg: Config) type {
         comptime {
             std.debug.assert(plaintext_len >= plaintext_fixed_overhead);
             // Each field's cap must be expressible in its one-byte
-            // length prefix and must fit the budget alone.
+            // length prefix, and all fields at their caps must fit
+            // together. A format whose fields can be legal one by one
+            // and too long together has a "does not fit" case that a
+            // peer picks (that was the v2 Retry token).
+            var caps_total: usize = 0;
             for (cfg.field_caps) |cap| {
                 std.debug.assert(cap <= 255);
-                std.debug.assert(cap <= max_bound_total);
+                caps_total += cap;
             }
+            std.debug.assert(caps_total <= max_bound_total);
         }
 
         /// Mint the token: random nonce, fixed header (expiry derived
@@ -124,9 +142,10 @@ pub fn Envelope(comptime cfg: Config) type {
         /// AEAD seal under `cfg.domain_separator`.
         ///
         /// The caller has already validated each field against its
-        /// cap and the field-length sum against `max_bound_total` —
-        /// this function asserts rather than re-policing, so the
-        /// per-module error vocabulary stays at the public boundary.
+        /// cap — this function asserts rather than re-policing, so
+        /// the per-module error vocabulary stays at the public
+        /// boundary. Fields within their caps fit (see the check
+        /// above).
         pub fn seal(
             dst: *[token_len]u8,
             key: *const [key_len]u8,
@@ -217,6 +236,7 @@ pub fn Envelope(comptime cfg: Config) type {
             inline for (0..num_fields) |i| {
                 const f = fields[i];
                 std.debug.assert(f.len <= cfg.field_caps[i]);
+                std.debug.assert(pos + 1 + f.len <= dst.len);
                 dst[pos] = @intCast(f.len);
                 pos += 1;
                 @memcpy(dst[pos..][0..f.len], f);

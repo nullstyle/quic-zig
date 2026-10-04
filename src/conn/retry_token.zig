@@ -9,37 +9,38 @@
 //! guarantee while making the token bytes a uniformly random opaque
 //! blob to peers and on-path observers (anti-fingerprinting).
 //!
-//! Wire format (v2, fixed 96 bytes):
+//! Wire format (v3, fixed 114 bytes):
 //!
-//!     nonce (12)  |  ciphertext (68)  |  tag (16)
+//!     nonce (12)  |  ciphertext (86)  |  tag (16)
 //!
-//! Mint always pads the inner plaintext to exactly 68 bytes before
+//! Mint always pads the inner plaintext to exactly 86 bytes before
 //! AEAD-sealing, so on-wire tokens are constant-length and cannot
 //! be distinguished by the layout of bound fields.
 //!
-//! Inner plaintext (68 bytes after zero-padding):
+//! Inner plaintext (86 bytes after zero-padding):
 //!
 //!     version    (4 bytes,  big-endian)
 //!     issued_at  (8 bytes,  big-endian, microseconds since epoch)
 //!     expires_at (8 bytes,  big-endian, microseconds since epoch)
-//!     addr_len   (1 byte)         | client_address (<= 22 bytes)
+//!     addr_len   (1 byte)         | client_address (<= 23 bytes)
 //!     odcid_len  (1 byte)         | original_dcid  (<= 20 bytes)
 //!     scid_len   (1 byte)         | retry_scid     (<= 20 bytes)
-//!     <pad>      (zero bytes to reach 68)
+//!     <pad>      (zero bytes to reach 86)
 //!
-//! Mint enforces a per-call sum constraint so the bound material
-//! fits the fixed plaintext budget:
+//! The three fields at their full length are 63 bytes, and that is
+//! exactly the room behind the 23 fixed bytes. So `mint` cannot fail
+//! for an input that the wire allows: any client address, any first
+//! Destination Connection ID a client may pick (8 to 20 bytes; the
+//! client picks it, RFC 9000 section 7.2), any length of the server's
+//! own IDs. A compile-time check below holds that.
 //!
-//!     addr_len + odcid_len + scid_len <= 45  bytes  (= 68 - 23)
-//!
-//! With the 23-byte address context (full IPv6) and the default
-//! 8-byte server SCID that leaves up to 14 bytes for the peer's
-//! original DCID — comfortably above the 8-byte typical and the
-//! 8-byte interop convention. Peers presenting unusually long initial
-//! DCIDs (>14 bytes when paired with the default SCID length) cause
-//! `mint` to return `Error.OutputTooSmall`; the server then drops
-//! the Initial rather than minting a Retry. Operators that want
-//! full 20-byte CID coverage should bump `max_token_len`.
+//! v2 (until v0.26.0) had a 68-byte plaintext: 45 bytes for the three
+//! fields. With a 23-byte IPv6 address context and 8-byte server IDs
+//! that left 14 bytes for the client's first DCID. A longer one made
+//! `mint` fail, the server dropped the Initial, and the client timed
+//! out. MEASURED 2026-10-04: quic-go picks 8 to 20 bytes at random,
+//! and the interop `retry` cell failed in exactly the runs with a 19
+//! or 20 byte ID (4 runs of 20).
 
 const std = @import("std");
 
@@ -61,40 +62,40 @@ pub const tag_len: usize = token_envelope.tag_len;
 pub const max_address_len: usize = path.Address.context_max_len;
 
 /// Maximum CID length the format can carry. Matches the QUIC v1
-/// limit (`path.max_cid_len = 20`). Note the per-call sum cap
-/// described in this module's preamble — both CIDs at full 20
-/// bytes plus a 23-byte address overflows the fixed plaintext
-/// budget and `mint` will return `Error.OutputTooSmall`.
+/// limit (`path.max_cid_len = 20`). Both connection IDs at this
+/// length fit together with a full address context.
 pub const max_cid_len: usize = path.max_cid_len;
 
-/// Total token length on the wire (and in `Token`). Fixed at 96
-/// bytes: a 12-byte AEAD nonce, a 68-byte ciphertext (zero-padded
+/// Total token length on the wire (and in `Token`). Fixed at 114
+/// bytes: a 12-byte AEAD nonce, an 86-byte ciphertext (zero-padded
 /// plaintext under fixed-size AEAD), and a 16-byte authentication
 /// tag. Owned by `token_envelope` because NEW_TOKEN must share the
 /// exact same shape to stay indistinguishable on the wire.
 pub const max_token_len: usize = token_envelope.token_len;
 
-/// The shared AEAD envelope, instantiated with the v2 Retry domain
+/// The shared AEAD envelope, instantiated with the v3 Retry domain
 /// separator and the three bound fields in wire order. The envelope
 /// owns the seal/open/parse/compare mechanics; this module keeps the
 /// key material, error vocabulary, and budget policy.
 const Env = token_envelope.Envelope(.{
-    .domain_separator = "quic retry token v2",
+    .domain_separator = "quic retry token v3",
     .field_caps = &.{ max_address_len, max_cid_len, max_cid_len },
 });
 
 comptime {
-    // The plaintext budget must accommodate a full IPv6 address
-    // context plus two default (8-byte) CIDs, or IPv6 Retry breaks
-    // again. This couples the budget to `path.Address.context_max_len`
-    // so a future Address change can't silently shrink token capacity.
+    // The plaintext must hold the largest input the wire allows: a
+    // full address context and two connection IDs of full length.
+    // Then `mint` has no "does not fit" case that a peer can reach.
+    // A change to `path.Address` or to the envelope that breaks this
+    // does not compile: make `token_envelope.token_len` larger (and
+    // give the domain separators a new version) instead.
     std.debug.assert(max_address_len >= path.Address.context_max_len);
-    std.debug.assert(path.Address.context_max_len + 8 + 8 <= max_bound_total);
+    std.debug.assert(max_address_len + max_cid_len + max_cid_len <= max_bound_total);
 }
 
 /// Maximum sum of the three bound-field lengths that fits in the
-/// fixed plaintext budget. Mint enforces this at runtime via
-/// `Error.OutputTooSmall`.
+/// fixed plaintext budget. The three caps together are no larger
+/// (checked above), so `mint` has no sum to enforce.
 const max_bound_total: usize = Env.max_bound_total;
 
 /// 32-byte AES-GCM-256 key. The server must keep this stable across
@@ -113,9 +114,7 @@ pub const Token = [max_token_len]u8;
 
 /// Errors raised by `mint` and (via `validate`) surfaced as `.malformed`.
 pub const Error = error{
-    /// Output buffer was smaller than `max_token_len`, or the
-    /// requested bound-field combination doesn't fit the fixed
-    /// plaintext budget.
+    /// Output buffer was smaller than `max_token_len`.
     OutputTooSmall,
     /// `client_address` exceeded `max_address_len`.
     ContextTooLong,
@@ -159,8 +158,8 @@ pub const ValidationResult = enum {
     /// are within the allowed window.
     valid,
     /// Length, AEAD authentication, or recovered-field shape was
-    /// wrong (also covers the case where a v1 HMAC-format token is
-    /// presented to v2). Treat as untrusted.
+    /// wrong (also covers a token of an older format: v1 HMAC, 53
+    /// bytes, or v2, 96 bytes). Treat as untrusted.
     malformed,
     /// The QUIC version field did not match.
     wrong_version,
@@ -174,16 +173,14 @@ pub const ValidationResult = enum {
 };
 
 /// Mint a Retry token into `dst`. Returns the number of bytes
-/// written (always `max_token_len`). Errors come from oversized
-/// bound fields, a bound-total that doesn't fit the fixed plaintext
-/// budget, a short output buffer, or an underlying BoringSSL
-/// failure.
+/// written (always `max_token_len`). Errors come from a bound field
+/// longer than the wire allows (an address context over
+/// `max_address_len`, a connection ID over `max_cid_len`), a short
+/// output buffer, or an underlying BoringSSL failure. Fields within
+/// those limits always fit.
 pub fn mint(dst: []u8, opts: MintOptions) Error!usize {
     if (dst.len < max_token_len) return Error.OutputTooSmall;
     try validateBoundInputs(opts.client_address, opts.original_dcid, opts.retry_scid);
-    if (opts.client_address.len + opts.original_dcid.len + opts.retry_scid.len > max_bound_total) {
-        return Error.OutputTooSmall;
-    }
 
     try Env.seal(
         dst[0..max_token_len],
@@ -368,7 +365,7 @@ test "Retry token rejects wrong version expired future and malformed tokens" {
     try std.testing.expectEqual(ValidationResult.malformed, validate(&token, opts));
 }
 
-test "Retry token rejects v1 HMAC-format prefix as malformed under v2" {
+test "Retry token of an older format is malformed, not an error" {
     // Sanity: a token shaped like the legacy v1 wire format (53
     // bytes, no random nonce, HMAC tag at the tail) doesn't match
     // `max_token_len` and is rejected by the length gate. Operators
@@ -376,6 +373,17 @@ test "Retry token rejects v1 HMAC-format prefix as malformed under v2" {
     // cleanly.
     var legacy: [53]u8 = @splat(0xcd);
     try std.testing.expectEqual(ValidationResult.malformed, validate(&legacy, .{
+        .key = &testing_key,
+        .now_us = 1_000,
+        .client_address = "addr",
+        .original_dcid = &.{1},
+        .retry_scid = &.{2},
+    }));
+    // The same for a v2 token (96 bytes, until v0.26.0): a client
+    // that still holds one after the server was updated shows it, and
+    // the answer is "not a token of mine", never a failure.
+    var v2_sized: [96]u8 = @splat(0xcd);
+    try std.testing.expectEqual(ValidationResult.malformed, validate(&v2_sized, .{
         .key = &testing_key,
         .now_us = 1_000,
         .client_address = "addr",
@@ -424,19 +432,71 @@ test "Retry token mint rejects oversized bound fields" {
     }));
 }
 
-test "Retry token mint rejects bound-total over plaintext budget" {
-    var dst: [max_token_len]u8 = undefined;
-    var addr_full: [max_address_len]u8 = @splat(0);
-    var cid_full: [max_cid_len]u8 = @splat(0);
-    // 22 + 20 + 20 = 62 > 45, doesn't fit the 68-byte plaintext.
-    try std.testing.expectError(Error.OutputTooSmall, mint(&dst, .{
+test "Retry token binds an address and two connection IDs of full length" {
+    // The largest input the wire allows: a full address context (23
+    // bytes, IPv6) and two 20-byte connection IDs. v2 had room for 45
+    // of these 63 bytes and `mint` returned OutputTooSmall; the
+    // client's first Destination Connection ID is the client's
+    // choice, so a client could make the server unable to answer it.
+    var addr_full: [max_address_len]u8 = @splat(0xa5);
+    var odcid_full: [max_cid_len]u8 = @splat(0x0d);
+    var scid_full: [max_cid_len]u8 = @splat(0x5c);
+    const token = try minted(.{
         .key = &testing_key,
-        .now_us = 1,
-        .lifetime_us = 1,
+        .now_us = 1_000_000,
+        .lifetime_us = 5_000_000,
         .client_address = &addr_full,
-        .original_dcid = &cid_full,
-        .retry_scid = &cid_full,
+        .original_dcid = &odcid_full,
+        .retry_scid = &scid_full,
+    });
+    try std.testing.expectEqual(ValidationResult.valid, validate(&token, .{
+        .key = &testing_key,
+        .now_us = 2_000_000,
+        .client_address = &addr_full,
+        .original_dcid = &odcid_full,
+        .retry_scid = &scid_full,
     }));
+    // The last byte of the last field is bound too (it is the last
+    // byte of the plaintext: there is no padding behind it).
+    scid_full[max_cid_len - 1] ^= 0x01;
+    try std.testing.expectEqual(ValidationResult.invalid, validate(&token, .{
+        .key = &testing_key,
+        .now_us = 2_000_000,
+        .client_address = &addr_full,
+        .original_dcid = &odcid_full,
+        .retry_scid = &scid_full,
+    }));
+}
+
+test "Retry token mint fits every length of the three bound fields" {
+    // Every combination of lengths within the caps mints and
+    // validates. (A sum the plaintext could not hold was an error
+    // until v0.26.0.)
+    var addr_buf: [max_address_len]u8 = @splat(0x11);
+    var odcid_buf: [max_cid_len]u8 = @splat(0x22);
+    var scid_buf: [max_cid_len]u8 = @splat(0x33);
+    for ([_]usize{ 0, 1, 7, 19, max_address_len }) |addr_len| {
+        var odcid_len: usize = 0;
+        while (odcid_len <= max_cid_len) : (odcid_len += 1) {
+            for ([_]usize{ 0, 1, 8, max_cid_len }) |scid_len| {
+                const token = try minted(.{
+                    .key = &testing_key,
+                    .now_us = 1_000_000,
+                    .lifetime_us = 5_000_000,
+                    .client_address = addr_buf[0..addr_len],
+                    .original_dcid = odcid_buf[0..odcid_len],
+                    .retry_scid = scid_buf[0..scid_len],
+                });
+                try std.testing.expectEqual(ValidationResult.valid, validate(&token, .{
+                    .key = &testing_key,
+                    .now_us = 2_000_000,
+                    .client_address = addr_buf[0..addr_len],
+                    .original_dcid = odcid_buf[0..odcid_len],
+                    .retry_scid = scid_buf[0..scid_len],
+                }));
+            }
+        }
+    }
 }
 
 test "Retry token mint rejects undersized output buffer" {
@@ -451,7 +511,10 @@ test "Retry token mint rejects undersized output buffer" {
     }));
 }
 
-test "Retry token mint produces fixed-length 96-byte tokens" {
+test "Retry token mint produces fixed-length 114-byte tokens" {
+    // The length is part of the wire format (and of `quic.RetryToken`,
+    // which an embedder may hold in a buffer of its own).
+    try std.testing.expectEqual(@as(usize, 114), max_token_len);
     var dst: [max_token_len]u8 = undefined;
     const n = try mint(&dst, .{
         .key = &testing_key,
@@ -478,8 +541,8 @@ test "Retry token mint produces fixed-length 96-byte tokens" {
     try std.testing.expect(!std.mem.eql(u8, &dst, &dst2));
 }
 
-test "Retry token KAT: validate pins the v2 wire format" {
-    // Known-answer token minted by the v2 codec under `testing_key`
+test "Retry token KAT: validate pins the v3 wire format" {
+    // Known-answer token minted by the v3 codec under `testing_key`
     // with now_us = 1_700_000_000_000_000, lifetime_us = 30_000_000,
     // client_address = "ip4:203.0.113.7:443", original_dcid =
     // 01..08, retry_scid = aa bb cc dd ee ff 11 22, quic_version = 1.
@@ -491,14 +554,16 @@ test "Retry token KAT: validate pins the v2 wire format" {
     // deliberate, versioned decision (bump the domain separator),
     // never a refactor side effect.
     const kat = [_]u8{
-        0x2d, 0x18, 0x9e, 0xbb, 0x1f, 0x18, 0x20, 0x14, 0xcc, 0x7e, 0x23, 0x9c,
-        0x00, 0xef, 0xef, 0xd2, 0x7b, 0x5e, 0x18, 0x02, 0x18, 0x1e, 0xf6, 0xe4,
-        0x46, 0x54, 0x63, 0x0f, 0x97, 0xe1, 0xa0, 0xff, 0xb7, 0x97, 0xdb, 0xb5,
-        0xeb, 0xcc, 0xf8, 0xed, 0x8e, 0xe8, 0x8b, 0x95, 0x0b, 0x91, 0xee, 0xfa,
-        0xc6, 0x13, 0xa8, 0xf3, 0xdc, 0x71, 0x41, 0xd3, 0x50, 0x45, 0xdc, 0xc6,
-        0x3e, 0x75, 0x32, 0x49, 0x2f, 0xb6, 0xc7, 0x3c, 0x0c, 0xb6, 0x3b, 0xd6,
-        0x5a, 0x5d, 0xab, 0xf2, 0xa4, 0x2a, 0xbd, 0x8d, 0xb2, 0x7f, 0x63, 0xca,
-        0x42, 0x61, 0x28, 0xeb, 0xb9, 0xb4, 0x77, 0x27, 0x62, 0xfb, 0x03, 0x28,
+        0x25, 0x04, 0xb6, 0x1f, 0xa2, 0xd2, 0x41, 0x90, 0xe1, 0x53, 0x26, 0xb8,
+        0x88, 0x32, 0xfe, 0x91, 0x2d, 0x5b, 0xd5, 0x01, 0x00, 0xf8, 0x46, 0xec,
+        0x8b, 0x90, 0x25, 0x0f, 0xd8, 0xfa, 0x06, 0xdb, 0x34, 0x1e, 0x50, 0xc9,
+        0x9f, 0x0c, 0x64, 0x3f, 0x5a, 0x08, 0xc0, 0xb0, 0x8b, 0xbe, 0xf4, 0xef,
+        0x91, 0x54, 0x13, 0x31, 0xb6, 0x5a, 0x9f, 0x8e, 0x96, 0x4d, 0x58, 0xa3,
+        0x34, 0x7b, 0x6e, 0xb9, 0xbf, 0xfe, 0xef, 0x33, 0x03, 0x6b, 0x0f, 0xd0,
+        0x4c, 0x72, 0xb0, 0x39, 0x87, 0x82, 0x02, 0xf2, 0x20, 0xcf, 0x42, 0x99,
+        0xd7, 0xba, 0x30, 0xc1, 0x5d, 0xd5, 0x0c, 0x9a, 0xc3, 0x98, 0xfe, 0x7b,
+        0x9a, 0x56, 0x39, 0x5d, 0x0a, 0xcc, 0xdc, 0x40, 0x64, 0xb4, 0xe4, 0xbf,
+        0xf8, 0x7b, 0x42, 0x48, 0xd5, 0x0c,
     };
     const addr = "ip4:203.0.113.7:443";
     const odcid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };

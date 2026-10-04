@@ -43,8 +43,9 @@ pub const RetransmitFrame = union(enum) {
     max_path_id: frame_types.MaxPathId,
     paths_blocked: frame_types.PathsBlocked,
     path_cids_blocked: frame_types.PathCidsBlocked,
-    /// NEW_TOKEN retransmit slot. Stores the token by value (max 96
-    /// bytes) so the loss-recovery requeue path doesn't need to
+    /// NEW_TOKEN retransmit slot. Stores the token by value (at most
+    /// `NewTokenRetransmit.max_len` bytes) so the loss-recovery
+    /// requeue path doesn't need to
     /// chase a borrowed slice that may have been overwritten when
     /// `pending_frames.new_token` was cleared on first emit.
     new_token: NewTokenRetransmit,
@@ -61,7 +62,11 @@ pub const RetransmitFrame = union(enum) {
 /// of importing the queue type) to avoid a circular import between
 /// `sent_packets` and `pending_frames`.
 pub const NewTokenRetransmit = struct {
-    pub const max_len: usize = 96;
+    /// The same constant as `pending_frames.NewTokenItem.max_len`:
+    /// the send path copies one into the other. Until v0.26.0 this
+    /// was a second, hand-written 96. When the token grew, the copy
+    /// ran past the end of this buffer (a panic in a safe build).
+    pub const max_len: usize = @import("token_envelope.zig").token_len;
     bytes: [max_len]u8 = @splat(0),
     len: u8 = 0,
 
@@ -142,7 +147,7 @@ pub const SentPacket = struct {
     ///
     /// Heap-backed on purpose: an inline [max_retransmit_frames]
     /// array would put ~16 x @sizeOf(RetransmitFrame) (the union's
-    /// NEW_TOKEN arm alone carries 96 token bytes inline) inside
+    /// NEW_TOKEN arm alone carries 114 token bytes inline) inside
     /// every one of the 4096 tracker slots, ballooning SentPacket
     /// from its pinned 184 bytes to ~2.3 KB and the tracker to
     /// ~9.5 MB per connection. The array is allocated only for the

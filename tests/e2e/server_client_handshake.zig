@@ -359,6 +359,135 @@ test "Server <-> Client: handshake completes via Retry round-trip" {
     try std.testing.expectEqualStrings("hq-test", srv.iterator()[0].conn.inner.alpnSelected().?);
 }
 
+/// One Retry round trip through `Server.feed`: the first Initial earns
+/// a Retry, the client echoes the token, the handshake completes.
+///
+/// `first_dcid_len` is the length of the client's first Destination
+/// Connection ID, which the client picks (RFC 9000 section 7.2: at
+/// least 8 bytes; section 17.2: at most 20). `client_cid_len` and
+/// `server_cid_len` are the lengths of each end's own IDs. The token
+/// binds the client's address, that first DCID and the server's Retry
+/// Source Connection ID, so those three decide whether a token can be
+/// made at all.
+fn retryRoundTrip(
+    first_dcid_len: u8,
+    client_cid_len: u8,
+    server_cid_len: u8,
+    peer_addr: quic.conn.path.Address,
+) !void {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    const retry_key: quic.RetryTokenKey = .{
+        0x86, 0x71, 0x15, 0x0d, 0x9a, 0x2c, 0x5e, 0x04,
+        0x31, 0xa8, 0x6a, 0xf9, 0x18, 0x44, 0xbd, 0x2b,
+        0x4d, 0xee, 0x90, 0x3f, 0xa7, 0x61, 0x0c, 0x55,
+        0xf2, 0x83, 0x1d, 0xb6, 0x95, 0x77, 0x40, 0x29,
+    };
+
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .retry_token_key = retry_key,
+        .local_cid_len = server_cid_len,
+    });
+    defer srv.deinit();
+
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .initial_dcid_len = first_dcid_len,
+        .local_cid_len = client_cid_len,
+    });
+    defer cli.deinit();
+
+    var rx: [4096]u8 = undefined;
+    try cli.conn.advance();
+
+    // The first Initial has no token. The server owes a Retry for it.
+    {
+        const now_us: u64 = 1_000;
+        const len = (try cli.conn.poll(&rx, now_us)) orelse return error.NoFirstInitial;
+        const outcome = try srv.feed(rx[0..len], peer_addr, now_us);
+        try std.testing.expectEqual(quic.Server.FeedOutcome.retry_sent, outcome);
+        const retry_resp = srv.drainStatelessResponse() orelse return error.NoRetryQueued;
+        var retry_buf: [256]u8 = undefined;
+        @memcpy(retry_buf[0..retry_resp.len], retry_resp.slice());
+        try cli.conn.handle(retry_buf[0..retry_resp.len], null, now_us);
+    }
+
+    // The second Initial carries the token. No second Retry: a token
+    // that the server made itself must validate.
+    var step: u32 = 0;
+    while (step < 32) : (step += 1) {
+        const now_us: u64 = @as(u64, 2 + step) * 1_000;
+        _ = try pumpClientToServer(&cli, &srv, &rx, peer_addr, now_us);
+        try std.testing.expectEqual(@as(usize, 0), srv.statelessResponseCount());
+        _ = try pumpServerToClient(&srv, &cli, &rx, now_us);
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        if (cli.conn.handshakeDone() and srv.iterator().len > 0) {
+            if (srv.iterator()[0].conn.handshakeDone()) break;
+        }
+    }
+
+    try std.testing.expect(cli.conn.retry_accepted);
+    try std.testing.expect(cli.conn.handshakeDone());
+    try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
+    try std.testing.expect(srv.iterator()[0].conn.handshakeDone());
+}
+
+const retry_client_ipv4: quic.conn.path.Address = .{ .ipv4 = .{ .addr = .{ 203, 0, 113, 7 }, .port = 50_443 } };
+const retry_client_ipv6: quic.conn.path.Address = .{ .ipv6 = .{
+    .addr = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07 },
+    .port = 50_443,
+    .flow = 0xABCDE,
+} };
+
+test "Server <-> Client: a Retry round trip completes for every legal length of the client's first connection ID" {
+    // The client picks the length of its first Destination Connection
+    // ID: 8 to 20 bytes (quic-go picks one of them at random for each
+    // connection). The server must be able to answer each of them
+    // with a Retry, for an IPv4 and for an IPv6 client (the address is
+    // in the token, and the IPv6 one is 16 bytes longer).
+    //
+    // Until v0.26.0 the token had room for 45 bytes of address and
+    // IDs: an IPv6 client with a first DCID above 14 bytes got no
+    // Retry and no connection. The Initial was dropped and the client
+    // timed out.
+    var failed: usize = 0;
+    var cases: usize = 0;
+    var len: u8 = 8;
+    while (len <= 20) : (len += 1) {
+        for ([_]quic.conn.path.Address{ retry_client_ipv4, retry_client_ipv6 }) |addr| {
+            cases += 1;
+            retryRoundTrip(len, 8, 8, addr) catch |err| {
+                failed += 1;
+                std.debug.print("Retry round trip failed: first DCID {d} bytes, {s} client: {s}\n", .{
+                    len, @tagName(addr), @errorName(err),
+                });
+            };
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 26), cases);
+    try std.testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "Server <-> Client: a Retry round trip completes with connection IDs of full length on both ends" {
+    // The largest input a token can get: an IPv6 address (23 bytes of
+    // context), a first DCID of 20 bytes, and a server that issues
+    // 20-byte IDs (the Retry Source Connection ID). The client's own
+    // ID is 20 bytes too, which makes the Retry packet as long as it
+    // can be.
+    try retryRoundTrip(20, 20, 20, retry_client_ipv6);
+    try retryRoundTrip(20, 20, 20, retry_client_ipv4);
+}
+
 test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on existing slot" {
     // Regression coverage for `server × {ngtcp2, quic-go, quiche} × rebind-addr`
     // (the runner's mid-transfer source-address rewrite). Symmetric server-

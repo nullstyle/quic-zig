@@ -124,7 +124,7 @@ test "Server emits NEW_TOKEN to handshake-confirmed client" {
     try std.testing.expect(cli.conn.handshakeDone());
     try std.testing.expect(srv.iterator()[0].conn.handshakeDone());
     try std.testing.expect(capture.fired);
-    // The token must be exactly `new_token.max_token_len` (96) —
+    // The token must be exactly `new_token.max_token_len` (114) —
     // quic mints fixed-shape tokens. A different length means the
     // server emitted from a different code path.
     try std.testing.expectEqual(@as(usize, quic.conn.new_token.max_token_len), capture.len);
@@ -299,4 +299,93 @@ test "Server rejects expired NEW_TOKEN and falls through to Retry" {
     try std.testing.expectEqual(@as(usize, 1), srv.statelessResponseCount());
     // Drain so deinit doesn't trip the bounded-queue assertion.
     while (srv.drainStatelessResponse()) |_| {}
+}
+
+/// A client that shows a token of the size this library made until
+/// v0.26.0 (96 bytes; the token is 114 bytes now). A NEW_TOKEN lives
+/// for hours, so this client is real on the day a server is updated.
+/// Returns the server's answer to the first Initial, after it drove
+/// the handshake to its end.
+fn handshakeWithOldSizedToken(srv: *quic.Server, peer_addr: quic.conn.path.Address) !quic.Server.FeedOutcome {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    const old_token: [96]u8 = @splat(0x5a);
+
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .new_token = &old_token,
+    });
+    defer cli.deinit();
+
+    var rx: [4096]u8 = undefined;
+    try cli.conn.advance();
+
+    const len = (try cli.conn.poll(&rx, 1_000)) orelse return error.NoFirstInitial;
+    const first = try srv.feed(rx[0..len], peer_addr, 1_000);
+
+    var step: u32 = 0;
+    while (step < 32) : (step += 1) {
+        const now_us: u64 = @as(u64, 2 + step) * 1_000;
+        // A Retry (if the server made one) goes to the client like
+        // any other datagram.
+        while (srv.drainStatelessResponse()) |resp| {
+            var buf: [256]u8 = undefined;
+            @memcpy(buf[0..resp.len], resp.slice());
+            try cli.conn.handle(buf[0..resp.len], null, now_us);
+        }
+        _ = try pumpClientToServer(&cli, srv, &rx, peer_addr, now_us);
+        _ = try pumpServerToClient(srv, &cli, &rx, now_us);
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        if (cli.conn.handshakeDone() and srv.iterator().len > 0) {
+            if (srv.iterator()[0].conn.handshakeDone()) break;
+        }
+    }
+    try std.testing.expect(cli.conn.handshakeDone());
+    try std.testing.expectEqual(@as(usize, 1), srv.connectionCount());
+    try std.testing.expect(srv.iterator()[0].conn.handshakeDone());
+    return first;
+}
+
+test "Server answers a token of the old size with a fresh Retry, and the client connects" {
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .new_token_key = new_token_key,
+        .retry_token_key = retry_key,
+    });
+    defer srv.deinit();
+
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xce), .port = 0 } };
+    const first = try handshakeWithOldSizedToken(&srv, peer_addr);
+    // "Not a token of mine": the same answer as for no token at all.
+    try std.testing.expectEqual(quic.Server.FeedOutcome.retry_sent, first);
+}
+
+test "Server without Retry accepts a client that shows a token of the old size" {
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try quic.Server.init(.{
+        .allocator = std.testing.allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .new_token_key = new_token_key,
+    });
+    defer srv.deinit();
+
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xcf), .port = 0 } };
+    const first = try handshakeWithOldSizedToken(&srv, peer_addr);
+    // No Retry key: a token that does not validate is the same as no
+    // token. The connection opens (the address is validated by the
+    // handshake itself).
+    try std.testing.expectEqual(quic.Server.FeedOutcome.accepted, first);
 }

@@ -441,6 +441,13 @@ pub fn applyRetryGate(
 /// is fixed-size, dst buf is fixed-size). Any peer-reachable
 /// path that lands here means an invariant slipped, so the
 /// caller drops the datagram silently.
+///
+/// Until v0.26.0 a peer DID reach it: the token had room for 45
+/// bytes of address and connection IDs, and the client picks the
+/// length of its first Destination Connection ID (8 to 20 bytes). An
+/// IPv6 client with more than 14 got no Retry, and so no connection.
+/// The token now holds a full address and two IDs of full length
+/// (`conn/retry_token.zig` checks that at compile time).
 const RetryMintError = Error || error{RetryEncodeFailed};
 
 fn mintAndQueueRetry(

@@ -14,26 +14,30 @@
 //! AES-GCM-256 blob so peers and on-path observers see opaque random
 //! bytes.
 //!
-//! Wire format (v1, fixed 96 bytes — matches the v2 Retry token shape
+//! Wire format (v2, fixed 114 bytes — matches the v3 Retry token shape
 //! so both formats are uniformly opaque on the wire):
 //!
-//!     nonce (12)  |  ciphertext (68)  |  tag (16)
+//!     nonce (12)  |  ciphertext (86)  |  tag (16)
 //!
-//! Inner plaintext (zero-padded to 68 bytes before AEAD-seal):
+//! Inner plaintext (zero-padded to 86 bytes before AEAD-seal):
 //!
 //!     version    (4 bytes,  big-endian)
 //!     issued_at  (8 bytes,  big-endian, microseconds since epoch)
 //!     expires_at (8 bytes,  big-endian, microseconds since epoch)
-//!     addr_len   (1 byte)         | client_address (<= 22 bytes)
-//!     <pad>      (zero bytes to reach 68)
+//!     addr_len   (1 byte)         | client_address (<= 23 bytes)
+//!     <pad>      (zero bytes to reach 86)
 //!
 //! The address slot is the only variable-length bound material, so the
-//! plaintext budget (68 - 21 fixed = 47 bytes) is far in excess of the
-//! 22-byte `path.Address` shape — there is no `OutputTooSmall` rejection
-//! path for normal addresses, but we keep one for forward-compatibility
-//! if `path.Address` ever grows.
+//! plaintext budget (86 - 21 fixed = 65 bytes) is far in excess of the
+//! 23-byte `path.Address` context: an address within `max_address_len`
+//! always fits (the envelope checks that at compile time).
 //!
-//! Domain separator: `"quic new_token v1"` — distinct from the
+//! v1 (until v0.26.0) was 96 bytes. The size follows the Retry token,
+//! which had to grow (see `retry_token.zig`). A v1 token that a client
+//! kept from an older server fails `validate` as `.malformed`; the
+//! server then treats the client as one without a token.
+//!
+//! Domain separator: `"quic new_token v2"` — distinct from the
 //! Retry-token domain separator so a Retry token presented in the
 //! Initial-token field cannot be mistaken for a NEW_TOKEN (and vice
 //! versa). The server's gate tries NEW_TOKEN.validate first; on
@@ -58,32 +62,28 @@ pub const tag_len: usize = token_envelope.tag_len;
 /// silently disabling NEW_TOKEN issuance for the whole address family.
 pub const max_address_len: usize = path.Address.context_max_len;
 
-/// Total token length on the wire (and in `Token`). Fixed at 96 bytes
-/// so NEW_TOKEN is bytewise indistinguishable from the v2 Retry token
+/// Total token length on the wire (and in `Token`). Fixed at 114 bytes
+/// so NEW_TOKEN is bytewise indistinguishable from the v3 Retry token
 /// shape on the wire — the constant is owned by `token_envelope` for
 /// exactly that reason.
 pub const max_token_len: usize = token_envelope.token_len;
 
-/// The shared AEAD envelope, instantiated with the v1 NEW_TOKEN
+/// The shared AEAD envelope, instantiated with the v2 NEW_TOKEN
 /// domain separator and the single address bound field. The envelope
 /// owns the seal/open/parse/compare mechanics; this module keeps the
 /// key material, error vocabulary, and budget policy.
 const Env = token_envelope.Envelope(.{
-    .domain_separator = "quic new_token v1",
+    .domain_separator = "quic new_token v2",
     .field_caps = &.{max_address_len},
 });
 
 comptime {
     // Couple the address-field cap to the real Address context size so
     // a future Address change can't silently shrink token capacity and
-    // reintroduce the IPv6 NEW_TOKEN regression.
+    // reintroduce the IPv6 NEW_TOKEN regression. (That the cap fits
+    // the plaintext is the envelope's own compile-time check.)
     std.debug.assert(max_address_len >= path.Address.context_max_len);
-    std.debug.assert(path.Address.context_max_len <= max_bound_total);
 }
-
-/// Maximum address-field length that fits the fixed plaintext budget.
-/// Mint enforces this at runtime.
-const max_bound_total: usize = Env.max_bound_total;
 
 /// 32-byte AES-GCM-256 key. The server keeps this stable across every
 /// outstanding token's lifetime so a client returning hours later can
@@ -100,9 +100,7 @@ pub const Token = [max_token_len]u8;
 /// Errors raised by `mint` (and surfaced as `.malformed` from
 /// `validate`).
 pub const Error = error{
-    /// Output buffer was smaller than `max_token_len`, or the
-    /// requested address length doesn't fit the fixed plaintext
-    /// budget.
+    /// Output buffer was smaller than `max_token_len`.
     OutputTooSmall,
     /// `client_address` exceeded `max_address_len`.
     ContextTooLong,
@@ -159,7 +157,6 @@ pub const ValidationResult = enum {
 pub fn mint(dst: []u8, opts: MintOptions) Error!usize {
     if (dst.len < max_token_len) return Error.OutputTooSmall;
     try validateBoundInputs(opts.client_address);
-    if (opts.client_address.len > max_bound_total) return Error.OutputTooSmall;
 
     try Env.seal(
         dst[0..max_token_len],
@@ -354,8 +351,20 @@ test "NEW_TOKEN rejects wrong key" {
     }));
 }
 
+test "NEW_TOKEN of the older size is malformed, not an error" {
+    // v1 tokens were 96 bytes (until v0.26.0). A NEW_TOKEN lives for
+    // hours or days, so a client can show one to a server that was
+    // updated in between. The answer is "not a token of mine".
+    var v1_sized: [96]u8 = @splat(0x5a);
+    try std.testing.expectEqual(ValidationResult.malformed, validate(&v1_sized, .{
+        .key = &testing_key,
+        .now_us = 1_000,
+        .client_address = "addr",
+    }));
+}
+
 test "NEW_TOKEN rejects Retry-token-shaped bytes (wrong domain)" {
-    // A token shaped at the wire level (96 bytes random) but minted
+    // A token shaped at the wire level (114 bytes random) but minted
     // by some other AES-GCM construction, or with the wrong domain
     // separator, can never authenticate. Mint a Retry-token-style
     // blob as a stand-in: the AEAD AAD differs, so opening fails and
@@ -402,7 +411,8 @@ test "NEW_TOKEN mint rejects oversized address and undersized output" {
     }));
 }
 
-test "NEW_TOKEN mint produces fixed-length 96-byte tokens with random nonce" {
+test "NEW_TOKEN mint produces fixed-length 114-byte tokens with random nonce" {
+    try std.testing.expectEqual(@as(usize, 114), max_token_len);
     var dst: [max_token_len]u8 = undefined;
     const n = try mint(&dst, .{
         .key = &testing_key,
@@ -424,8 +434,8 @@ test "NEW_TOKEN mint produces fixed-length 96-byte tokens with random nonce" {
     try std.testing.expect(!std.mem.eql(u8, &dst, &dst2));
 }
 
-test "NEW_TOKEN KAT: validate pins the v1 wire format" {
-    // Known-answer token minted by the v1 codec under `testing_key`
+test "NEW_TOKEN KAT: validate pins the v2 wire format" {
+    // Known-answer token minted by the v2 codec under `testing_key`
     // with now_us = 1_700_000_000_000_000, lifetime_us =
     // 3_600_000_000, client_address = "ip4:203.0.113.7:443",
     // quic_version = 1. Mint is nondeterministic (random nonce), but
@@ -438,14 +448,16 @@ test "NEW_TOKEN KAT: validate pins the v1 wire format" {
     // deliberate, versioned decision (bump the domain separator) —
     // never a refactor side effect.
     const kat = [_]u8{
-        0xd7, 0x1e, 0x08, 0x58, 0x01, 0xf2, 0x5f, 0xd9, 0x75, 0xf0, 0xeb, 0x5d,
-        0x5a, 0xe8, 0xc7, 0xed, 0x7c, 0x10, 0x6d, 0xa6, 0x76, 0x7c, 0xec, 0xa1,
-        0x8c, 0x2d, 0xe8, 0xdc, 0x80, 0x51, 0x6f, 0x99, 0x69, 0x29, 0x30, 0x20,
-        0x63, 0x30, 0x90, 0xda, 0x67, 0x1c, 0x5c, 0xea, 0xbf, 0xcc, 0x8c, 0xe9,
-        0x94, 0xbe, 0xf6, 0x56, 0xfc, 0x8b, 0x02, 0xc8, 0x4f, 0x4b, 0xee, 0xe9,
-        0x14, 0x6a, 0xd9, 0xdc, 0x32, 0x6e, 0xc1, 0x71, 0xdc, 0x2f, 0xcb, 0x12,
-        0xee, 0x10, 0x6b, 0xeb, 0xcd, 0xa7, 0x95, 0x0b, 0x86, 0x9e, 0x6d, 0x23,
-        0x78, 0x1e, 0x51, 0x67, 0x59, 0x91, 0x16, 0xd5, 0x5c, 0xf7, 0xea, 0x60,
+        0x51, 0xf5, 0x53, 0x4d, 0x70, 0x60, 0x47, 0xc6, 0xe5, 0xfb, 0x06, 0x01,
+        0x7d, 0xb0, 0x6e, 0x93, 0xc3, 0xfc, 0x52, 0x5a, 0x8a, 0x13, 0x51, 0x28,
+        0xd9, 0x71, 0x03, 0x1a, 0xe1, 0x84, 0x97, 0xd8, 0x24, 0xb3, 0x53, 0xf1,
+        0xc9, 0x80, 0x15, 0x99, 0xff, 0xa2, 0x68, 0xd4, 0x15, 0xa9, 0x2d, 0xc3,
+        0x05, 0xf6, 0x4f, 0xe4, 0xd6, 0x88, 0xd7, 0x05, 0x04, 0x0f, 0xb6, 0xab,
+        0xe0, 0xf4, 0xd6, 0xbe, 0x87, 0xd1, 0x97, 0xb0, 0xf2, 0x02, 0x69, 0xf2,
+        0x7f, 0xc9, 0x0f, 0x7a, 0xc3, 0x8a, 0x0d, 0x12, 0x10, 0x46, 0xec, 0x1b,
+        0x12, 0xab, 0x1d, 0x29, 0xff, 0xdf, 0x82, 0x12, 0x3b, 0x72, 0xc6, 0x2a,
+        0xd7, 0xb9, 0x89, 0x35, 0x5b, 0x06, 0x69, 0x72, 0xbc, 0xc9, 0x33, 0x9a,
+        0xfe, 0xb5, 0x24, 0xbc, 0xce, 0x05,
     };
     const addr = "ip4:203.0.113.7:443";
 

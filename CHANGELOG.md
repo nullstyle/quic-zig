@@ -5,6 +5,48 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Changed
+
+- **Address-validation tokens are 114 bytes (were 96).**
+  `quic.RetryToken`, `quic.conn.NewTokenBlob`,
+  `retry_token.max_token_len` and `new_token.max_token_len` change
+  size. A buffer written as `[96]u8` for a token must use the type or
+  the constant. The formats have new versions (Retry v3, NEW_TOKEN
+  v2). A token made by an older release fails `validate` as
+  `.malformed`, which a server treats as "no token": it sends a fresh
+  Retry, or accepts the client without one when Retry is off. Tests
+  hold both. `retry_token.mint` and `new_token.mint` no longer return
+  `OutputTooSmall` for fields within their limits (only for an output
+  buffer that is too short).
+
+### Fixed
+
+- **A server with Retry on answers every legal client.** The Retry
+  token had room for 45 bytes of client address and connection IDs.
+  The client picks the length of its first Destination Connection ID
+  (8 to 20 bytes), and an IPv6 address takes 23 bytes: with the
+  default 8-byte server IDs an IPv6 client with a first ID above 14
+  bytes got no Retry. The server dropped its Initial packets, and the
+  client timed out. A server with 20-byte IDs could not answer an IPv6
+  client at all. The token now holds a full address and two IDs of
+  full length, and a compile-time check keeps it so. Test: a Retry
+  round trip through `Server.feed` for each first ID length from 8 to
+  20, with an IPv4 and an IPv6 client (6 of the 26 cases failed
+  before), and one with 20-byte IDs on both ends.
+- **A NEW_CONNECTION_ID frame that was lost is not issued again when
+  the peer has retired that ID.** The loss path queued it again
+  without a check. The ID was no longer ours, so the frame counted as
+  a new issuance: with the peer's limit used up, that was
+  `error.ConnectionIdLimitExceeded` out of `tick` or `handle`, and
+  that ends a connection. Found the first time the interop client ran
+  under 30% loss. The same for PATH_NEW_CONNECTION_ID.
+- **A connection ID sequence number is used once.** The next number
+  came from the IDs still in use, so after the peer retired the
+  newest ID, the next ID got its number again (RFC 9000 section
+  5.1.1; a peer may close for it, section 19.15).
+
 ## [0.25.0] - 2026-10-04
 
 "No stalls under stress": a connection must not stall, and must not

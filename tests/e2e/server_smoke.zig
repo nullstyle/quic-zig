@@ -804,12 +804,12 @@ test "Server.feed with retry_token_key issues a Retry then drops a malformed ech
     const retry_parsed = try quic.wire.header.parse(retry_resp.slice(), 0);
     try std.testing.expect(retry_parsed.header == .retry);
     try std.testing.expectEqualSlices(u8, &client_scid, retry_parsed.header.retry.dcid.slice());
-    // v2 (AES-GCM-256) tokens are 96 bytes wire-shape: 12 nonce + 68
-    // ciphertext + 16 tag (was 53 bytes under the v1 HMAC-only format).
+    // v3 (AES-GCM-256) tokens are 114 bytes wire-shape: 12 nonce + 86
+    // ciphertext + 16 tag (v2: 96 bytes; v1, HMAC-only: 53 bytes).
     try std.testing.expectEqual(quic.conn.retry_token.max_token_len, retry_parsed.header.retry.retry_token.len);
 
     // Second Initial: malformed token (4 bytes of garbage instead
-    // of the canonical 96-byte token). The peer is addressing the
+    // of the canonical 114-byte token). The peer is addressing the
     // retry SCID we just minted, but the token won't validate, so
     // the datagram drops and no Connection is created.
     const retry_scid_bytes = retry_parsed.header.retry.scid.slice();
@@ -912,8 +912,8 @@ test "Server.feed Retry happy-path: client echoes a valid token and a slot opens
     try std.testing.expect(retry_parsed.header == .retry);
     const retry = retry_parsed.header.retry;
     try std.testing.expectEqual(quic.QUIC_VERSION_1, retry.version);
-    // v2 (AES-GCM-256) Retry token: 12-byte nonce + 68-byte ciphertext
-    // + 16-byte tag = 96 bytes. The Retry-token hardening pass moved off the
+    // v3 (AES-GCM-256) Retry token: 12-byte nonce + 86-byte ciphertext
+    // + 16-byte tag = 114 bytes. The Retry-token hardening pass moved off the
     // v1 53-byte HMAC-only format so the wire bytes are uniformly
     // random (no plaintext bound-field reveal).
     try std.testing.expectEqual(quic.conn.retry_token.max_token_len, retry.retry_token.len);

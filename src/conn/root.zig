@@ -76,7 +76,7 @@ pub const retry_token = @import("retry_token.zig");
 /// + client-side opaque blob, distinct from `retry_token` so its key
 /// can be rotated independently.
 pub const new_token = @import("new_token.zig");
-/// Shared 96-byte AEAD envelope behind both token codecs — the one
+/// Shared 114-byte AEAD envelope behind both token codecs — the one
 /// copy of the wire shape they are required to keep identical.
 pub const token_envelope = @import("token_envelope.zig");
 /// RFC 9000 §10.3 stateless-reset token derivation
@@ -237,13 +237,15 @@ pub const Scheduler = path.Scheduler;
 pub const PmtudConfig = path.PmtudConfig;
 /// RFC 8899 DPLPMTUD probe-state-machine phase (re-export).
 pub const PmtudState = path.PmtudState;
-/// 32-byte stateless Retry token (re-export).
+/// Stateless Retry token, `retry_token.max_token_len` bytes: 114
+/// from v0.26.0, 96 before (re-export).
 pub const RetryToken = retry_token.Token;
-/// 32-byte HMAC-SHA256 key for Retry token mint/validate (re-export).
+/// 32-byte AES-GCM-256 key for Retry token mint/validate (re-export).
 pub const RetryTokenKey = retry_token.Key;
 /// Outcome of `retry_token.validate` (valid, expired, invalid, etc.).
 pub const RetryTokenValidationResult = retry_token.ValidationResult;
-/// 96-byte NEW_TOKEN (re-export).
+/// NEW_TOKEN, `new_token.max_token_len` bytes: 114 from v0.26.0, 96
+/// before (re-export).
 pub const NewTokenBlob = new_token.Token;
 /// 32-byte AES-GCM-256 key for NEW_TOKEN mint/validate (re-export).
 pub const NewTokenKey = new_token.Key;

@@ -919,8 +919,9 @@ pub const Error = error{
     ZeroLengthNewToken,
     /// `Connection.queueNewToken` was called with a token longer
     /// than `pending_frames.NewTokenItem.max_len`. quic mints
-    /// fixed-shape 96-byte tokens via `conn.new_token.mint`; only
-    /// custom embedder formats can hit this.
+    /// fixed-shape tokens of exactly that length via
+    /// `conn.new_token.mint`; only custom embedder formats can hit
+    /// this.
     NewTokenTooLong,
     /// `Connection.advertiseAlternativeV4Address` /
     /// `Connection.advertiseAlternativeV6Address` was called before
@@ -2426,7 +2427,7 @@ pub fn queueNewToken(self: *Connection, token: []const u8) Error!void {
     // (a peer that received one would close with FRAME_ENCODING).
     // We also bound the upper end to the inline-buffer capacity;
     // server callers fed by `new_token.mint` always emit exactly
-    // `new_token.max_token_len = 96`, which fits.
+    // `new_token.max_token_len`, which is that capacity.
     if (token.len == 0) return Error.ZeroLengthNewToken;
     if (token.len > PendingFrameQueues.NewTokenItem.max_len) return Error.NewTokenTooLong;
     var item: PendingFrameQueues.NewTokenItem = .{};

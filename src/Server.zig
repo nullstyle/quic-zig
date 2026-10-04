@@ -99,8 +99,17 @@ const PreferredAddressTp = tls_mod.transport_params.PreferredAddress;
 /// Maximum byte size of a single queued stateless response (Version
 /// Negotiation or Retry). Both packet types fit comfortably inside
 /// this bound: VN is ~16 bytes plus 4 bytes per advertised version
-/// (max 16), and Retry is ~32 bytes plus the token (53 bytes).
+/// (max 16), and Retry is at most 177 bytes (checked below).
 const max_stateless_response_bytes: usize = 256;
+
+comptime {
+    // The largest Retry packet (RFC 9000 section 17.2.5): first byte,
+    // version, two connection IDs of 20 bytes with their length
+    // bytes, the token, the 16-byte integrity tag. A token that grows
+    // past this buffer must not compile.
+    const max_retry_len = 1 + 4 + (1 + 20) + (1 + 20) + conn_mod.retry_token.max_token_len + 16;
+    std.debug.assert(max_retry_len <= max_stateless_response_bytes);
+}
 
 /// Bound on the stateless-response queue. Reached only when the
 /// embedder is feeding faster than they drain; on overflow the

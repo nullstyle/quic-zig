@@ -31,7 +31,7 @@ pub const MaxStreamDataItem = struct {
 };
 
 /// One queued NEW_TOKEN frame (RFC 9000 §19.7). The token payload is
-/// stored inline as a fixed 96-byte buffer (matches
+/// stored inline as a fixed 114-byte buffer (matches
 /// `conn.new_token.max_token_len`) plus a `len`. quic mints a single
 /// fixed-shape format so a heap allocation isn't needed.
 pub const NewTokenItem = struct {
@@ -106,7 +106,7 @@ stop_sending: std.ArrayList(StopSendingItem) = .empty,
 // -- NEW_TOKEN (RFC 9000 §19.7) --
 /// NEW_TOKEN payload the server has queued for emission. Single
 /// slot — quic emits at most one NEW_TOKEN per session by
-/// default, so the queue is a fixed buffer holding the 96-byte
+/// default, so the queue is a fixed buffer holding the 114-byte
 /// AEAD-sealed token plus its length. `Connection.queueNewToken`
 /// stages bytes here; the application-level drain in
 /// `pollLevel` clears the slot once the frame is on the wire and

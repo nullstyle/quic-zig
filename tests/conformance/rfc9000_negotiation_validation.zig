@@ -381,7 +381,7 @@ test "MUST NOT accept a Retry token whose Retry SCID differs from the issuing SC
 test "MUST NOT accept a Retry token whose AEAD tag has been tampered with [RFC9000 §8.1.2 ¶6]" {
     // RFC 9000 §8.1.2 ¶6: tokens are integrity-protected; any
     // modification on the wire MUST result in rejection. The fixed
-    // 96-byte format puts the AEAD tag at the tail — flipping a
+    // 114-byte format puts the AEAD tag at the tail — flipping a
     // single tag bit defeats authentication.
     var token = try retry_token.minted(.{
         .key = &retry_key,
@@ -601,7 +601,7 @@ test "NORMATIVE Retry-token-shaped bytes do not pass NEW_TOKEN validate (domain 
     // confused-deputy crossover (Retry token presented in the
     // NEW_TOKEN field, or vice versa) MUST NOT validate. quic
     // enforces this with distinct AEAD AAD strings; the property
-    // here is the asymmetry: a 96-byte blob shaped like a Retry
+    // here is the asymmetry: a 114-byte blob shaped like a Retry
     // token cannot pass through new_token.validate.
     var random_blob: [new_token.max_token_len]u8 = @splat(0xab);
     try std.testing.expectEqual(new_token.ValidationResult.malformed, new_token.validate(&random_blob, .{
