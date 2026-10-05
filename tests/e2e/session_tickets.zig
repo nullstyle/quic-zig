@@ -47,6 +47,7 @@ const ServerOptions = struct {
     retry: bool = false,
     transport_params: ?quic.tls.TransportParams = null,
     ticket_key: ?quic.SessionTicketKey = null,
+    ticket_lifetime_s: ?u32 = null,
 };
 
 const key_a: quic.SessionTicketKey = @splat(0xa5);
@@ -64,6 +65,7 @@ fn newServer(allocator: std.mem.Allocator, opts: ServerOptions) !quic.Server {
         .early_data = .without_replay_protection,
         .retry_token_key = if (opts.retry) retry_key else null,
         .session_ticket_key = opts.ticket_key,
+        .session_ticket_lifetime_s = opts.ticket_lifetime_s,
     });
 }
 
@@ -428,6 +430,133 @@ test "session ticket key: with 0-RTT off, a new server with the same key still r
     var none = try noEarly(allocator, null);
     defer none.deinit();
     try std.testing.expect(!try Dial.resumed(allocator, &none, sink.captured.?, null, 3004));
+}
+
+// --------------------------------------------------- the ticket lifetime
+
+/// TLS reads the wall clock for the age of a ticket, not the `now_us`
+/// of the QUIC loop. These tests give one server context a clock of
+/// their own, in seconds. (The client keeps the real clock. Its
+/// ticket age in the ClientHello is then a few milliseconds, and
+/// BoringSSL takes early data while that age and the server's own
+/// differ by 60 s at most, so the tests stay below that.)
+var test_tls_clock_s: i64 = 0;
+const test_tls_clock_base_s: i64 = 1_800_000_000;
+
+fn testTlsClock(ssl: ?*const boringssl.raw.SSL, out_clock: [*c]boringssl.raw.struct_timeval) callconv(.c) void {
+    _ = ssl;
+    out_clock.*.tv_sec = @intCast(test_tls_clock_s);
+    out_clock.*.tv_usec = 0;
+}
+
+/// The server's CURRENT context reads `test_tls_clock_s` from now on.
+/// A context that `replaceTlsContext` builds needs the call again.
+fn useTestTlsClock(srv: *quic.Server) void {
+    boringssl.raw.zbssl_SSL_CTX_set_current_time_cb(srv.tls_ctx.inner, testTlsClock);
+}
+
+test "ticket lifetime: a ticket is taken while it is younger than the lifetime, and refused from then on" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_lifetime_s = 10 });
+    defer srv.deinit();
+    test_tls_clock_s = test_tls_clock_base_s;
+    useTestTlsClock(&srv);
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    try earnTicket(allocator, &srv, &sink, 1201);
+    // The envelope of the FIRST ticket is used each time (a resumed
+    // connection hands out new tickets; they are not looked at).
+    const envelope = try allocator.dupe(u8, sink.captured.?);
+    defer allocator.free(envelope);
+
+    test_tls_clock_s = test_tls_clock_base_s + 9;
+    const young = try resumeWithEarlyData(allocator, &srv, envelope, 2201);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, young.status);
+    try std.testing.expect(young.read_before_handshake_done);
+
+    test_tls_clock_s = test_tls_clock_base_s + 10;
+    const old = try resumeWithEarlyData(allocator, &srv, envelope, 2202);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, old.status);
+    try std.testing.expect(!old.read_before_handshake_done);
+    try std.testing.expectEqual(early_payload.len, old.read);
+}
+
+test "ticket lifetime: with none set, a ticket of the same age is still taken (the control)" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{});
+    defer srv.deinit();
+    test_tls_clock_s = test_tls_clock_base_s;
+    useTestTlsClock(&srv);
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    try earnTicket(allocator, &srv, &sink, 1203);
+    const envelope = try allocator.dupe(u8, sink.captured.?);
+    defer allocator.free(envelope);
+
+    test_tls_clock_s = test_tls_clock_base_s + 10;
+    const r = try resumeWithEarlyData(allocator, &srv, envelope, 2203);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
+    try std.testing.expect(r.read_before_handshake_done);
+}
+
+test "ticket lifetime: a certificate reload keeps it" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_lifetime_s = 10 });
+    defer srv.deinit();
+    try srv.replaceTlsContext(.{ .pem = .{
+        .cert_pem = common.test_cert_pem,
+        .key_pem = common.test_key_pem,
+    } });
+    // The context that the reload built seals this ticket.
+    test_tls_clock_s = test_tls_clock_base_s;
+    useTestTlsClock(&srv);
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    try earnTicket(allocator, &srv, &sink, 1204);
+    const envelope = try allocator.dupe(u8, sink.captured.?);
+    defer allocator.free(envelope);
+
+    test_tls_clock_s = test_tls_clock_base_s + 9;
+    const young = try resumeWithEarlyData(allocator, &srv, envelope, 2204);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, young.status);
+
+    test_tls_clock_s = test_tls_clock_base_s + 10;
+    const old = try resumeWithEarlyData(allocator, &srv, envelope, 2205);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, old.status);
+}
+
+test "ticket lifetime: init takes 1 second to 7 days, and no lifetime with a context of the embedder" {
+    const allocator = std.testing.allocator;
+    const base: quic.Server.Config = .{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    };
+    for ([_]u32{ 0, 604_801, std.math.maxInt(u32) }) |bad| {
+        var cfg = base;
+        cfg.session_ticket_lifetime_s = bad;
+        try std.testing.expectError(error.InvalidConfig, quic.Server.init(cfg));
+    }
+    for ([_]u32{ 1, 3600, 604_800 }) |good| {
+        var cfg = base;
+        cfg.session_ticket_lifetime_s = good;
+        var srv = try quic.Server.init(cfg);
+        srv.deinit();
+    }
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{
+            .min_version = boringssl.raw.TLS1_3_VERSION,
+            .max_version = boringssl.raw.TLS1_3_VERSION,
+            .alpn = &protos,
+        });
+        defer ctx.deinit();
+        var cfg = base;
+        cfg.tls_context_override = ctx;
+        cfg.session_ticket_lifetime_s = 3600;
+        try std.testing.expectError(error.InvalidConfig, quic.Server.init(cfg));
+    }
 }
 
 // ------------------------------------------------- 0-RTT and a Retry

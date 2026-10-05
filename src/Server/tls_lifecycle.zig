@@ -147,6 +147,9 @@ pub const SessionTicketOptions = struct {
     /// `Server.Config.session_ticket_key`, or null for BoringSSL's
     /// own per-context key.
     key: ?*const tls_mod.session_ticket.Key = null,
+    /// `Server.Config.session_ticket_lifetime_s` (already checked
+    /// by `Server.init`), or null for BoringSSL's 2 days.
+    lifetime_s: ?u32 = null,
 };
 
 /// Build a server-mode TLS context from PEM credentials, carrying
@@ -181,7 +184,9 @@ pub const SessionTicketOptions = struct {
 /// key (`Config.session_ticket_key`). Because a `.pem` reload comes
 /// through here too, the tickets of the old context still open on
 /// the new one. Null leaves BoringSSL's key, random for each
-/// context.
+/// context. `tickets.lifetime_s` non-null is the lifetime of the
+/// tickets that this context seals
+/// (`Config.session_ticket_lifetime_s`).
 pub fn buildServerContext(
     alpn: []const []const u8,
     cert_pem: []const u8,
@@ -226,6 +231,10 @@ pub fn buildServerContext(
             @ptrCast(t),
         );
     }
+    if (tickets.lifetime_s) |seconds| {
+        if (!tls_mod.session_ticket.isValidLifetime(seconds)) return Error.InvalidConfig;
+        tls_mod.session_ticket.setLifetime(ctx, seconds);
+    }
     if (tickets.key) |key| {
         tls_mod.session_ticket.install(ctx, key) catch |err| return switch (err) {
             error.OutOfMemory => Error.OutOfMemory,
@@ -250,7 +259,10 @@ pub fn replaceTlsContext(server: *Server, reload: TlsReload) Error!void {
             server.client_ca_pem,
             server.enable_0rtt,
             server.early_data_anti_replay,
-            .{ .key = if (server.session_ticket_key) |*key| key else null },
+            .{
+                .key = if (server.session_ticket_key) |*key| key else null,
+                .lifetime_s = server.session_ticket_lifetime_s,
+            },
         ),
         // Mirror the `Server.init` rule that rejects
         // `client_ca_pem` + `tls_context_override`: an adopted

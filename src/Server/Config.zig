@@ -608,6 +608,27 @@ early_data: EarlyData = .disabled,
 ///    resumption without 0-RTT).
 session_ticket_key: ?SessionTicketKey = null,
 
+/// How long a session ticket is good for, in seconds. Null (the
+/// default) leaves BoringSSL's 2 days. Allowed: 1 to 604800 (7 days,
+/// the most that RFC 8446 section 4.6.1 lets a server say); `init`
+/// returns `InvalidConfig` for anything else, and for a lifetime
+/// together with `tls_context_override` (set it on your own
+/// context).
+///
+/// It is the lifetime that the client is told with each ticket, and
+/// the age at which the server stops taking a ticket back. A ticket
+/// that is already out keeps the lifetime it was sealed with.
+///
+/// Why shorten it: with `session_ticket_key` set, the lifetime is how
+/// long a stolen key is of use after you change the key, because a
+/// ticket that was sealed under the old key is good until it
+/// expires. It does not need a key: it bounds the tickets of the
+/// default key too.
+///
+/// TLS reads the wall clock for this, not the `now_us` that `feed`
+/// and `tick` are given.
+session_ticket_lifetime_s: ?u32 = null,
+
 /// Whether to encode the locally-recorded close-reason string into
 /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
 /// secure-by-default redaction: internal parser-error strings reveal

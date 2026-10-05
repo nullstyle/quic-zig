@@ -40,6 +40,33 @@ pub const key_len: usize = 48;
 /// key (16).
 pub const Key = [key_len]u8;
 
+/// The shortest ticket lifetime that can be set, in seconds.
+pub const min_lifetime_s: u32 = 1;
+/// The longest ticket lifetime, in seconds: 7 days. RFC 8446 section
+/// 4.6.1: "Servers MUST NOT use any value greater than 604800
+/// seconds".
+pub const max_lifetime_s: u32 = 7 * 24 * 60 * 60;
+/// What BoringSSL uses when no lifetime is set: 2 days.
+pub const default_lifetime_s: u32 = 2 * 24 * 60 * 60;
+
+/// True when `seconds` is a ticket lifetime that `setLifetime` takes.
+pub fn isValidLifetime(seconds: u32) bool {
+    return seconds >= min_lifetime_s and seconds <= max_lifetime_s;
+}
+
+/// Tickets that `ctx` seals from now on are good for `seconds` (it
+/// is the lifetime that the client is told, and the server checks
+/// the ticket's own age against it when the ticket comes back). A
+/// ticket that is already out keeps the lifetime it was sealed with.
+/// `seconds` must be valid (`isValidLifetime`).
+///
+/// TLS reads the wall clock for this, not the clock that the QUIC
+/// loop is fed.
+pub fn setLifetime(ctx: boringssl.tls.Context, seconds: u32) void {
+    std.debug.assert(isValidLifetime(seconds));
+    raw.zbssl_SSL_CTX_set_session_psk_dhe_timeout(ctx.inner, seconds);
+}
+
 pub const InstallError = error{
     /// BoringSSL could not take the key (it allocates a copy).
     OutOfMemory,
@@ -88,6 +115,17 @@ pub fn currentKeyForTest(ctx: boringssl.tls.Context) ?Key {
 }
 
 // -- tests ---------------------------------------------------------------
+
+test "isValidLifetime: 1 second to 7 days" {
+    try std.testing.expect(!isValidLifetime(0));
+    try std.testing.expect(isValidLifetime(1));
+    try std.testing.expect(isValidLifetime(default_lifetime_s));
+    try std.testing.expect(isValidLifetime(604_800));
+    try std.testing.expect(!isValidLifetime(604_801));
+    try std.testing.expect(!isValidLifetime(std.math.maxInt(u32)));
+    // The library default is BoringSSL's.
+    try std.testing.expectEqual(@as(u32, raw.SSL_DEFAULT_SESSION_PSK_DHE_TIMEOUT), default_lifetime_s);
+}
 
 test "isAllZero: only a key of 48 zero bytes" {
     var key: Key = @splat(0);

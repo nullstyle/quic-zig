@@ -494,6 +494,9 @@ enable_0rtt: bool,
 /// a certificate reload. Null leaves BoringSSL's per-context random
 /// key. `secureZero`-ed in `deinit`.
 session_ticket_key: ?SessionTicketKey,
+/// Captured `Config.session_ticket_lifetime_s`, for the contexts
+/// that a `.pem` reload builds. Null leaves BoringSSL's 2 days.
+session_ticket_lifetime_s: ?u32,
 
 /// Resolved from `Config.early_data`. Drives the
 /// `bumpClock` call in `feed` so the BoringSSL trampoline has
@@ -869,6 +872,11 @@ pub fn init(config: Config) Error!Server {
         if (config.early_data == .with_anti_replay) return Error.InvalidConfig;
     }
 
+    if (config.session_ticket_lifetime_s) |seconds| {
+        if (!tls_mod.session_ticket.isValidLifetime(seconds)) return Error.InvalidConfig;
+        if (config.tls_context_override != null) return Error.InvalidConfig;
+    }
+
     var tls_ctx: boringssl.tls.Context = undefined;
     var owns_tls = false;
     if (config.tls_context_override) |ctx| {
@@ -885,7 +893,10 @@ pub fn init(config: Config) Error!Server {
             config.client_ca_pem,
             config.early_data.enabled(),
             config.early_data.antiReplayTracker(),
-            .{ .key = if (config.session_ticket_key) |*key| key else null },
+            .{
+                .key = if (config.session_ticket_key) |*key| key else null,
+                .lifetime_s = config.session_ticket_lifetime_s,
+            },
         );
         owns_tls = true;
     }
@@ -961,6 +972,7 @@ pub fn init(config: Config) Error!Server {
         .enable_0rtt = config.early_data.enabled(),
         .early_data_anti_replay = config.early_data.antiReplayTracker(),
         .session_ticket_key = config.session_ticket_key,
+        .session_ticket_lifetime_s = config.session_ticket_lifetime_s,
         .tunables = .{
             .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
             .max_connection_memory = config.max_connection_memory,

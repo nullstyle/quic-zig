@@ -29,6 +29,16 @@ changes.
   again). The field's doc comment says what a stolen key gives and
   what else must stay the same for 0-RTT to survive. Asked for by
   capnp-zig, which installed the key through the raw TLS layer.
+- **`Server.Config.session_ticket_lifetime_s`.** How long a session
+  ticket is good for: 1 second to 7 days (the limit of RFC 8446
+  section 4.6.1); null leaves BoringSSL's 2 days. A `.pem` reload
+  keeps it. With a ticket key that outlives the process, the
+  lifetime is how long a stolen key is of use after the key is
+  changed, so an operator wants to be able to shorten it. TLS reads
+  the wall clock for it, not the `now_us` of the QUIC loop. Tested
+  with a TLS clock that the test moves: with a lifetime of 10 s a
+  ticket is taken at 9 s and refused at 10 s; with no lifetime set
+  it is taken at 10 s.
 - **`Connection.retryAccepted()`.** True once a client has taken a
   Retry packet. A client that counts "dials that saved the round
   trip" needs it: after a Retry the handshake costs one round trip
