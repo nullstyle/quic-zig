@@ -661,6 +661,8 @@ test "STREAM send tracking survives duplicate application PNs across paths" {
     conn.setRememberedPeerTransportParams(.{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_streams_bidi = 1 << 16,
+        .initial_max_streams_uni = 1 << 16,
     });
     const path_id = try conn.openPath(.unspecified, .unspecified, ConnectionId.fromSlice(&.{0x01}), ConnectionId.fromSlice(&.{0xbb}));
     try std.testing.expect(conn.markPathValidated(path_id));

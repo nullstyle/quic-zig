@@ -840,12 +840,19 @@ test "initialSendStreamLimit: remembered 0-RTT params bound the pre-params send 
     try std.testing.expectEqual(@as(u64, 0), conn.initialSendStreamLimit(0));
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), conn.peer_max_data);
 
+    // Until any parameters are there, the number of streams this end
+    // may open is the wire maximum, 2^60 (nothing can be sent on them).
+    try std.testing.expectEqual(@as(u64, 1 << 60), conn.local_bidi_ids.limit);
+    try std.testing.expectEqual(@as(u64, 1 << 60), conn.local_uni_ids.limit);
+
     // Install remembered peer params (a 0-RTT resumption): pre-params
     // windows are now bounded by them, per-stream and connection-level.
     conn.setRememberedPeerTransportParams(.{
         .initial_max_data = 4096,
         .initial_max_stream_data_bidi_remote = 2048,
         .initial_max_stream_data_uni = 512,
+        .initial_max_streams_bidi = 3,
+        .initial_max_streams_uni = 1,
     });
     // Client-initiated bidi stream 0 → remembered bidi_remote limit.
     try std.testing.expectEqual(@as(u64, 2048), conn.initialSendStreamLimit(0));
@@ -853,6 +860,38 @@ test "initialSendStreamLimit: remembered 0-RTT params bound the pre-params send 
     try std.testing.expectEqual(@as(u64, 512), conn.initialSendStreamLimit(2));
     // Connection-level send window tightened from maxInt to the remembered value.
     try std.testing.expectEqual(@as(u64, 4096), conn.peer_max_data);
+    // The NUMBER of streams is the remembered one too (RFC 9000 §7.4.1).
+    try std.testing.expectEqual(@as(u64, 3), conn.local_bidi_ids.limit);
+    try std.testing.expectEqual(@as(u64, 1), conn.local_uni_ids.limit);
+    _ = try conn.openBidi(0);
+    _ = try conn.openBidi(4);
+    _ = try conn.openBidi(8);
+    try std.testing.expectError(Error.StreamLimitExceeded, conn.openBidi(12));
+    _ = try conn.openUni(2);
+    try std.testing.expectError(Error.StreamLimitExceeded, conn.openUni(6));
+}
+
+test "remembered 0-RTT params do not touch the limits once the real parameters are there" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    // The real parameters arrived first (a late call of the embedder).
+    conn.cached_peer_transport_params = .{ .initial_max_data = 1 << 20, .initial_max_streams_bidi = 50 };
+    conn.peer_max_data = 1 << 20;
+    conn.local_bidi_ids.limit = 50;
+    conn.local_uni_ids.limit = 7;
+
+    conn.setRememberedPeerTransportParams(.{
+        .initial_max_data = 4096,
+        .initial_max_streams_bidi = 3,
+        .initial_max_streams_uni = 1,
+    });
+    try std.testing.expectEqual(@as(u64, 1 << 20), conn.peer_max_data);
+    try std.testing.expectEqual(@as(u64, 50), conn.local_bidi_ids.limit);
+    try std.testing.expectEqual(@as(u64, 7), conn.local_uni_ids.limit);
 }
 
 test "send-side ops on a peer-initiated uni stream fail fast with StreamNotWritable" {

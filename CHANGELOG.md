@@ -15,6 +15,22 @@ changes.
   more, and `earlyDataStatus()` still says `.accepted`. (capnp-zig
   read the field `retry_accepted` for this; the field stays.)
 
+### Changed
+
+- **Remembered transport parameters also limit the NUMBER of 0-RTT
+  streams.** Until the server's new parameters arrive, a resumed
+  client may open at most the remembered `initial_max_streams_bidi`
+  and `initial_max_streams_uni` streams (RFC 9000 section 7.4.1); one
+  more is `error.StreamLimitExceeded`, as at the real limit. Only the
+  bytes were bounded before, so a client could open and fill more
+  early streams than the server had allowed, and a server that checks
+  closes the connection for it. With `Client.Config.resumption_state`
+  nothing is to do: the envelope holds the server's parameters. **A
+  caller of `Connection.setRememberedPeerTransportParams` that passes
+  flow-control limits only must now pass the two stream counts too**
+  (a count of 0 means no early stream). Seven test helpers of this
+  repository did that and were changed.
+
 ### Fixed
 
 - **A client sends its 0-RTT data again after a Retry.** A server

@@ -123,6 +123,8 @@ fn prepareUnboundSender(conn: *Connection) !void {
     conn.setRememberedPeerTransportParams(.{
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_remote = 1 << 22,
+        .initial_max_streams_bidi = 1 << 16,
+        .initial_max_streams_uni = 1 << 16,
     });
     conn.pacing_enabled = false;
     conn.ccForApplication().setCwndForTest(1 << 30);

@@ -2783,16 +2783,27 @@ pub const initialSendStreamLimit = conn_streams.initialSendStreamLimit;
 /// Install the peer's transport parameters remembered from a prior
 /// connection, for a 0-RTT resumption. Bounds early-data (0-RTT)
 /// sends before the real peer params arrive — per-stream (via
-/// `initialSendStreamLimit`) and connection-level (by tightening
-/// `peer_max_data`). No-op-ish once the real params are cached:
-/// `applyPeerFlowTransportParams` overwrites `peer_max_data` and
-/// `@max`-raises each stream's window to the true (>= remembered)
-/// limits. Intended to be called at connection setup by the client
-/// wrapper when it also installs the resumption session ticket.
+/// `initialSendStreamLimit`), connection-level (by tightening
+/// `peer_max_data`), and in the NUMBER of streams this end may open
+/// (the remembered `initial_max_streams_bidi` / `_uni`; RFC 9000
+/// §7.4.1 lists them among the limits a client keeps for 0-RTT).
+/// No-op-ish once the real params are cached:
+/// `applyPeerFlowTransportParams` overwrites `peer_max_data` and the
+/// stream-count limits, and `@max`-raises each stream's window to the
+/// true (>= remembered) limits. Intended to be called at connection
+/// setup by the client wrapper when it also installs the resumption
+/// session ticket.
+///
+/// Until 0.27.0 the number of streams was not bounded here: a client
+/// could open, and fill, more early streams than the server had
+/// allowed, and a server that checks its limit closes the connection
+/// for that (STREAM_LIMIT_ERROR).
 pub fn setRememberedPeerTransportParams(self: *Connection, params: TransportParams) void {
     self.remembered_peer_transport_params = params;
     if (self.cached_peer_transport_params == null) {
         self.peer_max_data = @min(self.peer_max_data, params.initial_max_data);
+        self.local_bidi_ids.limit = @min(self.local_bidi_ids.limit, params.initial_max_streams_bidi);
+        self.local_uni_ids.limit = @min(self.local_uni_ids.limit, params.initial_max_streams_uni);
     }
 }
 

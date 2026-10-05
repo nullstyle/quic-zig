@@ -661,6 +661,8 @@ test "pollLevel coalesces multiple STREAM frames with distinct loss keys" {
     conn.setRememberedPeerTransportParams(.{
         .initial_max_data = 1 << 20,
         .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_streams_bidi = 1 << 16,
+        .initial_max_streams_uni = 1 << 16,
     });
 
     const s0 = try conn.openBidi(0);

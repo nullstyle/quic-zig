@@ -324,3 +324,33 @@ test "0-RTT after a Retry: the early packets leave the flight, nothing is counte
     try std.testing.expectEqualStrings(early_payload, rbuf[0..got]);
     try std.testing.expect(!slot.conn.handshakeDone());
 }
+
+// ------------------------------------------- the number of 0-RTT streams
+
+test "0-RTT: before the handshake a resumed client opens no more streams than it remembers" {
+    // RFC 9000 section 7.4.1: a client that sends 0-RTT data uses the
+    // limits that the server gave on the connection that the ticket
+    // comes from. That holds for the NUMBER of streams too.
+    const allocator = std.testing.allocator;
+    var params = common.defaultParams();
+    params.initial_max_streams_bidi = 3;
+    params.initial_max_streams_uni = 2;
+    var srv = try newServer(allocator, .{ .transport_params = params });
+    defer srv.deinit();
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    try earnTicket(allocator, &srv, &sink, 1003);
+
+    var cli = try newClient(allocator, null, sink.captured.?);
+    defer cli.deinit();
+    cli.conn.setEarlyDataEnabled(true);
+    // Client-initiated bidirectional streams are 0, 4, 8, ...;
+    // unidirectional ones are 2, 6, 10, ...
+    _ = try cli.conn.openBidi(0);
+    _ = try cli.conn.openBidi(4);
+    _ = try cli.conn.openBidi(8);
+    try std.testing.expectError(error.StreamLimitExceeded, cli.conn.openBidi(12));
+    _ = try cli.conn.openUni(2);
+    _ = try cli.conn.openUni(6);
+    try std.testing.expectError(error.StreamLimitExceeded, cli.conn.openUni(10));
+}

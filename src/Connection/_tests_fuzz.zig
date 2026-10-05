@@ -1609,6 +1609,8 @@ fn fuzzConnSendSmallTracker(_: void, smith: *std.testing.Smith) anyerror!void {
     conn.setRememberedPeerTransportParams(.{
         .initial_max_data = 1 << 22,
         .initial_max_stream_data_bidi_remote = 1 << 22,
+        .initial_max_streams_bidi = 1 << 16,
+        .initial_max_streams_uni = 1 << 16,
     });
     // No handshake in this fixture: its timeout must not end the run.
     conn.handshake_timeout_us = 0;
