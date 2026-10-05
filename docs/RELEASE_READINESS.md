@@ -124,14 +124,15 @@ is safe to embed in production. The gates:
 ### Cross-repo hygiene
 - [ ] `boringssl` is pinned to a tag (not a bare SHA) in both quic-zig
       and http3-zig, byte-for-byte identically (roadmap H1 #3). Current
-      reality (2026-10): the pins have diverged. quic-zig pins bare SHA
-      `ff30fe9…` (boringssl 0.6.7, since v0.21.2); http3-zig's main
-      still pins `87d15bf…` (0.6.6) beside quic v0.19.0.
-      `.github/workflows/pin-lint.yml` is a ratchet: identical pins
-      pass, exactly that dated pair passes with a warning, anything
-      else fails. Re-check this box when boringssl-zig tags the release,
-      both repos repin to the tag (delete the known pair then), and
-      http3-zig's `tools/check-boringssl-pin.sh` again lints a tag pin.
+      reality (2026-10-04): the pins are identical again, and both are
+      the bare SHA `ff30fe9…` (boringssl 0.6.7; quic-zig since v0.21.2,
+      http3-zig since its commit `f2c3805`; it is on quic v0.26.0).
+      `.github/workflows/pin-lint.yml` is strict again: identical pins
+      pass, anything else fails (the one dated pair that passed with a
+      warning while http3-zig was on 0.6.6 is deleted). Check this box
+      when boringssl-zig tags the release, both repos repin to the tag,
+      and http3-zig's `tools/check-boringssl-pin.sh` again lints a tag
+      pin.
 
 - [x] **Toolchain pinning policy is decided and executed.** quic-zig
       tracked Zig master while 0.17 was in development and **pins the
