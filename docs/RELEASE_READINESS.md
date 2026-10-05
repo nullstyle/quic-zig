@@ -916,6 +916,188 @@ tag (`git archive`, the files of the tag tarball; hash
 no `invalid option` line, and ran (`consumer-smoke ok: quic-zig
 0.26.0`).
 
+## v0.27.0 ticket-keys release
+
+v0.27.0 is about one sentence: a server that restarts, or reloads its
+certificate, must still accept the session tickets that it gave out,
+and a client's early data must go early also when the server answers
+with a Retry. It has no security fix, and it removes nothing. Every
+item was asked for by a downstream (the handoff of capnp-zig, five
+asks) or was found in the sprint before (the number of 0-RTT
+streams).
+
+**Measured before it was planned.** A probe at the public wrappers: a
+first connection earns a ticket, a second one resumes with 11 bytes
+of early data, and the probe looks at WHEN the server can read them.
+
+    same server                         before its handshake is done
+    a new server ("restart")            after  (0-RTT rejected)
+    a new server, the same ticket key   before
+    a new server, another key           after
+    a .pem reload                       after
+    a .pem reload, the key set again    before
+    a resumed dial behind a Retry       after  (client: "accepted")
+
+So a restart and a certificate reload cost every client one full
+handshake and its 0-RTT, one 48-byte key was all that was missing, and
+the client's word "accepted" does not say that its early data went
+early. That last line is why every test of this release looks at the
+moment at which the server can read, and not at the client's status
+alone.
+
+**What was built.**
+
+- `Server.Config.session_ticket_key`, installed where the Server
+  builds a TLS context, so a `.pem` reload cannot lose it. Three
+  pairs are refused: a zero key, a key with a context of the
+  embedder, and a key with the replay tracker (the tracker is process
+  memory; after a crash a recorded 0-RTT flight would be fresh again
+  for the 60 s that BoringSSL allows a ticket age to be off).
+- `Server.rotateSessionTicketKey`: the Server keeps two keys and
+  gives BoringSSL its ticket-key callback. One question was open in
+  the plan ("not measured, and it matters"): does a ticket that is
+  opened with the PREVIOUS key through the callback keep its 0-RTT?
+  It was measured before the Server was touched: yes, and tickets
+  sealed by the callback open with BoringSSL's own key setter and the
+  other way round. The old key is cleared one ticket lifetime after
+  the rotation. That is not tidiness: whoever has a ticket key can
+  make tickets, and with client certificates that is a session for
+  any client identity.
+- `Server.Config.session_ticket_lifetime_s`.
+- A client sends its 0-RTT data again after a Retry, and
+  `Connection.retryAccepted()`.
+- Remembered transport parameters also limit the number of 0-RTT
+  streams. This one broke 21 unit tests of our own: seven test
+  helpers gave a hand-built connection its send credit through
+  remembered parameters with flow limits only. An embedder that calls
+  the function by hand can meet the same; it is the one "can need a
+  change" item of the release.
+- Three doc repairs. One of them was advice of ours that would have
+  cost a follower the server's TLS posture (use `.override` to carry
+  ticket keys).
+
+No change in boringssl-zig was needed (the raw layer has every
+function), so no pin moved and http3-zig was not touched.
+
+**What the mutants found.** 54 mutants, all killed in the end, and
+the first runs earned their cost:
+
+- Three mutants that took the wrong 16 bytes of the key for the HMAC
+  or for AES passed every test. The end-to-end test keys were 48
+  equal bytes, so every part of a key was the same. A callback with
+  the key parts swapped would have shipped green. The keys have three
+  different parts now, and a comptime check holds that.
+- A mutant with a fixed IV passed: no test looked at the IV.
+- Two guards could not be made to fail by any test (a read-back of
+  what was just set). One became a function with its own test; the
+  other was removed.
+- Two "survivors" were the mutant runner: it did not count a leaked
+  allocation as a failed test.
+
+The first point is the eighth green signal in this record that said
+nothing: a test of a structured secret with a key that has no
+structure.
+
+**The pass criteria, as written before the work, and what happened.**
+
+- S1 (a ticket of server A is taken by a new server B with the same
+  key, with 0-RTT; not with another key or none; the same across a
+  `.pem` reload; the three refusals): met.
+- S2 (a ticket older than the lifetime is not resumed, a younger one
+  is; the TLS clock moved in the test): met. With a lifetime of 10 s:
+  taken at 9 s, refused at 10 s; with none set, taken at 10 s.
+- S3 (after one rotation a ticket of the old key resumes; a second
+  rotation, or one lifetime, ends that; a `.pem` reload keeps both
+  keys; what the previous key gives is measured): met. It gives
+  0-RTT.
+- S4 (behind a Retry the server reads the early data before its
+  handshake is done; nothing is counted as lost; packet numbers do
+  not go back): met.
+- S5 (a resumed client cannot open more early streams than it
+  remembers; after the handshake the real limits hold): met.
+- S6 (no setting = no change: the 18 bench cells print the same
+  lines as on v0.26.0; the resumption and zerortt interop cells pass
+  in both roles): met.
+- S7 (capnp-zig's own suite on the branch): NOT met at
+  the tag. The capnp-zig session was asked to run its suite against
+  an archive of the branch and had not answered when the gates were
+  green. What stands in for its answer, and is less than it:
+  capnp-zig's sources (its commit `e416dd3`) were read against the
+  changes. It does not call `setRememberedPeerTransportParams`. Its
+  bridge sets the key with BoringSSL's plain setter on
+  `server.tls_ctx.inner` and reads the field `retry_accepted`; both
+  names are unchanged, and a Server touches the ticket keys of its
+  context only when the new setting is used. Tests of this release
+  run that bridge form against the setting, in both directions. One
+  test of capnp-zig that holds "late after a Retry" will go red; it
+  was told, and that is the wanted result. Its answer goes into the
+  sprint log when it comes.
+- S8 (a mutant for every new guard; the fuzz gate counts at least 43
+  sites; five gates real on the tag commit; the wide matrix in both
+  roles with every failed cell read): met; the gates and the matrix
+  are below.
+
+**The gates on the release commit.** Tagged 2026-10-05 at `9d2ab6e`,
+each gate read at its evidence line.
+
+- `test`: six jobs, every step green; 1,942 tests in Debug and 1,902
+  in ReleaseSafe on the four Unix jobs, 1,879 on Windows; in the
+  consumer-smoke step, `check-modes: 6 of 6 as expected` and no
+  `invalid option` line.
+- rc-fuzz: `n_runs=2,163,963 unique_runs=12,974 pcs_len=43,766` across
+  43 sites (floor 1,935,000), no failing site.
+- `quic-go-interop`: `interop evidence: pairs=1 cells=2 succeeded=2
+  failed=0 known_failed=0 unsupported=0 skipped=0 flaky_passed=0
+  flaky_failed=0`.
+- QNS image: built from that commit.
+- pin-lint: `zig pins agree: 0.17.0`, and the boringssl pins of
+  quic-zig and http3-zig are identical (the lint is strict again
+  since `6684116`).
+
+The wide matrix, quic-zig as server, 16 tests, quic-go, quiche and
+ngtcp2 clients, in CI on the release commit (run 37354596734):
+`interop evidence: pairs=3 cells=48 succeeded=43 failed=0
+known_failed=0 unsupported=4 skipped=0 flaky_passed=0
+flaky_failed=1`. The flaky cell is `quiche:multiplexing`, as in every
+release since v0.24.0.
+
+The same tests without the goodput measurement, local, on the code of
+the release (the image was built one commit before the release
+commit, which changes the version and the docs only). One run for
+each role, and every failed cell read in its capture:
+
+- quic-zig as the client against the three servers: `interop
+  evidence: pairs=3 cells=45 succeeded=42 failed=1 known_failed=0
+  unsupported=2 skipped=0 flaky_passed=0 flaky_failed=0`. The failed
+  cell is `handshakeloss` against quic-go, which passes 5 runs of 10
+  on v0.26.0 (the client's slow retry of a silent handshake). In the
+  capture the server heard nothing from the client for 7.0 s; it
+  waits 5 s. Nothing in this release touches that.
+- quic-zig as the server against the three clients: `interop
+  evidence: pairs=3 cells=45 succeeded=40 failed=1 known_failed=0
+  unsupported=4 skipped=0 flaky_passed=0 flaky_failed=0`. The failed
+  cell is `quiche:multiplexing` (the local run has no flaky list). In
+  the quiche client's log 4 of its 1999 requests are cut short on the
+  wire with no FIN, and it logged "failed to send request Done" 4
+  times: the signature of every earlier capture of that cell.
+- The client's `zerortt` and `keyupdate` cells in a batch of their
+  own: 3 runs of 3 against each server. The 0-RTT sizes at the runner
+  are 10413, 10414 and 10417 bytes, as on v0.26.0, now with the
+  library holding the stream count.
+
+The `resumption` and `zerortt` cells pass in both roles against all
+three peers. None of them uses the new settings: the interop endpoint
+sets no ticket key, so what they show is that nothing changed for a
+server without one.
+
+A fresh consumer outside the repository, built from an archive of the
+tag (`git archive`, the files of the tag tarball; hash
+`quic-0.27.0-DnSYvdkEOQDHm_pJQOp6Vo47gQ1Cm7-0c2sgVV0M6Xht`), with
+`.optimize = optimize` and `-Doptimize=ReleaseSafe`: it compiled with
+`-Osafe` for the application, for `quic` and for `boringssl`, printed
+no `invalid option` line, and ran (`consumer-smoke ok: quic-zig
+0.27.0`).
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig
