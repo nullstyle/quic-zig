@@ -1281,6 +1281,10 @@ pub fn iterator(self: *Server) []*Slot {
 /// before it as not yet valid until its own uptime passes their
 /// issue time, and answers those clients with a Retry (if
 /// `retry_token_key` is set) or takes them with no validation.
+/// From that moment it takes such a token for one token lifetime of
+/// its OWN clock, however old the token is by then: the key that
+/// lives on, with a clock that does not, also undoes
+/// `new_token_lifetime_us`.
 /// Microseconds since the Unix epoch are a clock that goes on.
 /// (Session tickets do not have this problem: TLS ages them on the
 /// wall clock by itself.)

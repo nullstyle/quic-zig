@@ -542,7 +542,8 @@ retry_state_table_capacity: u32 = 4096,
 /// the tokens of the process before read as not yet valid. See
 /// `Server.feed`. The bundled loop (`transport.runUdpServer`) feeds
 /// such a clock: with it, a key from the process before does not
-/// save the Retry.
+/// save the Retry, and it lets old tokens through after their
+/// lifetime. Do not give that loop a key that outlives the process.
 new_token_key: ?conn_mod.NewTokenKey = null,
 /// Lifetime of a minted NEW_TOKEN in microseconds. Returning
 /// clients presenting a token older than this fall through to

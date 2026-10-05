@@ -28,7 +28,10 @@
 //! at, so the restarted loop reads the tokens of the loop before it
 //! as not yet valid until its own uptime passes their issue time, and
 //! answers those clients with a Retry (or takes them with no
-//! validation). See `Server.feed`. Session tickets are not touched by
+//! validation). After that it takes them for one token lifetime of
+//! its own clock, however old they are. See `Server.feed`. So do not
+//! give this loop a `new_token_key` that outlives the process.
+//! Session tickets are not touched by
 //! this (TLS ages them on the wall clock). An embedder that needs its
 //! NEW_TOKENs to live through a restart drives `Server.feed` itself,
 //! with a clock that goes on: for example the wall clock at start

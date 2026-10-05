@@ -389,3 +389,76 @@ test "Server without Retry accepts a client that shows a token of the old size" 
     // handshake itself).
     try std.testing.expectEqual(quic.Server.FeedOutcome.accepted, first);
 }
+
+/// What a server with both token keys says to a first Initial that
+/// carries `token`, when the server's clock is at `now_us`. A new
+/// server and a new client for each call, so nothing is carried over.
+fn firstAnswerAt(token: []const u8, peer_addr: quic.conn.path.Address, now_us: u64) !quic.Server.FeedOutcome {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    var srv = try quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .new_token_key = new_token_key,
+        .retry_token_key = retry_key,
+    });
+    defer srv.deinit();
+
+    var cli = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .new_token = token,
+    });
+    defer cli.deinit();
+
+    var rx: [4096]u8 = undefined;
+    try cli.conn.advance();
+    const len = (try cli.conn.poll(&rx, now_us)) orelse return error.NoFirstInitial;
+    const outcome = try srv.feed(rx[0..len], peer_addr, now_us);
+    while (srv.drainStatelessResponse()) |_| {}
+    return outcome;
+}
+
+test "A server whose clock starts again reads a token of the process before at the wrong age" {
+    // This is what the docs of `Config.new_token_key` and `Server.feed`
+    // warn about. It is measured here, not wanted.
+    //
+    // A NEW_TOKEN holds the `now_us` it was made at. The process
+    // before had been up for one hour when it made this token, with a
+    // lifetime of one day. The next process has the same key and a
+    // clock that starts at zero again (the bundled UDP loop feeds such
+    // a clock). What it says depends on its OWN uptime. The real age
+    // of the token is not in the picture: the new process may start a
+    // minute or a month after the token was made.
+    const s_us: u64 = 1_000_000;
+    const hour_us: u64 = 3600 * s_us;
+    const day_us: u64 = 24 * hour_us;
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xd1), .port = 0 } };
+    var addr_buf: [quic.conn.path.Address.context_max_len]u8 = undefined;
+    var token: quic.conn.NewTokenBlob = undefined;
+    _ = try quic.conn.new_token.mint(&token, .{
+        .key = &new_token_key,
+        .now_us = hour_us,
+        .lifetime_us = day_us,
+        .client_address = peer_addr.writeContext(&addr_buf),
+    });
+    const retry = quic.Server.FeedOutcome.retry_sent;
+    const taken = quic.Server.FeedOutcome.accepted;
+
+    // Until its uptime passes the issue time the new process reads
+    // the token as "not yet valid": the client pays the Retry that the
+    // token was for.
+    try std.testing.expectEqual(retry, try firstAnswerAt(&token, peer_addr, 10 * s_us));
+    try std.testing.expectEqual(retry, try firstAnswerAt(&token, peer_addr, hour_us - s_us));
+    // From then on it takes the token, for one token lifetime of ITS
+    // clock, however old the token is by then.
+    try std.testing.expectEqual(taken, try firstAnswerAt(&token, peer_addr, hour_us + s_us));
+    try std.testing.expectEqual(taken, try firstAnswerAt(&token, peer_addr, hour_us + day_us - s_us));
+    try std.testing.expectEqual(retry, try firstAnswerAt(&token, peer_addr, hour_us + day_us + s_us));
+}

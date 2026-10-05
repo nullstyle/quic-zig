@@ -1117,9 +1117,11 @@ var server = try quic.Server.init(.{
   restart, for example microseconds since the Unix epoch: a NEW_TOKEN
   holds the time it was made at, and a clock that starts at zero in
   each process reads the tokens of the process before it as not yet
-  valid. The bundled loop (`quic.transport.runUdpServer`) feeds a
-  clock that starts at zero, so with it the Retry is not saved after a
-  restart. When the server does answer with a Retry, the client sends
+  valid, and after that as younger than they are (it takes them for
+  one token lifetime of its own clock). The bundled loop
+  (`quic.transport.runUdpServer`) feeds a clock that starts at zero:
+  do not give it a `new_token_key` that outlives the process. When the
+  server does answer with a Retry, the client sends
   its 0-RTT data again after it (since 0.27.0), so the data still
   arrives before the handshake is done, one round trip later.
   `Connection.retryAccepted()` tells a client that this happened.

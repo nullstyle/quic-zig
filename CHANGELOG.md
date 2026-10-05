@@ -33,7 +33,13 @@ On `main` after 0.27.0. Docs and one test; no change in behavior.
     that limit was raised on its own TLS context.
   - The bundled loop (`transport.runUdpServer`) feeds a clock that
     starts at zero each time it starts. With it, a `new_token_key`
-    from the process before does not save the Retry.
+    from the process before does not save the Retry: the new process
+    reads the old tokens as not yet valid until its uptime passes
+    their issue time. Read in the token check, and now in the docs
+    too: from then on it takes such a token for one token lifetime of
+    its own clock, however old the token is. So a key that outlives
+    the process needs a clock that goes on, and the bundled loop has
+    none.
 
 ### Tools and tests
 
