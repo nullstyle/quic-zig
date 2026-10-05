@@ -195,6 +195,8 @@ const server_config = @import("Server/Config.zig");
 pub const PreferredAddressConfig = server_config.PreferredAddressConfig;
 pub const RateLimit = server_config.RateLimit;
 pub const EarlyData = server_config.EarlyData;
+/// 48-byte session-ticket key (`Config.session_ticket_key`).
+pub const SessionTicketKey = tls_mod.SessionTicketKey;
 pub const Config = server_config;
 pub const TlsReload = server_config.TlsReload;
 
@@ -485,6 +487,13 @@ new_token_lifetime_us: u64,
 /// original 0-RTT posture without forcing the embedder to pass
 /// it again.
 enable_0rtt: bool,
+
+/// Captured `Config.session_ticket_key`. Installed on the TLS
+/// context that `init` builds and on every context that
+/// `replaceTlsContext({.pem = ...})` builds, so tickets live through
+/// a certificate reload. Null leaves BoringSSL's per-context random
+/// key. `secureZero`-ed in `deinit`.
+session_ticket_key: ?SessionTicketKey,
 
 /// Resolved from `Config.early_data`. Drives the
 /// `bumpClock` call in `feed` so the BoringSSL trampoline has
@@ -845,6 +854,21 @@ pub fn init(config: Config) Error!Server {
         if (!wire.initial.isSupportedVersion(v)) return Error.InvalidConfig;
     }
 
+    // A session-ticket key: see `Config.session_ticket_key` for the
+    // three refusals.
+    if (config.session_ticket_key) |*key| {
+        // A zeroed buffer is a key that was never filled in.
+        if (tls_mod.session_ticket.isAllZero(key)) return Error.InvalidConfig;
+        // An adopted context is the embedder's; the key belongs on
+        // it, set by the embedder.
+        if (config.tls_context_override != null) return Error.InvalidConfig;
+        // The replay tracker is process memory. With a key that
+        // outlives the process, a 0-RTT flight recorded before a
+        // crash is "fresh" for the empty tracker of the next process
+        // (BoringSSL takes a ticket age that is off by up to 60 s).
+        if (config.early_data == .with_anti_replay) return Error.InvalidConfig;
+    }
+
     var tls_ctx: boringssl.tls.Context = undefined;
     var owns_tls = false;
     if (config.tls_context_override) |ctx| {
@@ -861,6 +885,7 @@ pub fn init(config: Config) Error!Server {
             config.client_ca_pem,
             config.early_data.enabled(),
             config.early_data.antiReplayTracker(),
+            .{ .key = if (config.session_ticket_key) |*key| key else null },
         );
         owns_tls = true;
     }
@@ -935,6 +960,7 @@ pub fn init(config: Config) Error!Server {
         .new_token_lifetime_us = config.new_token_lifetime_us,
         .enable_0rtt = config.early_data.enabled(),
         .early_data_anti_replay = config.early_data.antiReplayTracker(),
+        .session_ticket_key = config.session_ticket_key,
         .tunables = .{
             .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
             .max_connection_memory = config.max_connection_memory,
@@ -1116,6 +1142,10 @@ pub fn deinit(self: *Server) void {
     // And the stateless-reset HMAC key — same hardening
     // rationale as the other secret key fields.
     if (self.stateless_reset_key) |*key| {
+        std.crypto.secureZero(u8, key[0..]);
+    }
+    // And the session-ticket key: it opens recorded 0-RTT data.
+    if (self.session_ticket_key) |*key| {
         std.crypto.secureZero(u8, key[0..]);
     }
     // Draining contexts always represent ownership the Server

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const quic = @import("quic");
+const boringssl = @import("boringssl");
 const common = @import("common.zig");
 
 const protos = [_][]const u8{"hq-test"};
@@ -45,7 +46,11 @@ const ServerOptions = struct {
     /// Answer the first Initial packet of each client with a Retry.
     retry: bool = false,
     transport_params: ?quic.tls.TransportParams = null,
+    ticket_key: ?quic.SessionTicketKey = null,
 };
+
+const key_a: quic.SessionTicketKey = @splat(0xa5);
+const key_b: quic.SessionTicketKey = @splat(0x5b);
 
 const retry_key: quic.RetryTokenKey = @splat(0x42);
 
@@ -58,6 +63,7 @@ fn newServer(allocator: std.mem.Allocator, opts: ServerOptions) !quic.Server {
         .transport_params = opts.transport_params orelse common.defaultParams(),
         .early_data = .without_replay_protection,
         .retry_token_key = if (opts.retry) retry_key else null,
+        .session_ticket_key = opts.ticket_key,
     });
 }
 
@@ -194,6 +200,236 @@ fn resumeWithEarlyData(allocator: std.mem.Allocator, srv: *quic.Server, envelope
     return out;
 }
 
+// ------------------------------------------- a ticket and a new server
+
+test "session ticket key: a new server with the same key takes the tickets of the old one, with 0-RTT" {
+    // "A new server" stands for a process that started again, and for
+    // the next server of a pool.
+    const allocator = std.testing.allocator;
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    {
+        var old = try newServer(allocator, .{ .ticket_key = key_a });
+        defer old.deinit();
+        try earnTicket(allocator, &old, &sink, 1101);
+    }
+    var new = try newServer(allocator, .{ .ticket_key = key_a });
+    defer new.deinit();
+    const r = try resumeWithEarlyData(allocator, &new, sink.captured.?, 2101);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
+    try std.testing.expect(r.read_before_handshake_done);
+}
+
+test "session ticket key: a new server with no key, or with another key, cannot open the ticket; the early data still arrives" {
+    const allocator = std.testing.allocator;
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    {
+        var old = try newServer(allocator, .{ .ticket_key = key_a });
+        defer old.deinit();
+        try earnTicket(allocator, &old, &sink, 1102);
+    }
+    for ([_]?quic.SessionTicketKey{ null, key_b }, 0..) |other, i| {
+        var new = try newServer(allocator, .{ .ticket_key = other });
+        defer new.deinit();
+        const r = try resumeWithEarlyData(allocator, &new, sink.captured.?, @intCast(2110 + i));
+        try std.testing.expectEqual(quic.EarlyDataStatus.rejected, r.status);
+        try std.testing.expect(!r.read_before_handshake_done);
+        // `resumeWithEarlyData` has checked that all the bytes came.
+        try std.testing.expectEqual(early_payload.len, r.read);
+    }
+    // And a ticket of a server that had NO key is lost at a restart,
+    // whatever the new server has.
+    var sink2: EnvelopeSink = .{ .allocator = allocator };
+    defer sink2.deinit();
+    {
+        var old = try newServer(allocator, .{});
+        defer old.deinit();
+        try earnTicket(allocator, &old, &sink2, 1103);
+    }
+    var new = try newServer(allocator, .{ .ticket_key = key_a });
+    defer new.deinit();
+    const r = try resumeWithEarlyData(allocator, &new, sink2.captured.?, 2112);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, r.status);
+    try std.testing.expect(!r.read_before_handshake_done);
+}
+
+test "session ticket key: a certificate reload keeps the tickets when a key is set, and loses them when none is" {
+    const allocator = std.testing.allocator;
+    const reload: quic.Server.TlsReload = .{ .pem = .{
+        .cert_pem = common.test_cert_pem,
+        .key_pem = common.test_key_pem,
+    } };
+
+    // With a key: the context that the reload builds gets it too.
+    {
+        var srv = try newServer(allocator, .{ .ticket_key = key_a });
+        defer srv.deinit();
+        var sink: EnvelopeSink = .{ .allocator = allocator };
+        defer sink.deinit();
+        try earnTicket(allocator, &srv, &sink, 1104);
+        try std.testing.expectEqualSlices(u8, &key_a, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+
+        try srv.replaceTlsContext(reload);
+        try std.testing.expectEqualSlices(u8, &key_a, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+        const r = try resumeWithEarlyData(allocator, &srv, sink.captured.?, 2104);
+        try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
+        try std.testing.expect(r.read_before_handshake_done);
+
+        // A second reload, and a ticket from before the first one.
+        try srv.replaceTlsContext(reload);
+        const r2 = try resumeWithEarlyData(allocator, &srv, sink.captured.?, 2105);
+        try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r2.status);
+        try std.testing.expect(r2.read_before_handshake_done);
+    }
+    // With no key: each context has a key of its own.
+    {
+        var srv = try newServer(allocator, .{});
+        defer srv.deinit();
+        var sink: EnvelopeSink = .{ .allocator = allocator };
+        defer sink.deinit();
+        try earnTicket(allocator, &srv, &sink, 1106);
+        try srv.replaceTlsContext(reload);
+        const r = try resumeWithEarlyData(allocator, &srv, sink.captured.?, 2106);
+        try std.testing.expectEqual(quic.EarlyDataStatus.rejected, r.status);
+        try std.testing.expect(!r.read_before_handshake_done);
+    }
+}
+
+test "session ticket key: init refuses a zero key, a key with a context of the embedder, and a key with the replay tracker" {
+    const allocator = std.testing.allocator;
+    const base: quic.Server.Config = .{
+        .allocator = allocator,
+        .tls_cert_pem = common.test_cert_pem,
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+    };
+
+    // 48 zero bytes: a buffer that was never filled in.
+    {
+        var cfg = base;
+        cfg.session_ticket_key = @splat(0);
+        try std.testing.expectError(error.InvalidConfig, quic.Server.init(cfg));
+    }
+    // One byte that is not zero is a key.
+    {
+        var cfg = base;
+        var key: quic.SessionTicketKey = @splat(0);
+        key[47] = 1;
+        cfg.session_ticket_key = key;
+        var srv = try quic.Server.init(cfg);
+        defer srv.deinit();
+        try std.testing.expectEqualSlices(u8, &key, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+    }
+    // A context that the embedder built: the key belongs on it.
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{
+            .min_version = boringssl.raw.TLS1_3_VERSION,
+            .max_version = boringssl.raw.TLS1_3_VERSION,
+            .alpn = &protos,
+        });
+        defer ctx.deinit();
+        var cfg = base;
+        cfg.tls_context_override = ctx;
+        cfg.session_ticket_key = key_a;
+        try std.testing.expectError(error.InvalidConfig, quic.Server.init(cfg));
+    }
+    // The replay tracker is process memory; a key that outlives the
+    // process would let a recorded 0-RTT flight be "fresh" again.
+    {
+        var tracker = try quic.tls.AntiReplayTracker.init(allocator, .{});
+        defer tracker.deinit();
+        var cfg = base;
+        cfg.early_data = .{ .with_anti_replay = &tracker };
+        cfg.session_ticket_key = key_a;
+        try std.testing.expectError(error.InvalidConfig, quic.Server.init(cfg));
+        // The tracker alone is fine, and so is the key alone.
+        cfg.session_ticket_key = null;
+        var with_tracker = try quic.Server.init(cfg);
+        with_tracker.deinit();
+    }
+    // A key with 0-RTT off, and with unprotected 0-RTT: both taken.
+    for ([_]quic.Server.EarlyData{ .disabled, .without_replay_protection }) |early| {
+        var cfg = base;
+        cfg.early_data = early;
+        cfg.session_ticket_key = key_a;
+        var srv = try quic.Server.init(cfg);
+        defer srv.deinit();
+        try std.testing.expectEqualSlices(u8, &key_a, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+    }
+    // No key: the context keeps a key of its own.
+    {
+        var srv = try quic.Server.init(base);
+        defer srv.deinit();
+        const own = quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?;
+        try std.testing.expect(!std.mem.eql(u8, &own, &key_a));
+    }
+}
+
+test "session ticket key: with 0-RTT off, a new server with the same key still resumes the session" {
+    // Resumption without early data. What is asked here is TLS's own
+    // answer (`SSL_session_reused`): a resumed TLS 1.3 handshake
+    // sends no certificate and checks none.
+    const allocator = std.testing.allocator;
+    const Dial = struct {
+        /// One connection to `srv`; true when TLS resumed a session.
+        fn resumed(alloc: std.mem.Allocator, srv: *quic.Server, envelope: ?[]const u8, sink: ?*EnvelopeSink, port: u16) !bool {
+            const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x33), .port = port } };
+            var cli = try newClient(alloc, sink, envelope);
+            defer cli.deinit();
+            try cli.conn.advance();
+            var now_us: u64 = 90_000_000;
+            var step: u32 = 0;
+            while (step < 64) : (step += 1) {
+                _ = try clientToServer(&cli, srv, addr, now_us);
+                try serverToClient(srv, &cli, now_us);
+                try srv.tick(now_us);
+                try cli.conn.tick(now_us);
+                if (cli.conn.handshakeDone() and (sink == null or sink.?.captured != null)) break;
+                now_us += 1_000;
+            }
+            try std.testing.expect(cli.conn.handshakeDone());
+            const client_says = boringssl.raw.zbssl_SSL_session_reused(cli.conn.inner.inner) == 1;
+            const server_says = boringssl.raw.zbssl_SSL_session_reused(srv.iterator()[0].conn.inner.inner) == 1;
+            try std.testing.expectEqual(client_says, server_says);
+            try closeAndReap(&cli, srv, addr, now_us);
+            return client_says;
+        }
+    };
+    const noEarly = struct {
+        fn server(alloc: std.mem.Allocator, key: ?quic.SessionTicketKey) !quic.Server {
+            return quic.Server.init(.{
+                .allocator = alloc,
+                .tls_cert_pem = common.test_cert_pem,
+                .tls_key_pem = common.test_key_pem,
+                .alpn_protocols = &protos,
+                .transport_params = common.defaultParams(),
+                .early_data = .disabled,
+                .session_ticket_key = key,
+            });
+        }
+    }.server;
+
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    {
+        var old = try noEarly(allocator, key_a);
+        defer old.deinit();
+        try std.testing.expect(!try Dial.resumed(allocator, &old, null, &sink, 3001));
+        try std.testing.expect(sink.captured != null);
+    }
+    var same = try noEarly(allocator, key_a);
+    defer same.deinit();
+    try std.testing.expect(try Dial.resumed(allocator, &same, sink.captured.?, null, 3002));
+    var other = try noEarly(allocator, key_b);
+    defer other.deinit();
+    try std.testing.expect(!try Dial.resumed(allocator, &other, sink.captured.?, null, 3003));
+    var none = try noEarly(allocator, null);
+    defer none.deinit();
+    try std.testing.expect(!try Dial.resumed(allocator, &none, sink.captured.?, null, 3004));
+}
+
 // ------------------------------------------------- 0-RTT and a Retry
 
 test "0-RTT with no Retry in the way: the server reads the early data before its handshake is done" {
@@ -325,6 +561,27 @@ test "0-RTT after a Retry: the early packets leave the flight, nothing is counte
     try std.testing.expect(!slot.conn.handshakeDone());
 }
 
+test "0-RTT after a Retry at a new server with the same ticket key: the early data is read before the handshake is done" {
+    // The whole case of a crash-restart behind source validation: the
+    // new process has the ticket key of the old one, and it answers
+    // the client's first flight with a Retry (it has no NEW_TOKEN key
+    // of the old process to validate the address with).
+    const allocator = std.testing.allocator;
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    {
+        var old = try newServer(allocator, .{ .retry = true, .ticket_key = key_a });
+        defer old.deinit();
+        try earnTicket(allocator, &old, &sink, 1105);
+    }
+    var new = try newServer(allocator, .{ .retry = true, .ticket_key = key_a });
+    defer new.deinit();
+    const r = try resumeWithEarlyData(allocator, &new, sink.captured.?, 2107);
+    try std.testing.expectEqual(@as(u32, 1), r.retries);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
+    try std.testing.expect(r.read_before_handshake_done);
+}
+
 // ------------------------------------------- the number of 0-RTT streams
 
 test "0-RTT: before the handshake a resumed client opens no more streams than it remembers" {
@@ -353,4 +610,55 @@ test "0-RTT: before the handshake a resumed client opens no more streams than it
     _ = try cli.conn.openUni(2);
     _ = try cli.conn.openUni(6);
     try std.testing.expectError(error.StreamLimitExceeded, cli.conn.openUni(10));
+}
+
+test "0-RTT: after the handshake the server's new limits replace the remembered ones" {
+    // The new server has the ticket key of the old one and allows
+    // MORE streams. (Its transport parameters differ, so it refuses
+    // the early data itself; the session still resumes, and the
+    // early bytes arrive after the handshake.)
+    const allocator = std.testing.allocator;
+    var small = common.defaultParams();
+    small.initial_max_streams_bidi = 3;
+    var large = common.defaultParams();
+    large.initial_max_streams_bidi = 5;
+
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    {
+        var old = try newServer(allocator, .{ .transport_params = small, .ticket_key = key_a });
+        defer old.deinit();
+        try earnTicket(allocator, &old, &sink, 1107);
+    }
+    var srv = try newServer(allocator, .{ .transport_params = large, .ticket_key = key_a });
+    defer srv.deinit();
+
+    const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x22), .port = 2108 } };
+    var cli = try newClient(allocator, null, sink.captured.?);
+    defer cli.deinit();
+    cli.conn.setEarlyDataEnabled(true);
+    _ = try cli.conn.openBidi(0);
+    _ = try cli.conn.streamWrite(0, early_payload);
+    try cli.conn.streamFinish(0);
+    _ = try cli.conn.openBidi(4);
+    _ = try cli.conn.openBidi(8);
+    try std.testing.expectError(error.StreamLimitExceeded, cli.conn.openBidi(12));
+    try cli.conn.advance();
+
+    var now_us: u64 = 60_000_000;
+    var step: u32 = 0;
+    while (step < 100 and !cli.conn.handshakeDone()) : (step += 1) {
+        _ = try clientToServer(&cli, &srv, addr, now_us);
+        try serverToClient(&srv, &cli, now_us);
+        try srv.tick(now_us);
+        try cli.conn.tick(now_us);
+        now_us += 1_000;
+    }
+    try std.testing.expect(cli.conn.handshakeDone());
+    try std.testing.expect(!cli.conn.isClosed());
+
+    // The limit is the server's new one: 5 streams, not 3.
+    _ = try cli.conn.openBidi(12);
+    _ = try cli.conn.openBidi(16);
+    try std.testing.expectError(error.StreamLimitExceeded, cli.conn.openBidi(20));
 }

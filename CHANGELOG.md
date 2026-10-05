@@ -9,6 +9,26 @@ changes.
 
 ### Added
 
+- **`Server.Config.session_ticket_key`: session tickets that live
+  through a restart and a certificate reload.** BoringSSL seals
+  tickets under a key that is random for each TLS context and lives
+  in memory only. So a new process could not open the tickets of the
+  one before it, and neither could the context that
+  `replaceTlsContext(.{ .pem = ... })` builds: every client paid one
+  full handshake and lost its 0-RTT. Measured at the public wrappers
+  before this: after a restart, and after a `.pem` reload, a resumed
+  client's early data was rejected; with the same 48-byte key on both
+  contexts it was accepted and the server read it before its
+  handshake was done. The new setting (`quic.SessionTicketKey`, 48
+  bytes) is installed on the context that `init` builds and on every
+  context that a `.pem` reload builds. `init` refuses, with
+  `InvalidConfig`, a key of 48 zero bytes, a key together with
+  `tls_context_override`, and a key together with
+  `early_data = .with_anti_replay` (the replay tracker is process
+  memory: after a crash a recorded 0-RTT flight would be fresh
+  again). The field's doc comment says what a stolen key gives and
+  what else must stay the same for 0-RTT to survive. Asked for by
+  capnp-zig, which installed the key through the raw TLS layer.
 - **`Connection.retryAccepted()`.** True once a client has taken a
   Retry packet. A client that counts "dials that saved the round
   trip" needs it: after a Retry the handshake costs one round trip

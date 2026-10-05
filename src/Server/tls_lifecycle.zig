@@ -142,6 +142,13 @@ pub fn antiReplayEarlyDataTrampoline(
     };
 }
 
+/// What `buildServerContext` does about session tickets.
+pub const SessionTicketOptions = struct {
+    /// `Server.Config.session_ticket_key`, or null for BoringSSL's
+    /// own per-context key.
+    key: ?*const tls_mod.session_ticket.Key = null,
+};
+
 /// Build a server-mode TLS context from PEM credentials, carrying
 /// the FULL TLS security posture: TLS-1.3-only version pin, ALPN
 /// preference order, mTLS trust anchors (`client_ca_pem`), the
@@ -169,6 +176,12 @@ pub fn antiReplayEarlyDataTrampoline(
 /// for `.with_anti_replay`, which also enables 0-RTT); the hook is
 /// installed whenever a tracker is supplied, matching the
 /// historical `Server.init` behavior.
+///
+/// `tickets.key` non-null installs the embedder's session-ticket
+/// key (`Config.session_ticket_key`). Because a `.pem` reload comes
+/// through here too, the tickets of the old context still open on
+/// the new one. Null leaves BoringSSL's key, random for each
+/// context.
 pub fn buildServerContext(
     alpn: []const []const u8,
     cert_pem: []const u8,
@@ -176,6 +189,7 @@ pub fn buildServerContext(
     client_ca_pem: ?[]const u8,
     early_data_enabled: bool,
     tracker: ?*tls_mod.anti_replay.AntiReplayTracker,
+    tickets: SessionTicketOptions,
 ) Error!boringssl.tls.Context {
     if (cert_pem.len == 0 or key_pem.len == 0) return Error.InvalidConfig;
     var ctx = try boringssl.tls.Context.initServer(.{
@@ -212,6 +226,14 @@ pub fn buildServerContext(
             @ptrCast(t),
         );
     }
+    if (tickets.key) |key| {
+        tls_mod.session_ticket.install(ctx, key) catch |err| return switch (err) {
+            error.OutOfMemory => Error.OutOfMemory,
+            // The context did not take the key. A server that went
+            // on would hand out tickets under a key nobody has.
+            error.KeyNotInstalled => Error.InvalidConfig,
+        };
+    }
     return ctx;
 }
 
@@ -228,6 +250,7 @@ pub fn replaceTlsContext(server: *Server, reload: TlsReload) Error!void {
             server.client_ca_pem,
             server.enable_0rtt,
             server.early_data_anti_replay,
+            .{ .key = if (server.session_ticket_key) |*key| key else null },
         ),
         // Mirror the `Server.init` rule that rejects
         // `client_ca_pem` + `tls_context_override`: an adopted

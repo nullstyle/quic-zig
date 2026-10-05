@@ -343,6 +343,12 @@ pub const RetryToken = conn.RetryToken;
 /// 32-byte HMAC key used to mint and validate stateless Retry tokens.
 pub const RetryTokenKey = conn.RetryTokenKey;
 
+/// 48-byte key that a server seals session tickets under
+/// (`Server.Config.session_ticket_key`). The same key in the next
+/// process, or on the next server of a pool, keeps resumption and
+/// 0-RTT alive across a restart.
+pub const SessionTicketKey = tls.SessionTicketKey;
+
 /// Outcome of `retry_token.validate`: ok, expired, address mismatch,
 /// or malformed.
 pub const RetryTokenValidationResult = conn.RetryTokenValidationResult;

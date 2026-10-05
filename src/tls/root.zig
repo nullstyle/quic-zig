@@ -30,6 +30,12 @@ pub const anti_replay = @import("AntiReplayTracker.zig");
 /// (`Client.Config.ca_pem` / `Server.Config.client_ca_pem`) and the
 /// client-presented mTLS identity (`Client.Config.client_cert_pem`).
 pub const pem = @import("pem.zig");
+/// Session-ticket keys for a server context: the key that lets
+/// tickets (resumption and 0-RTT) live through a restart and a
+/// certificate reload (`Server.Config.session_ticket_key`).
+pub const session_ticket = @import("session_ticket.zig");
+/// Re-export of `session_ticket.Key`, the 48-byte session-ticket key.
+pub const SessionTicketKey = session_ticket.Key;
 /// Re-export of `level.EncryptionLevel` — Initial / 0-RTT / Handshake / 1-RTT.
 pub const EncryptionLevel = level.EncryptionLevel;
 /// Re-export of `level.Direction` — read vs. write side of a derived secret.
@@ -54,4 +60,5 @@ test {
     _ = resumption_state;
     _ = anti_replay;
     _ = pem;
+    _ = session_ticket;
 }

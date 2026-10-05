@@ -23,6 +23,7 @@ const HandshakeCompleteCallbackImpl = server_observability.HandshakeCompleteCall
 const QlogCallback = conn_mod.QlogCallback;
 const TransportParams = tls_mod.TransportParams;
 const RetryTokenKey = conn_mod.RetryTokenKey;
+const SessionTicketKey = tls_mod.SessionTicketKey;
 const PreferredAddressTp = tls_mod.transport_params.PreferredAddress;
 
 /// Configuration handed to `Server.init`. Re-exported as
@@ -564,6 +565,48 @@ new_token_lifetime_us: u64 = 24 * 3600 * 1_000_000,
 /// data on your own context yields a server where 0-RTT silently
 /// never works.
 early_data: EarlyData = .disabled,
+
+/// The key that session tickets are sealed under, 48 bytes. Null (the
+/// default) leaves BoringSSL's own key: random for each TLS context,
+/// in memory only. Then a new process, and the context that
+/// `replaceTlsContext(.{ .pem = ... })` builds, cannot open the
+/// tickets of the one before it, and every client pays one full
+/// handshake and loses its 0-RTT.
+///
+/// Set it to keep tickets alive through a restart and a certificate
+/// reload: give every process, and every server of a pool that a
+/// client may come back to, the same key. The Server installs it on
+/// the context it builds at `init` and on each one it builds for a
+/// `.pem` reload.
+///
+/// What else must be the same for 0-RTT (not for plain resumption)
+/// to survive: the ALPN, `transport_params` (a server must not lower
+/// the limits a ticket remembers) and
+/// `early_data_application_context`.
+///
+/// The key is a secret of the same rank as the private key; make it
+/// with a CSPRNG, keep it out of logs, and change it on a schedule.
+/// A stolen key does NOT open recorded 1-RTT traffic (TLS 1.3
+/// resumes with a fresh key exchange). It DOES open recorded 0-RTT
+/// data, and its holder can answer as this server to a client that
+/// offers a ticket sealed under it, until that ticket expires. The
+/// layout is BoringSSL's: a 16-byte key name (in clear at the front
+/// of each ticket), a 16-byte HMAC-SHA256 key, a 16-byte AES-128
+/// key.
+///
+/// `init` returns `InvalidConfig` for:
+///  - a key of 48 zero bytes (a buffer that was never filled in);
+///  - a key together with `tls_context_override` (that context is
+///    the embedder's; set the key on it yourself);
+///  - a key together with `early_data = .with_anti_replay`. The
+///    replay tracker is process memory. After a crash it is empty,
+///    and a 0-RTT flight that was recorded before the crash would be
+///    "fresh" again for as long as BoringSSL accepts its ticket age
+///    (60 s). So the pair would not keep what `.with_anti_replay`
+///    promises. Use `.without_replay_protection` with a replay
+///    defense of your own, or `.disabled` (tickets then give
+///    resumption without 0-RTT).
+session_ticket_key: ?SessionTicketKey = null,
 
 /// Whether to encode the locally-recorded close-reason string into
 /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per
