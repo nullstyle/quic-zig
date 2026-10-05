@@ -533,6 +533,14 @@ retry_state_table_capacity: u32 = 4096,
 /// magnitude (hours/days vs. seconds), so they need their own
 /// rotation policy. Sharing the key would force NEW_TOKEN
 /// rotation every time the operator rotated the Retry key.
+///
+/// If the next process gets the same key (so that a returning
+/// client skips the Retry also after a restart), the `now_us` that
+/// you feed must go on across the restart too, for example
+/// microseconds since the Unix epoch. A token holds the `now_us` it
+/// was made at; with a clock that starts at zero in each process
+/// the tokens of the process before read as not yet valid. See
+/// `Server.feed`.
 new_token_key: ?conn_mod.NewTokenKey = null,
 /// Lifetime of a minted NEW_TOKEN in microseconds. Returning
 /// clients presenting a token older than this fall through to
@@ -855,9 +863,18 @@ pub const TlsReload = union(enum) {
     },
     /// A caller-built context the Server should adopt as the new
     /// current context. Use this to wire up bespoke options the
-    /// `pem` variant doesn't expose (custom verify modes, session
-    /// ticket callbacks, ALPN protocols different from the
-    /// init-time list, etc.). The Server takes ownership and will
-    /// `deinit` the override when it eventually drains.
+    /// `pem` variant doesn't expose (custom verify modes, ALPN
+    /// protocols different from the init-time list, etc.). The
+    /// Server takes ownership and will `deinit` the override when
+    /// it eventually drains.
+    ///
+    /// The Server puts NOTHING on this context. What its own
+    /// contexts carry, and yours must get from you if you want it:
+    /// TLS 1.3 only, the ALPN list, the early-data flag, the
+    /// anti-replay hook, the session-ticket keys
+    /// (`Config.session_ticket_key`) and the ticket lifetime. To
+    /// keep tickets across a certificate reload, the `pem` variant
+    /// with `Config.session_ticket_key` is the way; this variant is
+    /// not.
     override: boringssl.tls.Context,
 };

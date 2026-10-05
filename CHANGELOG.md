@@ -98,6 +98,31 @@ changes.
   done; now it reads them before. Found by the capnp-zig session,
   whose patched client proved the cure.
 
+### Documentation
+
+- **The "Resumption note" of `replaceTlsContext` gave advice that
+  loses the server's TLS posture.** It told embedders who want
+  tickets to live through a certificate reload to set ticket keys on
+  a context of their own and pass it as `.override`. A context that
+  the embedder builds has only what the embedder puts on it: not the
+  TLS 1.3 pin, the ALPN list, the early-data flag or the anti-replay
+  hook of the Server's own contexts (and `.override` is refused with
+  `client_ca_pem`). The note now points at `session_ticket_key` with
+  a `.pem` reload, and `TlsReload.override` lists what it leaves to
+  the embedder. Reported by capnp-zig.
+- **`Server.feed`: "any monotonic origin works" is true inside one
+  process only.** A NEW_TOKEN holds the `now_us` it was made at. With
+  a `new_token_key` that the next process is given too, a clock that
+  starts at zero in each process makes the new process read the
+  tokens of the one before it as not yet valid, and those clients get
+  a Retry. The doc of `feed` and of `new_token_key` say so now, and
+  what clock does not have the problem. Reported by capnp-zig, which
+  met it.
+- **EMBEDDING.md, "Session tickets across restarts"**: the key, what
+  a stolen key gives, rotation, lifetime, the pair that is refused,
+  source validation after a restart, and what to do with a TLS
+  context of your own.
+
 ### Measured, not changed
 
 - **The ACK repeat in the Handshake space alone was tried and is not

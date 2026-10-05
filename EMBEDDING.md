@@ -1029,7 +1029,85 @@ the session, enables early data, and remembers the peer parameters. On a
 raw `Connection`, call `conn.setRememberedPeerTransportParams(...)` next
 to `setSession`. Without the remembered parameters, early-data streams
 keep an unbounded (client-self-limited) send window until the server's
-real parameters arrive.
+real parameters arrive. Pass the server's parameters whole: since
+0.27.0 the remembered `initial_max_streams_bidi` and
+`initial_max_streams_uni` are also the number of streams that can be
+opened before the handshake, so a struct with flow-control limits
+only allows none.
+
+### Session tickets across restarts
+
+A resumed handshake needs a ticket that the server can open. BoringSSL
+seals tickets under a key that is random for each TLS context and
+lives in memory only. So by default a restarted process, and the
+context that `replaceTlsContext(.{ .pem = ... })` builds, cannot open
+the tickets that are out: every client pays one full handshake and
+loses its 0-RTT.
+
+Give the server a key of its own to keep them:
+
+```zig
+// 48 bytes from a CSPRNG, made once and kept where the next process
+// (and every server of the pool) finds them. A secret of the same
+// rank as the private key: not in the repository, not in a log.
+const ticket_key: quic.SessionTicketKey = loadTicketKey();
+
+var server = try quic.Server.init(.{
+    // ...
+    .early_data = .without_replay_protection, // see "the refused pair"
+    .session_ticket_key = ticket_key,
+    .session_ticket_lifetime_s = 6 * 60 * 60,
+});
+```
+
+- **What survives.** With the same key, a ticket from before the
+  restart resumes. 0-RTT survives too when the ALPN,
+  `transport_params` and `early_data_application_context` are the same
+  as before (a server must not lower the limits that a ticket
+  remembers). A certificate reload with `.pem` keeps the key and the
+  lifetime.
+- **What a stolen key gives.** Not recorded 1-RTT traffic: TLS 1.3
+  resumes with a fresh key exchange. It does open recorded 0-RTT data,
+  it lets its holder answer as your server to a client that offers a
+  ticket, and it lets its holder make tickets (with client
+  certificates in use, a session for any client identity). All three
+  end when the key is no longer accepted.
+- **Change the key on a schedule.** `server.rotateSessionTicketKey(new_key, now_us)`,
+  on the thread that calls `feed`. New tickets are sealed under the
+  new key at once. The old key still opens tickets for one ticket
+  lifetime, so no client loses its session, and every client that
+  comes back leaves with a ticket of the new key. Then the old key is
+  cleared. BoringSSL changes its own key every 2 days; a period of
+  hours to a few days is reasonable here, and never more than 7 days.
+  Give the new key to the other servers of the pool the same way, and
+  to the next process as `session_ticket_key`. A process that STARTS
+  with the new key does not have the old one.
+- **The lifetime** (`session_ticket_lifetime_s`, 1 second to 7 days,
+  default 2 days) is how long a ticket is good for, and so how long an
+  old key is of use after a rotation. TLS measures it on the wall
+  clock.
+- **The refused pair.** `session_ticket_key` together with
+  `early_data = .with_anti_replay` is `InvalidConfig`. The replay
+  tracker is process memory; after a crash it is empty, and a 0-RTT
+  flight that was recorded before the crash would be "fresh" again for
+  about a minute. Use `.without_replay_protection` with a replay
+  defense of your own (accept only idempotent requests as early data),
+  or `.disabled`, which keeps resumption and drops 0-RTT.
+- **Source validation after a restart.** A `new_token_key` that is
+  the same after the restart lets a returning client skip the Retry,
+  but only if the clock you feed (`now_us`) also goes on across the
+  restart, for example microseconds since the Unix epoch: a NEW_TOKEN
+  holds the time it was made at, and a clock that starts at zero in
+  each process reads the tokens of the process before it as not yet
+  valid. When the server does answer with a Retry, the client sends
+  its 0-RTT data again after it (since 0.27.0), so the data still
+  arrives before the handshake is done, one round trip later.
+  `Connection.retryAccepted()` tells a client that this happened.
+- **A context of your own** (`tls_context_override`) takes neither
+  setting. Set the key on that context yourself, before the first
+  datagram: `quic.tls.session_ticket.install(ctx, &key)` for one key,
+  or `quic.tls.session_ticket.installRing(ctx, &ring)` for a pair of
+  keys that you rotate.
 
 ## Diagnostics
 

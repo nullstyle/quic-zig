@@ -1253,8 +1253,21 @@ pub fn iterator(self: *Server) []*Slot {
 
 /// Demultiplex `bytes` to the right connection, opening a new
 /// one for fresh long-header Initials. `now_us` is the monotonic
-/// clock in microseconds (any monotonic origin works as long as
-/// it's consistent across calls).
+/// clock in microseconds. Inside one process any origin works, as
+/// long as it is the same for every call (`feed`, `tick`, and
+/// `rotateSessionTicketKey`).
+///
+/// One thing needs a clock that goes on ACROSS a restart: a
+/// `Config.new_token_key` that the next process is given too. A
+/// NEW_TOKEN holds the `now_us` at which it was made, and a token
+/// "from the future" is not valid. With a clock that starts at zero
+/// in each process, the new process reads the tokens of the one
+/// before it as not yet valid until its own uptime passes their
+/// issue time, and answers those clients with a Retry (if
+/// `retry_token_key` is set) or takes them with no validation.
+/// Microseconds since the Unix epoch are a clock that goes on.
+/// (Session tickets do not have this problem: TLS ages them on the
+/// wall clock by itself.)
 ///
 /// Stateless responses (Version Negotiation, Retry) are queued
 /// internally; the embedder must drain them via
@@ -1810,16 +1823,26 @@ pub fn shutdown(self: *Server, error_code: u64, reason: []const u8) void {
 /// reload adopts the caller-supplied context, so the caller must
 /// not deinit it after handing it over.
 ///
-/// **Resumption note**: BoringSSL mints session tickets under
-/// the SSL_CTX's per-context ticket key, so a ticket issued
-/// before this swap cannot be decrypted under the new context
-/// (different key material). Embedders that need cross-reload
-/// resumption — for example to keep 0-RTT working across a hot
-/// cert rotation — must manage ticket key material themselves
-/// (`SSL_CTX_set_tlsext_ticket_keys` or its callback variants)
-/// and feed the rebuilt context in via the `.override` variant
-/// after configuring the keys explicitly. This call deliberately
-/// does not bridge ticket keys for you.
+/// **Resumption note**: BoringSSL seals session tickets under a
+/// key that is random for each `SSL_CTX`, so by default a ticket
+/// from before the swap does not open on the new context: the
+/// client pays one full handshake and loses its 0-RTT. To keep
+/// tickets (and 0-RTT) across a certificate reload, set
+/// `Config.session_ticket_key` and reload with the `.pem` variant.
+/// The context that the reload builds gets the Server's ticket keys
+/// (also a key that `rotateSessionTicketKey` put in) and
+/// `Config.session_ticket_lifetime_s`.
+///
+/// Do NOT reach for `.override` to carry ticket keys. (This note
+/// said to, until 0.27.0.) A context that you build yourself has
+/// only what you put on it. It does not get the TLS 1.3 pin, the
+/// ALPN list, the early-data flag, or the anti-replay hook that the
+/// Server puts on its own contexts, and `.override` is refused on a
+/// Server that was built with `client_ca_pem`. If you do use
+/// `.override`, set all of those yourself, and the ticket keys too
+/// (`tls.session_ticket.install` for one key, or
+/// `tls.session_ticket.installRing` for a pair that you rotate),
+/// before you hand the context over.
 ///
 /// Errors:
 ///   - `OutOfMemory`: appending to `draining_tls_contexts`.
