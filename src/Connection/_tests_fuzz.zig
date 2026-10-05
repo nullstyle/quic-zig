@@ -1375,8 +1375,45 @@ fn fuzzConnStreamWindow(_: void, smith: *std.testing.Smith) anyerror!void {
                 }
             },
             .tick => {
+                // ORACLE (0.28.0 stream-end repair): the end note must not
+                // move WHEN a stream is reclaimed. Compute today's reclaim
+                // rule before the tick — a peer bidi stream needs both
+                // halves done, a peer uni stream its receive half — and
+                // require that exactly those streams leave the table. A
+                // mutant that keeps a stream one more tick (and so delays
+                // its credit) passes every other check in this harness;
+                // this one kills it. Windows are at most 6, so the GC's
+                // 128 batch never applies.
+                var gone_ids: [2 * window_fuzz_max_index]u64 = undefined;
+                var gone_ends: [2 * window_fuzz_max_index]?state.StreamRecvEnd = undefined;
+                var n_gone: usize = 0;
+                const live_before = conn.streams.count();
+                var sit = conn.streams.iterator();
+                while (sit.next()) |entry| {
+                    const s = entry.value_ptr.*;
+                    // This harness never stops a stream; the GC's
+                    // `discardStopped` would otherwise change the rule.
+                    try std.testing.expect(!s.recv_stopped);
+                    const reclaimable = if (s.id & 2 == 0)
+                        s.send.isTerminal() and s.recvFullyTerminated()
+                    else
+                        s.recvFullyTerminated();
+                    if (!reclaimable) continue;
+                    gone_ids[n_gone] = s.id;
+                    // The live answer, to compare with the note below.
+                    gone_ends[n_gone] = conn.streamRecvEnd(s.id);
+                    n_gone += 1;
+                }
                 now_us += 1_000;
                 try conn.tick(now_us);
+                try std.testing.expectEqual(live_before - n_gone, conn.streams.count());
+                for (gone_ids[0..n_gone], gone_ends[0..n_gone]) |id, end| {
+                    try std.testing.expect(!conn.streams.contains(id));
+                    // Order independence, fuzzed: the note written by the
+                    // reclaiming tick says what the live stream said.
+                    try std.testing.expect(end != null);
+                    try std.testing.expectEqualDeep(end, conn.streamRecvEnd(id));
+                }
             },
             else => {},
         }

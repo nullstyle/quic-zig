@@ -81,6 +81,7 @@ pub const congestion_mod = @import("conn/congestion.zig");
 pub const RttEstimator = @import("conn/RttEstimator.zig");
 pub const flow_control_mod = @import("conn/flow_control.zig");
 const StreamIdSpace = @import("conn/StreamIdSpace.zig");
+pub const RecvEndRing = @import("conn/RecvEndRing.zig");
 pub const event_queue_mod = @import("conn/event_queue.zig");
 pub const PendingFrameQueues = @import("conn/PendingFrameQueues.zig");
 pub const lifecycle_mod = @import("conn/lifecycle.zig");
@@ -333,6 +334,12 @@ sent_crypto: [4]std.ArrayList(SentCryptoChunk) = .{ .empty, .empty, .empty, .emp
 
 /// Per-stream state, keyed by stream id.
 streams: std.AutoHashMapUnmanaged(u64, *Stream) = .empty,
+/// How recently reclaimed streams' receive halves ended
+/// (`streamRecvEnd`). Allocated by `gcClosedStreams` on the first
+/// reclaim that needs it; null until then. A failed allocation is
+/// retried at the next such reclaim; meanwhile the answer for the
+/// streams it missed degrades to "outcome unknown".
+recv_end_ring: ?*RecvEndRing = null,
 /// Monotonic connection-local key for STREAM send bookkeeping.
 /// Wire packet numbers are scoped by packet-number space/path;
 /// SendStream needs one global key to avoid multipath PN collisions.
@@ -1634,16 +1641,24 @@ pub const StreamSendStats = struct {
     has_pending: bool,
 };
 
-/// Result of `Connection.streamReadFin`: the bytes read, plus whether the
-/// peer's FIN has been observed for the stream.
+/// Result of `Connection.streamReadFin`: the bytes read, plus how the
+/// stream ended if it has.
 pub const StreamReadResult = struct {
     /// Bytes copied into the caller's buffer (0 when empty or drained).
     n: usize,
-    /// True once a STREAM frame carrying the FIN bit has been accepted for
-    /// this stream — no more data will arrive. Surfaced inline with the read
-    /// that drains the final bytes, so a caller need not inspect the receive
-    /// half separately (which the stream GC reaps the moment it goes terminal).
+    /// True once a STREAM frame carrying the FIN bit has been accepted and
+    /// the peer has NOT reset the stream. This is not an end-of-stream
+    /// test on its own: a FIN at a high offset can arrive while lower
+    /// bytes are still missing or unread, so `fin` with `n == 0` can also
+    /// be a stream with a hole in it. To learn that a stream has ended,
+    /// and how, ask `Connection.streamRecvEnd`. False for a reset stream
+    /// even when its FIN had arrived first: a RESET_STREAM throws away
+    /// unread bytes, so such a stream is cut (before 0.28.0 this read
+    /// `true` there).
     fin: bool,
+    /// The peer reset the stream (RFC 9000 §19.4): its application error
+    /// code. Null while the stream is open or after a clean end.
+    reset_code: ?u64 = null,
 };
 
 /// Read-only recv-half status of a stream, from `Connection.streamRecvState`.
@@ -1666,6 +1681,40 @@ pub const StreamRecvState = struct {
     /// The stream's total length, known once FIN or RESET_STREAM
     /// locks it (RFC 9000 §4.5); null while the peer may still send.
     final_size: ?u64,
+    /// The peer's RESET_STREAM application error code; null unless
+    /// `reset_seen`. When both `fin_seen` and `reset_seen` are true the
+    /// peer reset the stream after its FIN: treat it as reset (cut).
+    reset_code: ?u64 = null,
+};
+
+/// How a stream's receive half ended — from `Connection.streamRecvEnd`.
+/// Answered alike for a live stream whose receive half is terminal and
+/// for one that `tick` has already reclaimed, so an application gets the
+/// same answer whether it reads before or after `tick`.
+pub const StreamRecvEnd = struct {
+    /// A STREAM frame with the FIN bit was accepted.
+    fin_seen: bool,
+    /// The peer reset the stream: its application error code. Non-null
+    /// means cut, even when `fin_seen` is also true (a reset after the FIN
+    /// throws away unread bytes).
+    reset_code: ?u64,
+    /// The stream's total length (RFC 9000 §4.5).
+    final_size: u64,
+    /// Bytes the application consumed — or, for a stream it stopped with
+    /// `streamStopSending`, bytes the connection read and threw away for
+    /// it.
+    read_offset: u64,
+    /// The application stopped the stream (`streamStopSending`): bytes up
+    /// to `read_offset` may never have reached it.
+    stopped: bool,
+    /// Some of the stream's bytes arrived in 0-RTT (replayable).
+    arrived_in_early_data: bool,
+
+    /// A clean, complete end: the peer's FIN arrived, the peer did not
+    /// reset the stream, and the application did not stop it.
+    pub fn isClean(self: StreamRecvEnd) bool {
+        return self.fin_seen and self.reset_code == null and !self.stopped;
+    }
 };
 
 const PendingRecvDatagram = PendingFrameQueues.PendingRecvDatagram;
@@ -2224,6 +2273,7 @@ pub fn deinit(self: *Connection) void {
         self.allocator.destroy(s);
     }
     self.streams.deinit(self.allocator);
+    if (self.recv_end_ring) |ring| self.allocator.destroy(ring);
     for ([_]*StreamIdSpace{ &self.peer_bidi_ids, &self.peer_uni_ids, &self.local_bidi_ids, &self.local_uni_ids }) |ids| {
         ids.deinit(self.allocator);
     }
@@ -2922,7 +2972,31 @@ pub const streamRecvState = conn_streams.streamRecvState;
 /// reclaimed. Distinguishes a GC'd receive stream from an implicitly opened
 /// lower ID whose first frame has not arrived. False for send-only local uni
 /// streams; their receive direction is invalid regardless of lifecycle.
+/// To learn HOW a reclaimed stream ended, ask `streamRecvEnd`.
 pub const streamRecvWasReaped = conn_streams.streamRecvWasReaped;
+
+/// How the receive half of stream `id` ended (Evolving tier): a clean
+/// FIN, or a reset with its code — see `StreamRecvEnd`. The answer is
+/// the same whether the application asks before or after the `tick` that
+/// reclaims the stream, which closes a trap: `tick` reclaims a stream
+/// the moment its receive half ends, so an end that arrived with nothing
+/// left to read (a bare FIN after the last read, or a RESET_STREAM) used
+/// to be indistinguishable afterwards.
+///
+/// Null means one of:
+///  - the receive half has not ended yet (`streamRecvState` is non-null);
+///  - the id was never opened, or the stream has no receive half (a
+///    locally-initiated unidirectional stream);
+///  - the stream ended and was reclaimed, but its end is not known
+///    (`streamRecvWasReaped` is true): its note was overwritten, because
+///    the application did not ask within the tick after the reclaiming
+///    one and more streams ended since; or the connection could not
+///    allocate the note (out of memory). Treat it as CUT, never as
+///    complete.
+///
+/// When streams are reclaimed and when their stream credit returns to the
+/// peer are not affected by this function or the note behind it.
+pub const streamRecvEnd = conn_streams.streamRecvEnd;
 
 /// Convenience: write `data` to the send half of stream `id`.
 ///
@@ -2943,11 +3017,12 @@ pub const streamWrite = conn_streams.streamWrite;
 /// stream (no receive half exists on this side).
 pub const streamRead = conn_streams.streamRead;
 
-/// Like `streamRead`, but also reports whether the peer's FIN has been
-/// seen — so a caller captures end-of-stream inline with the last read
-/// rather than inspecting the receive half separately, which the stream
-/// GC reaps the moment the recv side goes terminal. Prefer this over
-/// `streamRead` when you need to detect clean stream completion.
+/// Like `streamRead`, but also reports whether a FIN has arrived with no
+/// reset after it (`fin`) and the code of a peer reset (`reset_code`),
+/// captured inline with the read. `fin` alone does not prove the stream
+/// is drained (see `StreamReadResult.fin`); `streamRecvEnd` is the
+/// end-of-stream test. Once `tick` has reclaimed the stream this returns
+/// `StreamNotFound`; `streamRecvEnd` still answers how it ended.
 pub const streamReadFin = conn_streams.streamReadFin;
 
 /// Zero-copy read, half one: the contiguously readable prefix of

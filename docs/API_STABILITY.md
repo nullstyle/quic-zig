@@ -81,6 +81,12 @@ suite.
   release unchanged. Note the deliberate absence of `@hasDecl`-based
   callback detection — see `src/app/root.zig`'s hook-table comment for
   the comptime-quirk rationale.
+- **`Connection.streamRecvEnd` / `StreamRecvEnd`** (added 0.28.0): how a
+  stream's receive half ended, answered the same before and after the
+  `tick` that reaps the stream. The note behind it is bounded (at least
+  through the tick after the reaping one); its contract — `null` +
+  `streamRecvWasReaped` means "ended, how unknown: treat as cut" — is the
+  part embedders must rely on, not the ring's size.
 - **`quic.testing`** (added 0.14.0): the shipped in-memory loopback
   harness (`testing.Loopback`, `testing.NullDriver`). Test-only by
   intent; shape may move freely within a minor.

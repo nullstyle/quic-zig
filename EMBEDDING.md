@@ -299,9 +299,11 @@ try quic.transport.runUdpServer(&server, .{
 ```
 
 Ordering guarantees (the traps this removes): events drain before
-data from the same stream is pumped; `onStreamEnd` fires on
-`streamRecvState().terminal` / reset / reaped — never early under
-reordering; `Outbox.push` accepts what the connection takes and
+data from the same stream is pumped; `onStreamEnd` fires once the
+receive half has ended (`streamRecvEnd`), never early under
+reordering, as `.fin` or `.reset` even if a `tick` reaped the stream
+first (`.reaped` is left for teardown and "how unknown");
+`Outbox.push` accepts what the connection takes and
 retries the rest, so short writes disappear; the whole pass runs
 before `Connection.tick`, which is what keeps the stream GC from
 reaping streams with unread bytes. A hand-rolled loop must preserve
@@ -804,20 +806,27 @@ To observe stream completion and backpressure without reaching into the
 stream internals — which the transport's stream GC reclaims the moment a
 stream goes terminal — use the connection-level accessors:
 
-- `streamReadFin(id, dst)` reads like `streamRead` but also returns whether
-  the peer's FIN has been seen, captured inline with the read that drains
-  the stream (so you never have to re-inspect a soon-reaped stream).
-- `streamRecvState(id)` reports `fin_seen` / `reset_seen` / `terminal`,
-  distinguishing a clean FIN from an abortive RESET, or `null` once the
-  stream has been reaped or was never opened.
+- `streamReadFin(id, dst)` reads like `streamRead` but also returns `fin`
+  (a FIN arrived and no reset followed) and `reset_code` (the peer reset
+  the stream), captured inline with the read. `fin` is NOT an end-of-stream
+  test on its own — see "Ending a receive stream" below. (Since 0.28.0
+  `fin` is false for a stream the peer reset after its FIN: the reset threw
+  unread bytes away, so it is cut, not complete.)
+- `streamRecvState(id)` reports `fin_seen` / `reset_seen` / `terminal` /
+  `reset_code` for a LIVE stream, or `null` once the stream has been reaped
+  or was never opened. Non-null means "still in the table".
+- `streamRecvEnd(id)` reports how the receive half ENDED — `fin_seen`,
+  `reset_code`, `final_size`, `read_offset`, and `isClean()` — and gives
+  the same answer before and after the `tick` that reaps the stream (see
+  "Ending a receive stream" below).
 - `streamSendStats(id)` snapshots `written` / `acked` / `buffered` /
   `has_pending` for write backpressure, or `null` for a reaped stream.
 
 ### Ending a receive stream
 
-**Use `streamRecvState(id).terminal`, and nothing else.** Every wrong
-version of this test fails *silently*: the application truncates the
-stream, and neither endpoint reports an error.
+**Use `streamRecvEnd(id)`, and nothing else.** Every wrong version of
+this test fails *silently*: the application truncates the stream, and
+neither endpoint reports an error.
 
 - A read that returns 0 bytes means "nothing readable **right now**".
   `streamRead` also returns 0 when the next in-order byte has not arrived
@@ -831,32 +840,57 @@ stream, and neither endpoint reports an error.
   `100..199` reordered behind them, puts the receiver in that state with
   two thirds of the stream still to come.
 
-`terminal` is true only once the FIN arrived **and** every byte was
-delivered and read, or the peer sent RESET_STREAM — `reset_seen` tells an
-abort apart from a clean EOF. `null` means the stream was already reaped,
-which is terminal too:
+- "The stream is gone" is not an end-of-stream test either. `tick` reaps a
+  stream the moment its receive half ends, so `StreamNotFound` (or
+  `streamRecvState` == null) after a reap looks the same for a clean FIN
+  and for a reset. Before 0.28.0 an end that arrived with nothing left to
+  read (a bare FIN after your last read, or a RESET_STREAM) could be
+  reaped before you looked, and its kind was lost.
+
+`streamRecvEnd` is non-null only once the receive half has ENDED — the FIN
+arrived **and** every byte was delivered and read, or the peer sent
+RESET_STREAM — and it says which. It answers the same whether you ask
+before or after the `tick` that reaps the stream, at least through the
+tick after the reaping one. Past that, a reaped stream's end note may be
+overwritten — and if the connection could not allocate the note at all
+(out of memory), there is none. In both cases `null` with
+`streamRecvWasReaped(id)` true means "ended, how unknown". Treat that as
+cut, never as complete:
 
 ```zig
 while (true) {
     const n = conn.streamRead(id, &buf) catch |err| switch (err) {
-        error.StreamNotFound => break, // already reaped
+        error.StreamNotFound => break, // already reaped: see below
         else => return err,
     };
     if (n == 0) break;                 // nothing readable RIGHT NOW
     handle(buf[0..n]);
 }
-const st = conn.streamRecvState(id) orelse return true; // reaped => done
-if (!st.terminal) return false;                         // more coming, or a gap
-if (st.reset_seen) return true;                         // peer aborted
-// clean EOF: every byte arrived and was read
+const end = conn.streamRecvEnd(id) orelse {
+    if (conn.streamRecvWasReaped(id)) return .cut; // ended, how unknown
+    return .more_coming;                           // not ended, or a gap
+};
+if (end.isClean()) return .clean; // FIN, every byte arrived and was read
+return .cut;                      // reset (end.reset_code) or stopped
 ```
+
+Read every stream at least once between two calls of `tick` and you meet
+the "how unknown" case only if the note could not be allocated: you see
+each end while the stream is still live. The bundled loops do this:
+`runUdpServer` and (since 0.28.0) `runUdpClient` run their hook before
+`tick`.
 
 A receiver that knows the message length in advance (a fixed-size reply, a
 length-prefixed frame) may end on the byte count instead — that is what
-`examples/echo_client.zig` does. Everything else ends on `terminal`.
-`examples/echo_server.zig`, `examples/foreign_loop_embedder.zig`, and
-`examples/goodput_smoke.zig` all follow this rule, and the reordering
-regression test that pins it lives in `examples/foreign_loop_embedder.zig`.
+`examples/echo_client.zig` does, and it still asks `streamRecvEnd` when the
+stream is gone, because a reset is a cut reply whatever the count says.
+Everything else ends on `streamRecvEnd`. `examples/echo_server.zig` gets
+it through `quic.app` (its `onStreamEnd` sees `.fin` / `.reset`), and
+`examples/goodput_smoke.zig` asks `streamRecvEnd` directly.
+`examples/foreign_loop_embedder.zig` ends on a live stream's `terminal` and
+takes a stream that is already gone as abandoned (cut), which keeps the
+same rule — gone is never complete — and its reordering regression test
+pins the "empty read + FIN" trap above.
 
 RFC 9221 DATAGRAM support is off by default:
 `transport_params.max_datagram_frame_size` defaults to `0`, which

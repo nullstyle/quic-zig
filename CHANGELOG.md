@@ -7,7 +7,9 @@ changes.
 
 ## [Unreleased]
 
-On `main` after 0.27.0. Docs and one test; no change in behavior.
+On `main` after 0.27.0. The stream-end repair: an application learns
+how a stream ended — a clean FIN, or a reset with its code — whatever
+the order of its read and `tick`. Plus a fix to `streamReadFin`.
 
 ### Documentation
 
@@ -41,29 +43,106 @@ On `main` after 0.27.0. Docs and one test; no change in behavior.
     the process needs a clock that goes on, and the bundled loop has
     none.
 
-### Measured, not changed
+### Fixed
 
-- **The end of a stream is lost when `tick` runs before the
-  application reads.** `tick` reclaims a stream as soon as its
-  receive half has ended. When the end comes with nothing left to
-  read (a FIN in a frame of its own after the application read all
-  the data, or a RESET_STREAM) and `tick` runs before the next read,
-  the application finds no stream: `streamReadFin` returns
-  `StreamNotFound`, `streamRecvState` is null, `streamRecvWasReaped`
-  is true. Measured on uni and bidi streams: a clean end and a reset
-  (with its error code) give the same three answers, so the
-  application cannot tell a complete stream from a cut one. With the
-  read before `tick`, both are reported right. `runUdpServer` calls
-  its hook before `tick`; **`runUdpClient` calls it after**, so a
-  client that reads in that hook has the trap, and the module doc
-  says so now. Old behavior, not from 0.27.0. Reported by http3-zig,
-  which lost the end of its WebTransport CONNECT streams to it and
-  now reads before `tick`. The repair is a design choice (when the
-  receive half counts as done, or an event for the end of a stream,
-  and the order in `runUdpClient`); it is not made yet.
+- **`streamReadFin` called a stream reset after its FIN complete.**
+  When a peer sent data and a FIN, then RESET_STREAM before the
+  application read, the reset threw the unread bytes away but
+  `streamReadFin` still said `fin = true` with `n = 0`: a cut stream
+  passed for a complete one, with the right read order. Now `fin` is
+  false once the peer reset the stream, and the result carries
+  `reset_code`. (`RecvStream.resetStream` keeps `fin_seen`;
+  `streamReadFin` did not look at the reset.) `fin` is still not an
+  end-of-stream test on its own (a FIN at a high offset can arrive
+  while lower bytes are missing); `streamRecvEnd` is that test.
+- **The end of a stream was lost when `tick` ran before the
+  application read.** `tick` reclaims a stream as soon as its receive
+  half has ended. When the end came with nothing left to read (a FIN
+  in a frame of its own after the last read, or a RESET_STREAM) and
+  `tick` ran first, a clean end and a reset gave the same answers and
+  the reset code was gone. Reported by http3-zig (it lost the end of
+  its WebTransport CONNECT streams) and measured by two more
+  downstreams. Three changes, below: `streamRecvEnd` answers after the
+  reclaim, `runUdpClient` reads before `tick`, and `quic.app` reports
+  the true end. Old behavior, not from 0.27.0.
+
+### Added
+
+- **`Connection.streamRecvEnd(id) ?StreamRecvEnd`** (Evolving): how the
+  receive half of a stream ended — `fin_seen`, `reset_code`,
+  `final_size`, `read_offset`, `stopped`, `arrived_in_early_data`, and
+  `isClean()`. It gives the same answer before and after the `tick`
+  that reclaims the stream, at least through the tick after that one.
+  Behind it is a small note per connection (a ring of 256 ends, about
+  10 KiB, allocated on the first reclaim). `null` together with
+  `streamRecvWasReaped(id) == true` means "ended, how not known": treat
+  it as cut, never as complete. If the note cannot be allocated, the
+  stream is still reclaimed as before and the answer is "not known".
+- **`reset_code`** on `StreamRecvState` (live streams) and on
+  `StreamReadResult`. Before this, the code of a peer's RESET_STREAM
+  could be read only from the internal field `Stream.recv.reset` of a
+  live stream, and was gone once `tick` reclaimed it.
+
+### Changed
+
+- **`runUdpClient` calls its `on_iteration` hook BEFORE `tick`** (it was
+  after), the order `runUdpServer` already uses. A stream whose end came
+  in this iteration is still in the table when the hook reads it. When
+  that `tick` closes the connection (an idle timeout, for example), the
+  hook runs once more right after it, so it still sees the close before
+  the loop returns, as it did with the old order.
+- **`quic.app`**: for a stream that a `tick` reclaimed before the Driver
+  serviced it, `on_stream_end` now gets `.fin` or `.reset` (it got
+  `.reaped`). A stream the application itself stopped
+  (`streamStopSending`) is now `.reaped`, also while it is live (it was
+  `.fin`, which says every byte reached `on_stream_data`; the bytes after
+  the stop were dropped). `.reaped` now means "no clean end the Driver can
+  vouch for: teardown, a stopped stream, or a reclaimed stream whose end
+  is not known". Note: such a stopped stream can be `.reaped` while still
+  live, so `streamRecvWasReaped(id)` is false for it; that alone does not
+  mean teardown. `streamRecvEnd(id).?.stopped` says it directly. The
+  reset code is
+  `conn.streamRecvEnd(entry.id).?.reset_code`. `StreamEnd` keeps its
+  shape (no payload).
+- **`Outbox.finish` cannot stop the server any more.** It now treats as
+  "nothing left to finish": `StreamNotFound` for a stream that really
+  was reclaimed (its send half was already done), and `StreamClosed`, a
+  send half the peer already stopped with STOP_SENDING. The second one
+  is an old fault: a peer that sent STOP_SENDING and then its FIN made
+  the usual `.fin => outbox.finish(...)` reply return `StreamClosed`
+  out of the service pass, which stops `runUdpServer` for every
+  connection. An id that was never opened still returns
+  `StreamNotFound`.
+- EMBEDDING.md "Ending a receive stream" is rewritten around
+  `streamRecvEnd`. Its old snippet took `streamRecvState(id) == null`
+  as "done", which is the trap itself. `examples/echo_client.zig` asks
+  `streamRecvEnd` when its stream is gone, and `examples/goodput_smoke.zig`
+  ends its upload on `streamRecvEnd` (a cut upload now fails the smoke;
+  it took "gone" as "done").
+
+### Not changed (on purpose)
+
+- WHEN a stream is reclaimed, and WHEN its stream credit goes back to
+  the peer. A per-tick oracle in the stream-window fuzz test pins it.
+- `streamRecvState` returns null once a stream is reclaimed, as before:
+  qmsg and `quic.app` use "not null" to mean "still in the table".
+- The field `Stream.recv.final_size` (capnp-zig reads it directly).
+- The shape of `quic.app.StreamEnd`.
 
 ### Tools and tests
 
+- `tests/e2e/stream_end_after_tick.zig`: four kinds of end (FIN, RESET,
+  FIN then RESET, unread data + FIN then RESET) on a uni and a bidi
+  stream, asked before and after the reclaiming `tick`: the same
+  `streamRecvEnd` both ways; `streamReadFin` for the reset cases; the
+  null contract of `streamRecvState`; the `runUdpClient` order through
+  its iteration tail; and `quic.app` with the tick first.
+- The stream-window fuzz test checks, at every `tick`, that exactly the
+  streams of today's reclaim rule leave the table and that each one's
+  note equals its live answer from just before.
+- Unit tests: the ring's bound and survival, an overwritten note that
+  answers "not known" (never "clean"), and a refused allocation that
+  still reclaims and gives credit at the same tick.
 - `tests/e2e/session_tickets.zig`: a process that restarts before the
   old key's time is over, starts with the old key and rotates again
   with the time of the first rotation. It takes the tickets of both

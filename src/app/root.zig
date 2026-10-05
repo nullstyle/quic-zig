@@ -46,17 +46,36 @@ const CloseEvent = quic.CloseEvent;
 /// a pointer kept past it dangles into a recycled slot. (The send
 /// side is independent: a staged Outbox tail for the same stream id
 /// keeps draining after release.)
+///
+/// `.fin` and `.reset` are reported whether or not the stream is still in
+/// the connection's live table: a `tick` that ran before the Driver
+/// serviced the connection may already have reclaimed it (the connection
+/// keeps a note of how it ended — `Connection.streamRecvEnd`). So a
+/// send-side call made from `on_stream_end` can meet `StreamNotFound`;
+/// `Outbox.finish` and `Outbox.reset` already treat that as "nothing left
+/// to do". The reset code is `conn.streamRecvEnd(entry.id).?.reset_code`,
+/// which always answers inside `on_stream_end` (no `tick` runs inside a
+/// service pass).
 pub const StreamEnd = union(enum) {
     /// Clean EOF: the peer FINed, every byte was delivered through
     /// `onStreamData`, and the recv half is terminal.
     fin,
-    /// The peer aborted the stream with RESET_STREAM. Bytes already
-    /// delivered stay delivered; no more are coming.
+    /// The peer aborted the stream with RESET_STREAM — also when its FIN
+    /// had arrived first. Bytes already delivered stay delivered; unread
+    /// ones were thrown away; no more are coming.
     reset,
-    /// The stream left the connection's live table before its end was
-    /// observed (the GC reaped a fully-terminal stream, or the
-    /// connection is closing). Treat as done: there is nothing left
-    /// to read.
+    /// The stream ended without a clean end the Driver can vouch for:
+    /// the connection is closing; the application stopped the stream
+    /// (`streamStopSending`), so later bytes were dropped unread; or the
+    /// stream was reclaimed and its end is not known (its note was
+    /// overwritten, or could not be allocated). Treat it as cut, never as
+    /// a clean end.
+    ///
+    /// To tell these apart: a STOPPED stream can end `.reaped` while it is
+    /// still live, so `streamRecvWasReaped(id)` is false for it — that
+    /// alone does not mean teardown. `conn.streamRecvEnd(id)` answers
+    /// directly: a stopped stream gives a non-null answer with
+    /// `.stopped == true`.
     reaped,
 };
 
@@ -288,7 +307,24 @@ pub const Outbox = struct {
             tail.fin = true;
             return;
         }
-        try conn.streamFinish(id);
+        conn.streamFinish(id) catch |err| switch (err) {
+            // Already reclaimed: a reclaimed bidi stream's send half was
+            // already terminal, so there is nothing left to finish. The
+            // usual `.fin => outbox.finish(...)` reply can meet this when
+            // `on_stream_end` reports the end of a stream a `tick`
+            // reclaimed before the Driver serviced it. Only a REALLY
+            // reclaimed id counts: an id that was never opened, or a
+            // lower id a higher one opened implicitly, still errors —
+            // swallowing that would lose a FIN for a stream that has not
+            // started yet.
+            error.StreamNotFound => if (!conn.streamRecvWasReaped(id)) return err,
+            // The peer stopped our send half (STOP_SENDING), so it is
+            // already reset: no FIN can follow. `flush` drops a staged
+            // tail for the same reason. A peer must not be able to stop
+            // the whole server through this reply.
+            error.StreamClosed => {},
+            else => return err,
+        };
     }
 
     /// Abort stream `id` with RESET_STREAM and drop any staged tail.
@@ -582,7 +618,10 @@ fn pumpStream(owner: anytype, session: anytype, entry: anytype) anyerror!void {
                 // first frame materializes receive state. Only the connection
                 // can distinguish that absence from actual terminal GC.
                 if (!session.conn.streamRecvWasReaped(entry.id)) return;
-                ended = .reaped;
+                // Reclaimed before this pump ran (a `tick` came first):
+                // the connection's note still says how it ended. Only an
+                // overwritten note leaves `.reaped`, "outcome unknown".
+                ended = if (session.conn.streamRecvEnd(entry.id)) |e| streamEndOf(e) else .reaped;
                 break;
             },
             else => return err,
@@ -594,13 +633,27 @@ fn pumpStream(owner: anytype, session: anytype, entry: anytype) anyerror!void {
         if (n < chunk.len) return;
     }
     if (ended == null) {
-        if (session.conn.streamRecvState(entry.id)) |st| {
-            if (st.terminal) ended = if (st.reset_seen) .reset else .fin;
-        } else ended = .reaped;
+        // Live stream: ended iff its receive half is terminal. The same
+        // `streamRecvEnd` answer as the reclaimed branch above, so both
+        // loop orders map an end to the same `StreamEnd`.
+        if (session.conn.streamRecvEnd(entry.id)) |e| {
+            ended = streamEndOf(e);
+        } else if (session.conn.streamRecvState(entry.id) == null) ended = .reaped;
     }
     const end = ended orelse return;
     defer session.table.release(entry.id);
     if (owner.hooks.on_stream_end) |f| try f(owner.app, session, entry, end);
+}
+
+/// `.fin` only for what `StreamRecvEnd.isClean` calls clean. A reset
+/// wins over a FIN (a RESET_STREAM after the FIN throws unread bytes
+/// away). A stream the application stopped is not `.fin` either: after
+/// `streamStopSending` the connection reads and drops what still
+/// arrives, so those bytes never reached `on_stream_data`.
+fn streamEndOf(e: quic.StreamRecvEnd) StreamEnd {
+    if (e.reset_code != null) return .reset;
+    if (e.stopped) return .reaped;
+    return .fin;
 }
 
 fn endTrackedStreams(owner: anytype, session: anytype) void {
@@ -1437,10 +1490,144 @@ test "ConnectionDriver: an observed receive stream still ends once when its owne
     try std.testing.expect(ctx.conn.stream(sid) == null);
     try driver.service();
     try std.testing.expectEqual(@as(usize, 1), app.ends);
-    try std.testing.expectEqual(StreamEnd.reaped, app.last_end.?);
+    // Reclaimed before the pump, yet the end is known: the connection's
+    // note says reset (before 0.28.0 this read `.reaped`, "how unknown").
+    try std.testing.expectEqual(StreamEnd.reset, app.last_end.?);
     try std.testing.expectEqual(@as(usize, 0), driver.table.count());
     try driver.service();
     try std.testing.expectEqual(@as(usize, 1), app.ends);
+}
+
+test "Outbox: finish on a stream that a tick already reclaimed is a no-op" {
+    // Since 0.28.0 `on_stream_end` reports `.fin` / `.reset` for a stream
+    // that a tick reclaimed first, so the usual `.fin => outbox.finish`
+    // reply can name a stream that is gone. A reclaimed bidi stream's send
+    // half was already terminal: there is nothing to finish, and an error
+    // here would stop the whole service pass.
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var outbox = Outbox.init(std.testing.allocator);
+    defer outbox.deinit();
+    const stream = try ctx.conn.openNextBidi();
+    const sid = stream.id;
+    try ctx.conn.streamFinish(sid);
+    stream.send.fin_acked = true;
+    stream.send.state = .data_recvd;
+    try ctx.conn.handleResetStream(.{ .stream_id = sid, .application_error_code = 0, .final_size = 0 });
+    try ctx.conn.tick(1000);
+    try std.testing.expect(ctx.conn.stream(sid) == null);
+    try outbox.finish(ctx.conn, sid);
+}
+
+test "Outbox: finish on a send half that is already reset is a no-op" {
+    // STOP_SENDING from the peer resets our send half; so does our own
+    // reset. Either way `finish` meets `StreamClosed`, and the usual
+    // `.fin => outbox.finish(...)` reply must not stop the service pass
+    // (and with it the whole server) over it.
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var outbox = Outbox.init(std.testing.allocator);
+    defer outbox.deinit();
+    const s = try ctx.conn.openNextBidi();
+    try ctx.conn.streamReset(s.id, 9);
+    try outbox.finish(ctx.conn, s.id);
+}
+
+test "Outbox: finish on an id that was never opened still errors" {
+    // Only a stream that was really reclaimed means "nothing left to
+    // finish". A local id never opened, or a peer id that a higher one
+    // opened implicitly (a hole), has a send half still to come; hiding
+    // the error would lose that FIN.
+    var ctx = try receivingTestConn(std.testing.allocator);
+    defer ctx.deinit();
+    var outbox = Outbox.init(std.testing.allocator);
+    defer outbox.deinit();
+    try std.testing.expectError(error.StreamNotFound, outbox.finish(ctx.conn, 400));
+    // Server-initiated bidi 5 arrives first, so 1 is an implicit hole.
+    try ctx.conn.handleStream(.application, .{ .stream_id = 5, .offset = 0, .data = "x", .fin = false });
+    try std.testing.expect(ctx.conn.stream(1) == null);
+    try std.testing.expectError(error.StreamNotFound, outbox.finish(ctx.conn, 1));
+}
+
+test "ConnectionDriver: a stream the application stopped never ends as .fin" {
+    // After `streamStopSending` the connection reads and drops what still
+    // arrives, so those bytes never reach `on_stream_data`. `.fin` says
+    // every byte did, so a stopped stream must not get it — in either
+    // order of `tick` and service.
+    for ([_]bool{ false, true }) |tick_first| {
+        var ctx = try receivingTestConn(std.testing.allocator);
+        defer ctx.deinit();
+        var app: ProgressApp = .{ .limit = 100 };
+        var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = ProgressApp.hooks() });
+        defer driver.deinit();
+        try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 0, .data = "abc", .fin = false });
+        try driver.service();
+        try std.testing.expectEqual(@as(usize, 3), app.received);
+        try ctx.conn.streamStopSending(3, 7);
+        // The rest arrives with the FIN and is dropped unread.
+        try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 3, .data = "def", .fin = true });
+        if (tick_first) {
+            try ctx.conn.tick(1000);
+            try std.testing.expect(ctx.conn.stream(3) == null);
+        }
+        try driver.service();
+        try std.testing.expectEqual(@as(usize, 1), app.ends);
+        try std.testing.expectEqual(StreamEnd.reaped, app.last_end.?);
+        try std.testing.expectEqual(@as(usize, 3), app.received);
+    }
+}
+
+/// Refuses exactly the allocation of the connection's stream-end note
+/// while `refuse` is set; every other allocation goes to `child`.
+const RefuseNoteAllocator = struct {
+    child: std.mem.Allocator,
+    refuse: bool = true,
+    refused: u32 = 0,
+
+    fn allocator(self: *RefuseNoteAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *RefuseNoteAllocator = @ptrCast(@alignCast(ctx));
+        if (self.refuse and len == @sizeOf(Connection.RecvEndRing)) {
+            self.refused += 1;
+            return null;
+        }
+        return self.child.rawAlloc(len, alignment, ret_addr);
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *RefuseNoteAllocator = @ptrCast(@alignCast(ctx));
+        return self.child.rawResize(memory, alignment, new_len, ret_addr);
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *RefuseNoteAllocator = @ptrCast(@alignCast(ctx));
+        return self.child.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *RefuseNoteAllocator = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "ConnectionDriver: a reclaimed stream whose end is not known ends as .reaped, never .fin" {
+    // Fail closed. The stream really ended cleanly here, but with no note
+    // the Driver cannot know that; claiming `.fin` would let a cut stream
+    // pass for a complete one whenever the note is missing.
+    var refusing: RefuseNoteAllocator = .{ .child = std.testing.allocator };
+    var ctx = try receivingTestConn(refusing.allocator());
+    defer ctx.deinit();
+    var app: ProgressApp = .{ .limit = 100 };
+    var driver = try ProgressApp.C.init(.{ .allocator = std.testing.allocator, .app = &app, .conn = ctx.conn, .hooks = ProgressApp.hooks() });
+    defer driver.deinit();
+    try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 0, .data = "abc", .fin = false });
+    try driver.service();
+    try ctx.conn.handleStream(.application, .{ .stream_id = 3, .offset = 3, .data = "", .fin = true });
+    try ctx.conn.tick(1000);
+    try std.testing.expect(ctx.conn.stream(3) == null);
+    try std.testing.expectEqual(@as(u32, 1), refusing.refused);
+    try driver.service();
+    try std.testing.expectEqual(@as(usize, 1), app.ends);
+    try std.testing.expectEqual(StreamEnd.reaped, app.last_end.?);
 }
 
 test "ConnectionDriver: an implicit unobserved stream ends if terminal input is reaped before service" {
@@ -1458,7 +1645,9 @@ test "ConnectionDriver: an implicit unobserved stream ends if terminal input is 
         try std.testing.expect(ctx.conn.stream(3) == null);
         try driver.service();
         try std.testing.expectEqual(@as(usize, 2), app.ends);
-        try std.testing.expectEqual(StreamEnd.reaped, app.last_end.?);
+        // The FIN and the RESET stay apart after the reclaim (before
+        // 0.28.0 both read `.reaped`: a cut stream passed for a whole one).
+        try std.testing.expectEqual(if (reset) StreamEnd.reset else StreamEnd.fin, app.last_end.?);
         try std.testing.expectEqual(@as(usize, 0), driver.table.count());
     }
 }

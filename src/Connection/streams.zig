@@ -18,6 +18,8 @@ const StreamType = state_mod.StreamType;
 const StreamSendStats = state_mod.StreamSendStats;
 const StreamReadResult = state_mod.StreamReadResult;
 const StreamRecvState = state_mod.StreamRecvState;
+const StreamRecvEnd = state_mod.StreamRecvEnd;
+const RecvEndRing = state_mod.RecvEndRing;
 const send_stream_mod = state_mod.send_stream_mod;
 const SendStream = state_mod.SendStream;
 const RecvStream = state_mod.RecvStream;
@@ -370,6 +372,62 @@ pub fn streamRecvWasReaped(conn: *const Connection, id: u64) bool {
     return streamWasReaped(conn, id);
 }
 
+/// The one place that says how a live stream's receive half ended. Both
+/// answers of `streamRecvEnd` — from the live stream and from the note
+/// written when `tick` reclaims it — come from here, so they cannot
+/// drift apart. Null while the receive half has not ended.
+fn recvEndOf(s: *const Stream) ?StreamRecvEnd {
+    if (!s.recvFullyTerminated()) return null;
+    return .{
+        .fin_seen = s.recv.fin_seen,
+        .reset_code = if (s.recv.reset) |r| r.error_code else null,
+        // A terminal receive half always has a locked final size (a FIN
+        // or a RESET_STREAM set it); the fallback is defensive only.
+        .final_size = s.recv.final_size orelse s.recv.read_offset,
+        .read_offset = s.recv.read_offset,
+        .stopped = s.recv_stopped,
+        .arrived_in_early_data = s.arrived_in_early_data,
+    };
+}
+
+fn recordOf(id: u64, end: StreamRecvEnd) RecvEndRing.Record {
+    return .{
+        .id = id,
+        .final_size = end.final_size,
+        .read_offset = end.read_offset,
+        .reset_code = end.reset_code orelse 0,
+        .flags = .{
+            .fin_seen = end.fin_seen,
+            .reset = end.reset_code != null,
+            .stopped = end.stopped,
+            .arrived_in_early_data = end.arrived_in_early_data,
+        },
+    };
+}
+
+fn endOfRecord(rec: RecvEndRing.Record) StreamRecvEnd {
+    return .{
+        .fin_seen = rec.flags.fin_seen,
+        .reset_code = if (rec.flags.reset) rec.reset_code else null,
+        .final_size = rec.final_size,
+        .read_offset = rec.read_offset,
+        .stopped = rec.flags.stopped,
+        .arrived_in_early_data = rec.flags.arrived_in_early_data,
+    };
+}
+
+// Doc comment lives on the Connection.streamRecvEnd thunk.
+pub fn streamRecvEnd(conn: *const Connection, id: u64) ?StreamRecvEnd {
+    if (!peerMaySendOnStream(conn, id)) return null;
+    if (conn.streams.get(id)) |s| return recvEndOf(s);
+    // Only an id the stream table reclaimed has a note; an id that was
+    // never opened, or only skipped, has none and stays null.
+    if (!streamWasReaped(conn, id)) return null;
+    const ring = conn.recv_end_ring orelse return null;
+    const rec = ring.find(id) orelse return null;
+    return endOfRecord(rec);
+}
+
 pub fn peerStreamWithinLocalLimit(conn: *Connection, id: u64) bool {
     const idx = streamIndex(id);
     if (idx >= max_stream_count_limit) {
@@ -529,7 +587,9 @@ pub fn streamCount(conn: *const Connection) usize {
 /// to the budget so a long-lived connection that GCs many
 /// streams does not leak budget headroom.
 pub fn gcClosedStreams(conn: *Connection) void {
-    var batch: [128]u64 = undefined;
+    // The batch size is owned by `RecvEndRing` so its survival guarantee
+    // ("a note outlives the next tick") cannot drift from the GC.
+    var batch: [RecvEndRing.gc_batch]u64 = undefined;
     var n: usize = 0;
     var it = conn.streams.iterator();
     while (it.next()) |entry| {
@@ -550,6 +610,21 @@ pub fn gcClosedStreams(conn: *Connection) void {
         batch[n] = s.id;
         n += 1;
     }
+    // The note for `streamRecvEnd`: allocated once, here, and only when
+    // this pass reclaims a stream that has a receive half. A failed
+    // allocation records nothing and changes nothing else — every
+    // reclaim below still happens, and the answer for those streams
+    // degrades to "outcome unknown", which callers treat as cut.
+    if (conn.recv_end_ring == null) {
+        for (batch[0..n]) |id| {
+            if (!peerMaySendOnStream(conn, id)) continue;
+            if (conn.allocator.create(RecvEndRing)) |ring| {
+                ring.* = .{};
+                conn.recv_end_ring = ring;
+            } else |_| {}
+            break;
+        }
+    }
     for (batch[0..n]) |id| {
         const removed = conn.streams.fetchRemove(id) orelse continue;
         const s = removed.value;
@@ -563,6 +638,13 @@ pub fn gcClosedStreams(conn: *Connection) void {
             ids.noteClosed();
             // A closed peer stream is one more id the peer may open.
             if (!streamInitiatedByLocal(conn, id)) conn_flow.maybeAdvertiseStreamCredit(conn, streamIsBidi(id));
+            // Same gate as `noteClosed`, so an id with a note is always
+            // one `streamRecvWasReaped` reports as reclaimed.
+            if (conn.recv_end_ring) |ring| {
+                if (peerMaySendOnStream(conn, id)) {
+                    if (recvEndOf(s)) |end| ring.push(recordOf(id, end));
+                }
+            }
         }
         const held = s.send.bytes.items.len + s.recv.bytes.items.len;
         if (held > 0) conn.releaseResidentBytes(held);
@@ -684,6 +766,7 @@ pub fn streamRecvState(conn: *const Connection, id: u64) ?StreamRecvState {
         .terminal = s.recvFullyTerminated(),
         .read_offset = s.recv.read_offset,
         .final_size = s.recv.final_size,
+        .reset_code = if (s.recv.reset) |r| r.error_code else null,
     };
 }
 
@@ -836,9 +919,13 @@ pub fn streamReadFin(conn: *Connection, id: u64, dst: []u8) Error!StreamReadResu
     const n = try streamRead(conn, id, dst);
     // `streamRead` already returned `StreamNotFound` if the stream was
     // absent, and reaping (`gcClosedStreams`) runs only in `tick`, so the
-    // stream is still live here; the `else` is a defensive dead branch.
-    const fin = if (conn.streams.get(id)) |s| s.recv.fin_seen else false;
-    return .{ .n = n, .fin = fin };
+    // stream is still live here; the `orelse` is a defensive dead branch.
+    const s = conn.streams.get(id) orelse return .{ .n = n, .fin = false };
+    // A RESET_STREAM keeps `fin_seen` (RecvStream.resetStream does not
+    // clear it) but throws the unread bytes away, so `fin` must not
+    // report a stream reset after its FIN as a clean end.
+    const reset_code: ?u64 = if (s.recv.reset) |r| r.error_code else null;
+    return .{ .n = n, .fin = s.recv.fin_seen and reset_code == null, .reset_code = reset_code };
 }
 
 /// Whether the receive side of `id` has seen any STREAM bytes in

@@ -30,6 +30,7 @@ test {
     _ = @import("e2e/app_driver.zig");
     _ = @import("e2e/testing_loopback.zig");
     _ = @import("e2e/stream_window.zig");
+    _ = @import("e2e/stream_end_after_tick.zig");
     _ = @import("e2e/initial_padding.zig");
     _ = @import("e2e/coalesced_loss.zig");
     _ = @import("e2e/handshake_loss.zig");

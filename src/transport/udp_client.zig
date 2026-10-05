@@ -44,20 +44,16 @@
 //! iteration on the loop thread. Never touch `client.conn` from a
 //! second thread while the loop runs. Same model as `runUdpServer`.
 //!
-//! KNOWN TRAP, measured 2026-10-05 and not repaired yet: this loop
-//! calls the hook AFTER `tick`, and `tick` reclaims a stream as soon
-//! as its receive half has ended (`runUdpServer` calls its hook
-//! before `tick`). So a stream whose end came in this iteration with
-//! nothing left to read (a FIN in a frame of its own after you read
-//! all the data, or a RESET_STREAM) is gone when the hook runs:
-//! `streamReadFin` returns `StreamNotFound`, `streamRecvState` is
-//! null and `streamRecvWasReaped` is true, for a clean end and for a
-//! reset alike. The hook cannot tell a complete stream from a cut
-//! one. A FIN that comes in the same frame as the last data is not
-//! touched by this (the stream stays until you read that data, and
-//! `streamReadFin` reports the FIN with it). If your protocol must
-//! tell the two apart, drive `Connection.handle` / `tick` yourself
-//! and read every stream between the two. Reported by http3-zig.
+//! Stream ends. The hook runs BEFORE `tick` (since 0.28.0; it ran
+//! after it before), because `tick` reclaims a stream as soon as its
+//! receive half has ended. A stream whose end arrived this iteration
+//! with nothing left to read (a FIN in a frame of its own after you
+//! read all the data, or a RESET_STREAM) is therefore still live in
+//! the hook, and `streamReadFin` reports it (`fin` for a clean end,
+//! `reset_code` for a reset). If a stream is already gone (you read it
+//! in a later iteration), `streamRecvEnd` still says how it ended, at
+//! least through the tick after the one that reclaimed it. Reported by
+//! http3-zig, 2026-10-05.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -171,9 +167,15 @@ pub const RunUdpClientOptions = struct {
     /// Per-iteration application hook — the one safe place to run
     /// application logic against a loop-owned client. Invoked once per
     /// iteration on the loop thread, after inbound datagrams have been
-    /// handled and the recovery clock ticked; the next outbox drain
-    /// runs immediately after the hook returns, so writes it queues
-    /// ship without waiting out a receive timeout. `Connection` has no
+    /// handled and BEFORE the recovery clock ticks — the order
+    /// `runUdpServer` uses — so a stream whose end arrived this
+    /// iteration is still live when the hook reads it (`tick` reclaims a
+    /// stream once its receive half ends; before 0.28.0 this hook ran
+    /// after `tick`). The next outbox drain runs right after that tick,
+    /// so writes the hook queues ship without waiting out a receive
+    /// timeout. When that tick closes the connection (an idle timeout,
+    /// for example), the hook runs once more right after it, so it
+    /// still sees the close before the loop returns. `Connection` has no
     /// internal locking; open streams, read data, drain
     /// `client.conn.pollEvent()`, and send datagrams only from inside
     /// the hook. It keeps firing during the shutdown grace window. An
@@ -433,13 +435,38 @@ pub fn runUdpClient(client: *Client, options: RunUdpClientOptions) anyerror!void
             };
         }
 
-        // Tick the recovery clock. PTO / loss detection / key-update
-        // deadlines all fire in here.
-        try client.conn.tick(now_us);
+        try finishIteration(client, options, now_us);
+    }
+}
 
-        // Application hook: inbound handled and clock ticked; the top
-        // of the next iteration drains the outbox immediately, so
-        // anything the hook queues ships without a timeout wait.
+/// The tail of one `runUdpClient` iteration, after inbound datagrams
+/// were handled: the application hook, THEN `tick`. Public only so a
+/// test can drive this exact order without a socket; embedders call
+/// `runUdpClient`.
+///
+/// The order is the point. `tick` ends with the stream GC, which
+/// reclaims a stream as soon as its receive half has ended, so a hook
+/// that ran after it could not see an end that arrived this iteration
+/// with nothing left to read (a bare FIN, or a RESET_STREAM): the
+/// stream would already be gone. `runUdpServer` runs its hook before
+/// `tick` for the same reason.
+pub fn finishIteration(client: *Client, options: RunUdpClientOptions, now_us: u64) anyerror!void {
+    // Application hook: inbound handled, streams still live. The top
+    // of the next iteration drains the outbox right after the tick
+    // below, so anything the hook queues ships without a timeout wait.
+    if (options.on_iteration) |hook| {
+        try hook(options.on_iteration_ctx, client, now_us);
+    }
+    const closed_before_tick = client.conn.isClosed();
+    // Tick the recovery clock. PTO / loss detection / key-update
+    // deadlines all fire in here, and the stream GC runs last.
+    try client.conn.tick(now_us);
+    // A close that `tick` itself causes (an idle timeout, a handshake
+    // that gave up) would otherwise never reach the hook: the loop
+    // returns at the top of the next iteration as soon as the
+    // connection is closed. Run the hook once more so it still sees
+    // that close, as it did when the hook ran after `tick`.
+    if (!closed_before_tick and client.conn.isClosed()) {
         if (options.on_iteration) |hook| {
             try hook(options.on_iteration_ctx, client, now_us);
         }

@@ -40,12 +40,13 @@ const SinkState = struct {
     stream_id: u64 = 0,
     have_stream: bool = false,
     consumed: u64 = 0,
-    /// The peer's recv half went terminal: every byte arrived and was
-    /// read (or the stream was reaped after both halves terminated).
-    /// Latched from `Connection.streamRecvState`, never from a read
-    /// that came back empty — an empty read only means nothing is
-    /// readable at that instant, which is also what a gap below the
-    /// read offset looks like.
+    /// The upload ended cleanly: the FIN arrived, every byte was read,
+    /// and the peer did not reset the stream. Latched from
+    /// `Connection.streamRecvEnd`, never from a read that came back
+    /// empty — an empty read only means nothing is readable at that
+    /// instant, which is also what a gap below the read offset looks
+    /// like — and never from the stream being gone, which a reset
+    /// looks like too.
     fin_drained: bool = false,
 };
 
@@ -72,12 +73,9 @@ const SinkApp = struct {
             var buf: [read_chunk_bytes]u8 = undefined;
             while (true) {
                 const n = slot.conn.streamRead(state.stream_id, &buf) catch |err| switch (err) {
-                    // Reaped after both halves went terminal — everything
-                    // was already drained.
-                    error.StreamNotFound => {
-                        state.fin_drained = true;
-                        break;
-                    },
+                    // Reaped: nothing left to read. HOW it ended is
+                    // decided below, not here — a reset is reaped too.
+                    error.StreamNotFound => break,
                     else => return err,
                 };
                 state.consumed += n;
@@ -89,10 +87,15 @@ const SinkApp = struct {
                 if (n == 0) break;
             }
             if (!state.fin_drained) {
-                if (slot.conn.streamRecvState(state.stream_id)) |st| {
-                    state.fin_drained = st.terminal;
-                } else {
-                    state.fin_drained = true; // reaped => terminal
+                // `streamRecvEnd` answers for a live stream whose receive
+                // half ended AND for one a `tick` already reaped. Null
+                // means not ended yet — or, once reaped, ended how
+                // unknown, which counts as cut, never as complete.
+                if (slot.conn.streamRecvEnd(state.stream_id)) |end| {
+                    if (!end.isClean()) return error.UploadCut;
+                    state.fin_drained = true;
+                } else if (slot.conn.streamRecvWasReaped(state.stream_id)) {
+                    return error.UploadCut;
                 }
             }
         }

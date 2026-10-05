@@ -68,6 +68,9 @@ pub const range_list = @import("range_list.zig");
 /// RFC 9000 §2.1 / §3.2 / §4.6 stream-id accounting for one stream-id
 /// space: which ids were used, skipped, or closed, and the limit.
 pub const stream_id_space = @import("StreamIdSpace.zig");
+/// The bounded note of how reclaimed streams' receive halves ended,
+/// behind `Connection.streamRecvEnd`.
+pub const recv_end_ring = @import("RecvEndRing.zig");
 /// Per-path 4-tuple bundle: CIDs, anti-amp, validation, RTT, congestion.
 pub const path = @import("path.zig");
 /// RFC 9000 §8.1.2 stateless Retry token mint/validate.
@@ -217,6 +220,8 @@ pub const StreamSendStats = state.StreamSendStats;
 pub const StreamReadResult = state.StreamReadResult;
 /// Read-only recv-half status from `Connection.streamRecvState`.
 pub const StreamRecvState = state.StreamRecvState;
+/// How a stream's receive half ended, from `Connection.streamRecvEnd`.
+pub const StreamRecvEnd = state.StreamRecvEnd;
 /// Receive-side half-stream (re-export).
 pub const RecvStream = recv_stream.RecvStream;
 /// A QUIC path endpoint address (IPv4/IPv6/unspecified), the peer-address
@@ -268,6 +273,7 @@ test {
     _ = recv_stream;
     _ = range_list;
     _ = stream_id_space;
+    _ = recv_end_ring;
     _ = path;
     _ = retry_token;
     _ = new_token;

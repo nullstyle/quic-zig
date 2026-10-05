@@ -761,6 +761,106 @@ fn openReadReapPeerUni(conn: *Connection, index: u64) !void {
     try std.testing.expect(conn.stream(sid) == null);
 }
 
+// -- The stream-end note (0.28.0): bound and allocation failure ----------
+
+test "stream end note: an overwritten note fails closed, never as a clean end" {
+    // The note behind `streamRecvEnd` is a bounded ring. Once a stream's
+    // note is overwritten, the answer must be "ended, how unknown" (null
+    // + wasReaped), which callers treat as cut — never a clean end.
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try windowServer(ctx, 0, 1);
+    defer conn.destroy();
+
+    // The first stream is RESET (code 5) after one byte: the answer that
+    // must not turn into "clean".
+    const first = peerUni(0);
+    try conn.handleStream(.application, .{ .stream_id = first, .offset = 0, .data = "x", .has_length = true, .fin = false });
+    var buf: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try conn.streamRead(first, &buf));
+    try conn.handleResetStream(.{ .stream_id = first, .application_error_code = 5, .final_size = 1 });
+    try conn.tick(1_000_000);
+    try std.testing.expect(conn.stream(first) == null);
+    try std.testing.expectEqual(@as(?u64, 5), conn.streamRecvEnd(first).?.reset_code);
+
+    // Fill the ring: the first note survives exactly `capacity` notes.
+    var i: u64 = 1;
+    while (i < state.RecvEndRing.capacity) : (i += 1) try openReadReapPeerUni(conn, i);
+    try std.testing.expectEqual(@as(?u64, 5), conn.streamRecvEnd(first).?.reset_code);
+
+    // One more end overwrites it.
+    try openReadReapPeerUni(conn, state.RecvEndRing.capacity);
+    try std.testing.expectEqual(@as(?state.StreamRecvEnd, null), conn.streamRecvEnd(first));
+    try std.testing.expect(conn.streamRecvWasReaped(first));
+    // The newest note is still there.
+    try std.testing.expect(conn.streamRecvEnd(peerUni(state.RecvEndRing.capacity)).?.isClean());
+}
+
+/// Refuses exactly the allocation of a `RecvEndRing` while `refuse` is
+/// set, and passes every other allocation to `child`.
+const RefuseRingAllocator = struct {
+    child: std.mem.Allocator,
+    refuse: bool = true,
+    refused: u32 = 0,
+
+    fn allocator(self: *RefuseRingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *RefuseRingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.refuse and len == @sizeOf(state.RecvEndRing)) {
+            self.refused += 1;
+            return null;
+        }
+        return self.child.rawAlloc(len, alignment, ret_addr);
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *RefuseRingAllocator = @ptrCast(@alignCast(ctx));
+        return self.child.rawResize(memory, alignment, new_len, ret_addr);
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *RefuseRingAllocator = @ptrCast(@alignCast(ctx));
+        return self.child.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *RefuseRingAllocator = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "stream end note: a refused allocation still reclaims and returns credit, then is retried" {
+    // The note is allocated inside the GC, which cannot fail. A refused
+    // allocation must change nothing but the note: the stream is still
+    // reclaimed, its credit still goes out at the same tick, nothing
+    // leaks, and the answer degrades to "how unknown".
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    var refusing: RefuseRingAllocator = .{ .child = std.testing.allocator };
+    const conn = try Connection.createServer(refusing.allocator(), ctx);
+    defer conn.destroy();
+    try conn.setTransportParams(.{
+        .initial_max_data = 1 << 16,
+        .initial_max_stream_data_bidi_remote = 64,
+        .initial_max_stream_data_uni = 64,
+        .initial_max_streams_bidi = 0,
+        .initial_max_streams_uni = 1,
+    });
+
+    try openReadReapPeerUni(conn, 0); // asserts the reclaim itself
+    try std.testing.expectEqual(@as(u32, 1), refusing.refused);
+    // The same credit as with a note ("a window of one" test: limit 2).
+    try std.testing.expectEqual(@as(?u64, 2), conn.pending_frames.max_streams_uni);
+    try std.testing.expectEqual(@as(?*state.RecvEndRing, null), conn.recv_end_ring);
+    try std.testing.expectEqual(@as(?state.StreamRecvEnd, null), conn.streamRecvEnd(peerUni(0)));
+    try std.testing.expect(conn.streamRecvWasReaped(peerUni(0)));
+
+    // Allocation works again: the next reclaim gets its note.
+    refusing.refuse = false;
+    try openReadReapPeerUni(conn, 1);
+    try std.testing.expect(conn.recv_end_ring != null);
+    try std.testing.expect(conn.streamRecvEnd(peerUni(1)).?.isClean());
+}
+
 test "stream credit: a window of one is one stream at a time, for as long as you like" {
     // The limit is the window plus the streams that closed. Under the
     // rule this replaces, a limit of 1 became 17 after one close, so

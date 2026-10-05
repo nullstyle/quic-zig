@@ -323,6 +323,11 @@ pub const StreamReadResult = conn.StreamReadResult;
 /// alternative to holding a stream pointer and reading `RecvStream`.
 pub const StreamRecvState = conn.StreamRecvState;
 
+/// How a stream's receive half ended (clean FIN, or reset + code), from
+/// `Connection.streamRecvEnd` — answered the same before and after the
+/// `tick` that reclaims the stream.
+pub const StreamRecvEnd = conn.StreamRecvEnd;
+
 /// Application-data scheduling policy across multiple validated
 /// paths (primary, round-robin, lowest-RTT-cwnd).
 pub const Scheduler = conn.Scheduler;

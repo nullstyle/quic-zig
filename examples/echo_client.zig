@@ -126,8 +126,9 @@ pub const EchoFlow = struct {
             },
             .awaiting_stream_echo => {
                 // Read until nothing more is readable. Note what this
-                // does NOT key off: `res.fin` reports that the FIN
-                // *frame arrived*, not that the stream is drained, so
+                // does NOT key off: `res.fin` reports that a FIN frame
+                // arrived and no reset followed — a clean end — not
+                // that the stream is drained, so
                 // for a reply of known length the byte count is the
                 // reliable completion signal. (A protocol whose reply
                 // length is unknown asks `streamRecvState(id)` and
@@ -142,13 +143,17 @@ pub const EchoFlow = struct {
                         flow.stream_id,
                         flow.reply[flow.reply_len..],
                     ) catch |err| switch (err) {
-                        // The stream has left the live table. The GC
+                        // The stream has left the live table: the GC
                         // reaps a bidi stream once both halves are
-                        // terminal, and "recv terminal" means the
-                        // peer's FIN arrived — so missing bytes here
-                        // mean the peer FIN'd early and shorted us,
-                        // not that the echo is still in flight.
+                        // terminal. "Terminal" is a clean FIN OR a
+                        // reset, so ask how it ended rather than assume
+                        // a FIN: a reset (or an end whose note is gone)
+                        // is a cut reply whatever the byte count says,
+                        // and missing bytes after a clean FIN mean the
+                        // peer shorted us.
                         error.StreamNotFound => {
+                            const end = client.conn.streamRecvEnd(flow.stream_id);
+                            if (end == null or !end.?.isClean()) return error.EchoTruncated;
                             if (flow.reply_len < flow.reply.len) return error.EchoTruncated;
                             break;
                         },

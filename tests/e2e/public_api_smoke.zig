@@ -34,6 +34,7 @@ test "stable root and namespace exports resolve" {
             "StreamSendStats",
             "StreamReadResult",
             "StreamRecvState",
+            "StreamRecvEnd",
             "TimerDeadline",
             "TimerKind",
             "PathStats",
@@ -91,6 +92,9 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
     const stream_stop_sending: *const fn (*Conn, u64, u64) anyerror!void = Conn.streamStopSending;
     const stream_send_stats: *const fn (*const Conn, u64) ?quic.StreamSendStats = Conn.streamSendStats;
     const stream_recv_state: *const fn (*const Conn, u64) ?quic.StreamRecvState = Conn.streamRecvState;
+    // How a stream ended, the same before and after the reaping tick
+    // (Evolving as of 0.28.0).
+    const stream_recv_end: *const fn (*const Conn, u64) ?quic.StreamRecvEnd = Conn.streamRecvEnd;
     const stream_priority: *const fn (*const Conn, u64) ?quic.StreamPriority = Conn.streamPriority;
     const stream_set_priority: *const fn (*Conn, u64, quic.StreamPriority) anyerror!void = Conn.streamSetPriority;
     // Zero-copy read pair (Evolving as of 0.16.0): borrow the
@@ -141,6 +145,7 @@ test "stable Connection cycle, lifecycle, stream, and datagram methods keep thei
         stream_stop_sending,
         stream_send_stats,
         stream_recv_state,
+        stream_recv_end,
         stream_priority,
         stream_set_priority,
         send_window,
@@ -213,6 +218,13 @@ test "0-RTT, resumption-capture, migration, and ALPN surfaces keep their shape" 
         // reaching into internals).
         _ = @FieldType(quic.StreamRecvState, "read_offset");
         _ = @FieldType(quic.StreamRecvState, "final_size");
+        // 0.28.0: the reset code, live and after the reaping tick, and
+        // `fin` on a read means a CLEAN end.
+        _ = @FieldType(quic.StreamRecvState, "reset_code");
+        _ = @FieldType(quic.StreamReadResult, "reset_code");
+        _ = @FieldType(quic.StreamRecvEnd, "reset_code");
+        _ = @FieldType(quic.StreamRecvEnd, "final_size");
+        requireDecl(quic.StreamRecvEnd, "isClean");
         // Post-init teardown-hook wiring for wrapper stacks
         // (friction #6) and the Driver convenience over it.
         requireDecl(quic.Server, "setConnectionWillCloseHook");
