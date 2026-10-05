@@ -43,6 +43,21 @@
 //! `RunUdpClientOptions.on_iteration`, which fires once per loop
 //! iteration on the loop thread. Never touch `client.conn` from a
 //! second thread while the loop runs. Same model as `runUdpServer`.
+//!
+//! KNOWN TRAP, measured 2026-10-05 and not repaired yet: this loop
+//! calls the hook AFTER `tick`, and `tick` reclaims a stream as soon
+//! as its receive half has ended (`runUdpServer` calls its hook
+//! before `tick`). So a stream whose end came in this iteration with
+//! nothing left to read (a FIN in a frame of its own after you read
+//! all the data, or a RESET_STREAM) is gone when the hook runs:
+//! `streamReadFin` returns `StreamNotFound`, `streamRecvState` is
+//! null and `streamRecvWasReaped` is true, for a clean end and for a
+//! reset alike. The hook cannot tell a complete stream from a cut
+//! one. A FIN that comes in the same frame as the last data is not
+//! touched by this (the stream stays until you read that data, and
+//! `streamReadFin` reports the FIN with it). If your protocol must
+//! tell the two apart, drive `Connection.handle` / `tick` yourself
+//! and read every stream between the two. Reported by http3-zig.
 
 const std = @import("std");
 const builtin = @import("builtin");

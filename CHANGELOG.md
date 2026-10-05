@@ -41,12 +41,37 @@ On `main` after 0.27.0. Docs and one test; no change in behavior.
     the process needs a clock that goes on, and the bundled loop has
     none.
 
+### Measured, not changed
+
+- **The end of a stream is lost when `tick` runs before the
+  application reads.** `tick` reclaims a stream as soon as its
+  receive half has ended. When the end comes with nothing left to
+  read (a FIN in a frame of its own after the application read all
+  the data, or a RESET_STREAM) and `tick` runs before the next read,
+  the application finds no stream: `streamReadFin` returns
+  `StreamNotFound`, `streamRecvState` is null, `streamRecvWasReaped`
+  is true. Measured on uni and bidi streams: a clean end and a reset
+  (with its error code) give the same three answers, so the
+  application cannot tell a complete stream from a cut one. With the
+  read before `tick`, both are reported right. `runUdpServer` calls
+  its hook before `tick`; **`runUdpClient` calls it after**, so a
+  client that reads in that hook has the trap, and the module doc
+  says so now. Old behavior, not from 0.27.0. Reported by http3-zig,
+  which lost the end of its WebTransport CONNECT streams to it and
+  now reads before `tick`. The repair is a design choice (when the
+  receive half counts as done, or an event for the end of a stream,
+  and the order in `runUdpClient`); it is not made yet.
+
 ### Tools and tests
 
 - `tests/e2e/session_tickets.zig`: a process that restarts before the
   old key's time is over, starts with the old key and rotates again
   with the time of the first rotation. It takes the tickets of both
   keys, and the old key ends when it would have ended.
+- `tests/e2e/new_token_smoke.zig`: a server whose clock starts again
+  reads a token of the process before at the wrong age (a Retry
+  before its uptime passes the issue time; taken for one lifetime of
+  its own clock after that). Measured, not wanted.
 
 ## [0.27.0] - 2026-10-05
 
