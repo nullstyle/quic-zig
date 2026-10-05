@@ -1031,7 +1031,8 @@ structure.
   run that bridge form against the setting, in both directions. One
   test of capnp-zig that holds "late after a Retry" will go red; it
   was told, and that is the wanted result. Its answer goes into the
-  sprint log when it comes.
+  sprint log when it comes. **It came the same day, after the tag:
+  met, late.** See "After the tag" at the end of this section.
 - S8 (a mutant for every new guard; the fuzz gate counts at least 43
   sites; five gates real on the tag commit; the wide matrix in both
   roles with every failed cell read): met; the gates and the matrix
@@ -1097,6 +1098,52 @@ tag (`git archive`, the files of the tag tarball; hash
 `-Osafe` for the application, for `quic` and for `boringssl`, printed
 no `invalid option` line, and ran (`consumer-smoke ok: quic-zig
 0.27.0`).
+
+**After the tag: what the downstreams ran.** Both answers came the
+same day, after the tag was pushed. The numbers are theirs.
+
+- capnp-zig ran its own suite, first on the archive of the branch,
+  then on the tag (built from a `git archive` of `9d2ab6e`; the hash
+  matched). So S7 is met, late. With its tests unchanged:
+  `test-rpc-quic` 144 of 149, and exactly the 5 failures it expected.
+  Three tests held "late after a Retry" (the fix of this release;
+  each new value was the one its handoff predicted). Two held
+  `.handshake_timeout` where v0.26.0 gives `.peer_close` (it was on
+  v0.25.0). With those five flipped, its scratch tests for the new
+  settings, and its dial counter moved to `retryAccepted()`: 169 of
+  169, in Debug and in ReleaseSafe. It checked the config field, its
+  bridge and the field on one server (the field wins), tickets read
+  both ways, rotation (the old key ends on the `feed` clock), every
+  refusal, and the lifetime range. A build without its bridge passes
+  too. Its words: "No v0.27.1 needed from our side."
+- One result it did not expect: the stream-count change of this
+  release repaired a hidden failure of its own. A resumed dial that
+  staged 5 large frames against a remembered limit of 2 streams was
+  closed by the server on v0.26.0 (0 of 5 arrived). Now the client
+  stops at the limit, and all 5 arrive in order.
+- http3-zig moved to v0.27.0 (its commit `9920527`): core 16 of 16,
+  interop 6 of 6, allocation counts as on v0.26.0. It does not call
+  `setRememberedPeerTransportParams`.
+
+What capnp-zig found, and where each thing went:
+
+- Docs, repaired on `main` after the tag (the changelog has them
+  under "Unreleased"). The doc of `rotateSessionTicketKey` did not
+  say plainly that the lifetime counts from its `now_us` argument on
+  the clock of `feed`, and that the Server does not check the thread.
+  Nothing said what a process must do when it restarts less than one
+  ticket lifetime after a rotation: start with the old key and rotate
+  again (a test holds that now). Nothing said that the caller's own
+  copies of the key are not cleared, that a lifetime above 2 days
+  needs the client too (a BoringSSL client keeps a ticket for 2 days
+  at most by default), and that the bundled UDP loop feeds a clock
+  that starts at zero, so with it a `new_token_key` from the process
+  before does not save the Retry.
+- Not built, for a later sprint: a setting for the previous ticket
+  key at start; a debug check of the thread rule; and three asks of
+  its handoff about the NEW_TOKEN clock that this sprint answered
+  with docs only (the bundled loop's clock, a wall clock of its own
+  for NEW_TOKEN times, an allowed clock skew).
 
 ### RC/soak criterion toward 1.0
 
