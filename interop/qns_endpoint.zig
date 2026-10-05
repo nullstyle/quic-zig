@@ -2066,12 +2066,15 @@ fn runClientConnection(
         // didn't send any 0-RTT data."
         //
         // No more streams than the remembered limit (RFC 9000 section
-        // 7.4.1); the rest of the requests start after the handshake,
-        // in the loop below.
+        // 7.4.1). The library holds that limit since v0.27.0:
+        // `openBidi` says `StreamLimitExceeded` at the remembered
+        // count, and `startClientRequests` stops there. (v0.26.0
+        // bounded only the bytes, and this code counted by hand.)
+        // The rest of the requests start after the handshake, in the
+        // loop below.
         if (conn_opts.remembered_peer_params) |remembered| {
             conn.setRememberedPeerTransportParams(remembered);
-            const early_count: usize = @intCast(@min(@as(u64, downloads.len), remembered.initial_max_streams_bidi));
-            _ = try startClientRequests(allocator, conn, downloads[0..early_count]);
+            _ = try startClientRequests(allocator, conn, downloads);
         }
     }
     try conn.advance();
