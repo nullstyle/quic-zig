@@ -5,11 +5,19 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.28.0] - 2026-10-05
 
-On `main` after 0.27.0. The stream-end repair: an application learns
+"The end of a stream that cannot be lost". An application now learns
 how a stream ended — a clean FIN, or a reset with its code — whatever
-the order of its read and `tick`. Plus a fix to `streamReadFin`.
+the order of its read and `tick`. New: `Connection.streamRecvEnd`,
+`StreamRecvEnd`, `reset_code` on `StreamRecvState` and
+`StreamReadResult`. Fixed: `streamReadFin` called a stream that was
+reset after its FIN complete. Changed: `runUdpClient` runs its hook
+before `tick`; `quic.app` reports the true end of a stream that a
+`tick` reclaimed first. No wire change: when streams are reclaimed and
+when stream credit returns do not move. Also the doc repairs that
+capnp-zig's run of 0.27.0 asked for. No security fix; nothing removed
+or renamed.
 
 ### Documentation
 
