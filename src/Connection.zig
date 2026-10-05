@@ -884,6 +884,14 @@ pub const Error = error{
     /// after it has the keys), the last update has no acknowledgment
     /// yet, or the wait after it is not over. Not fatal: ask again
     /// later (`canInitiateKeyUpdateAt` says when it would work).
+    ///
+    /// A connection is confirmed by a packet: a server when it
+    /// processes the client's Finished from a Handshake packet, a
+    /// client when it processes HANDSHAKE_DONE. A test shim that
+    /// hands the last flight to TLS without packets leaves the
+    /// connection unconfirmed for its whole life: this error every
+    /// time, and a close that still goes at the Handshake level too
+    /// (seen in http3-zig's in-process handshake shim, 2026-10-04).
     KeyUpdateBlocked,
     DatagramUnavailable,
     DatagramTooLarge,
