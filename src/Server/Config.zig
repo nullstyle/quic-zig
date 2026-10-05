@@ -540,7 +540,9 @@ retry_state_table_capacity: u32 = 4096,
 /// microseconds since the Unix epoch. A token holds the `now_us` it
 /// was made at; with a clock that starts at zero in each process
 /// the tokens of the process before read as not yet valid. See
-/// `Server.feed`.
+/// `Server.feed`. The bundled loop (`transport.runUdpServer`) feeds
+/// such a clock: with it, a key from the process before does not
+/// save the Retry.
 new_token_key: ?conn_mod.NewTokenKey = null,
 /// Lifetime of a minted NEW_TOKEN in microseconds. Returning
 /// clients presenting a token older than this fall through to
@@ -605,6 +607,12 @@ early_data: EarlyData = .disabled,
 /// of each ticket), a 16-byte HMAC-SHA256 key, a 16-byte AES-128
 /// key.
 ///
+/// The field holds the key by value. The Server copies it into
+/// memory of its own and clears that copy at `deinit` (and an old key
+/// when its time is over). It cannot clear your copies: this `Config`,
+/// and the buffer that you loaded the key into. Clear those yourself
+/// when `init` has returned (`std.crypto.secureZero`).
+///
 /// `init` returns `InvalidConfig` for:
 ///  - a key of 48 zero bytes (a buffer that was never filled in);
 ///  - a key together with `tls_context_override` (that context is
@@ -629,6 +637,14 @@ session_ticket_key: ?SessionTicketKey = null,
 /// It is the lifetime that the client is told with each ticket, and
 /// the age at which the server stops taking a ticket back. A ticket
 /// that is already out keeps the lifetime it was sealed with.
+///
+/// More than 2 days needs the client too. A client keeps a ticket for
+/// the smaller of this lifetime and a limit of its own, and for a
+/// BoringSSL client (so for a quic-zig client) that limit is 2 days
+/// unless it was raised on the client's TLS context. Read in
+/// BoringSSL (`tls13_create_session_with_ticket`); capnp-zig measured
+/// it with a quic-zig client: a server lifetime of 604800 was kept as
+/// 172800.
 ///
 /// Why shorten it: with `session_ticket_key` set, the lifetime is how
 /// long a stolen key is of use after you change the key, because a

@@ -22,6 +22,18 @@
 //! cannot drag QUIC's recovery timers backwards; `now_us` is strictly
 //! monotonically non-decreasing for the lifetime of the server.
 //!
+//! That clock starts at zero each time the loop starts. One thing
+//! does not work with it: a `Config.new_token_key` that the next
+//! process is given too. A NEW_TOKEN holds the `now_us` it was made
+//! at, so the restarted loop reads the tokens of the loop before it
+//! as not yet valid until its own uptime passes their issue time, and
+//! answers those clients with a Retry (or takes them with no
+//! validation). See `Server.feed`. Session tickets are not touched by
+//! this (TLS ages them on the wall clock). An embedder that needs its
+//! NEW_TOKENs to live through a restart drives `Server.feed` itself,
+//! with a clock that goes on: for example the wall clock at start
+//! plus a monotonic clock from there.
+//!
 //! Shutdown
 //! --------
 //! If `RunUdpOptions.shutdown_flag` is set, the loop checks the flag

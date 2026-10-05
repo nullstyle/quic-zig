@@ -666,6 +666,71 @@ test "key rotation: a datagram alone clears the old key when its time is over" {
     try std.testing.expect(previousKey(&srv) == null);
 }
 
+test "key rotation: a process that restarts before the old key's time is over starts with the old key and rotates again" {
+    // `Config.session_ticket_key` is one key, so a process that STARTS
+    // with the new key cannot open the tickets of the old one. The
+    // way to keep them (the doc of `rotateSessionTicketKey` gives it):
+    // start with the old key and repeat the rotation before the first
+    // datagram, with the `now_us` of the first rotation. The clock
+    // here goes on across the restart. Lifetime 10 s, first rotation
+    // at 100 s: the old key is good until 110 s, also in the process
+    // after the restart. (Found by capnp-zig.)
+    const allocator = std.testing.allocator;
+    const rotated_at_us: u64 = 100 * us_per_s;
+    var ticket_a: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_a.deinit();
+    var ticket_b: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_b.deinit();
+    {
+        // The process before the restart gives a ticket under each key.
+        var before = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 10 });
+        defer before.deinit();
+        try earnTicket(allocator, &before, &ticket_a, 1311);
+        try before.rotateSessionTicketKey(key_b, rotated_at_us);
+        try earnTicket(allocator, &before, &ticket_b, 1312);
+    }
+    {
+        // The control: a process that starts with the new key takes
+        // the ticket of the new key, and not the ticket of the old one.
+        var plain = try newServer(allocator, .{ .ticket_key = key_b, .ticket_lifetime_s = 10 });
+        defer plain.deinit();
+        const old = try resumeWith(allocator, &plain, ticket_a.captured.?, 2311, .{ .start_us = 104 * us_per_s });
+        try std.testing.expectEqual(quic.EarlyDataStatus.rejected, old.status);
+        const new = try resumeWith(allocator, &plain, ticket_b.captured.?, 2312, .{ .start_us = 104 * us_per_s });
+        try std.testing.expectEqual(quic.EarlyDataStatus.accepted, new.status);
+    }
+
+    // The process after the restart. Its first datagram comes at 104 s.
+    var srv = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 10 });
+    defer srv.deinit();
+    try srv.rotateSessionTicketKey(key_b, rotated_at_us);
+    try srv.tick(104 * us_per_s);
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+    try std.testing.expectEqualSlices(u8, &key_a, &previousKey(&srv).?);
+
+    const old = try resumeWith(allocator, &srv, ticket_a.captured.?, 2313, .{ .start_us = 104 * us_per_s });
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, old.status);
+    try std.testing.expect(old.read_before_handshake_done);
+    const new = try resumeWith(allocator, &srv, ticket_b.captured.?, 2314, .{ .start_us = 105 * us_per_s });
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, new.status);
+    try std.testing.expect(new.read_before_handshake_done);
+    const late = try resumeWith(allocator, &srv, ticket_a.captured.?, 2315, .{ .start_us = 110 * us_per_s });
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, late.status);
+    try std.testing.expect(previousKey(&srv) == null);
+
+    // The old key ends at 110 s, where it would have ended with no
+    // restart, and not one lifetime after the restart (114 s). The
+    // helper above moves the clock while it closes a connection, so
+    // the exact moment is looked at on a server of its own.
+    var edge = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 10 });
+    defer edge.deinit();
+    try edge.rotateSessionTicketKey(key_b, rotated_at_us);
+    try edge.tick(110 * us_per_s - 1);
+    try std.testing.expect(previousKey(&edge) != null);
+    try edge.tick(110 * us_per_s);
+    try std.testing.expect(previousKey(&edge) == null);
+}
+
 test "session ticket key: an init that fails after the key was taken leaves nothing behind" {
     // The Server keeps its ticket keys on the heap. `init` fails here
     // at the certificate; the testing allocator reports a leak if the

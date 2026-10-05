@@ -1082,10 +1082,28 @@ var server = try quic.Server.init(.{
   Give the new key to the other servers of the pool the same way, and
   to the next process as `session_ticket_key`. A process that STARTS
   with the new key does not have the old one.
+  `now_us` must be on the clock that you give `feed` and `tick`: the
+  old key is cleared when that clock reaches `now_us` plus one
+  lifetime. A second rotation before that drops the old key at once.
+  The Server does not check the thread.
+- **A restart soon after a key change.** A process that restarts less
+  than one ticket lifetime after the rotation, and starts with the new
+  key, loses the tickets of the old key that are still out. To keep
+  them, start it with the OLD key as `session_ticket_key` and call
+  `rotateSessionTicketKey(new_key, t)` before the first datagram. If
+  your `now_us` goes on across the restart, `t` is the `now_us` of the
+  first rotation, and the old key ends when it would have ended. If it
+  does not, `t` is the present `now_us`, and the old key lives one more
+  lifetime from the restart.
 - **The lifetime** (`session_ticket_lifetime_s`, 1 second to 7 days,
   default 2 days) is how long a ticket is good for, and so how long an
   old key is of use after a rotation. TLS measures it on the wall
-  clock.
+  clock. More than 2 days needs the client too: a BoringSSL client (a
+  quic-zig client is one) keeps a ticket for 2 days at most unless
+  that limit was raised on its own TLS context.
+- **Your copies of the key.** The Server clears its own copy at
+  `deinit`. The `Config` that you built and the buffer that you loaded
+  the key into are yours to clear (`std.crypto.secureZero`).
 - **The refused pair.** `session_ticket_key` together with
   `early_data = .with_anti_replay` is `InvalidConfig`. The replay
   tracker is process memory; after a crash it is empty, and a 0-RTT
@@ -1099,7 +1117,9 @@ var server = try quic.Server.init(.{
   restart, for example microseconds since the Unix epoch: a NEW_TOKEN
   holds the time it was made at, and a clock that starts at zero in
   each process reads the tokens of the process before it as not yet
-  valid. When the server does answer with a Retry, the client sends
+  valid. The bundled loop (`quic.transport.runUdpServer`) feeds a
+  clock that starts at zero, so with it the Retry is not saved after a
+  restart. When the server does answer with a Retry, the client sends
   its 0-RTT data again after it (since 0.27.0), so the data still
   arrives before the handshake is done, one round trip later.
   `Connection.retryAccepted()` tells a client that this happened.

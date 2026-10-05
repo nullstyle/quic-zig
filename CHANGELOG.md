@@ -5,6 +5,43 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+On `main` after 0.27.0. Docs and one test; no change in behavior.
+
+### Documentation
+
+- **What capnp-zig found when it ran its own suite on 0.27.0.** The
+  suite passed. These are the things that the docs did not say:
+  - `Server.rotateSessionTicketKey`: the time of the old key counts
+    from the `now_us` argument, on the clock of `feed` and `tick`.
+    The Server does not check the calling thread.
+  - A process that restarts less than one ticket lifetime after a
+    rotation, and starts with the new key, loses the tickets of the
+    old key that are still out. The way to keep them: start with the
+    OLD key and call `rotateSessionTicketKey` again before the first
+    datagram (with the `now_us` of the first rotation, if the clock
+    goes on across the restart). It is in the doc of the function and
+    in EMBEDDING.md. This corrects the 0.27.0 entry "A process that
+    starts with a new ticket key does not have the old one", which
+    named no way out.
+  - `Config.session_ticket_key` holds the key by value. The Server
+    clears its own copy; the caller clears the `Config` and the
+    buffer that the key was loaded into.
+  - `Config.session_ticket_lifetime_s` above 2 days needs the client
+    too: a BoringSSL client keeps a ticket for 2 days at most, unless
+    that limit was raised on its own TLS context.
+  - The bundled loop (`transport.runUdpServer`) feeds a clock that
+    starts at zero each time it starts. With it, a `new_token_key`
+    from the process before does not save the Retry.
+
+### Tools and tests
+
+- `tests/e2e/session_tickets.zig`: a process that restarts before the
+  old key's time is over, starts with the old key and rotates again
+  with the time of the first rotation. It takes the tickets of both
+  keys, and the old key ends when it would have ended.
+
 ## [0.27.0] - 2026-10-05
 
 "Tickets that live through a restart". A server can now keep its

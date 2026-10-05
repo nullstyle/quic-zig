@@ -1218,8 +1218,24 @@ pub fn deinit(self: *Server) void {
 /// server that STARTS with the new key does not have the old one, so
 /// it cannot open the tickets of the old key.)
 ///
-/// Call it on the thread that calls `feed`; the Server has no lock.
-/// `now_us` is the clock of `feed` and `tick`.
+/// So a process that restarts less than one ticket lifetime after the
+/// rotation, and starts with the new key, loses the tickets of the old
+/// key that are still out. To keep them, start it with the OLD key as
+/// `Config.session_ticket_key` and call this function again with
+/// `new_key`, before the first datagram. If your `now_us` goes on
+/// across the restart (see `feed`), pass the `now_us` of the first
+/// rotation: the old key then ends when it would have ended. If it
+/// does not, pass the present `now_us`: the old key then lives one
+/// more lifetime from the restart.
+///
+/// Call it on the thread that calls `feed`. The Server has no lock
+/// and does not check the thread: a call from another thread races
+/// the handshakes that read the keys.
+///
+/// `now_us` must be on the clock that `feed` and `tick` are given.
+/// The lifetime counts from this argument: the first `feed` or `tick`
+/// whose `now_us` is at or past `now_us` + one lifetime clears the old
+/// key.
 ///
 /// Errors (`InvalidConfig`, and nothing is changed): the Server was
 /// built with no `Config.session_ticket_key`; `new_key` is 48 zero
