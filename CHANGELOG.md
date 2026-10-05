@@ -7,6 +7,34 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`Connection.retryAccepted()`.** True once a client has taken a
+  Retry packet. A client that counts "dials that saved the round
+  trip" needs it: after a Retry the handshake costs one round trip
+  more, and `earlyDataStatus()` still says `.accepted`. (capnp-zig
+  read the field `retry_accepted` for this; the field stays.)
+
+### Fixed
+
+- **A client sends its 0-RTT data again after a Retry.** A server
+  that answers the first flight with a Retry has no connection for
+  it, so the 0-RTT packets of that flight are gone. The client kept
+  them as "in flight". Nothing acknowledges them, and there is no
+  1-RTT probe timer before the handshake is confirmed, so the data
+  came back through loss recovery after the handshake, as 1-RTT
+  data, while TLS reported the early data as accepted. Now the Retry
+  queues the stream bytes and control frames of those packets again,
+  and they go out as 0-RTT with the next Initial packet, to the
+  connection ID of the Retry (RFC 9000 section 17.2.5.3). Packet
+  numbers go on; the keys are the same; it is not a loss for the
+  congestion controller or the loss counters. A DATAGRAM frame in
+  such a packet is reported as lost, as on a rejection. Measured at
+  the public wrappers before and after: with a Retry in the way, the
+  server could read the early bytes only after its handshake was
+  done; now it reads them before. Found by the capnp-zig session,
+  whose patched client proved the cure.
+
 ### Measured, not changed
 
 - **The ACK repeat in the Handshake space alone was tried and is not

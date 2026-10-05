@@ -352,6 +352,9 @@ pub fn handleRetry(
     try conn.setPeerDcid(retry.scid.slice());
     try conn.setInitialDcid(retry.scid.slice());
     try conn.resetInitialRecoveryForRetry();
+    // The 0-RTT packets of the first flight went to a server that had
+    // no connection for them. Send what was in them again, as 0-RTT.
+    try conn.requeueEarlyDataAfterRetry();
     return bytes.len;
 }
 

@@ -2515,6 +2515,22 @@ pub fn earlyDataReason(self: *Connection) []const u8 {
     return self.inner.earlyDataReason();
 }
 
+/// True once this client has taken a Retry packet from the server
+/// (RFC 9000 §8.1.2): the server asked for one more round trip to
+/// validate the address before it made a connection. Always false on
+/// a server.
+///
+/// Why an embedder may want it: after a Retry the handshake costs one
+/// round trip more, also for a resumed connection whose early data
+/// TLS then reports as `.accepted`. The early data is sent again as
+/// 0-RTT after the Retry (since 0.27.0), so it still arrives before
+/// the handshake is done, but one round trip later than on a dial
+/// with no Retry. A client that counts "dials that saved the round
+/// trip" needs both facts.
+pub fn retryAccepted(self: *const Connection) bool {
+    return self.retry_accepted;
+}
+
 /// The ALPN protocol negotiated during the handshake, or null
 /// before selection happens (or when the peer offered none). A
 /// server configured with several `alpn_protocols` uses this to
@@ -3810,6 +3826,40 @@ pub fn refreshEarlyDataStatus(self: *Connection) Error!void {
 /// wanted, add it as a second explicit mode beside this one —
 /// changing this default breaks a consumer contract.
 pub fn requeueRejectedEarlyData(self: *Connection) Error!void {
+    try self.requeueEarlyDataPackets();
+}
+
+/// RFC 9000 §17.2.5.3: a Retry came, so the 0-RTT packets of the
+/// first flight reached a server that had no connection for them.
+/// They are gone, and nothing will acknowledge them. Queue what was
+/// in them again; while `canSendEarlyData` holds it goes out as 0-RTT
+/// with the next Initial packet (the one that carries the token), to
+/// the connection ID of the Retry.
+///
+/// The packet numbers go on from where they were ("A client MUST NOT
+/// reset the packet number for any packet number space after
+/// processing a Retry packet"), and the keys are the same. Like a
+/// rejection, this is not a congestion loss (RFC 9002 §6.3: a Retry
+/// resets the recovery state; it says nothing about the path).
+///
+/// MEASURED 2026-10-04, before this existed (the probe that is now
+/// `tests/e2e/session_tickets.zig`): a resumed client behind a Retry
+/// said `.accepted`, and the server could read its early data only
+/// after the handshake. The packets stayed "in flight" until the
+/// handshake was confirmed (there is no 1-RTT probe timer before
+/// that) and came back through loss recovery as 1-RTT data. Found by
+/// the capnp-zig session, whose patched client proved the cure.
+// INTERNAL: pub for Connection/recv_packet_handlers.zig access; not part of the embedder API.
+pub fn requeueEarlyDataAfterRetry(self: *Connection) Error!void {
+    try self.requeueEarlyDataPackets();
+}
+
+/// Every packet that was sent under early-data keys leaves its sent
+/// tracker (so it is no longer in flight), and the stream bytes and
+/// control frames in it are queued again, verbatim. A DATAGRAM frame
+/// in such a packet is reported as lost (DATAGRAM frames are not sent
+/// again). No congestion controller hears of it.
+fn requeueEarlyDataPackets(self: *Connection) Error!void {
     for (self.paths.paths.items) |*path| {
         var i: u32 = 0;
         while (i < path.sent.count) {
