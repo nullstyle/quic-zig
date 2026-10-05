@@ -5,7 +5,22 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.27.0] - 2026-10-05
+
+"Tickets that live through a restart". A server can now keep its
+session tickets, and with them resumption and 0-RTT, across a
+restart, a certificate reload and a change of the ticket key; and a
+client's early data goes early also when the server answers with a
+Retry. New: `Server.Config.session_ticket_key`,
+`Server.Config.session_ticket_lifetime_s`,
+`Server.rotateSessionTicketKey`, `Connection.retryAccepted()`.
+Nothing is removed or renamed. **One thing can need a change in an
+embedder:** a direct caller of
+`Connection.setRememberedPeerTransportParams` must pass the two
+stream counts too (under "Changed"). A server that uses none of the
+new settings behaves as before: the 18 virtual-time bench cells print
+the same lines as on 0.26.0. The work was asked for by capnp-zig,
+whose handoff named each item. Verified toolchain: 0.17.0.
 
 ### Added
 
@@ -145,6 +160,56 @@ changes.
   five copies of its ClientHello). A repeat is safe only for a peer
   that is known to have a sample; the note is at `firePtoAtLevel` in
   `src/Connection/loss.zig`.
+- **A ticket key together with the replay tracker is refused, not
+  made safe.** `session_ticket_key` with
+  `early_data = .with_anti_replay` is `InvalidConfig`, because the
+  tracker is empty after a crash. The pair can be made safe: a server
+  that takes no 0-RTT for the first 61 s after its start (BoringSSL
+  accepts a ticket age that is off by 60 s; RFC 8446 section 8.2
+  asks for this). It is not built.
+- **A process that starts with a new ticket key does not have the
+  old one.** `rotateSessionTicketKey` keeps the previous key in the
+  process that is running. `Config.session_ticket_key` is one key, so
+  after a restart the tickets of the key before it are lost.
+- **Still open from 0.26.0, as written there:** a client retries a
+  silent handshake with one datagram for each probe timeout; a
+  Handshake packet that arrives before its keys is dropped; a
+  CONNECTION_CLOSE that is lost is in practice not sent again.
+
+### Tools and tests
+
+- `tests/e2e/session_tickets.zig` (25 tests), at the public wrappers:
+  a first connection earns a ticket, a second one resumes with early
+  data. Each test looks at what the client says and at WHEN the
+  server could read the bytes (before its handshake was done, or
+  after). The second is the one that counts: a client says "accepted"
+  also when its early data came late.
+- `src/tls/session_ticket.zig` (13 unit tests): the pair of keys, the
+  lifetime range, and BoringSSL's ticket callback called directly.
+- The ticket lifetime is tested with a TLS clock that the test moves
+  (TLS ages a ticket on the wall clock, not on the clock of the QUIC
+  loop).
+- 54 mutants of the new code, all killed in the end. The first runs
+  found real gaps, and each has a test now. Three mutants that took
+  the wrong 16 bytes of the key for the HMAC or for AES passed every
+  test, because the test keys were 48 equal bytes; the keys now have
+  three different parts. A mutant with a fixed IV passed, because no
+  test looked at the IV. Two guards that no test could make fail were
+  rewritten or removed.
+- Interop, local, on the code of this release, both roles against
+  quic-go, ngtcp2 and quiche. As the client, `zerortt` and
+  `keyupdate` passed 3 runs of 3 against each server; the 0-RTT sizes
+  at the runner are what they were (10413 to 10417 bytes), now with
+  the library holding the stream count. The wide matrix (15 tests),
+  one run for each role. As the client: 42 cells passed, 1 failed, 2
+  not supported by the peer. As the server: 40 passed, 1 failed, 4
+  not supported by the peer. Both failed cells are known ones, and
+  both were read: `handshakeloss` against a quic-go server (the first
+  "Measured, not changed" entry of 0.26.0; the server heard nothing
+  from the client for 7 s), and `multiplexing` with a quiche client
+  (the flaky cell of every release since 0.24.0; 4 of its 1999
+  requests were cut short by the client). The `resumption` and
+  `zerortt` cells pass in both roles against all three peers.
 
 ## [0.26.0] - 2026-10-04
 

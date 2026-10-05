@@ -77,14 +77,14 @@ The public Zig module name is `quic`.
 ### Consuming this package
 
 Fetch a tagged release into your `build.zig.zon` — substitute the
-current tag (`v0.26.0` as of this writing):
+current tag (`v0.27.0` as of this writing):
 
 ```sh
-zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.26.0.tar.gz
+zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.27.0.tar.gz
 ```
 
 Pin the **archive tarball URL** as above; it is the form every release
-is verified with. On Zig 0.17.0 a `git+https://…#v0.26.0` reference
+is verified with. On Zig 0.17.0 a `git+https://…#v0.27.0` reference
 resolves to the same package hash. (On the 0.17.0-dev builds it did
 not: release tags here are annotated tag objects, and those builds
 gave them a different, unnamed `N-V` fingerprint.)
