@@ -144,9 +144,10 @@ pub fn antiReplayEarlyDataTrampoline(
 
 /// What `buildServerContext` does about session tickets.
 pub const SessionTicketOptions = struct {
-    /// `Server.Config.session_ticket_key`, or null for BoringSSL's
-    /// own per-context key.
-    key: ?*const tls_mod.session_ticket.Key = null,
+    /// The Server's ticket keys (from `Config.session_ticket_key`,
+    /// changed by `rotateSessionTicketKey`), or null for BoringSSL's
+    /// own per-context key. The context keeps the pointer.
+    ring: ?*tls_mod.session_ticket.Ring = null,
     /// `Server.Config.session_ticket_lifetime_s` (already checked
     /// by `Server.init`), or null for BoringSSL's 2 days.
     lifetime_s: ?u32 = null,
@@ -180,11 +181,13 @@ pub const SessionTicketOptions = struct {
 /// installed whenever a tracker is supplied, matching the
 /// historical `Server.init` behavior.
 ///
-/// `tickets.key` non-null installs the embedder's session-ticket
-/// key (`Config.session_ticket_key`). Because a `.pem` reload comes
-/// through here too, the tickets of the old context still open on
-/// the new one. Null leaves BoringSSL's key, random for each
-/// context. `tickets.lifetime_s` non-null is the lifetime of the
+/// `tickets.ring` non-null makes the context seal and open its
+/// tickets with the Server's own keys (`Config.session_ticket_key`).
+/// Because a `.pem` reload comes through here too, the tickets of
+/// the old context still open on the new one, and a key that
+/// `rotateSessionTicketKey` put in is the key of the new context
+/// too. Null leaves BoringSSL's key, random for each context.
+/// `tickets.lifetime_s` non-null is the lifetime of the
 /// tickets that this context seals
 /// (`Config.session_ticket_lifetime_s`).
 pub fn buildServerContext(
@@ -235,14 +238,7 @@ pub fn buildServerContext(
         if (!tls_mod.session_ticket.isValidLifetime(seconds)) return Error.InvalidConfig;
         tls_mod.session_ticket.setLifetime(ctx, seconds);
     }
-    if (tickets.key) |key| {
-        tls_mod.session_ticket.install(ctx, key) catch |err| return switch (err) {
-            error.OutOfMemory => Error.OutOfMemory,
-            // The context did not take the key. A server that went
-            // on would hand out tickets under a key nobody has.
-            error.KeyNotInstalled => Error.InvalidConfig,
-        };
-    }
+    if (tickets.ring) |ring| try tls_mod.session_ticket.installRing(ctx, ring);
     return ctx;
 }
 
@@ -260,7 +256,7 @@ pub fn replaceTlsContext(server: *Server, reload: TlsReload) Error!void {
             server.enable_0rtt,
             server.early_data_anti_replay,
             .{
-                .key = if (server.session_ticket_key) |*key| key else null,
+                .ring = server.session_ticket_ring,
                 .lifetime_s = server.session_ticket_lifetime_s,
             },
         ),

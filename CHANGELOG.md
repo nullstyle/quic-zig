@@ -29,6 +29,23 @@ changes.
   again). The field's doc comment says what a stolen key gives and
   what else must stay the same for 0-RTT to survive. Asked for by
   capnp-zig, which installed the key through the raw TLS layer.
+- **`Server.rotateSessionTicketKey(new_key, now_us)`: a key change
+  that loses no ticket.** BoringSSL's own key setter holds one key
+  and drops the one before it, so a change through it costs every
+  client one full handshake. The Server now keeps two keys and gives
+  BoringSSL a callback: new tickets are sealed under the new key, and
+  the key before it still opens the tickets that are out. A client
+  that comes back with one resumes, with 0-RTT, and leaves with a
+  ticket of the new key (measured before it was built, and held by
+  tests). The old key is cleared one ticket lifetime after the
+  rotation, by the clock of `feed` and `tick`, or at once by a second
+  rotation. A `.pem` reload keeps both keys. Refused: a server with
+  no `session_ticket_key`, a zero key, and a key with the 16-byte
+  name of the current one. The ticket format is BoringSSL's own, so a
+  server with the setting and a server whose key was set on the TLS
+  context by hand read each other's tickets; a pool can move one
+  server at a time. For an embedder with a TLS context of its own:
+  `quic.tls.session_ticket.Ring` and `installRing`.
 - **`Server.Config.session_ticket_lifetime_s`.** How long a session
   ticket is good for: 1 second to 7 days (the limit of RFC 8446
   section 4.6.1); null leaves BoringSSL's 2 days. A `.pem` reload

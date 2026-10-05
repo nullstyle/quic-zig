@@ -50,8 +50,47 @@ const ServerOptions = struct {
     ticket_lifetime_s: ?u32 = null,
 };
 
-const key_a: quic.SessionTicketKey = @splat(0xa5);
-const key_b: quic.SessionTicketKey = @splat(0x5b);
+/// A test key whose three parts (key name, HMAC key, AES key; 16
+/// bytes each) all differ, and that differs from the key of another
+/// seed in each part. A key of 48 equal bytes cannot tell a server
+/// that takes the wrong part for a job from one that takes the right
+/// one. (That is not a guess: with such keys, three mutants of the
+/// ticket callback passed every test.)
+fn testKey(comptime seed: u8) quic.SessionTicketKey {
+    var key: quic.SessionTicketKey = undefined;
+    for (&key, 0..) |*b, i| b.* = seed ^ @as(u8, @intCast((i * 7 + i / 16 * 31) & 0xff));
+    return key;
+}
+
+const key_a: quic.SessionTicketKey = testKey(0xa5);
+const key_b: quic.SessionTicketKey = testKey(0x5b);
+const key_c: quic.SessionTicketKey = testKey(0x77);
+
+comptime {
+    for ([_]quic.SessionTicketKey{ key_a, key_b, key_c }) |k| {
+        std.debug.assert(!std.mem.eql(u8, k[0..16], k[16..32]));
+        std.debug.assert(!std.mem.eql(u8, k[16..32], k[32..48]));
+        std.debug.assert(!std.mem.eql(u8, k[0..16], k[32..48]));
+    }
+    std.debug.assert(!std.mem.eql(u8, key_a[0..16], key_b[0..16]));
+    std.debug.assert(!std.mem.eql(u8, key_b[0..16], key_c[0..16]));
+    std.debug.assert(!std.mem.eql(u8, key_a[0..16], key_c[0..16]));
+}
+
+const st = quic.tls.session_ticket;
+
+/// The key that the server's current TLS context seals tickets under,
+/// when the Server manages the keys itself; null when BoringSSL does.
+fn sealingKey(srv: *quic.Server) ?quic.SessionTicketKey {
+    const ring = st.installedRing(srv.tls_ctx) orelse return null;
+    return ring.current;
+}
+
+/// The key before it, while it still opens tickets.
+fn previousKey(srv: *quic.Server) ?quic.SessionTicketKey {
+    const ring = st.installedRing(srv.tls_ctx) orelse return null;
+    return ring.previous;
+}
 
 const retry_key: quic.RetryTokenKey = @splat(0x42);
 
@@ -164,8 +203,23 @@ const Resumed = struct {
 /// the first flight. Runs until the client's handshake is done and
 /// the server has the whole payload.
 fn resumeWithEarlyData(allocator: std.mem.Allocator, srv: *quic.Server, envelope: []const u8, port: u16) !Resumed {
+    return resumeWith(allocator, srv, envelope, port, .{});
+}
+
+const ResumeOptions = struct {
+    /// Run on until the client has a NEW ticket from this connection
+    /// in the sink (which must be empty at the call).
+    sink: ?*EnvelopeSink = null,
+    /// The server's clock (`now_us`) at the first datagram.
+    start_us: u64 = 60_000_000,
+};
+
+/// `resumeWithEarlyData` with options.
+fn resumeWith(allocator: std.mem.Allocator, srv: *quic.Server, envelope: []const u8, port: u16, opts: ResumeOptions) !Resumed {
     const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x22), .port = port } };
-    var cli = try newClient(allocator, null, envelope);
+    const sink = opts.sink;
+    if (sink) |s| try std.testing.expect(s.captured == null);
+    var cli = try newClient(allocator, sink, envelope);
     defer cli.deinit();
     cli.conn.setEarlyDataEnabled(true);
     _ = try cli.conn.openBidi(0);
@@ -174,7 +228,7 @@ fn resumeWithEarlyData(allocator: std.mem.Allocator, srv: *quic.Server, envelope
     try cli.conn.advance();
 
     var out: Resumed = .{ .status = .not_offered, .read_before_handshake_done = false, .read = 0, .retries = 0 };
-    var now_us: u64 = 60_000_000;
+    var now_us: u64 = opts.start_us;
     var rbuf: [64]u8 = undefined;
     var step: u32 = 0;
     while (step < 200) : (step += 1) {
@@ -191,12 +245,14 @@ fn resumeWithEarlyData(allocator: std.mem.Allocator, srv: *quic.Server, envelope
         try serverToClient(srv, &cli, now_us);
         try srv.tick(now_us);
         try cli.conn.tick(now_us);
-        if (cli.conn.handshakeDone() and out.read >= early_payload.len) break;
+        if (cli.conn.handshakeDone() and out.read >= early_payload.len and
+            (sink == null or sink.?.captured != null)) break;
         now_us += 1_000;
     }
     try std.testing.expect(cli.conn.handshakeDone());
     try std.testing.expect(!cli.conn.isClosed());
     try std.testing.expectEqualStrings(early_payload, rbuf[0..out.read]);
+    if (sink) |s| try std.testing.expect(s.captured != null);
     out.status = cli.conn.earlyDataStatus();
     try closeAndReap(&cli, srv, addr, now_us);
     return out;
@@ -270,10 +326,10 @@ test "session ticket key: a certificate reload keeps the tickets when a key is s
         var sink: EnvelopeSink = .{ .allocator = allocator };
         defer sink.deinit();
         try earnTicket(allocator, &srv, &sink, 1104);
-        try std.testing.expectEqualSlices(u8, &key_a, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+        try std.testing.expectEqualSlices(u8, &key_a, &sealingKey(&srv).?);
 
         try srv.replaceTlsContext(reload);
-        try std.testing.expectEqualSlices(u8, &key_a, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+        try std.testing.expectEqualSlices(u8, &key_a, &sealingKey(&srv).?);
         const r = try resumeWithEarlyData(allocator, &srv, sink.captured.?, 2104);
         try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
         try std.testing.expect(r.read_before_handshake_done);
@@ -322,7 +378,7 @@ test "session ticket key: init refuses a zero key, a key with a context of the e
         cfg.session_ticket_key = key;
         var srv = try quic.Server.init(cfg);
         defer srv.deinit();
-        try std.testing.expectEqualSlices(u8, &key, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+        try std.testing.expectEqualSlices(u8, &key, &sealingKey(&srv).?);
     }
     // A context that the embedder built: the key belongs on it.
     {
@@ -358,14 +414,14 @@ test "session ticket key: init refuses a zero key, a key with a context of the e
         cfg.session_ticket_key = key_a;
         var srv = try quic.Server.init(cfg);
         defer srv.deinit();
-        try std.testing.expectEqualSlices(u8, &key_a, &quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?);
+        try std.testing.expectEqualSlices(u8, &key_a, &sealingKey(&srv).?);
+        try std.testing.expect(previousKey(&srv) == null);
     }
-    // No key: the context keeps a key of its own.
+    // No key: BoringSSL keeps a key of its own for the context.
     {
         var srv = try quic.Server.init(base);
         defer srv.deinit();
-        const own = quic.tls.session_ticket.currentKeyForTest(srv.tls_ctx).?;
-        try std.testing.expect(!std.mem.eql(u8, &own, &key_a));
+        try std.testing.expect(sealingKey(&srv) == null);
     }
 }
 
@@ -430,6 +486,257 @@ test "session ticket key: with 0-RTT off, a new server with the same key still r
     var none = try noEarly(allocator, null);
     defer none.deinit();
     try std.testing.expect(!try Dial.resumed(allocator, &none, sink.captured.?, null, 3004));
+}
+
+// ------------------------------------------------------ a change of key
+
+const us_per_s: u64 = 1_000_000;
+
+test "key rotation: a ticket of the old key still resumes with 0-RTT, and the client leaves with a ticket of the new key" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a });
+    defer srv.deinit();
+    var old_ticket: EnvelopeSink = .{ .allocator = allocator };
+    defer old_ticket.deinit();
+    try earnTicket(allocator, &srv, &old_ticket, 1301);
+
+    try srv.rotateSessionTicketKey(key_b, 50 * us_per_s);
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+    try std.testing.expectEqualSlices(u8, &key_a, &previousKey(&srv).?);
+
+    var new_ticket: EnvelopeSink = .{ .allocator = allocator };
+    defer new_ticket.deinit();
+    const r = try resumeWith(allocator, &srv, old_ticket.captured.?, 2301, .{ .sink = &new_ticket });
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
+    try std.testing.expect(r.read_before_handshake_done);
+
+    // The new ticket is under the new key: a server that has ONLY the
+    // new key takes it, and not the old ticket.
+    var only_new = try newServer(allocator, .{ .ticket_key = key_b });
+    defer only_new.deinit();
+    const with_new = try resumeWithEarlyData(allocator, &only_new, new_ticket.captured.?, 2302);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, with_new.status);
+    try std.testing.expect(with_new.read_before_handshake_done);
+    const with_old = try resumeWithEarlyData(allocator, &only_new, old_ticket.captured.?, 2303);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, with_old.status);
+    // And a server that has only the OLD key does not take the new
+    // ticket.
+    var only_old = try newServer(allocator, .{ .ticket_key = key_a });
+    defer only_old.deinit();
+    const new_at_old = try resumeWithEarlyData(allocator, &only_old, new_ticket.captured.?, 2304);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, new_at_old.status);
+}
+
+test "key rotation: the old key opens tickets for one ticket lifetime, then it is gone" {
+    // The ticket lifetime is 10 s. The rotation is at 100 s on the
+    // server's clock, so the old key is good until 110 s. (TLS's own
+    // clock, which ages the tickets, does not move in this test.)
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 10 });
+    defer srv.deinit();
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    try earnTicket(allocator, &srv, &sink, 1305);
+    const old_ticket = try allocator.dupe(u8, sink.captured.?);
+    defer allocator.free(old_ticket);
+
+    try srv.rotateSessionTicketKey(key_b, 100 * us_per_s);
+
+    try srv.tick(109 * us_per_s);
+    try std.testing.expect(previousKey(&srv) != null);
+    const before = try resumeWith(allocator, &srv, old_ticket, 2305, .{ .start_us = 109 * us_per_s });
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, before.status);
+    try std.testing.expect(before.read_before_handshake_done);
+    // (The helper closes that connection over some seconds of the
+    // server's clock, so the old key may be gone already here.)
+
+    // The first datagram at 110 s already finds the old key gone.
+    const after = try resumeWith(allocator, &srv, old_ticket, 2306, .{ .start_us = 110 * us_per_s });
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, after.status);
+    try std.testing.expect(!after.read_before_handshake_done);
+    try std.testing.expect(previousKey(&srv) == null);
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+}
+
+test "key rotation: `tick` alone clears the old key when its time is over; with no lifetime set that is after 2 days" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a });
+    defer srv.deinit();
+    try srv.rotateSessionTicketKey(key_b, 7 * us_per_s);
+    const two_days_us: u64 = 2 * 24 * 60 * 60 * us_per_s;
+
+    try srv.tick(7 * us_per_s + two_days_us - 1);
+    try std.testing.expectEqualSlices(u8, &key_a, &previousKey(&srv).?);
+    try srv.tick(7 * us_per_s + two_days_us);
+    try std.testing.expect(previousKey(&srv) == null);
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+}
+
+test "key rotation: a second rotation drops the first key at once" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a });
+    defer srv.deinit();
+    var ticket_a: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_a.deinit();
+    try earnTicket(allocator, &srv, &ticket_a, 1307);
+
+    try srv.rotateSessionTicketKey(key_b, 50 * us_per_s);
+    var ticket_b: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_b.deinit();
+    try earnTicket(allocator, &srv, &ticket_b, 1308);
+
+    try srv.rotateSessionTicketKey(key_c, 51 * us_per_s);
+    try std.testing.expectEqualSlices(u8, &key_c, &sealingKey(&srv).?);
+    try std.testing.expectEqualSlices(u8, &key_b, &previousKey(&srv).?);
+
+    const first = try resumeWithEarlyData(allocator, &srv, ticket_a.captured.?, 2307);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, first.status);
+    const second = try resumeWithEarlyData(allocator, &srv, ticket_b.captured.?, 2308);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, second.status);
+    try std.testing.expect(second.read_before_handshake_done);
+}
+
+test "key rotation: a certificate reload keeps both keys" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a });
+    defer srv.deinit();
+    var ticket_a: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_a.deinit();
+    try earnTicket(allocator, &srv, &ticket_a, 1309);
+
+    try srv.rotateSessionTicketKey(key_b, 50 * us_per_s);
+    try srv.replaceTlsContext(.{ .pem = .{
+        .cert_pem = common.test_cert_pem,
+        .key_pem = common.test_key_pem,
+    } });
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+    try std.testing.expectEqualSlices(u8, &key_a, &previousKey(&srv).?);
+
+    var ticket_b: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_b.deinit();
+    const r = try resumeWith(allocator, &srv, ticket_a.captured.?, 2309, .{ .sink = &ticket_b });
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
+    try std.testing.expect(r.read_before_handshake_done);
+    var only_new = try newServer(allocator, .{ .ticket_key = key_b });
+    defer only_new.deinit();
+    const with_new = try resumeWithEarlyData(allocator, &only_new, ticket_b.captured.?, 2310);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, with_new.status);
+}
+
+test "key rotation: refused on a server with no key, for a zero key, and for a key with the name of the current one" {
+    const allocator = std.testing.allocator;
+    {
+        var srv = try newServer(allocator, .{});
+        defer srv.deinit();
+        try std.testing.expectError(error.InvalidConfig, srv.rotateSessionTicketKey(key_b, 1));
+        try std.testing.expect(sealingKey(&srv) == null);
+    }
+    var srv = try newServer(allocator, .{ .ticket_key = key_a });
+    defer srv.deinit();
+    try std.testing.expectError(error.InvalidConfig, srv.rotateSessionTicketKey(@splat(0), 1));
+    // The same key again.
+    try std.testing.expectError(error.InvalidConfig, srv.rotateSessionTicketKey(key_a, 1));
+    // Other secrets under the same 16-byte name: a ticket could not
+    // say which of the two sealed it.
+    var same_name = key_b;
+    @memcpy(same_name[0..16], key_a[0..16]);
+    try std.testing.expectError(error.InvalidConfig, srv.rotateSessionTicketKey(same_name, 1));
+    // Nothing changed.
+    try std.testing.expectEqualSlices(u8, &key_a, &sealingKey(&srv).?);
+    try std.testing.expect(previousKey(&srv) == null);
+    // A key that differs in the name is taken.
+    try srv.rotateSessionTicketKey(key_b, 1);
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+}
+
+test "key rotation: a datagram alone clears the old key when its time is over" {
+    // `feed` checks before it looks at the datagram, so the handshake
+    // that a datagram starts never opens a ticket with a key whose
+    // time is over.
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 10 });
+    defer srv.deinit();
+    try srv.rotateSessionTicketKey(key_b, 100 * us_per_s);
+    const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x44), .port = 4444 } };
+    var junk: [40]u8 = @splat(0x41);
+
+    _ = try srv.feed(&junk, addr, 110 * us_per_s - 1);
+    try std.testing.expect(previousKey(&srv) != null);
+    _ = try srv.feed(&junk, addr, 110 * us_per_s);
+    try std.testing.expect(previousKey(&srv) == null);
+}
+
+test "session ticket key: an init that fails after the key was taken leaves nothing behind" {
+    // The Server keeps its ticket keys on the heap. `init` fails here
+    // at the certificate; the testing allocator reports a leak if the
+    // keys were not freed.
+    const allocator = std.testing.allocator;
+    try std.testing.expect(std.meta.isError(quic.Server.init(.{
+        .allocator = allocator,
+        .tls_cert_pem = "-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n",
+        .tls_key_pem = common.test_key_pem,
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .session_ticket_key = key_a,
+    })));
+}
+
+test "ticket format: a server with the setting and a server with BoringSSL's plain key setter read each other's tickets" {
+    // A pool can move its servers one at a time from "the key set on
+    // the TLS context by hand" (`SSL_CTX_set_tlsext_ticket_keys`,
+    // here through `tls.session_ticket.install`) to
+    // `Config.session_ticket_key`. The Server seals through a
+    // callback of its own, so this holds only because the callback
+    // builds the ticket exactly as BoringSSL does.
+    const allocator = std.testing.allocator;
+
+    // From the setting to the plain setter.
+    var from_setting: EnvelopeSink = .{ .allocator = allocator };
+    defer from_setting.deinit();
+    {
+        var srv = try newServer(allocator, .{ .ticket_key = key_a });
+        defer srv.deinit();
+        try earnTicket(allocator, &srv, &from_setting, 1311);
+    }
+    var by_hand = try newServer(allocator, .{});
+    defer by_hand.deinit();
+    try st.install(by_hand.tls_ctx, &key_a);
+    const r1 = try resumeWithEarlyData(allocator, &by_hand, from_setting.captured.?, 2311);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r1.status);
+    try std.testing.expect(r1.read_before_handshake_done);
+
+    // From the plain setter to the setting.
+    var from_hand: EnvelopeSink = .{ .allocator = allocator };
+    defer from_hand.deinit();
+    try earnTicket(allocator, &by_hand, &from_hand, 1312);
+    var srv = try newServer(allocator, .{ .ticket_key = key_a });
+    defer srv.deinit();
+    const r2 = try resumeWithEarlyData(allocator, &srv, from_hand.captured.?, 2312);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r2.status);
+    try std.testing.expect(r2.read_before_handshake_done);
+}
+
+test "ticket format: the plain setter on top of the setting changes nothing (the setting's keys are used)" {
+    // An embedder that still sets the key by hand after `Server.init`
+    // (capnp-zig did, before the setting existed) and also uses the
+    // setting: BoringSSL asks the callback and ignores the plain key.
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a });
+    defer srv.deinit();
+    try st.install(srv.tls_ctx, &key_c);
+    var sink: EnvelopeSink = .{ .allocator = allocator };
+    defer sink.deinit();
+    try earnTicket(allocator, &srv, &sink, 1313);
+
+    var same_setting = try newServer(allocator, .{ .ticket_key = key_a });
+    defer same_setting.deinit();
+    const r = try resumeWithEarlyData(allocator, &same_setting, sink.captured.?, 2313);
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, r.status);
+    var plain_c = try newServer(allocator, .{});
+    defer plain_c.deinit();
+    try st.install(plain_c.tls_ctx, &key_c);
+    const r2 = try resumeWithEarlyData(allocator, &plain_c, sink.captured.?, 2314);
+    try std.testing.expectEqual(quic.EarlyDataStatus.rejected, r2.status);
 }
 
 // --------------------------------------------------- the ticket lifetime

@@ -585,7 +585,10 @@ early_data: EarlyData = .disabled,
 /// `early_data_application_context`.
 ///
 /// The key is a secret of the same rank as the private key; make it
-/// with a CSPRNG, keep it out of logs, and change it on a schedule.
+/// with a CSPRNG, keep it out of logs, and change it on a schedule
+/// (`Server.rotateSessionTicketKey` changes it with no restart and
+/// no lost ticket; this field is the key that a process STARTS
+/// with).
 /// A stolen key does NOT open recorded 1-RTT traffic (TLS 1.3
 /// resumes with a fresh key exchange). It DOES open recorded 0-RTT
 /// data, and its holder can answer as this server to a client that

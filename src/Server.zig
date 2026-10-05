@@ -488,12 +488,17 @@ new_token_lifetime_us: u64,
 /// it again.
 enable_0rtt: bool,
 
-/// Captured `Config.session_ticket_key`. Installed on the TLS
-/// context that `init` builds and on every context that
-/// `replaceTlsContext({.pem = ...})` builds, so tickets live through
-/// a certificate reload. Null leaves BoringSSL's per-context random
-/// key. `secureZero`-ed in `deinit`.
-session_ticket_key: ?SessionTicketKey,
+/// The ticket keys of this Server: `Config.session_ticket_key` as
+/// the key that seals, and after `rotateSessionTicketKey` the key
+/// before it too. Installed on the TLS context that `init` builds and
+/// on every context that `replaceTlsContext({.pem = ...})` builds, so
+/// tickets live through a certificate reload. Null leaves BoringSSL's
+/// per-context random key.
+///
+/// On the heap, because the TLS contexts keep a pointer to it and a
+/// `Server` value may be moved after `init` returns. Cleared with
+/// `secureZero` and freed in `deinit`.
+session_ticket_ring: ?*tls_mod.session_ticket.Ring,
 /// Captured `Config.session_ticket_lifetime_s`, for the contexts
 /// that a `.pem` reload builds. Null leaves BoringSSL's 2 days.
 session_ticket_lifetime_s: ?u32,
@@ -877,6 +882,19 @@ pub fn init(config: Config) Error!Server {
         if (config.tls_context_override != null) return Error.InvalidConfig;
     }
 
+    // The ticket keys go on the heap (see the field). Every error
+    // return below this line clears and frees them.
+    var ticket_ring: ?*tls_mod.session_ticket.Ring = null;
+    errdefer if (ticket_ring) |ring| {
+        ring.wipe();
+        config.allocator.destroy(ring);
+    };
+    if (config.session_ticket_key) |key| {
+        const ring = try config.allocator.create(tls_mod.session_ticket.Ring);
+        ring.* = .init(key);
+        ticket_ring = ring;
+    }
+
     var tls_ctx: boringssl.tls.Context = undefined;
     var owns_tls = false;
     if (config.tls_context_override) |ctx| {
@@ -894,7 +912,7 @@ pub fn init(config: Config) Error!Server {
             config.early_data.enabled(),
             config.early_data.antiReplayTracker(),
             .{
-                .key = if (config.session_ticket_key) |*key| key else null,
+                .ring = ticket_ring,
                 .lifetime_s = config.session_ticket_lifetime_s,
             },
         );
@@ -971,7 +989,7 @@ pub fn init(config: Config) Error!Server {
         .new_token_lifetime_us = config.new_token_lifetime_us,
         .enable_0rtt = config.early_data.enabled(),
         .early_data_anti_replay = config.early_data.antiReplayTracker(),
-        .session_ticket_key = config.session_ticket_key,
+        .session_ticket_ring = ticket_ring,
         .session_ticket_lifetime_s = config.session_ticket_lifetime_s,
         .tunables = .{
             .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
@@ -1156,10 +1174,8 @@ pub fn deinit(self: *Server) void {
     if (self.stateless_reset_key) |*key| {
         std.crypto.secureZero(u8, key[0..]);
     }
-    // And the session-ticket key: it opens recorded 0-RTT data.
-    if (self.session_ticket_key) |*key| {
-        std.crypto.secureZero(u8, key[0..]);
-    }
+    // (The session-ticket keys are cleared at the end, after the TLS
+    // contexts that point at them are gone.)
     // Draining contexts always represent ownership the Server
     // took on at swap-time, so they're unconditionally deinit-ed
     // here regardless of `owns_tls` (which only describes the
@@ -1167,7 +1183,54 @@ pub fn deinit(self: *Server) void {
     for (self.draining_tls_contexts.items) |*entry| entry.ctx.deinit();
     self.draining_tls_contexts.deinit(self.allocator);
     if (self.owns_tls) self.tls_ctx.deinit();
+    // The session-ticket keys, last: the contexts above pointed at
+    // them. A ticket key opens recorded 0-RTT data, so the bytes are
+    // cleared before the memory goes back.
+    if (self.session_ticket_ring) |ring| {
+        ring.wipe();
+        self.allocator.destroy(ring);
+    }
     self.* = undefined;
+}
+
+/// Change the key that session tickets are sealed under, with no
+/// restart and no lost ticket. From this call on, new tickets are
+/// sealed under `new_key`. The key that sealed until now still OPENS
+/// tickets, so a client that comes back with one resumes (with 0-RTT,
+/// if that is on) and leaves with a ticket under the new key. That
+/// lasts for one ticket lifetime from `now_us`
+/// (`Config.session_ticket_lifetime_s`, or 2 days): by then every
+/// ticket of the old key has expired by itself, and the old key is
+/// cleared. A second rotation before that drops the old key at once;
+/// the Server keeps two keys, not more.
+///
+/// Why change the key at all: whoever has a ticket key can open
+/// recorded 0-RTT data that was sent under its tickets, can answer as
+/// this server to a client that offers such a ticket, and can make
+/// tickets of its own (with client certificates in use, that is a
+/// session for any client identity). A key that is changed on a
+/// schedule bounds all three. BoringSSL changes its own random key
+/// every 2 days; a key that is set by hand stays until it is changed
+/// here.
+///
+/// The other servers of a pool, and the next process, need the same
+/// change: give them `new_key` as `Config.session_ticket_key`. (A
+/// server that STARTS with the new key does not have the old one, so
+/// it cannot open the tickets of the old key.)
+///
+/// Call it on the thread that calls `feed`; the Server has no lock.
+/// `now_us` is the clock of `feed` and `tick`.
+///
+/// Errors (`InvalidConfig`, and nothing is changed): the Server was
+/// built with no `Config.session_ticket_key`; `new_key` is 48 zero
+/// bytes; `new_key` has the same key name (its first 16 bytes) as the
+/// current key, because a ticket names its key by those bytes alone.
+pub fn rotateSessionTicketKey(self: *Server, new_key: SessionTicketKey, now_us: u64) Error!void {
+    const ring = self.session_ticket_ring orelse return Error.InvalidConfig;
+    if (tls_mod.session_ticket.isAllZero(&new_key)) return Error.InvalidConfig;
+    const lifetime_s: u64 = self.session_ticket_lifetime_s orelse tls_mod.session_ticket.default_lifetime_s;
+    const expires_at_us = now_us +| lifetime_s * std.time.us_per_s;
+    ring.rotate(new_key, expires_at_us) catch return Error.InvalidConfig;
 }
 
 /// Number of live connections currently in the table.
@@ -1237,6 +1300,10 @@ pub fn feedWithEcn(
     // Server-driven time. No-op when 0-RTT or anti-replay isn't
     // configured.
     if (self.early_data_anti_replay) |tracker| tracker.bumpClock(now_us);
+    // A ticket key that was rotated out stops opening tickets one
+    // ticket lifetime after the rotation. Checked here so that the
+    // handshake this datagram may start already sees it.
+    if (self.session_ticket_ring) |ring| _ = ring.expire(now_us);
     // Global DoS backstop: listener-level packet + byte rate
     // limits. Runs *before* the empty-bytes check, before the
     // 1200-byte Initial size gate, before slot lookup — every
@@ -1635,6 +1702,9 @@ pub fn poll(
 /// draining-state slots stay in the loop so their deadlines fire
 /// and the connection eventually transitions to terminal closed.
 pub fn tick(self: *Server, now_us: u64) ConnectionError!void {
+    // Clear a rotated-out ticket key when its time is over, also on a
+    // server that gets no datagram.
+    if (self.session_ticket_ring) |ring| _ = ring.expire(now_us);
     for (self.slots.items) |slot| {
         if (slot.conn.closeState() == .closed) continue;
         try slot.conn.tick(now_us);
