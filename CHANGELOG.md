@@ -5,7 +5,11 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.28.1] - 2026-10-05
+
+A build fix for 0.28.0: it did not compile for a 32-bit target. No
+change for a 64-bit target beyond five casts in tests and examples.
+A 32-bit leg in CI from now on. Verified toolchain: 0.17.0.
 
 ### Fixed
 
