@@ -62,20 +62,27 @@ pub const StreamEnd = union(enum) {
     fin,
     /// The peer aborted the stream with RESET_STREAM — also when its FIN
     /// had arrived first. Bytes already delivered stay delivered; unread
-    /// ones were thrown away; no more are coming.
+    /// ones were thrown away; no more are coming. This is also the usual
+    /// end of a stream the application STOPPED (`streamStopSending`): a
+    /// peer answers STOP_SENDING with RESET_STREAM (RFC 9000 §3.5), and
+    /// the reset is checked first.
     reset,
     /// The stream ended without a clean end the Driver can vouch for:
     /// the connection is closing; the application stopped the stream
-    /// (`streamStopSending`), so later bytes were dropped unread; or the
-    /// stream was reclaimed and its end is not known (its note was
-    /// overwritten, or could not be allocated). Treat it as cut, never as
-    /// a clean end.
+    /// (`streamStopSending`) and the peer's RESET_STREAM has not arrived
+    /// (when it has, the end is `.reset`), so later bytes were dropped
+    /// unread; or the stream was reclaimed and its end is not known (its
+    /// note was overwritten, or could not be allocated). Treat it as cut,
+    /// never as a clean end.
     ///
     /// To tell these apart: a STOPPED stream can end `.reaped` while it is
     /// still live, so `streamRecvWasReaped(id)` is false for it — that
     /// alone does not mean teardown. `conn.streamRecvEnd(id)` answers
-    /// directly: a stopped stream gives a non-null answer with
-    /// `.stopped == true`.
+    /// directly inside `on_stream_end`: a stopped stream gives a non-null
+    /// answer with `.stopped == true`. Anywhere else it can be null (a
+    /// stream whose receive half has not ended, as in the Driver's own
+    /// teardown pass), so read it as `if (conn.streamRecvEnd(id)) |e|
+    /// e.stopped`, never with `.?`.
     reaped,
 };
 

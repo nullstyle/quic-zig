@@ -329,7 +329,13 @@ or renamed.
   mean teardown. `streamRecvEnd(id).?.stopped` says it directly. The
   reset code is
   `conn.streamRecvEnd(entry.id).?.reset_code`. `StreamEnd` keeps its
-  shape (no payload).
+  shape (no payload). *Correction (2026-10-06, found by capnp-zig):
+  the USUAL end of a stopped stream is `.reset`, not `.reaped`: a peer
+  answers STOP_SENDING with RESET_STREAM (RFC 9000 §3.5) and the reset
+  is checked first; `.reaped` is the stopped stream whose RESET_STREAM
+  has not arrived. And `.?` is safe only inside `on_stream_end`, where
+  the answer is never null; anywhere else (the Driver's teardown pass
+  included) read it as `if (conn.streamRecvEnd(id)) |e| e.stopped`.*
 - **`Outbox.finish` cannot stop the server any more.** It now treats as
   "nothing left to finish": `StreamNotFound` for a stream that really
   was reclaimed (its send half was already done), and `StreamClosed`, a
