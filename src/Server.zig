@@ -1362,14 +1362,20 @@ pub fn iterator(self: *Server) []*Slot {
 /// `drainStatelessResponse` and forward them on the same UDP
 /// socket the datagram came in on.
 ///
-/// `bytes` is changed in place, whatever the outcome: header
-/// protection is removed and a packet is opened where it lies, and a
-/// datagram that comes back `.dropped` may already have its first
-/// byte and packet-number bytes changed. An embedder that gives a
+/// `bytes` is opened in place when it reaches a connection (header
+/// protection is removed and a packet is decrypted where it lies), so
+/// a datagram that comes back `.routed` or `.accepted` is consumed.
+/// Every other outcome leaves `bytes` as it was: the gates only look,
+/// and the one path that opens a datagram and then drops it (a new
+/// connection that could open no packet of it: another server's
+/// first flight on a shared socket, junk behind a long header) copies
+/// the datagram first and puts it back. An embedder that gives a
 /// `.dropped` datagram to something else (its own dials, on one
-/// socket) must give that a COPY taken BEFORE this call (found by the
-/// bugnest session in qmesh-zig, 2026-10-06: a dial handed the bytes
-/// after `feed` stalled in its handshake).
+/// socket) may give it these bytes. Through v0.30.1 that datagram
+/// came back with its first byte and packet-number bytes changed,
+/// and a dial handed it stalled (found by the bugnest session in
+/// qmesh-zig, 2026-10-06; qmesh copies before `feed` since, which
+/// stays correct).
 pub fn feed(
     self: *Server,
     bytes: []u8,
@@ -1378,6 +1384,11 @@ pub fn feed(
 ) Error!FeedOutcome {
     return self.feedWithEcn(bytes, from, .not_ect, now_us);
 }
+
+/// The stack copy `feedWithEcn` keeps of a datagram that makes a new
+/// connection (see `feed`): an Initial datagram is 1200 bytes or more
+/// and at most a path MTU, so this covers it without an allocation.
+const feed_copy_bytes: usize = 2048;
 
 /// Like `feed`, but also carries the IP-layer ECN codepoint the
 /// embedder peeled off the datagram's TOS byte. The codepoint
@@ -1753,6 +1764,17 @@ pub fn feedWithEcn(
         if (from) |addr| _ = self.retry_state_table.remove(addr);
         self.retries_validated += 1;
     }
+    // `dispatchToSlot` opens the datagram where it lies. If the
+    // connection turns out stillborn (next), the embedder gets the
+    // datagram back as it came: a copy on the stack for the common
+    // datagram, on the heap for a larger one (an embedder's GRO
+    // buffer). No allocation for a datagram of `feed_copy_bytes` or
+    // less, so a handshake's allocation count does not move.
+    var feed_copy: [feed_copy_bytes]u8 = undefined;
+    const copy_on_heap = bytes.len > feed_copy.len;
+    const original: []u8 = if (copy_on_heap) try self.allocator.alloc(u8, bytes.len) else feed_copy[0..bytes.len];
+    defer if (copy_on_heap) self.allocator.free(original);
+    @memcpy(original, bytes);
     try self.dispatchToSlot(slot, bytes, from, now_us);
     // A connection that could open NO packet of the datagram that made
     // it is not a connection: the datagram was a server's first flight
@@ -1769,6 +1791,7 @@ pub fn feedWithEcn(
     // is owed that CONNECTION_CLOSE.
     if (slot.conn.qlog_packets_received == 0 and slot.conn.closeState() == .open) {
         self.discardStillbornSlot(slot);
+        @memcpy(bytes, original);
         self.feeds_dropped += 1;
         return .dropped;
     }

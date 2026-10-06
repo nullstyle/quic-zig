@@ -71,6 +71,63 @@ test "stillborn: another server's first flight makes no connection, and the cont
     try std.testing.expectEqual(@as(u64, answers), local.metricsSnapshot().feeds_dropped);
 }
 
+test "stillborn: a `.dropped` datagram is left as it was (another server's first flight, and junk)" {
+    // An embedder with one socket for a Server and its own dials gives
+    // every datagram to the Server first, and a `.dropped` one to the
+    // dial it may belong to. The Server opens a datagram where it lies
+    // (header protection, then the payload). Up to v0.30.1 a `.dropped`
+    // datagram came back with its first byte and packet-number bytes
+    // changed, and a dial given those bytes stalled (found by the
+    // bugnest session in qmesh-zig, 2026-10-06; qmesh copies before
+    // `feed` since). From v0.31.0 the bytes are what they were, and
+    // the dial completes its handshake on them.
+    const allocator = std.testing.allocator;
+    var remote = try newServer(allocator);
+    defer remote.deinit();
+    var local = try newServer(allocator);
+    defer local.deinit();
+    var cli = try newClient(allocator);
+    defer cli.deinit();
+    try cli.conn.advance();
+    var rx: [4096]u8 = undefined;
+    var orig: [4096]u8 = undefined;
+
+    const first = (try cli.conn.poll(&rx, 1_000)).?;
+    try std.testing.expectEqual(quic.Server.FeedOutcome.accepted, try remote.feed(rx[0..first], dial_addr, 1_000));
+
+    var answers: usize = 0;
+    for (remote.iterator()) |slot| {
+        while (try slot.conn.poll(&rx, 2_000)) |len| {
+            answers += 1;
+            @memcpy(orig[0..len], rx[0..len]);
+            try std.testing.expectEqual(quic.Server.FeedOutcome.dropped, try local.feed(rx[0..len], remote_addr, 2_000));
+            try std.testing.expectEqualSlices(u8, orig[0..len], rx[0..len]);
+            // The dial, given the bytes after the Server, opens them.
+            try cli.conn.handle(rx[0..len], null, 2_000);
+        }
+    }
+    try std.testing.expect(answers >= 1);
+    try std.testing.expectEqual(@as(usize, 0), local.connectionCount());
+    try std.testing.expect(cli.conn.handshakeDone());
+
+    // Junk behind a long header: the same.
+    var junk: [1200]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    prng.random().bytes(&junk);
+    junk[0] = 0xc0;
+    junk[1] = 0;
+    junk[2] = 0;
+    junk[3] = 0;
+    junk[4] = 1;
+    junk[5] = 8;
+    junk[14] = 8;
+    junk[23] = 0;
+    const junk_orig = junk;
+    try std.testing.expectEqual(quic.Server.FeedOutcome.dropped, try local.feed(&junk, dial_addr, 3_000));
+    try std.testing.expectEqualSlices(u8, &junk_orig, &junk);
+    try std.testing.expectEqual(@as(usize, 0), local.connectionCount());
+}
+
 test "stillborn: 1200 bytes of junk behind a long header make no connection" {
     const allocator = std.testing.allocator;
     var srv = try newServer(allocator);

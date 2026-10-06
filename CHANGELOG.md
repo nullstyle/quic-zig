@@ -5,6 +5,23 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Changed
+
+- **`Server.feed` leaves a `.dropped` datagram as it was.** The datagram
+  that makes a new connection is opened where it lies; a connection
+  that could open no packet of it is stillborn (another server's first
+  flight on a shared socket, junk behind a long header), and `feed`
+  said `.dropped` with the first byte and packet-number bytes already
+  changed, so an embedder that routed it to its own dials had to copy
+  before `feed` (found by the bugnest session in qmesh-zig,
+  2026-10-06). `feed` now copies the datagram before it opens it on
+  that path (on the stack up to 2048 bytes, the heap above) and puts
+  it back: a datagram that comes back anything but `.routed` or
+  `.accepted` is as it came. A copy before `feed` stays correct and
+  can go. Test: `tests/e2e/server_stillborn.zig`.
+
 ## [0.30.1] - 2026-10-06
 
 A build fix for 0.30.0: it did not compile on Windows. No change for
