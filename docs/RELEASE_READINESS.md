@@ -1145,6 +1145,62 @@ What capnp-zig found, and where each thing went:
   with docs only (the bundled loop's clock, a wall clock of its own
   for NEW_TOKEN times, an allowed clock skew).
 
+## v0.28.0 stream-end release and the v0.28.1 build fix
+
+v0.28.0 (tag `a9078d8`, 2026-10-05) is "the end of a stream that
+cannot be lost": `Connection.streamRecvEnd` and a bounded note of how
+reclaimed streams ended, `reset_code` on the read results, the hook of
+`runUdpClient` before `tick`. It was made by another session; its
+record is the sprint file in the project's handoff notes
+(`SPRINT-2026-10-05-stream-end.md`), with its gates read at evidence
+level (rc-fuzz 2.2 M executions, 0 failing; test six jobs; quic-go
+2 of 2; the wide matrix 19 of 21 with 0 failed).
+
+**v0.28.0 did not compile for a 32-bit target.** http3-zig's CI leg
+for `x86-linux-musl` found it the same day: `src/conn/RecvEndRing.zig`
+asserted at comptime that a `Record` is 40 bytes, which holds only
+where a u64 aligns to 8 (it is 36 where a u64 aligns to 4). No leg of
+ours built for a 32-bit target, so none could see it. http3-zig went
+back to v0.27.0 and waited.
+
+**v0.28.1** (tag `21d05d1`, 2026-10-05) is the fix: the assert is on
+the layout; five u64-to-usize casts in tests and examples that the
+32-bit build refused; a size pin in one test that is per pointer size
+now; a 32-bit leg in the `test` workflow that compiles AND runs the
+suite (an x86-64 Linux runner runs 32-bit static binaries); `just
+check-x86` as the compile-only form. Nothing changed for a 64-bit
+target.
+
+The first run of the 32-bit leg found one more thing, recorded and not
+changed: with the C sanitizer in its default trap mode, nine
+bench-harness handshakes trap inside BoringSSL's P-256 field code
+(fiat `p256_32.h`, `fiat_p256_mul`, under ECDSA verify) on
+`x86-linux-musl`, while the other handshake tests with the same P-256
+key pass. The leg runs with `-Dsanitize-c=off`; the x86-64 `sanitizer`
+job keeps the UB check on the C code. It is a finding for
+boringssl-zig (`FINDING-2026-10-05-boringssl-p256-ubsan-32-bit.md` in
+the handoff notes).
+
+**The gates on `21d05d1`**, each read at its evidence line.
+
+- `test`: seven jobs, every step green; 1,960 tests in Debug and
+  1,920 in ReleaseSafe on the Unix jobs, 1,897 on Windows, 1,960 on
+  the 32-bit leg (the same count as 64-bit); `check-modes: 6 of 6 as
+  expected`; `consumer-smoke ok: quic-zig 0.28.1`.
+- rc-fuzz: `n_runs=2,168,624 unique_runs=12,461 pcs_len=44,392`
+  across 43 sites (floor 1,935,000), no failing site.
+- `quic-go-interop`: `pairs=1 cells=2 succeeded=2 failed=0`.
+- QNS image: built and pushed from that commit.
+- pin-lint: `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl
+  pins of quic-zig and http3-zig identical.
+- A fresh consumer from an archive of the tag (hash
+  `quic-0.28.1-DnSYvacDOgCPlHPHQWufNaG2XMoKtnwwHJPVcIUuAmqB`):
+  `-Osafe` for the application, `quic` and `boringssl`, no `invalid
+  option` line, `consumer-smoke ok: quic-zig 0.28.1`.
+
+The wide interop matrix was not run again for v0.28.1: no code on the
+wire changed after v0.28.0 (an assert, casts in tests, a CI job).
+
 ### RC/soak criterion toward 1.0
 
 Between v0.9.0 and the 1.0 RC, the explicit soak gate is: http3-zig
