@@ -362,9 +362,13 @@ test "PTO requeues CRYPTO bytes at original offsets" {
     try conn.tick(conn.ptoDurationForLevel(level));
 
     try std.testing.expectEqual(@as(usize, 0), conn.sent_crypto[level_idx].items.len);
-    try std.testing.expectEqual(@as(usize, 1), conn.crypto_retx[level_idx].items.len);
-    try std.testing.expectEqual(@as(u64, 123), conn.crypto_retx[level_idx].items[0].offset);
-    try std.testing.expectEqualStrings("crypto-fragment", conn.crypto_retx[level_idx].items[0].data);
+    // Twice: a connection with no RTT sample sends a handshake probe
+    // in two datagrams (RFC 9002 section 6.2.4; `_tests_handshake_recovery`).
+    try std.testing.expectEqual(@as(usize, 2), conn.crypto_retx[level_idx].items.len);
+    for (conn.crypto_retx[level_idx].items) |chunk| {
+        try std.testing.expectEqual(@as(u64, 123), chunk.offset);
+        try std.testing.expectEqualStrings("crypto-fragment", chunk.data);
+    }
 }
 
 test "ACK of ack-eliciting packet resets PTO count and updates RTT" {

@@ -235,6 +235,127 @@ test "discarding the keys of a space drops its queued and its unacknowledged CRY
     try std.testing.expect(!conn.canSend());
 }
 
+// ------------------------------------------------ RFC 9002 §6.2.4
+
+test "probe timeout: the CRYPTO data of the expired packet is queued twice, for two datagrams" {
+    // A client whose ClientHello datagram was lost: nothing comes back,
+    // and the probe timeout (1 s with no RTT sample) sends the data
+    // again. Two copies go into the queue, so two datagrams leave.
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+
+    try sendCrypto(conn, .initial, 0, 0, "client-hello");
+    const deadline = conn_loss.ptoDeadlineForLevel(conn, .initial).?;
+    try conn_loss.fireDuePtoAtLevel(conn, .initial, deadline);
+
+    const ini = EncryptionLevel.initial.idx();
+    try std.testing.expectEqual(@as(usize, 2), conn.crypto_retx[ini].items.len);
+    for (conn.crypto_retx[ini].items) |chunk| {
+        try std.testing.expectEqual(@as(u64, 0), chunk.offset);
+        try std.testing.expectEqualStrings("client-hello", chunk.data);
+    }
+    // The expired packet left the tracker; one probe timeout counted.
+    try std.testing.expectEqual(@as(usize, 0), conn.sent_crypto[ini].items.len);
+    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.initial).liveCount());
+    try std.testing.expectEqual(@as(u32, 1), conn.pto_count[ini]);
+    // The data went back to a queue, so no PING is owed on top.
+    try std.testing.expect(!conn.pending_ping[ini]);
+}
+
+test "probe timeout: the Handshake space queues its data twice too, and a server does the same" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+
+    try sendCrypto(conn, .initial, 0, 0, "server-hello");
+    try sendCrypto(conn, .handshake, 0, 0, "certificate");
+    const ini = EncryptionLevel.initial.idx();
+    const hsk = EncryptionLevel.handshake.idx();
+
+    try conn_loss.fireDuePtoAtLevel(conn, .initial, conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+    try conn_loss.fireDuePtoAtLevel(conn, .handshake, conn_loss.ptoDeadlineForLevel(conn, .handshake).?);
+
+    try std.testing.expectEqual(@as(usize, 2), conn.crypto_retx[ini].items.len);
+    try std.testing.expectEqual(@as(usize, 2), conn.crypto_retx[hsk].items.len);
+    try std.testing.expectEqualStrings("server-hello", conn.crypto_retx[ini].items[1].data);
+    try std.testing.expectEqualStrings("certificate", conn.crypto_retx[hsk].items[1].data);
+}
+
+test "probe timeout: a packet with no CRYPTO data gets a PING, not two copies of nothing" {
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+
+    try sendPing(conn, .initial, 0);
+    try conn_loss.fireDuePtoAtLevel(conn, .initial, conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+
+    const ini = EncryptionLevel.initial.idx();
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_retx[ini].items.len);
+    try std.testing.expect(conn.pending_ping[ini]);
+}
+
+test "probe timeout: with an RTT sample the data is queued once (the retries are quick then)" {
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+
+    // An ACK of an earlier packet gave a sample.
+    conn.rttForLevel(.initial).update(20_000, 0, false, 0);
+    try std.testing.expect(conn.rttForLevelConst(.initial).first_sample_taken);
+    try sendCrypto(conn, .initial, 0, 0, "client-hello");
+    try conn_loss.fireDuePtoAtLevel(conn, .initial, conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+
+    const ini = EncryptionLevel.initial.idx();
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_retx[ini].items.len);
+}
+
+test "probe timeout: the 1-RTT space queues its CRYPTO data once" {
+    // The second datagram is for the handshake spaces: a 1-RTT probe
+    // is the congestion controller's business.
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+
+    try sendCrypto(conn, .application, 0, 0, "new-session-ticket");
+    const path = conn.activePath();
+    try conn_loss.fireDuePtoOnApplicationPath(conn, path, conn_loss.ptoDeadlineForApplicationPath(conn, path).?);
+
+    const app = EncryptionLevel.application.idx();
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_retx[app].items.len);
+    try std.testing.expectEqualStrings("new-session-ticket", conn.crypto_retx[app].items[0].data);
+}
+
+// ------------------------------------------------ RFC 9000 §12.2
+
+test "held Handshake packets: two slots, a third packet finds none, and the key discard frees them" {
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+
+    try std.testing.expect(conn.holdHandshakePacket("packet-one"));
+    try std.testing.expect(conn.holdHandshakePacket("packet-two"));
+    try std.testing.expect(!conn.holdHandshakePacket("packet-three"));
+    try std.testing.expectEqual(@as(u32, 2), conn.held_handshake_packets);
+    try std.testing.expectEqualStrings("packet-one", conn.held_handshake[0].?);
+    try std.testing.expectEqualStrings("packet-two", conn.held_handshake[1].?);
+
+    // The keys came and went (the handshake is confirmed): nothing
+    // kept can be read any more.
+    installHandshakeSecrets(conn);
+    conn.discardHandshakeKeys();
+    try std.testing.expect(conn.held_handshake[0] == null);
+    try std.testing.expect(conn.held_handshake[1] == null);
+    // The count is history, not state.
+    try std.testing.expectEqual(@as(u32, 2), conn.held_handshake_packets);
+}
+
 // ---------------------------------------------- HANDSHAKE_DONE again
 
 /// A server whose handshake is complete: HANDSHAKE_DONE was queued and

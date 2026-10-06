@@ -613,6 +613,8 @@ pub fn discardHandshakeKeys(conn: *Connection) void {
     freeLevelKeys(&conn.levels[hsk_lvl_idx].write_keys);
     conn.levels[hsk_lvl_idx].read = null;
     conn.levels[hsk_lvl_idx].write = null;
+    // A Handshake packet kept for keys that are gone now has no use.
+    conn.freeHeldHandshakePackets();
     // Initial uses idx 0 in connPnIdx mapping; Handshake is idx 1.
     // See `connPnIdx` for the rationale (the array indices ride
     // the connection-level PN-space layout, not `EncryptionLevel.idx`).

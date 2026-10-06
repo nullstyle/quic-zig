@@ -149,6 +149,7 @@ pub fn handleWithEcn(
     )) try conn_recv_data_handlers.drainInboxIntoTls(
         conn,
     );
+    try replayHeldHandshakePackets(conn, now_us);
     // RFC 9001 §4.1.2 ¶2 + §4.9.2: client confirms the handshake
     // when it processes a HANDSHAKE_DONE frame, and an endpoint
     // MUST discard its handshake keys at confirmation. We latch
@@ -167,7 +168,7 @@ pub fn handleWithEcn(
     // re-arm a CONNECTION_CLOSE retransmit (subject to the SHOULD
     // rate-limit). The peer's CC, if any, would have transitioned
     // us to draining via `dispatchFrames` before we get here.
-    maybeRearmClosingStateCloseRepeat(conn, now_us);
+    maybeRearmClosingStateCloseRepeat(conn);
 
     // PATH_CHALLENGE → record-and-tick; the validator will
     // either succeed (echo arrived) or time out at PTO * 3.
@@ -253,6 +254,27 @@ pub fn scanForPeerCloseFrame(
     }
 }
 
+/// Handshake packets kept while the Handshake read keys were missing
+/// (`Connection.held_handshake`): read them now that the keys are
+/// there (RFC 9000 §12.2). Each is a whole packet and goes through
+/// `handleOnePacket` as if it had just arrived; the CRYPTO data it
+/// brings goes to TLS right after, as for the packets of a datagram.
+/// Nothing happens while the keys are still missing.
+fn replayHeldHandshakePackets(conn: *Connection, now_us: u64) Error!void {
+    if (conn.levels[EncryptionLevel.handshake.idx()].read == null) return;
+    var any = false;
+    for (&conn.held_handshake) |*slot| {
+        const bytes = slot.* orelse continue;
+        slot.* = null;
+        defer conn.allocator.free(bytes);
+        _ = try handleOnePacket(conn, bytes, now_us);
+        any = true;
+    }
+    if (any and conn_recv_data_handlers.cryptoInboxQueued(conn) and !closingAttributionOnly(conn)) {
+        try conn_recv_data_handlers.drainInboxIntoTls(conn);
+    }
+}
+
 /// Re-arm `pending_close` so the next `poll` retransmits the
 /// CONNECTION_CLOSE, but only if (a) we're in the post-emit
 /// closing state, (b) at least one packet authenticated under our
@@ -265,14 +287,14 @@ pub fn scanForPeerCloseFrame(
 /// frames of different sizes or with different error codes, but
 /// the error code in all frames SHOULD be consistent"), keeping
 /// them identical satisfies the SHOULD-consistent guidance.
-fn maybeRearmClosingStateCloseRepeat(conn: *Connection, now_us: u64) void {
+fn maybeRearmClosingStateCloseRepeat(conn: *Connection) void {
     if (!conn.closing_state_attribution_observed) return;
     conn.closing_state_attribution_observed = false;
     if (conn.lifecycle.state() != .closing) return;
     if (conn.lifecycle.closing_deadline_us == null) return;
     if (conn.lifecycle.pending_close != null) return;
-    const base = conn_loss.basePtoDurationForLevel(conn, .application);
-    if (!conn.lifecycle.shouldRearmCloseRepeat(now_us, base)) return;
+    conn.lifecycle.noteClosingPacket();
+    if (!conn.lifecycle.shouldRearmCloseRepeat()) return;
     const stored = conn.lifecycle.close_event orelse return;
     conn.lifecycle.pending_close = .{
         .is_transport = stored.error_space == .transport,

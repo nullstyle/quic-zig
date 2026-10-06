@@ -293,6 +293,53 @@ fn requeueSentCryptoForPacket(
     return any;
 }
 
+/// RFC 9002 §6.2.4: a probe timeout may send up to two full-sized
+/// datagrams, "to avoid an expensive consecutive PTO expiration due to
+/// a single lost datagram". A handshake probe here sends the CRYPTO
+/// data of the expired packet again, in one packet; this queues that
+/// data a second time, so the next packet of the level carries it
+/// too, in a datagram of its own (the send path puts one CRYPTO chunk
+/// of the queue into each packet, and one packet of a level into each
+/// datagram).
+///
+/// Why: a client whose Initial datagram is lost sends it again after
+/// 1 s, then 3 s, 7 s and 15 s (RFC 9002: the first probe timeout is
+/// 1 s with no RTT sample, and it doubles), one datagram each time. A
+/// quic-go server forgets a half-open connection after 5 s. So the
+/// handshake fails when the datagrams at 0, 1 and 3 s are all lost,
+/// which 30% loss does often enough (MEASURED 2026-10-04, interop
+/// `handshakeloss` and `handshakecorruption`, client role against
+/// quic-go: 5 and 2 passes of 10). With two datagrams for each probe,
+/// a network that loses up to three datagrams in a row cannot hold
+/// the client off past 3 s.
+///
+/// Only the Initial and Handshake spaces (the level-scoped probe
+/// timer runs for those two alone: `tick` fires `fireDuePtoAtLevel`
+/// for `.initial` and `.handshake`, and the 1-RTT probe is the path's
+/// business), and only while the connection has no RTT sample. With a
+/// sample, the probe timeout is
+/// the real round trip and the retries are quick; a second datagram
+/// would then only double the cues that the peer answers with a copy
+/// of its flight (`retransmitHandshakeCryptoEarly` has a limit of 8
+/// copies, and MEASURED in tests/e2e/handshake_loss.zig: with the
+/// second datagram always, an outage of 100 ms toward the client used
+/// up those copies and the handshake waited for the server's probe
+/// timeout). The 1-RTT probe is the congestion controller's business,
+/// and a PING probe (no CRYPTO data left to send) stays one datagram.
+fn queueHandshakeProbeCopy(conn: *Connection, lvl: EncryptionLevel, queued_before: usize) Error!void {
+    if (conn.rttForLevelConst(lvl).first_sample_taken) return;
+    const idx = lvl.idx();
+    const queued_now = conn.crypto_retx[idx].items.len;
+    if (queued_now <= queued_before) return;
+    try conn.crypto_retx[idx].ensureUnusedCapacity(conn.allocator, queued_now - queued_before);
+    var i = queued_before;
+    while (i < queued_now) : (i += 1) {
+        const chunk = conn.crypto_retx[idx].items[i];
+        const copy = try conn.allocator.dupe(u8, chunk.data);
+        conn.crypto_retx[idx].appendAssumeCapacity(.{ .offset = chunk.offset, .data = copy });
+    }
+}
+
 /// True if a packet with this number at `lvl` still owns CRYPTO data
 /// that nobody acknowledged.
 fn packetOwnsSentCrypto(conn: *const Connection, lvl: EncryptionLevel, pn: u64) bool {
@@ -1000,7 +1047,12 @@ fn firePtoOn(conn: *Connection, target: LossTarget) Error!PtoOutcome {
         const is_probe = target.isApplication() and
             pmtudHandleProbeLossIfMatches(conn, target.path, &lost);
         const requeued = switch (target.scope) {
-            .level => try requeueLostPacket(conn, target.lvl, &lost),
+            .level => blk: {
+                const queued_before = conn.crypto_retx[target.lvl.idx()].items.len;
+                const r = try requeueLostPacket(conn, target.lvl, &lost);
+                try queueHandshakeProbeCopy(conn, target.lvl, queued_before);
+                break :blk r;
+            },
             .path => try requeueLostPacketOnPath(conn, target.lvl, &lost, target.path.id),
         };
         if (is_probe) return .probe;

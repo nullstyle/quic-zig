@@ -329,6 +329,18 @@ crypto_pending_bytes: [4]usize = .{ 0, 0, 0, 0 },
 /// CRYPTO bytes that were sent in lost packets and need to be
 /// retransmitted at their original offsets.
 crypto_retx: [4]std.ArrayList(CryptoChunk) = .{ .empty, .empty, .empty, .empty },
+/// Handshake packets that arrived before the Handshake read keys, each
+/// a copy of the packet's bytes (RFC 9000 §12.2: an endpoint MAY keep
+/// such a packet). A client gets them when the datagram with the
+/// ServerHello was lost or comes late and the datagram with the rest
+/// of the flight did not. They are read as soon as the keys come
+/// (`replayHeldHandshakePackets`), and freed when the Handshake keys
+/// are discarded. At most `max_held_handshake_packets`; a packet that
+/// finds no free slot is dropped as before.
+held_handshake: [max_held_handshake_packets]?[]u8 = .{ null, null },
+/// How many Handshake packets this connection kept that way (a count
+/// for tests and metrics; it only grows).
+held_handshake_packets: u32 = 0,
 /// CRYPTO bytes currently in sent packets awaiting ACK/loss.
 sent_crypto: [4]std.ArrayList(SentCryptoChunk) = .{ .empty, .empty, .empty, .empty },
 
@@ -1252,6 +1264,14 @@ pub const max_pending_crypto_bytes_per_level: usize = 64 * 1024;
 /// packets per level, so this cap is generous; overflow is a peer
 /// protocol violation. Mirrors `max_pending_datagram_count`.
 pub const max_pending_crypto_fragments_per_level: usize = 128;
+/// How many Handshake packets a connection keeps while it has no
+/// Handshake read keys yet (`held_handshake`). A server's first flight
+/// puts its Handshake packets into the datagrams after the one with
+/// the ServerHello: two held packets cover a flight of three
+/// datagrams. More than that is dropped, as every such packet was
+/// until v0.28.1. Bounded, because a peer can send Handshake packets
+/// that open under no key at all.
+pub const max_held_handshake_packets: usize = 2;
 /// Largest gap (in bytes) we will tolerate between in-order CRYPTO data and a
 /// future fragment before treating the peer's stream as malicious.
 pub const max_crypto_reassembly_gap: u64 = 64 * 1024;
@@ -2288,6 +2308,7 @@ pub fn deinit(self: *Connection) void {
         for (list.items) |chunk| self.allocator.free(chunk.data);
         list.deinit(self.allocator);
     }
+    self.freeHeldHandshakePackets();
     for (&self.sent_crypto) |*list| {
         for (list.items) |chunk| self.allocator.free(chunk.data);
         list.deinit(self.allocator);
@@ -2777,6 +2798,27 @@ pub const setInitialDcid = conn_version.setInitialDcid;
 const discardInitialKeys = conn_keys.discardInitialKeys;
 
 pub const discardHandshakeKeys = conn_keys.discardHandshakeKeys;
+
+/// Keep a Handshake packet that arrived before the Handshake read keys
+/// (`held_handshake`). Returns false when every slot is taken.
+pub fn holdHandshakePacket(self: *Connection, packet: []const u8) bool {
+    for (&self.held_handshake) |*slot| {
+        if (slot.* != null) continue;
+        slot.* = self.allocator.dupe(u8, packet) catch return false;
+        self.held_handshake_packets +|= 1;
+        return true;
+    }
+    return false;
+}
+
+/// Drop every held Handshake packet (the keys were discarded, or the
+/// connection goes away).
+pub fn freeHeldHandshakePackets(self: *Connection) void {
+    for (&self.held_handshake) |*slot| {
+        if (slot.*) |bytes| self.allocator.free(bytes);
+        slot.* = null;
+    }
+}
 
 pub const setVersion = conn_version.setVersion;
 

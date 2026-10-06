@@ -322,30 +322,25 @@ test "handshake close: the close that is sent again in the closing state is at e
     // timeouts. A packet of the client that arrives in that time is
     // answered with the close again, but not every packet (RFC 9000
     // 10.2.1: an endpoint SHOULD limit the rate). The rule in
-    // `conn/lifecycle.zig`: not before TWO probe timeouts since the
-    // last close.
+    // `conn/lifecycle.zig`: the first packet after the close earns
+    // the close again; the next repeat needs two more packets, then
+    // four, and so on.
     //
-    // So the window for the first repeat is the last third of the
-    // closing state. A peer that probes on its own timer comes into
-    // it only by luck (MEASURED here before this test gave the packet
-    // by hand: probes at 100 to 9000 ms after the close, no answer to
-    // any of them). That is a fact about the rate rule, written down
-    // in the sprint log; this test is about WHAT is sent when the
-    // rule lets a repeat go.
+    // Until v0.28.1 the rule was time: not before TWO probe timeouts
+    // since the last close, so the window for the first repeat was
+    // the last third of the closing state, and a peer that probes on
+    // its own timer came into it only by luck (MEASURED here before
+    // this test gave the packet by hand: probes at 100 to 9000 ms
+    // after the close, no answer to any of them).
     const closing_ends = server.lifecycle.closing_deadline_us orelse return error.NotInClosingState;
     const third = (closing_ends - closed_at) / 3;
     try std.testing.expect(third > 0);
 
-    // One probe timeout after the close: too early, no answer.
+    // One probe timeout after the close, the client's first packet:
+    // the close goes again, in a Handshake packet and in a 1-RTT
+    // packet, as the first one did.
     pair.now_us = closed_at + third;
     var copy: [4096]u8 = undefined;
-    @memcpy(copy[0..kept_len], kept[0..kept_len]);
-    _ = try srv.feed(copy[0..kept_len], addr, pair.now_us);
-    try std.testing.expectEqual(@as(usize, 0), try pair.serverSends(everything));
-
-    // Two and a half: the close goes again, in a Handshake packet and
-    // in a 1-RTT packet, as the first one did.
-    pair.now_us = closed_at + 2 * third + third / 2;
     @memcpy(copy[0..kept_len], kept[0..kept_len]);
     _ = try srv.feed(copy[0..kept_len], addr, pair.now_us);
     try std.testing.expectEqual(@as(usize, 1), try pair.serverSends(everything));
@@ -356,6 +351,20 @@ test "handshake close: the close that is sent again in the closing state is at e
     const ev = cli.conn.closeEvent() orelse return error.ClientDidNotLearnOfTheClose;
     try std.testing.expectEqual(CloseSource.peer, ev.source);
     try std.testing.expectEqual(connection_refused, ev.error_code);
+
+    // The next repeat needs two packets: the first gets no answer,
+    // the second does. (The client has the close by now; the server
+    // cannot know that, and a peer that did not would still send.)
+    pair.now_us = closed_at + third + third / 2;
+    @memcpy(copy[0..kept_len], kept[0..kept_len]);
+    _ = try srv.feed(copy[0..kept_len], addr, pair.now_us);
+    try std.testing.expectEqual(@as(usize, 0), try pair.serverSends(everything));
+    pair.now_us = closed_at + 2 * third;
+    @memcpy(copy[0..kept_len], kept[0..kept_len]);
+    _ = try srv.feed(copy[0..kept_len], addr, pair.now_us);
+    try std.testing.expectEqual(@as(usize, 1), try pair.serverSends(everything));
+    try std.testing.expectEqual(@as(usize, 1), pair.last_server.handshake);
+    try std.testing.expectEqual(@as(usize, 1), pair.last_server.short);
 }
 
 test "handshake close: after the handshake is confirmed the close is one 1-RTT packet (the control)" {

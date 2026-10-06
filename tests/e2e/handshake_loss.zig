@@ -164,6 +164,10 @@ const Options = struct {
     /// none). The server answers the first copy before the second
     /// arrives.
     duplicate_client: usize = 0,
+    /// The network delivers the server's second datagram before its
+    /// first, once (reordering: the Handshake packets of the flight
+    /// come before the ServerHello).
+    swap_server_first_two: bool = false,
     /// The network damages the `index`-th datagram of the client, or
     /// of the server, and delivers it (0 = none).
     damage_client: Damage = .{},
@@ -320,6 +324,8 @@ const Net = struct {
     client_handshake_delivered: bool = false,
     /// The client sent a datagram that holds a Handshake packet.
     client_sent_handshake: bool = false,
+    /// `Options.swap_server_first_two` was applied.
+    swapped: bool = false,
     /// The client's first Destination Connection ID. The Initial keys
     /// of both directions come from it (RFC 9001 section 5.2), so the
     /// harness can open every Initial packet, as anyone on the path
@@ -484,6 +490,11 @@ const Net = struct {
             }
         }
         while (self.srv.drainStatelessResponse()) |_| {}
+        if (self.o.swap_server_first_two and !self.swapped and count >= 2) {
+            self.swapped = true;
+            std.mem.swap([4096]u8, &held[0], &held[1]);
+            std.mem.swap(usize, &lens[0], &lens[1]);
+        }
         for (0..count) |i| {
             const datagram = held[i][0..lens[i]];
             const s = shape(datagram);
@@ -759,6 +770,42 @@ test "handshake loss: the flight is lost 5 times, and each retry of the client b
     try std.testing.expectEqual(@as(usize, 5), out.server_early_copies);
 }
 
+test "handshake loss: the client's probe timeout sends its ClientHello in two datagrams (RFC 9002 6.2.4)" {
+    // The ClientHello is lost and nothing comes back: the client has
+    // no RTT sample, so its first probe timeout is about 1 s. The
+    // probe is two datagrams, not one, so that a network which loses
+    // up to three datagrams in a row cannot hold the client off past
+    // its second probe. MEASURED on the code before: one datagram at
+    // 1, 3, 7 and 15 s, and a quic-go server that forgets the
+    // connection after 5 s (interop `handshakeloss`, client role: 5
+    // passes of 10).
+    const out = try run(std.testing.allocator, .{ .drop_client = .{ .first = 1, .count = 1 } });
+    try std.testing.expect(out.done);
+    try std.testing.expectEqual(@as(usize, 1), out.client_dropped);
+    // The probe: two datagrams at the same instant, about 1 s in.
+    try std.testing.expect(out.client_datagrams >= 3);
+    try std.testing.expect(out.client_us[1] >= 900 * us_per_ms);
+    try std.testing.expect(out.client_us[1] < 1200 * us_per_ms);
+    try std.testing.expectEqual(out.client_us[1], out.client_us[2]);
+    try std.testing.expect(out.done_at_us < 1200 * us_per_ms);
+}
+
+test "handshake loss: a Handshake packet that arrives before the ServerHello is kept and read when the ServerHello comes (RFC 9000 12.2)" {
+    // A flight of three datagrams; the network delivers the second
+    // (Handshake packets) before the first (the ServerHello). The
+    // client has no Handshake keys yet when the second comes. It keeps
+    // the packet, opens it when the ServerHello gives it the keys, and
+    // the handshake is done with no copy of anything. Until v0.28.1
+    // the packet was dropped, and the server sent it again after its
+    // loss detection (one more flight, one more round trip).
+    const out = try run(std.testing.allocator, .{ .cert = .wide, .swap_server_first_two = true });
+    try std.testing.expect(out.done);
+    try std.testing.expectEqual(@as(usize, 3), out.flights);
+    try std.testing.expectEqual(@as(usize, 0), out.flights_dropped);
+    try std.testing.expectEqual(@as(usize, 0), out.server_early_copies);
+    try std.testing.expect(out.done_at_us < 100 * us_per_ms);
+}
+
 test "handshake loss: an outage of 100 ms toward the client costs the client's next retry, not a second" {
     // A short outage is what a real network does (the interop
     // simulator never loses more than 3 datagrams in a row). The
@@ -777,14 +824,18 @@ test "handshake loss: the limit on early copies holds, and the probe timer works
     // The flight is lost 9 times: the first copy and the 8 early ones
     // (`max_early_handshake_retransmits`). The server answers the
     // client's next retries with an ACK alone, and the tenth copy goes
-    // out at the server's probe timeout, 1 s after the ninth.
+    // out at the server's probe timeout, 1 s after the ninth. The
+    // server has no RTT sample (nothing it sent was acknowledged), so
+    // that probe is two datagrams (RFC 9002 section 6.2.4): the tenth
+    // and the eleventh copy leave together.
     const out = try run(std.testing.allocator, .{ .split_client_hello = true, .drop_server_flights = 9 });
     try std.testing.expect(out.done);
     try std.testing.expectEqual(@as(usize, 9), out.flights_dropped);
-    try std.testing.expectEqual(@as(usize, 10), out.flights);
+    try std.testing.expectEqual(@as(usize, 11), out.flights);
     try std.testing.expect(out.flight_us[8] < 400 * us_per_ms);
     const wait_us = out.flight_us[9] - out.flight_us[8];
     try std.testing.expect(wait_us >= 900 * us_per_ms and wait_us <= 1100 * us_per_ms);
+    try std.testing.expectEqual(out.flight_us[9], out.flight_us[10]);
     // The client asked all that time. Its probes back off (RFC 9002
     // section 6.2.1: an ACK in an Initial packet does not reset a
     // client's backoff), so there are few of them: the two packets of

@@ -131,9 +131,14 @@ pub const LifecycleState = struct {
     last_close_emit_us: ?u64 = null,
     /// Number of times we've sealed a CONNECTION_CLOSE (initial emit
     /// + repeats). Used as the exponent for the §10.2.1 ¶3
-    /// "progressively increasing … amount of time" backoff. Saturates
-    /// at the upper bound of `shift` inside the rate-limit math.
+    /// "progressively increasing number of received packets" backoff.
+    /// Saturates at the upper bound of `shift` inside the rate-limit
+    /// math.
     close_emit_count: u32 = 0,
+    /// Datagrams attributed to this connection since the last
+    /// CONNECTION_CLOSE emission. The §10.2.1 ¶3 rate limit counts
+    /// these, not time: see `shouldRearmCloseRepeat`.
+    closing_packets_since_emit: u32 = 0,
     /// Sticky close/error status for embedders. The stored event keeps
     /// offsets into `close_reason_buf` so `Connection` can be moved
     /// before bind/init without leaving a self-referential slice
@@ -310,34 +315,44 @@ pub const LifecycleState = struct {
         }
         self.last_close_emit_us = now_us;
         self.close_emit_count +|= 1;
+        self.closing_packets_since_emit = 0;
     }
 
-    /// Whether enough time has elapsed since the last CONNECTION_CLOSE
-    /// emission to re-arm `pending_close` for another retransmit. RFC
-    /// 9000 §10.2.1 ¶3 SHOULD: "limit the rate at which it generates
-    /// packets in the closing state. For instance, an endpoint could
-    /// wait for a progressively increasing number of received packets
-    /// or amount of time before responding to received packets."
+    /// One more datagram of the peer was attributed to this connection
+    /// while it is closing (a packet in it opened under our keys).
+    pub fn noteClosingPacket(self: *LifecycleState) void {
+        self.closing_packets_since_emit +|= 1;
+    }
+
+    /// Whether the peer's packets since the last CONNECTION_CLOSE
+    /// emission earn another one. RFC 9000 §10.2.1: an endpoint in the
+    /// closing state "sends a packet containing a CONNECTION_CLOSE
+    /// frame in response to any incoming packet that it attributes to
+    /// the connection", and ¶3 SHOULD "limit the rate at which it
+    /// generates packets in the closing state. For instance, an
+    /// endpoint could wait for a progressively increasing number of
+    /// received packets or amount of time before responding".
     ///
-    /// quic's policy: exponential time backoff. Wait at least
-    /// `base_interval_us << close_emit_count` before re-arming. The
-    /// shift saturates at 16 (matching the loss-recovery PTO backoff
-    /// cap) so the interval can't run away into u64 overflow.
-    pub fn shouldRearmCloseRepeat(
-        self: *const LifecycleState,
-        now_us: u64,
-        base_interval_us: u64,
-    ) bool {
+    /// quic's policy: a progressively increasing number of packets.
+    /// The first packet after the first emission earns a repeat, then
+    /// 2 more, then 4, 8, ... (the shift saturates at 16). So a peer
+    /// that did not get our close gets it again at its NEXT packet,
+    /// and a peer that floods us gets log2(N) closes for N packets.
+    ///
+    /// Until v0.29.0 the policy was time: at least `PTO << count`
+    /// since the last emission, so the first repeat waited 2 PTO, and
+    /// the closing state ends at 3 PTO. A lost close was in practice
+    /// not sent again (MEASURED 2026-10-04, interop server role: a
+    /// server kept sending to clients whose close was lost, and those
+    /// datagrams took the simulator's "pass" turns from the handshake
+    /// of the next connection).
+    pub fn shouldRearmCloseRepeat(self: *const LifecycleState) bool {
         if (self.pending_close != null) return false;
         if (self.closing_deadline_us == null) return false;
-        const last = self.last_close_emit_us orelse return true;
-        const shift: u6 = @intCast(@min(self.close_emit_count, 16));
-        const max_u64: u64 = std.math.maxInt(u64);
-        const interval = if (base_interval_us > (max_u64 >> shift))
-            max_u64
-        else
-            base_interval_us << shift;
-        return now_us >= last +| interval;
+        if (self.close_emit_count == 0) return true;
+        const shift: u6 = @intCast(@min(self.close_emit_count - 1, 16));
+        const needed: u64 = @as(u64, 1) << shift;
+        return self.closing_packets_since_emit >= needed;
     }
 
     /// Drop to terminal-closed once `now_us` crosses the stored
@@ -398,37 +413,44 @@ test "lifecycle: noteCloseEmit retransmit doesn't extend the closing deadline" {
     try std.testing.expectEqual(@as(u32, 2), ls.close_emit_count);
 }
 
-test "lifecycle: shouldRearmCloseRepeat applies exponential backoff per emit count" {
+test "lifecycle: shouldRearmCloseRepeat wants a progressively increasing number of packets" {
     var ls: LifecycleState = .{};
-    const base: u64 = 1_000; // 1 ms base interval
     const t0: u64 = 10_000;
 
     // Pre-arm: the closing-state deadline must be set for rearm to fire.
     ls.noteCloseEmit(t0, t0 + 300_000);
-    // After first emit, count==1, shift=1, interval = base << 1 = 2*base.
-    try std.testing.expect(!ls.shouldRearmCloseRepeat(t0 + (2 * base) - 1, base));
-    try std.testing.expect(ls.shouldRearmCloseRepeat(t0 + 2 * base, base));
+    // After the first emit (count 1): the next packet earns a repeat.
+    try std.testing.expect(!ls.shouldRearmCloseRepeat());
+    ls.noteClosingPacket();
+    try std.testing.expect(ls.shouldRearmCloseRepeat());
 
-    // Second emit: count==2 → interval = base << 2 = 4*base.
-    const t1 = t0 + 2 * base;
-    ls.noteCloseEmit(t1, t0 + 300_000); // deadline ignored (already armed).
-    try std.testing.expect(!ls.shouldRearmCloseRepeat(t1 + (4 * base) - 1, base));
-    try std.testing.expect(ls.shouldRearmCloseRepeat(t1 + 4 * base, base));
+    // Second emit (count 2): two more packets.
+    ls.noteCloseEmit(t0 + 1_000, t0 + 300_000); // deadline ignored (already armed).
+    try std.testing.expect(!ls.shouldRearmCloseRepeat());
+    ls.noteClosingPacket();
+    try std.testing.expect(!ls.shouldRearmCloseRepeat());
+    ls.noteClosingPacket();
+    try std.testing.expect(ls.shouldRearmCloseRepeat());
 
-    // Third emit: count==3 → interval = 8*base.
-    const t2 = t1 + 4 * base;
-    ls.noteCloseEmit(t2, t0 + 300_000);
-    try std.testing.expect(!ls.shouldRearmCloseRepeat(t2 + (8 * base) - 1, base));
-    try std.testing.expect(ls.shouldRearmCloseRepeat(t2 + 8 * base, base));
+    // Third emit (count 3): four more.
+    ls.noteCloseEmit(t0 + 2_000, t0 + 300_000);
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        ls.noteClosingPacket();
+        try std.testing.expect(!ls.shouldRearmCloseRepeat());
+    }
+    ls.noteClosingPacket();
+    try std.testing.expect(ls.shouldRearmCloseRepeat());
 }
 
 test "lifecycle: shouldRearmCloseRepeat is false while pending_close is queued" {
     var ls: LifecycleState = .{};
     ls.noteCloseEmit(0, 300_000);
+    ls.noteClosingPacket();
     ls.pending_close = .{ .is_transport = true, .error_code = 0 };
-    // Even past the backoff window the rearm path must short-circuit on
+    // Even with the packets in, the rearm path must short-circuit on
     // pending_close — we already have a CC queued for the next packet.
-    try std.testing.expect(!ls.shouldRearmCloseRepeat(1_000_000_000, 1));
+    try std.testing.expect(!ls.shouldRearmCloseRepeat());
 }
 
 test "lifecycle: finishClosingIfElapsed is no-op before the deadline" {

@@ -1139,8 +1139,10 @@ test "NORMATIVE retransmit a CONNECTION_CLOSE in response to attributed packets 
     // limit the rate at which it generates packets in the closing
     // state. For instance, an endpoint could wait for a progressively
     // increasing number of received packets or amount of time before
-    // responding to received packets." quic's policy is exponential
-    // time backoff (`shouldRearmCloseRepeat`).
+    // responding to received packets." quic's policy is a
+    // progressively increasing number of packets: the first packet
+    // after the close earns a repeat, then two more, then four
+    // (`shouldRearmCloseRepeat`; until v0.28.1 it was time).
     //
     // Test plan: drive a real handshake to confirmed, server-side-
     // initiate a close (sealing the first CC into the server's
@@ -1366,11 +1368,13 @@ test "SHOULD keep retransmitted CONNECTION_CLOSE error_code and frame_type consi
         0,
     );
 
-    // After the second close emit, §10.2.1 ¶3's exponential backoff
-    // requires a larger gap before another attributed packet can
-    // re-arm the close. Do not tick here: this test is about
-    // retransmit contents, not closing-deadline expiry.
-    pair.now_us +%= 5_000_000;
+    // After the second close emit, §10.2.1 ¶3's backoff wants two
+    // more attributed packets before the next repeat (the first repeat
+    // took one). Do not tick here: this test is about retransmit
+    // contents, not closing-deadline expiry.
+    pair.now_us +%= 1_000;
+    try sealAndFeedPing(&pair, cli, cli_keys, dcid);
+    pair.now_us +%= 1_000;
     try sealAndFeedPing(&pair, cli, cli_keys, dcid);
     pair.now_us +%= 1_000;
     const third_len = (try srv.poll(&packet_buf, pair.now_us)) orelse

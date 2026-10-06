@@ -419,6 +419,17 @@ pub fn handleHandshake(
     const unopened_len = unopenedLongPacketLen(bytes);
     const r_keys_opt = try conn.packetKeys(.handshake, .read);
     const r_keys = r_keys_opt orelse {
+        // No keys YET (not: no keys any more): the packet is early,
+        // the datagram with the ServerHello was lost or is late.
+        // Keep it and read it when the keys come (RFC 9000 §12.2).
+        // MEASURED 2026-10-04 (interop `handshakeloss`, client role
+        // against quiche): a dropped flight here cost the whole wait
+        // for the server's probe timeout.
+        if (!conn.handshake_keys_discarded and unopened_len > 0 and
+            conn.holdHandshakePacket(bytes[0..unopened_len]))
+        {
+            return unopened_len;
+        }
         conn_qlog.emitPacketDropped(conn, .handshake, @intCast(bytes.len), .keys_unavailable);
         // A client that still sends Handshake packets after the server
         // discarded the keys does not have HANDSHAKE_DONE.
