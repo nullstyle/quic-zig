@@ -670,3 +670,55 @@ test "1-RTT probe timer: a connection with no handshake over packets (keys set b
     const deadline = conn_loss.ptoDeadlineForApplicationPath(conn, path).?;
     try std.testing.expectEqual(start_us + conn_loss.ptoDurationForApplicationPath(conn, path), deadline);
 }
+
+// ------------------------------------------------ CRYPTO buffers
+
+test "CryptoBuffer: nothing until the first byte, grows by doubling, refuses past the cap, and releases" {
+    const CryptoBuffer = state.CryptoBuffer;
+    const allocator = std.testing.allocator;
+    var b: CryptoBuffer = .{};
+    defer b.release(allocator);
+    try std.testing.expectEqual(@as(usize, 0), b.buf.len);
+
+    try b.append(allocator, "hello");
+    try std.testing.expectEqual(@as(usize, 2048), b.buf.len);
+    try std.testing.expectEqualStrings("hello", b.buf[0..b.len]);
+
+    // 3000 more bytes: one doubling (2048 -> 4096).
+    const three_k: [3000]u8 = @splat(0x61);
+    try b.append(allocator, &three_k);
+    try std.testing.expectEqual(@as(usize, 3005), b.len);
+    try std.testing.expectEqual(@as(usize, 4096), b.buf.len);
+
+    // `drain` hands the bytes out and empties the buffer; the storage stays.
+    const drained = b.drain();
+    try std.testing.expectEqual(@as(usize, 3005), drained.len);
+    try std.testing.expectEqual(@as(usize, 0), b.len);
+    try std.testing.expectEqual(@as(usize, 4096), b.buf.len);
+
+    // The cap: one byte more than `crypto_buffer_max_len` in all is refused.
+    const big = try allocator.alloc(u8, state.crypto_buffer_max_len);
+    defer allocator.free(big);
+    @memset(big, 0x62);
+    try b.append(allocator, big);
+    try std.testing.expectEqual(state.crypto_buffer_max_len, b.len);
+    try std.testing.expectError(error.InboxOverflow, b.append(allocator, "x"));
+
+    b.release(allocator);
+    try std.testing.expectEqual(@as(usize, 0), b.buf.len);
+    try std.testing.expectEqual(@as(usize, 0), b.len);
+}
+
+test "CryptoBuffer: discarding a level's keys releases its buffers" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+    const hsk = EncryptionLevel.handshake.idx();
+    try conn.inbox[hsk].append(conn.allocator, "certificate");
+    try conn.outbox[hsk].append(conn.allocator, "finished");
+    installHandshakeSecrets(conn);
+    conn.discardHandshakeKeys();
+    try std.testing.expectEqual(@as(usize, 0), conn.inbox[hsk].buf.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.outbox[hsk].buf.len);
+}

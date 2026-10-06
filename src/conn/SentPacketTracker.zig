@@ -325,10 +325,18 @@ pub const compact_threshold: u32 = max_tracked / 4;
 /// RFC 9002 §A.1 sent-packet tracker. Indexed by PN, sorted ascending,
 /// with running totals for in-flight bookkeeping.
 ///
-/// Capacity is chosen at `init` and fixed for the tracker's lifetime —
-/// per-PN-space sizing is the point (the Application space needs
-/// high-BDP headroom; Initial/Handshake carry a handful of packets and
-/// then sit idle for the rest of the connection).
+/// Capacity is chosen at `init`: the most live packets the tracker
+/// ever holds (`capacity`). The storage behind it starts at
+/// `initial_slots` and doubles toward that capacity as the packets in
+/// flight need it (`grow`), so a connection pays for the window it
+/// uses, not for the window it might use. MEASURED 2026-10-06 before
+/// this: one live server connection after the handshake took
+/// 1,088,857 bytes of Zig heap, of which the Application-space
+/// tracker's 4096 slots of 200 bytes were 819,200 (http3-zig had
+/// measured "about 1.1 MB"). Per-PN-space sizing stays the point (the
+/// Application space needs high-BDP headroom; Initial/Handshake carry
+/// a handful of packets and then sit idle, and `shrinkToMinimum`
+/// gives their storage back when their keys go).
 ///
 /// Removal is O(1) tombstoning: removed slots stay in place (marked
 /// `dead`) and are swept out in one pass inside `record` once
@@ -343,6 +351,13 @@ pub const compact_threshold: u32 = max_tracked / 4;
 /// directly over caller-managed storage is allowed when the
 /// lifetime is externally guaranteed (see bench/loss_ack.zig).
 packets: []SentPacket,
+/// The most live packets this tracker holds (`capacity`); the
+/// storage grows toward it. 0 = the storage's length (a tracker over
+/// caller-managed storage never grows).
+max_capacity: u32 = 0,
+/// The allocator of `packets`, for `grow`. Undefined for a tracker
+/// over caller-managed storage, which never grows.
+allocator: std.mem.Allocator = undefined,
 /// Physical entries, INCLUDING tombstones. Loop bound for walks;
 /// not the number of tracked packets — that is `liveCount()`.
 count: u32 = 0,
@@ -355,14 +370,49 @@ bytes_in_flight: u64 = 0,
 /// we don't have to walk the array.
 ack_eliciting_in_flight: u64 = 0,
 
-/// Allocate a tracker with room for `cap` live packets. The
-/// storage is exactly `cap * @sizeOf(SentPacket)` — capacity is
-/// the whole per-space memory story, so size it to the space.
+/// The storage a tracker starts with, in slots, when its capacity is
+/// larger: the Initial/Handshake trackers' whole capacity, and a
+/// window of 256 packets (300 KB of 1200-byte datagrams) for the
+/// Application space before the first growth.
+pub const initial_slots: usize = 256;
+
+/// Allocate a tracker with room for `cap` live packets. The storage
+/// behind it is `min(cap, initial_slots)` slots at first and doubles
+/// toward `cap` as `record` needs it; the tracker refuses the packet
+/// that would be one more than `cap` (`isFull`), never one less.
 pub fn init(allocator: std.mem.Allocator, cap: usize) std.mem.Allocator.Error!SentPacketTracker {
     // Compaction math (capacity / 4) and the MinPipeCwnd-style
     // floor below it need a few slots to be meaningful.
     std.debug.assert(cap >= 4);
-    return .{ .packets = try allocator.alloc(SentPacket, cap) };
+    const first = @min(cap, initial_slots);
+    return .{
+        .packets = try allocator.alloc(SentPacket, first),
+        .max_capacity = @intCast(cap),
+        .allocator = allocator,
+    };
+}
+
+/// Double the storage toward `capacity`. Only `record` calls it, when
+/// the storage is full of live packets and the capacity is not
+/// reached. The slots move: nothing outside the tracker may hold a
+/// pointer into `packets` across a `record` (nothing does; walks
+/// hold indices, and `record` runs from the send path alone).
+fn grow(self: *SentPacketTracker) std.mem.Allocator.Error!void {
+    const cap: usize = self.capacity();
+    std.debug.assert(self.packets.len < cap);
+    const new_len = @min(self.packets.len * 2, cap);
+    self.packets = try self.allocator.realloc(self.packets, new_len);
+}
+
+/// Give the storage back down to the minimum, for a space whose keys
+/// are gone: the tracker is `clear`ed first (nothing live), and no
+/// packet is ever recorded in it again. The capacity stays what it
+/// was; the storage grows again if a packet comes anyway.
+pub fn shrinkToMinimum(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
+    std.debug.assert(self.liveCount() == 0);
+    self.resetRetainingCapacity();
+    if (self.packets.len <= 4) return;
+    self.packets = allocator.realloc(self.packets, 4) catch return;
 }
 
 /// Release every live packet's owned per-packet arrays, then the
@@ -398,15 +448,17 @@ pub fn resetRetainingCapacity(self: *SentPacketTracker) void {
     self.ack_eliciting_in_flight = 0;
 }
 
-/// Live-packet capacity (the storage length fixed at init).
+/// Live-packet capacity: the most packets the tracker holds, from
+/// `init` (the storage behind it may still be smaller).
 pub fn capacity(self: *const SentPacketTracker) u32 {
-    return @intCast(self.packets.len);
+    if (self.max_capacity == 0) return @intCast(self.packets.len);
+    return self.max_capacity;
 }
 
-/// Tombstone count that triggers a sweep: capacity / 4, so the
-/// amortization ratio is the same at every tracker size.
+/// Tombstone count that triggers a sweep: a quarter of the storage,
+/// so the amortization ratio is the same at every tracker size.
 fn compactThreshold(self: *const SentPacketTracker) u32 {
-    return self.capacity() / 4;
+    return @intCast(self.packets.len / 4);
 }
 
 /// Packets currently tracked (excludes tombstones).
@@ -424,10 +476,12 @@ pub fn isFull(self: *const SentPacketTracker) bool {
 /// Record a newly-sent packet. PNs must be strictly increasing.
 pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
     if (self.isFull()) return Error.TooManyInFlight;
-    if (self.count >= self.capacity() or self.dead_count >= self.compactThreshold()) {
-        // liveCount < capacity, so compaction always frees a slot.
+    if (self.count >= self.packets.len or self.dead_count >= self.compactThreshold()) {
         self.compact();
     }
+    // Every slot of the storage holds a live packet, and the capacity
+    // is not reached (`isFull` said so): more storage.
+    if (self.count >= self.packets.len) try self.grow();
     if (self.count > 0) {
         // invariant: caller is the send path, which draws PNs
         // from a monotonically-incrementing nextPn() and never
@@ -1132,4 +1186,47 @@ test "compaction threshold scales with capacity (capacity / 4)" {
     try std.testing.expectEqual(@as(u32, 0), t.dead_count);
     try std.testing.expectEqual(@as(u32, 17), t.count);
     try std.testing.expectEqual(@as(u32, 17), t.liveCount());
+}
+
+test "storage grows on demand toward the capacity, and shrinks to the minimum when the space is done" {
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, max_tracked), t.capacity());
+    try std.testing.expectEqual(initial_slots, t.packets.len);
+
+    // 1000 live packets: three doublings (256 -> 512 -> 1024), and
+    // every packet is still there, in order.
+    var pn: u64 = 0;
+    while (pn < 1000) : (pn += 1) {
+        try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 100, .ack_eliciting = true, .in_flight = true });
+    }
+    try std.testing.expectEqual(@as(u32, 1000), t.liveCount());
+    try std.testing.expectEqual(@as(usize, 1024), t.packets.len);
+    try std.testing.expectEqual(@as(u64, 100_000), t.bytes_in_flight);
+    try std.testing.expectEqual(@as(u64, 999), t.packets[999].pn);
+
+    // The capacity is the wall: 4096 live packets fit, one more does not.
+    while (pn < max_tracked) : (pn += 1) {
+        try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 100, .ack_eliciting = true, .in_flight = true });
+    }
+    try std.testing.expectEqual(@as(usize, max_tracked), t.packets.len);
+    try std.testing.expect(t.isFull());
+    try std.testing.expectError(Error.TooManyInFlight, t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 100, .ack_eliciting = true, .in_flight = true }));
+
+    // The space is done: nothing live, the storage goes back.
+    t.clear(std.testing.allocator);
+    t.shrinkToMinimum(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), t.packets.len);
+    try std.testing.expectEqual(@as(u32, max_tracked), t.capacity());
+}
+
+test "a tracker over caller-managed storage never grows" {
+    var storage: [8]SentPacket = undefined;
+    var t: SentPacketTracker = .{ .packets = &storage };
+    try std.testing.expectEqual(@as(u32, 8), t.capacity());
+    var pn: u64 = 0;
+    while (pn < 8) : (pn += 1) {
+        try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 10, .ack_eliciting = true, .in_flight = true });
+    }
+    try std.testing.expectError(Error.TooManyInFlight, t.record(.{ .pn = 8, .sent_time_us = 8, .bytes = 10, .ack_eliciting = true, .in_flight = true }));
 }

@@ -20,6 +20,7 @@ test {
     _ = @import("e2e/vn_spoofed_source_smoke.zig");
     _ = @import("e2e/new_token_smoke.zig");
     _ = @import("e2e/server_stillborn.zig");
+    _ = @import("e2e/memory_per_connection.zig");
     _ = @import("e2e/unknown_frames_smoke.zig");
     _ = @import("e2e/peer_close_smoke.zig");
     _ = @import("e2e/quic_v2_handshake.zig");

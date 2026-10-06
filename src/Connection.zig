@@ -1919,33 +1919,46 @@ pub const ApplicationOpenResult = struct {
     slot: ApplicationReadKeySlot,
 };
 
-/// Default per-encryption-level CRYPTO inbox bound. BoringSSL's
-/// `SSL_quic_max_handshake_flight_len` returns this 16 KiB constant
-/// for the Initial and Application levels and as the floor for
-/// Handshake; see `ssl/ssl_lib.cc:SSL_quic_max_handshake_flight_len`.
-/// We size `CryptoBuffer.buf` to match that floor — small enough to
-/// fit four buffers per Connection on the stack budget, large enough
-/// for every flight that does not carry a peer certificate chain.
-///
-/// **Known gap**: at the Handshake level BoringSSL may raise the
-/// bound to `2 * max_cert_list` when the peer ships a large cert
-/// chain (clients can receive Certificate + CertificateRequest),
-/// which exceeds our fixed buffer. Wiring `SSL_quic_max_handshake_flight_len`
-/// through the boringssl wrapper (it has no method binding today)
-/// would let us size per-level dynamically; until then, peers with
-/// >16 KiB Handshake flights surface as `error.InboxOverflow`.
-pub const crypto_buffer_default_len: usize = 16384;
+/// The most CRYPTO bytes one level's inbox or outbox holds. BoringSSL's
+/// `SSL_quic_max_handshake_flight_len` is 16 KiB for the Initial and
+/// Application levels, and for the Handshake level up to twice its
+/// `max_cert_list` (100 KiB by default) when a peer ships a large
+/// certificate chain. 256 KiB covers that with room; above it a peer
+/// is not a peer (`error.InboxOverflow`). Until v0.28.1 each of the
+/// eight buffers was 16 KiB in the `Connection` struct itself, so a
+/// chain above 16 KiB was refused, and every connection carried 128
+/// KiB of buffers it did not use after the handshake.
+pub const crypto_buffer_max_len: usize = 256 * 1024;
 
+/// What a connection carries in CRYPTO bytes for one level, in one
+/// direction: nothing until the first byte, then storage that grows
+/// to what the flight needs (`crypto_buffer_max_len` at most), and
+/// nothing again when the level's keys are discarded
+/// (`CryptoBuffer.release`).
 pub const CryptoBuffer = struct {
-    buf: [crypto_buffer_default_len]u8 = undefined,
+    buf: []u8 = &.{},
     len: usize = 0,
 
     /// Append bytes BoringSSL produced via `add_handshake_data`.
-    /// Returns `error.InboxOverflow` if the fixed-size buffer is full.
-    pub fn append(self: *CryptoBuffer, data: []const u8) !void {
-        if (self.len + data.len > self.buf.len) return error.InboxOverflow;
-        @memcpy(self.buf[self.len .. self.len + data.len], data);
-        self.len += data.len;
+    /// Returns `error.InboxOverflow` at `crypto_buffer_max_len`.
+    pub fn append(self: *CryptoBuffer, allocator: std.mem.Allocator, data: []const u8) !void {
+        if (data.len > crypto_buffer_max_len - self.len) return error.InboxOverflow;
+        const needed = self.len + data.len;
+        if (needed > self.buf.len) {
+            // Double, and at least 2 KiB: a ClientHello and the small
+            // flights fit in one step; a certificate chain in a few.
+            const want = @min(crypto_buffer_max_len, @max(needed, @max(self.buf.len * 2, 2048)));
+            self.buf = try allocator.realloc(self.buf, want);
+        }
+        @memcpy(self.buf[self.len..needed], data);
+        self.len = needed;
+    }
+
+    /// Give the storage back (the level is done, or the connection).
+    pub fn release(self: *CryptoBuffer, allocator: std.mem.Allocator) void {
+        allocator.free(self.buf);
+        self.buf = &.{};
+        self.len = 0;
     }
 
     /// Returns the buffered bytes and resets the buffer to empty. The
@@ -2293,6 +2306,8 @@ pub fn deinit(self: *Connection) void {
         self.allocator.destroy(s);
     }
     self.streams.deinit(self.allocator);
+    for (&self.inbox) |*b| b.release(self.allocator);
+    for (&self.outbox) |*b| b.release(self.allocator);
     if (self.recv_end_ring) |ring| self.allocator.destroy(ring);
     for ([_]*StreamIdSpace{ &self.peer_bidi_ids, &self.peer_uni_ids, &self.local_bidi_ids, &self.local_uni_ids }) |ids| {
         ids.deinit(self.allocator);
@@ -4920,7 +4935,7 @@ fn shuttleOutboxToPeer(self: *Connection, peer: *Connection) Error!void {
         const i = lvl.idx();
         if (self.outbox[i].len > 0) {
             const bytes = self.outbox[i].drain();
-            try peer.inbox[i].append(bytes);
+            try peer.inbox[i].append(peer.allocator, bytes);
             self.crypto_send_offset[i] += bytes.len;
         }
     }
@@ -5043,7 +5058,7 @@ fn addHandshakeData(
     // the wire-level handshake path. The in-process mock-transport
     // shim additionally has `advance` shuttle outbox→peer.inbox when
     // `peer` is set.
-    conn.outbox[lvl.idx()].append(data[0..len]) catch return 0;
+    conn.outbox[lvl.idx()].append(conn.allocator, data[0..len]) catch return 0;
     return 1;
 }
 

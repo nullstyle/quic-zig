@@ -552,6 +552,9 @@ pub fn wipeInitialKeys(conn: *Connection) void {
 /// Handshake.
 fn dropSpaceRecoveryState(conn: *Connection, lvl: EncryptionLevel, pn_idx: usize) void {
     conn.clearSentTracker(&conn.sent[pn_idx]);
+    // The space is done for good: its tracker's storage goes back
+    // (256 slots of 200 bytes for each of the two spaces).
+    conn.sent[pn_idx].shrinkToMinimum(conn.allocator);
     conn.pto_count[pn_idx] = 0;
     conn.pending_ping[pn_idx] = false;
     const idx = lvl.idx();
@@ -559,6 +562,10 @@ fn dropSpaceRecoveryState(conn: *Connection, lvl: EncryptionLevel, pn_idx: usize
     conn.crypto_retx[idx].clearAndFree(conn.allocator);
     for (conn.sent_crypto[idx].items) |chunk| conn.allocator.free(chunk.data);
     conn.sent_crypto[idx].clearAndFree(conn.allocator);
+    // The CRYPTO buffers of a level whose keys are gone hold nothing
+    // that anyone reads again.
+    conn.inbox[idx].release(conn.allocator);
+    conn.outbox[idx].release(conn.allocator);
 }
 
 /// RFC 9001 §4.9.2: "An endpoint MUST discard its handshake keys

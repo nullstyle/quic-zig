@@ -128,7 +128,7 @@ pub fn handleCrypto(
     const eff_data = cr.data[data_start..];
 
     if (eff_offset == my_off) {
-        try conn.inbox[idx].append(eff_data);
+        try conn.inbox[idx].append(conn.allocator, eff_data);
         conn.crypto_recv_offset[idx] += eff_data.len;
         try drainPendingCrypto(conn, idx);
     } else {
@@ -202,7 +202,7 @@ fn drainPendingCrypto(conn: *Connection, idx: usize) Error!void {
                 // Bridges the floor — deliver the new portion.
                 const skip: usize = @intCast(my_off - chunk.offset);
                 const tail = chunk.data[skip..];
-                try conn.inbox[idx].append(tail);
+                try conn.inbox[idx].append(conn.allocator, tail);
                 conn.crypto_recv_offset[idx] += tail.len;
                 conn.crypto_pending_bytes[idx] -= chunk.data.len;
                 conn.releaseResidentBytes(chunk.data.len);
