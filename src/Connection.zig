@@ -464,8 +464,10 @@ initial_keys_discarded: bool = false,
 /// Latched true when `discardHandshakeKeys` fires. RFC 9001 §4.9.2:
 /// "An endpoint MUST discard its handshake keys when the TLS
 /// handshake is confirmed (Section 4.1.2)." For the client, that
-/// confirmation event is receipt of HANDSHAKE_DONE (RFC 9001
-/// §4.1.2 ¶2); for the server, it is delivery of the client's
+/// confirmation event is receipt of HANDSHAKE_DONE, or of an ACK of
+/// a 1-RTT packet of its own (RFC 9001 §4.1.2 ¶2, both;
+/// `received_handshake_done`, `one_rtt_acked`); for the server, it
+/// is delivery of the client's
 /// Finished message (which equals `handshakeDone()` returning
 /// true). Once latched, `pnSpaceForLevel(.handshake)` and
 /// `sentForLevel(.handshake)` are dead — `tick` skips them and
@@ -480,6 +482,23 @@ handshake_keys_discarded: bool = false,
 /// `inner.handshakeDone()`, which already covers the §4.9.2
 /// "TLS handshake is confirmed" trigger for the server role.
 received_handshake_done: bool = false,
+/// Client only. Latched when the peer acknowledges a packet this
+/// connection sent at the 1-RTT level (RFC 9001 §4.1.2 ¶2: "a client
+/// MAY consider the handshake to be confirmed when it receives an
+/// acknowledgment for a 1-RTT packet"). The server can only have
+/// opened that packet after it processed our Finished (RFC 9001
+/// §5.7), so the handshake is complete there. Not for a 0-RTT packet
+/// (`SentPacket.is_early_data`): a server acknowledges those in 1-RTT
+/// packets before it has the Finished. Confirms the handshake like
+/// `received_handshake_done` does: the Handshake keys go at the end of
+/// the datagram (`applyPostFrameProcessing`). A client whose
+/// HANDSHAKE_DONE is lost stops its Finished probes as soon as any
+/// 1-RTT packet of its own is acknowledged; quiche sends HANDSHAKE_DONE
+/// again only at its own backed-off timeout (MEASURED 2026-10-06,
+/// client x quiche x handshakecorruption: two of three failed
+/// handshakes had such an ACK at about 24 s). Set in
+/// `recv_ack_handlers.dispatchAcked`; stays false on the server.
+one_rtt_acked: bool = false,
 /// Sequence number of the locally-issued CID the next-handled
 /// datagram was addressed to, or `null` when unknown. Set by
 /// `Server` from its routing table before each `Connection.handle`
@@ -902,14 +921,16 @@ pub const Error = error{
     KeyUpdateUnavailable,
     /// `requestKeyUpdate` may not start an update now: there are no
     /// 1-RTT write keys yet, the handshake is not confirmed yet (RFC
-    /// 9001 §6.1; a client is confirmed by HANDSHAKE_DONE, one flight
-    /// after it has the keys), the last update has no acknowledgment
+    /// 9001 §6.1; a client is confirmed by HANDSHAKE_DONE or by an ACK
+    /// of a 1-RTT packet of its own, one flight after it has the
+    /// keys), the last update has no acknowledgment
     /// yet, or the wait after it is not over. Not fatal: ask again
     /// later (`canInitiateKeyUpdateAt` says when it would work).
     ///
     /// A connection is confirmed by a packet: a server when it
     /// processes the client's Finished from a Handshake packet, a
-    /// client when it processes HANDSHAKE_DONE. A test shim that
+    /// client when it processes HANDSHAKE_DONE or an ACK of one of
+    /// its 1-RTT packets. A test shim that
     /// hands the last flight to TLS without packets leaves the
     /// connection unconfirmed for its whole life: this error every
     /// time, and a close that still goes at the Handshake level too
@@ -3657,7 +3678,8 @@ pub fn idleTimeoutUs(self: *const Connection) ?u64 {
 /// "Confirmed" is `handshake_keys_discarded` — RFC 9001 §4.1.2 /
 /// §4.9.2's own confirmation latch, which this codebase already
 /// maintains symmetrically: the server latches it when the client's
-/// Finished is processed, the client on receiving HANDSHAKE_DONE.
+/// Finished is processed, the client on receiving HANDSHAKE_DONE or
+/// an ACK of a 1-RTT packet of its own.
 /// Deliberately NOT the TLS-completion or application-write-key
 /// boundary: a client that received the server's flight but whose
 /// own Finished was lost has application write keys and a "done"

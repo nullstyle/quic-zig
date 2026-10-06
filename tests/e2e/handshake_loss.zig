@@ -184,9 +184,17 @@ const Options = struct {
     /// ("0.5-RTT" data; the interop server's NEW_CONNECTION_ID is
     /// that): a PING, queued as soon as the server has the connection.
     server_early_data: bool = false,
+    /// The client has 1-RTT data to send as soon as its TLS handshake
+    /// is done: this many PINGs, one per millisecond, so the server's
+    /// ACK comes at once (the second ack-eliciting packet forces it).
+    client_pings: u8 = 0,
+    /// Drop the first N datagrams of the server that carry no
+    /// long-header packet: its HANDSHAKE_DONE datagram is the first.
+    drop_server_short: usize = 0,
     /// Run until the client has CONFIRMED the handshake (it got
-    /// HANDSHAKE_DONE and discarded its Handshake keys), not only until
-    /// both ends have the TLS handshake done.
+    /// HANDSHAKE_DONE, or an ACK of a 1-RTT packet of its own, and
+    /// discarded its Handshake keys), not only until both ends have
+    /// the TLS handshake done.
     until_confirmed: bool = false,
     /// Stop when this much virtual time has gone by.
     budget_us: u64 = 40 * us_per_s,
@@ -260,6 +268,9 @@ const Outcome = struct {
     /// How many times the server queued HANDSHAKE_DONE again because
     /// the client still sent Handshake packets.
     server_done_resends: usize = 0,
+    /// The client confirmed on an ACK of a 1-RTT packet of its own,
+    /// with no HANDSHAKE_DONE seen (RFC 9001 section 4.1.2, a MAY).
+    confirmed_by_ack: bool = false,
     /// Datagrams of the server that held a 1-RTT packet and nothing
     /// else, sent before the server's handshake was done. The client
     /// cannot open those: it has no 1-RTT keys yet.
@@ -319,6 +330,9 @@ const Net = struct {
     server_bytes_in: u64 = 0,
     server_bytes_out: u64 = 0,
     server_early_data_queued: bool = false,
+    client_pings_sent: u8 = 0,
+    /// Datagrams of the server with no long-header packet, so far.
+    server_short_only: usize = 0,
     /// A datagram of the client that holds a Handshake packet was
     /// delivered to the server.
     client_handshake_delivered: bool = false,
@@ -517,6 +531,10 @@ const Net = struct {
                 if (self.out.flights_dropped < self.o.drop_server_flights) verdict = .drop;
                 if (self.sinceStart() < self.o.no_flight_for_us) verdict = .drop;
             }
+            if (s.has_short and !s.has_long) {
+                self.server_short_only += 1;
+                if (self.server_short_only <= self.o.drop_server_short) verdict = .drop;
+            }
             if (verdict == .deliver and self.randomLoss(self.o.loss_to_client, &self.burst_to_client)) verdict = .drop;
             if (self.o.verbose) std.debug.print("[handshake_loss] t={d}us S->C {d}B initial={} handshake={} crypto={} short={} {t}\n", .{ self.sinceStart(), datagram.len, s.leads_with_initial, s.leads_with_handshake, s.carries_crypto, s.has_short, verdict });
             if (verdict == .drop) {
@@ -602,6 +620,10 @@ fn run(allocator: std.mem.Allocator, o: Options) !Outcome {
 
     try cli.conn.advance();
     while (net.sinceStart() < o.budget_us) {
+        if (net.client_pings_sent < o.client_pings and cli.conn.handshakeDone()) {
+            cli.conn.requestPing();
+            net.client_pings_sent += 1;
+        }
         try net.exchange();
         if (!net.out.done and cli.conn.handshakeDone() and net.serverDone()) {
             net.out.done = true;
@@ -611,6 +633,7 @@ fn run(allocator: std.mem.Allocator, o: Options) !Outcome {
         if (cli.conn.handshake_keys_discarded) {
             net.out.confirmed = true;
             net.out.confirmed_at_us = net.sinceStart();
+            net.out.confirmed_by_ack = cli.conn.one_rtt_acked and !cli.conn.received_handshake_done;
             break;
         }
         // A connection that gave up (handshake timeout, idle timeout)
@@ -957,6 +980,26 @@ test "handshake loss: HANDSHAKE_DONE is lost 3 times, and each Finished of the c
     try std.testing.expect(out.confirmed);
     try std.testing.expect(out.confirmed_at_us < 100 * us_per_ms);
     try std.testing.expectEqual(@as(usize, 3), out.server_done_resends);
+}
+
+test "handshake loss: HANDSHAKE_DONE is lost, and a client with 1-RTT data confirms on the server's ACK of it, before any Finished again (RFC 9001 4.1.2)" {
+    // The server's HANDSHAKE_DONE datagram is lost. The client has
+    // 1-RTT data (two PINGs, a millisecond apart); the server
+    // acknowledges the second at once, and that ACK confirms the
+    // client: a server opens a 1-RTT packet only after it has the
+    // client's Finished (RFC 9001 section 4.1.2, a MAY that quic
+    // takes from v0.31.0). Up to v0.30.1 the client waited for
+    // HANDSHAKE_DONE, and its Finished probe brought it again.
+    const out = try run(std.testing.allocator, .{
+        .drop_server_short = 1,
+        .client_pings = 2,
+        .until_confirmed = true,
+    });
+    try std.testing.expect(out.confirmed);
+    try std.testing.expect(out.confirmed_by_ack);
+    try std.testing.expectEqual(@as(usize, 0), out.server_done_resends);
+    try std.testing.expectEqual(@as(usize, 1), out.client_handshakes);
+    try std.testing.expect(out.confirmed_at_us < 10 * us_per_ms);
 }
 
 test "handshake loss: the limit on HANDSHAKE_DONE resends holds, and the probe timer works behind it" {

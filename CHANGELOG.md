@@ -9,6 +9,22 @@ changes.
 
 ### Changed
 
+- **A client confirms its handshake on an ACK of a 1-RTT packet of its
+  own (RFC 9001 section 4.1.2, a MAY).** It confirmed on HANDSHAKE_DONE
+  alone; until that frame came, it kept its Handshake keys and probed
+  its Finished at the handshake probe timeout. The server can only
+  have opened a 1-RTT packet of the client after it processed the
+  client's Finished, so such an ACK says the handshake is complete
+  there. An ACK of a 0-RTT packet does not count (a server
+  acknowledges those before it has the Finished), and the server
+  never confirms on an ACK. What you may see: a client whose
+  HANDSHAKE_DONE was lost sends no Finished again once any 1-RTT
+  packet of its own is acknowledged (quiche sends HANDSHAKE_DONE again
+  only at its own backed-off timeout; in the probes sprint's client x
+  quiche x handshakecorruption runs, two of three failed handshakes
+  had such an ACK at about 24 s). Key updates and migration become
+  legal at that point too. Unit, conformance and loss-harness tests;
+  the loss harness gained `client_pings` and `drop_server_short`.
 - **`Server.feed` leaves a `.dropped` datagram as it was.** The datagram
   that makes a new connection is opened where it lies; a connection
   that could open no packet of it is stillborn (another server's first

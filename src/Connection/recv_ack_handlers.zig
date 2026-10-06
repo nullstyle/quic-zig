@@ -185,6 +185,13 @@ fn dispatchAcked(
         // stream error left the key epoch unconfirmed on one side).
         ctx.conn.onApplicationPacketAckedForKeys(acked, ctx.now_us);
         try conn_loss.dispatchAckedPacketToStreams(ctx.conn, acked);
+        // RFC 9001 §4.1.2 ¶2 (a MAY quic takes): the peer opened a
+        // 1-RTT packet of ours, so it has our Finished, and the
+        // client's handshake is confirmed. Not for a 0-RTT packet: a
+        // server acknowledges those before it has the Finished. The
+        // Handshake keys go at the end of the datagram
+        // (`applyPostFrameProcessing`), as for HANDSHAKE_DONE.
+        if (ctx.conn.role == .client and !acked.is_early_data) ctx.conn.one_rtt_acked = true;
     }
     conn_loss.discardSentCryptoForPacket(ctx.conn, ctx.target.lvl, acked.pn);
     conn_loss.dispatchAckedControlFrames(ctx.conn, acked);

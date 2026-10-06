@@ -425,6 +425,128 @@ test "client discards Handshake keys when HANDSHAKE_DONE arrives [RFC9001 §4.9.
     try std.testing.expectEqual(false, conn.pending_ping[1]);
 }
 
+/// RFC 9001 §4.1.2 ¶2, the client's second way to confirm: an ACK of
+/// a packet it sent at the 1-RTT level. The planted Handshake material
+/// and the planted Handshake packet are the HANDSHAKE_DONE test's.
+fn plantUnconfirmedHandshakeState(conn: *Connection) !void {
+    const hsk_idx = EncryptionLevel.handshake.idx();
+    var hsk_material: SecretMaterial = .{ .cipher_protocol_id = 0x1301 };
+    hsk_material.secret_len = 32;
+    @memset(hsk_material.secret[0..32], 0x42);
+    conn.levels[hsk_idx].read = hsk_material;
+    conn.levels[hsk_idx].write = hsk_material;
+    try conn.sentForLevel(.handshake).record(.{
+        .pn = 0,
+        .sent_time_us = 0,
+        .bytes = 36,
+        .ack_eliciting = true,
+        .in_flight = true,
+    });
+}
+
+/// One packet of ours in the Application space, number 5 (6 is the
+/// next), at 1-RTT or at 0-RTT.
+fn plantApplicationPacket(conn: *Connection, early_data: bool) !void {
+    try conn.sentForLevel(.application).record(.{
+        .pn = 5,
+        .sent_time_us = 1_000,
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .is_early_data = early_data,
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 6;
+}
+
+fn ackOfFive(buf: []u8) !usize {
+    return frame_mod.encode(buf, .{ .ack = .{
+        .largest_acked = 5,
+        .ack_delay = 0,
+        .first_range = 0,
+        .range_count = 0,
+        .ranges_bytes = &.{},
+        .ecn_counts = null,
+    } });
+}
+
+/// The discard runs at the end of `handleWithEcn`; mimicked here as
+/// the HANDSHAKE_DONE test does.
+fn runPostFrameDiscard(conn: *Connection) void {
+    if ((conn.received_handshake_done or conn.one_rtt_acked) and !conn.handshake_keys_discarded) {
+        conn.discardHandshakeKeys();
+    }
+}
+
+test "client confirms the handshake on an ACK of a 1-RTT packet of its own [RFC9001 §4.1.2 ¶2, a MAY]" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try plantUnconfirmedHandshakeState(conn);
+    try plantApplicationPacket(conn, false);
+
+    var payload: [16]u8 = undefined;
+    const n = try ackOfFive(&payload);
+    try conn.dispatchFrames(.application, payload[0..n], 2_000_000);
+    try std.testing.expect(conn.one_rtt_acked);
+    try std.testing.expect(!conn.received_handshake_done);
+    runPostFrameDiscard(conn);
+
+    const hsk_idx = EncryptionLevel.handshake.idx();
+    try std.testing.expect(conn.handshake_keys_discarded);
+    try std.testing.expect(conn.levels[hsk_idx].read == null);
+    try std.testing.expect(conn.levels[hsk_idx].write == null);
+    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.handshake).count);
+    // The ACK took the packet (the tracker keeps a tombstone).
+    try std.testing.expectEqual(@as(u64, 0), conn.sentForLevel(.application).bytes_in_flight);
+}
+
+test "an ACK of a 0-RTT packet does not confirm the handshake [RFC9001 §4.1.2 ¶2]" {
+    // A server acknowledges 0-RTT packets in 1-RTT packets before it
+    // has the client's Finished: such an ACK says nothing about the
+    // handshake.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try plantUnconfirmedHandshakeState(conn);
+    try plantApplicationPacket(conn, true);
+
+    var payload: [16]u8 = undefined;
+    const n = try ackOfFive(&payload);
+    try conn.dispatchFrames(.application, payload[0..n], 2_000_000);
+    try std.testing.expect(!conn.one_rtt_acked);
+    runPostFrameDiscard(conn);
+
+    const hsk_idx = EncryptionLevel.handshake.idx();
+    try std.testing.expect(!conn.handshake_keys_discarded);
+    try std.testing.expect(conn.levels[hsk_idx].read != null);
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.handshake).count);
+    // The ACK itself is good: it took the 0-RTT packet.
+    try std.testing.expectEqual(@as(u64, 0), conn.sentForLevel(.application).bytes_in_flight);
+}
+
+test "a server never confirms its handshake on an ACK [RFC9001 §4.1.2 ¶1]" {
+    // The server's confirmation is the client's Finished (§4.1.2 ¶1).
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try plantUnconfirmedHandshakeState(conn);
+    try plantApplicationPacket(conn, false);
+
+    var payload: [16]u8 = undefined;
+    const n = try ackOfFive(&payload);
+    try conn.dispatchFrames(.application, payload[0..n], 2_000_000);
+    try std.testing.expect(!conn.one_rtt_acked);
+    runPostFrameDiscard(conn);
+    try std.testing.expect(!conn.handshake_keys_discarded);
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.handshake).count);
+}
+
 // The AEAD context inside `PacketKeys` is heap state: two independent
 // derivations allocate two contexts, a cached derivation reuses one. The
 // derive-once tests below use its address as derivation-count identity.

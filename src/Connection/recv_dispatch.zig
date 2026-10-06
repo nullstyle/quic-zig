@@ -151,16 +151,18 @@ pub fn handleWithEcn(
     );
     try replayHeldHandshakePackets(conn, now_us);
     // RFC 9001 §4.1.2 ¶2 + §4.9.2: client confirms the handshake
-    // when it processes a HANDSHAKE_DONE frame, and an endpoint
-    // MUST discard its handshake keys at confirmation. We latch
-    // the receipt in the frame switch above (so the `handshake_done`
-    // arm stays a small enum-tag write); the actual discard runs
-    // here, after the datagram's frames are dispatched, so a late
-    // ACK in the same datagram still credits the Handshake-level
-    // sent tracker before we tear it down. `discardHandshakeKeys`
-    // is idempotent — the latch + the function-local guard makes
-    // a re-entry on a second HANDSHAKE_DONE a no-op.
-    if (conn.received_handshake_done and !conn.handshake_keys_discarded) {
+    // when it processes a HANDSHAKE_DONE frame, or an ACK of a 1-RTT
+    // packet of its own (the MAY; `one_rtt_acked`, latched in
+    // `recv_ack_handlers.dispatchAcked`), and an endpoint MUST
+    // discard its handshake keys at confirmation. We latch the
+    // receipt in the frame switch above (so the `handshake_done` arm
+    // stays a small enum-tag write); the actual discard runs here,
+    // after the datagram's frames are dispatched, so a late ACK in
+    // the same datagram still credits the Handshake-level sent
+    // tracker before we tear it down. `discardHandshakeKeys` is
+    // idempotent — the latches + the function-local guard make a
+    // re-entry on a second HANDSHAKE_DONE or a later ACK a no-op.
+    if ((conn.received_handshake_done or conn.one_rtt_acked) and !conn.handshake_keys_discarded) {
         conn.discardHandshakeKeys();
     }
     // RFC 9000 §10.2.1 ¶3: when in the closing state and an

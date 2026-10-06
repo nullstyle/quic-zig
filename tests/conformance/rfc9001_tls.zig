@@ -32,6 +32,7 @@
 //!   RFC9001 §5.2 ¶1  MUST       Initial keys use the v1 fixed salt 38762cf7…cad ccbb7f0a
 //!   RFC9001 §6.1 ¶2  MUST       refuse first key update before handshake confirmation
 //!   RFC9001 §6.1 ¶2  MUST NOT   initiate a key update between handshake completion and confirmation
+//!   RFC9001 §4.1.2 ¶2 MAY       confirm the handshake on an ACK of a 1-RTT packet (quic takes the MAY)
 //!   RFC9001 §6.5 ¶1  MUST       refuse second key update until peer ACKs the new keys
 //!   RFC9001 §5.3 ¶3  MUST       AEAD nonce = static_iv XOR PN (PN packed into low bytes)
 //!   RFC9001 §5.3 ¶3  MUST       PN=0 leaves the static IV unchanged in the nonce
@@ -854,6 +855,76 @@ test "MUST discard Initial keys once Handshake keys are available [RFC9001 §5.7
     const client_conn = pair.clientConn();
     try std.testing.expectEqual(false, client_conn.initialKeysActive(.read));
     try std.testing.expectEqual(false, client_conn.initialKeysActive(.write));
+}
+
+test "MAY confirm the handshake on an ACK of a 1-RTT packet [RFC9001 §4.1.2 ¶2]" {
+    // §4.1.2 ¶2: "a client MAY consider the handshake to be confirmed
+    // when it receives an acknowledgment for a 1-RTT packet." The
+    // server can only have opened that packet after it processed the
+    // client's Finished (§5.7), so the handshake is complete there.
+    // quic takes the MAY from v0.31.0: a client whose HANDSHAKE_DONE
+    // is lost stops its Finished probes on the first such ACK (quiche
+    // sends HANDSHAKE_DONE again only at its own backed-off timeout).
+    var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    const cli = pair.clientConn();
+    try cli.advance();
+
+    // ClientHello to the server, the server's flight to the client.
+    while (try cli.poll(&pair.rx_buf, 1_000)) |len| {
+        _ = try pair.server.feed(pair.rx_buf[0..len], pair.peer_addr, 1_000);
+    }
+    for (pair.server.iterator()) |slot| {
+        while (try slot.conn.poll(&pair.rx_buf, 2_000)) |len| {
+            try cli.handle(pair.rx_buf[0..len], null, 2_000);
+        }
+    }
+    try std.testing.expect(cli.handshakeDone());
+    try std.testing.expect(!cli.handshake_keys_discarded);
+
+    // The client's Finished to the server; what the server answers
+    // (HANDSHAKE_DONE) is lost.
+    while (try cli.poll(&pair.rx_buf, 3_000)) |len| {
+        _ = try pair.server.feed(pair.rx_buf[0..len], pair.peer_addr, 3_000);
+    }
+    const srv = try pair.serverConn();
+    try std.testing.expect(srv.handshakeDone());
+    var lost: usize = 0;
+    while (try srv.poll(&pair.rx_buf, 4_000)) |_| lost += 1;
+    try std.testing.expect(lost >= 1);
+
+    // The control: complete, with 1-RTT keys, and not confirmed.
+    try std.testing.expect(cli.handshakeDone());
+    try std.testing.expect(!cli.handshake_keys_discarded);
+    try std.testing.expect(!cli.received_handshake_done);
+
+    // A 1-RTT packet of the client (a PING), to the server.
+    cli.requestPing();
+    var pinged: usize = 0;
+    while (try cli.poll(&pair.rx_buf, 5_000)) |len| {
+        pinged += 1;
+        _ = try pair.server.feed(pair.rx_buf[0..len], pair.peer_addr, 5_000);
+    }
+    try std.testing.expect(pinged >= 1);
+    const pn = cli.primaryPath().app_pn_space.next_pn - 1;
+    pair.now_us = 5_000;
+
+    // The server's ACK of it, in a 1-RTT packet: confirmed, with no
+    // HANDSHAKE_DONE seen.
+    var ack_buf: [16]u8 = undefined;
+    const ack_len = try quic.frame.encode(&ack_buf, .{ .ack = .{
+        .largest_acked = pn,
+        .ack_delay = 0,
+        .first_range = 0,
+        .range_count = 0,
+        .ranges_bytes = &.{},
+        .ecn_counts = null,
+    } });
+    try std.testing.expectEqual(@as(?quic.CloseEvent, null), try pair.injectFrameAtClient(ack_buf[0..ack_len]));
+    try std.testing.expect(cli.one_rtt_acked);
+    try std.testing.expect(!cli.received_handshake_done);
+    try std.testing.expect(cli.handshake_keys_discarded);
+    try std.testing.expect(cli.canInitiateKeyUpdateAt(1_000_000));
 }
 
 test "MUST refuse the first key update before handshake confirmation [RFC9001 §6.1 ¶2]" {
