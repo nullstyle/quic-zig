@@ -1211,3 +1211,63 @@ implied.
 
 Check items off as they land; the list is the definition of done for the
 1.0 tag.
+
+## v0.29.0: the open-items release
+
+v0.29.0 (tag `b9a15e6`, 2026-10-06) is the seven items that were open
+after v0.28.1, done in one sprint in the "Zig 0.17.0 upgrade" session
+between 2026-10-05, 20:30 and 2026-10-06, 05:00 AKDT (its record:
+`SPRINT-2026-10-05-open-items.md` in the handoff notes). No
+wire-format change. Each item is its own commit on `main` and its own
+entry in the changelog:
+
+- `3c9bb9c` the client connects through loss: a two-datagram handshake
+  probe while there is no RTT sample, a Handshake packet before its
+  keys held and read when they come, a lost CONNECTION_CLOSE sent
+  again at the peer's next packet.
+- `bd1a63f` a `Server` makes no connection for a datagram of which no
+  packet opens (`feed` says `.dropped`); NEW_TOKEN times on a clock of
+  their own; a previous ticket key at start; a client's own ticket
+  lifetime; the ticket lifetime of an envelope; a thread check for
+  `rotateSessionTicketKey`.
+- `6bc069f` a connection costs 91 KB on the Zig heap, not 1.09 MB
+  (the tracker grows on demand, the CRYPTO buffers live on the heap).
+- `489462c` the 32-bit CI leg by hand (a sanitizer mode and a test
+  filter as dispatch inputs).
+- `30a40a3` a late packet is not a lost packet: the loss thresholds
+  widen on a spurious loss and a reduction is taken back when every
+  "lost" packet of its episode arrived; the recovery period is
+  anchored at the detection (RFC 9002 B.6), not the lost packet's
+  send time. MEASURED (12 seeds): a 20 ms round trip, 100 Mbit link
+  with 10% of the packets 1 ms late: bbr 1376 -> 773 ms (the link's
+  floor), cubic 9937 -> 790, new_reno 18357 -> 790. The anchor moves
+  the fairness cells where CUBIC is in them (deep-buffer BBR-vs-CUBIC
+  bbr share 31.1% -> 22.3%); the BBR-only cells are identical.
+
+**The gates on `b9a15e6`**, each read at its evidence line.
+
+- `test`: seven jobs, every step green; 1,997 of 2,013 tests in Debug
+  (16 skipped) on the Unix jobs and on the 32-bit leg, 1,957 of 1,973
+  in ReleaseSafe, 1,934 of 1,973 on Windows (39 skipped);
+  `check-modes: 6 of 6 as expected`; `consumer-smoke ok: quic-zig
+  0.29.0`.
+- rc-fuzz (run 37435918383): `n_runs=2,231,001 unique_runs=11,423
+  pcs_len=45,034`, `coverage verified: instrumented, 2,231,001
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop`: `interop evidence: pairs=1 cells=2 succeeded=2
+  failed=0 known_failed=0 unsupported=0`.
+- QNS image: built and pushed from that commit (digest `6c755a67…`).
+- pin-lint: `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl
+  pins of quic-zig and http3-zig byte-for-byte identical.
+- A fresh consumer from an archive of the tag (hash
+  `quic-0.29.0-DnSYvahYOwAdaHX-Ct3_iZGZycF387GmpAbI9G9wjFGg`):
+  `consumer-smoke ok: quic-zig 0.29.0`.
+- The wide interop matrix (advisory, both roles, three peers, one run
+  on the image of the tag): client `cells=45 succeeded=42 failed=1
+  unsupported=2`, server `cells=45 succeeded=40 failed=1
+  unsupported=4`. The two failures are the quiche handshake chance
+  cells, run 10 times each on the same image: server x quiche x
+  handshakeloss 9 of 10 (7 of 9 on 2026-10-04), client x quiche x
+  handshakecorruption 7 of 10, against 8 of 10 on the image of the
+  commit before the loss-recovery change (the control). Pre-existing;
+  the first candidate of the next sprint (the sprint record has it).
