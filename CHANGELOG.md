@@ -5,7 +5,19 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.30.0] - 2026-10-06
+
+The probes release. A probe timeout is not a loss (RFC 9002 section
+6.2.4: the Application space's timeout no longer declares the oldest
+packet lost nor cuts the window; the probe carries its frames again
+and the thresholds decide); the handshake spaces' probe timeout is
+bounded at about a second and runs from the last send (RFC 9002 A.8),
+so a client waiting for a lost server flight probes every second
+instead of 1, 2, 4, 8 s. Plus three repairs found by downstreams on
+0.29.0: `quic.unixWallClockUs` compiles on Zig 0.17.0,
+`Server.adoptLoopThread()`, and `Server.feed`'s in-place contract in
+its doc. Behavior only: no wire-format change, no API an embedder
+must change, the same option map. Verified toolchain: 0.17.0.
 
 ### Fixed
 
