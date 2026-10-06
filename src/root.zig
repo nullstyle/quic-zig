@@ -9,6 +9,7 @@
 //! example and the high-level architecture overview.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const boringssl = @import("boringssl");
 
 /// QUIC v1 wire-format version, per RFC 9000 §15.
@@ -72,13 +73,23 @@ pub const transport = @import("transport/root.zig");
 /// `Server.Config.new_token_clock`. Not for `feed` and `tick`: a wall
 /// clock can jump, and the timers must not.
 ///
-/// Through libc's `clock_gettime(CLOCK_REALTIME)`, which quic links
-/// everywhere (BoringSSL needs libc): Zig 0.17.0's `std.time` has no
-/// timestamp function of its own (it reads clocks through `std.Io`).
-/// v0.29.0 called `std.time.microTimestamp`, which does not exist on
-/// 0.17.0; no test referenced the function, so no gate compiled it
-/// (found by capnp-zig; the test below keeps it compiled).
+/// Through libc's `clock_gettime(CLOCK_REALTIME)` where there is one
+/// (quic links libc everywhere: BoringSSL needs it), and through
+/// `RtlGetSystemTimePrecise` on Windows (its libc has no
+/// `clock_gettime`; `std.c.timespec` is `void` there and the call does
+/// not compile — 0.30.0 did not build on Windows for it). Zig 0.17.0's
+/// `std.time` has no timestamp function of its own (it reads clocks
+/// through `std.Io`); v0.29.0 called `std.time.microTimestamp`, which
+/// does not exist on 0.17.0, and no test referenced the function, so
+/// no gate compiled it (found by capnp-zig; the test below keeps it
+/// compiled, on every target).
 pub fn unixWallClockUs() u64 {
+    if (builtin.os.tag == .windows) {
+        // 100 ns intervals since 1601-01-01 (the Windows epoch).
+        const since_1601: u64 = @intCast(@max(std.os.windows.ntdll.RtlGetSystemTimePrecise(), 0));
+        const unix_epoch_in_100ns: u64 = 116_444_736_000_000_000;
+        return (since_1601 -| unix_epoch_in_100ns) / 10;
+    }
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 0;
     if (ts.sec < 0) return 0;

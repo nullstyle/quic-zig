@@ -1252,6 +1252,15 @@ test "previous key at start: refused with no key, for a zero key, and for a key 
 
 // ------------------------------------------- the client's own limit
 
+/// BoringSSL counts a ticket's lifetime down from the moment it was
+/// made (it rebases the session's time when the session is used), so
+/// a slow test run reads a second or two less than the lifetime set.
+/// MEASURED 2026-10-06 on the Windows CI runner in Debug: 599 for 600.
+fn expectLifetimeAbout(expected: u32, got: u32) !void {
+    try std.testing.expect(got <= expected);
+    try std.testing.expect(got + 5 >= expected);
+}
+
 test "ticket lifetime at the client: a BoringSSL client keeps a ticket for 2 days at most, unless its own limit is raised" {
     // The server says 7 days. A client with the default limit keeps
     // the ticket for 2 days; a client whose limit is 7 days keeps it
@@ -1263,14 +1272,14 @@ test "ticket lifetime at the client: a BoringSSL client keeps a ticket for 2 day
     var capped: EnvelopeSink = .{ .allocator = allocator };
     defer capped.deinit();
     try earnTicket(allocator, &srv, &capped, 1331);
-    try std.testing.expectEqual(@as(u32, 172800), try quic.Client.resumptionTicketLifetimeSeconds(capped.captured.?));
+    try expectLifetimeAbout(172800, try quic.Client.resumptionTicketLifetimeSeconds(capped.captured.?));
 
     client_ticket_limit_s = 604800;
     defer client_ticket_limit_s = null;
     var raised: EnvelopeSink = .{ .allocator = allocator };
     defer raised.deinit();
     try earnTicket(allocator, &srv, &raised, 1332);
-    try std.testing.expectEqual(@as(u32, 604800), try quic.Client.resumptionTicketLifetimeSeconds(raised.captured.?));
+    try expectLifetimeAbout(604800, try quic.Client.resumptionTicketLifetimeSeconds(raised.captured.?));
 
     // The smaller of the two: a server lifetime of 600 s stays 600 s
     // at a client that allows 7 days.
@@ -1279,7 +1288,7 @@ test "ticket lifetime at the client: a BoringSSL client keeps a ticket for 2 day
     var ten_minutes: EnvelopeSink = .{ .allocator = allocator };
     defer ten_minutes.deinit();
     try earnTicket(allocator, &short, &ten_minutes, 1333);
-    try std.testing.expectEqual(@as(u32, 600), try quic.Client.resumptionTicketLifetimeSeconds(ten_minutes.captured.?));
+    try expectLifetimeAbout(600, try quic.Client.resumptionTicketLifetimeSeconds(ten_minutes.captured.?));
 
     // Not an envelope: an error, not a number.
     try std.testing.expectError(error.InvalidFormat, quic.Client.resumptionTicketLifetimeSeconds("not an envelope"));
