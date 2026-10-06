@@ -1271,3 +1271,67 @@ entry in the changelog:
   handshakecorruption 7 of 10, against 8 of 10 on the image of the
   commit before the loss-recovery change (the control). Pre-existing;
   the first candidate of the next sprint (the sprint record has it).
+
+## v0.30.0 and v0.30.1: the probes release
+
+v0.30.0 (tag `abc5f12`, 2026-10-06) is the "probes" sprint after
+v0.29.0 (record: `SPRINT-2026-10-06-probes.md` in the handoff notes):
+
+- `5519b02` the probe timeout of the Initial and Handshake spaces is
+  bounded at the no-sample probe timeout (about 1 s,
+  `max_handshake_pto_us`) and anchored on the last ack-eliciting send
+  (RFC 9002 A.8). A bound alone cascaded with the oldest anchor (2, 4,
+  8 datagrams per timeout); the two rules go together.
+- `1cbccd3` a probe timeout is not a loss (RFC 9002 section 6.2.4, a
+  MUST NOT): the Application path's timeout keeps the oldest packet
+  in flight, sends its frames again, tells no controller; the
+  thresholds decide after the probe's ACK; a full tracker keeps the
+  old expiry. The deadline runs from the last send there too.
+- `46ebae6` three repairs found by downstreams on v0.29.0:
+  `quic.unixWallClockUs` did not compile on Zig 0.17.0 (no test
+  referenced it), `Server.adoptLoopThread()` for a thread handoff,
+  and `Server.feed`'s in-place contract in its doc.
+
+**v0.30.0 did not compile on Windows**: `unixWallClockUs` through
+libc's `clock_gettime`, which Windows' libc has not (`std.c.timespec`
+is `void` there), and the new test that keeps the function compiled
+took the Windows test binary down. The `test` workflow's Windows job
+said so on the tag; `just check-windows` was not run before it. A
+tag is a tag: **v0.30.1** (tag `ccf6ae2`, the same day) is v0.30.0
+with `RtlGetSystemTimePrecise` on Windows and a ticket-lifetime
+test's tolerance (599 for 600 on the Windows runner in Debug:
+BoringSSL counts a ticket's lifetime down from its making). Nothing
+else differs. Lesson, now in the sprint rules: `mise exec -- just
+check-windows` before every tag.
+
+MEASURED for the sprint (12 or 10 runs each, before -> after): client
+x quiche x handshakecorruption 7 and 8 of 10 (two control images) ->
+9, then 7 of 10 (no signal at N = 10: every failed handshake is
+quiche's own server backoff, which doubles while our Initial probes
+only get ACKs); client x quic-go handshakeloss + handshakecorruption
+10 of 10 -> 10 of 10; server x quiche handshakeloss 9 of 10 -> 9 of
+10; the wide matrix on the release code client 43/0/2 and server
+40/1/4 (quiche x multiplexing, the known flaky cell); 18 bench cells
+byte-identical, the two-CUBIC fairness cell Jain 0.9823 -> 0.9640
+(one deterministic trajectory: the old rule's spurious cuts were an
+accidental equalizer), the BBR cells identical; a ClientHello lost
+eight times in a row completes at 4 s (8 s before).
+
+**The gates on `ccf6ae2`**, each read at its evidence line.
+
+- `test`: seven jobs green, the Windows one included; 2,005 of 2,021
+  tests in Debug (16 skipped) on the Unix jobs and the 32-bit leg,
+  1,965 of 1,981 in ReleaseSafe, 1,942 of 1,981 on Windows (39
+  skipped); `check-modes: 6 of 6 as expected`; `consumer-smoke ok:
+  quic-zig 0.30.1`.
+- rc-fuzz (run 37528416253): `n_runs=2,200,545 unique_runs=11,959
+  pcs_len=45,166`, `coverage verified: instrumented, 2,200,545
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop`: `interop evidence: pairs=1 cells=2 succeeded=2
+  failed=0 known_failed=0 unsupported=0`.
+- QNS image: built and pushed from that commit (digest `1f698440…`).
+- pin-lint: `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl
+  pins of quic-zig and http3-zig byte-for-byte identical.
+- A fresh consumer from an archive of the tag (hash
+  `quic-0.30.1-DnSYvVnOOwBfpDxHQWI41E6YxM1RqqkCuven5bK46jXR`):
+  `consumer-smoke ok: quic-zig 0.30.1`.
