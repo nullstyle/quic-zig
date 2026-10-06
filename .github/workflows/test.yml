@@ -5,6 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # By hand, for the 32-bit leg alone: a sanitizer mode and a test
+  # filter, to read what UBSan says about a test that traps on that
+  # target (the x86-64 host of a developer cannot run the binaries).
+  workflow_dispatch:
+    inputs:
+      sanitize_c:
+        description: "-Dsanitize-c for the 32-bit leg (off, trap, full)"
+        default: "full"
+      test_filter:
+        description: "-Dtest-filter for the 32-bit leg (empty = all)"
+        default: ""
 
 # quic-zig tracks the project toolchain via mise.toml, so CI uses
 # jdx/mise-action to install the same Zig and helper tools as local
@@ -12,6 +23,8 @@ on:
 # itself during build.
 jobs:
   build-test:
+    # A dispatch by hand is for the 32-bit leg alone.
+    if: github.event_name != 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -145,6 +158,7 @@ jobs:
 
   sanitizer:
     name: sanitizer (sanitize-c=full)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -235,4 +249,14 @@ jobs:
       # entry and FINDING-2026-10-05-boringssl-p256-ubsan-32-bit in
       # the project's handoff notes.
       - name: zig build test -Dtarget=x86-linux-musl -Dsanitize-c=off
+        if: github.event_name != 'workflow_dispatch'
         run: zig build test -Dtarget=x86-linux-musl -Dsanitize-c=off --summary all
+
+      - name: zig build test -Dtarget=x86-linux-musl (by hand, with a sanitizer mode and a filter)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ -n "${{ inputs.test_filter }}" ]; then
+            zig build test -Dtarget=x86-linux-musl -Dsanitize-c=${{ inputs.sanitize_c }} -Dtest-filter="${{ inputs.test_filter }}" --summary all
+          else
+            zig build test -Dtarget=x86-linux-musl -Dsanitize-c=${{ inputs.sanitize_c }} --summary all
+          fi
