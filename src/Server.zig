@@ -78,6 +78,7 @@
 const Server = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const boringssl = @import("boringssl");
 
 const conn_mod = @import("conn/root.zig");
@@ -480,6 +481,11 @@ new_token_key: ?conn_mod.NewTokenKey,
 /// Captured `Config.new_token_lifetime_us`. Only consulted when
 /// `new_token_key` is non-null.
 new_token_lifetime_us: u64,
+/// Captured `Config.new_token_clock`: the clock that NEW_TOKEN times
+/// are stamped and checked with, or null for the `now_us` of `feed`.
+new_token_clock: ?*const fn () u64,
+/// Captured `Config.new_token_max_clock_skew_us`.
+new_token_max_clock_skew_us: u64,
 
 /// Resolved from `Config.early_data` at `init`. Drives the
 /// `early_data_enabled` knob on TLS contexts auto-built by
@@ -499,6 +505,9 @@ enable_0rtt: bool,
 /// `Server` value may be moved after `init` returns. Cleared with
 /// `secureZero` and freed in `deinit`.
 session_ticket_ring: ?*tls_mod.session_ticket.Ring,
+/// The thread of the first `feed` or `tick` (Debug builds only; see
+/// `checkLoopThread`).
+loop_thread: ?std.Thread.Id = null,
 /// Captured `Config.session_ticket_lifetime_s`, for the contexts
 /// that a `.pem` reload builds. Null leaves BoringSSL's 2 days.
 session_ticket_lifetime_s: ?u32,
@@ -893,6 +902,17 @@ pub fn init(config: Config) Error!Server {
         const ring = try config.allocator.create(tls_mod.session_ticket.Ring);
         ring.* = .init(key);
         ticket_ring = ring;
+        // A previous key at start: see `Config.previous_session_ticket_key`.
+        if (config.previous_session_ticket_key) |old| {
+            if (tls_mod.session_ticket.isAllZero(&old)) return Error.InvalidConfig;
+            if (std.mem.eql(u8, old[0..tls_mod.session_ticket.name_len], key[0..tls_mod.session_ticket.name_len])) return Error.InvalidConfig;
+            ring.previous = old;
+            // `maxInt` = not anchored yet: the first `feed` or `tick`
+            // sets one lifetime from its `now_us` (see `anchorPreviousTicketKey`).
+            ring.previous_expires_at_us = config.previous_session_ticket_key_until_us orelse std.math.maxInt(u64);
+        }
+    } else if (config.previous_session_ticket_key != null) {
+        return Error.InvalidConfig;
     }
 
     var tls_ctx: boringssl.tls.Context = undefined;
@@ -987,6 +1007,8 @@ pub fn init(config: Config) Error!Server {
         .retry_state_table_capacity = config.retry_state_table_capacity,
         .new_token_key = config.new_token_key,
         .new_token_lifetime_us = config.new_token_lifetime_us,
+        .new_token_clock = config.new_token_clock,
+        .new_token_max_clock_skew_us = config.new_token_max_clock_skew_us,
         .enable_0rtt = config.early_data.enabled(),
         .early_data_anti_replay = config.early_data.antiReplayTracker(),
         .session_ticket_ring = ticket_ring,
@@ -1242,11 +1264,41 @@ pub fn deinit(self: *Server) void {
 /// bytes; `new_key` has the same key name (its first 16 bytes) as the
 /// current key, because a ticket names its key by those bytes alone.
 pub fn rotateSessionTicketKey(self: *Server, new_key: SessionTicketKey, now_us: u64) Error!void {
+    self.checkLoopThread();
     const ring = self.session_ticket_ring orelse return Error.InvalidConfig;
     if (tls_mod.session_ticket.isAllZero(&new_key)) return Error.InvalidConfig;
     const lifetime_s: u64 = self.session_ticket_lifetime_s orelse tls_mod.session_ticket.default_lifetime_s;
     const expires_at_us = now_us +| lifetime_s * std.time.us_per_s;
     ring.rotate(new_key, expires_at_us) catch return Error.InvalidConfig;
+}
+
+/// The clock of `feed` and `tick` moved to `now_us`: an old ticket key
+/// whose time is over goes, and a previous key given at start
+/// (`Config.previous_session_ticket_key`) with no time of its own gets
+/// one lifetime from the first call.
+fn expireTicketKeys(self: *Server, now_us: u64) void {
+    const ring = self.session_ticket_ring orelse return;
+    if (ring.previous != null and ring.previous_expires_at_us == std.math.maxInt(u64)) {
+        const lifetime_s: u64 = self.session_ticket_lifetime_s orelse tls_mod.session_ticket.default_lifetime_s;
+        ring.previous_expires_at_us = now_us +| lifetime_s * std.time.us_per_s;
+    }
+    _ = ring.expire(now_us);
+}
+
+/// In a Debug build: `rotateSessionTicketKey` on a thread that is not
+/// the one of `feed` and `tick` is a programming error that tears the
+/// keys the handshakes read (asked for by capnp-zig). The loop thread
+/// is the thread of the first `feed` or `tick`. Not in release builds:
+/// the Server has no lock, and this check is a cheap tripwire, not a
+/// lock.
+fn checkLoopThread(self: *Server) void {
+    if (builtin.mode != .debug) return;
+    const me = std.Thread.getCurrentId();
+    if (self.loop_thread) |loop| {
+        std.debug.assert(loop == me);
+    } else {
+        self.loop_thread = me;
+    }
 }
 
 /// Number of live connections currently in the table.
@@ -1275,17 +1327,18 @@ pub fn iterator(self: *Server) []*Slot {
 ///
 /// One thing needs a clock that goes on ACROSS a restart: a
 /// `Config.new_token_key` that the next process is given too. A
-/// NEW_TOKEN holds the `now_us` at which it was made, and a token
-/// "from the future" is not valid. With a clock that starts at zero
-/// in each process, the new process reads the tokens of the one
-/// before it as not yet valid until its own uptime passes their
-/// issue time, and answers those clients with a Retry (if
-/// `retry_token_key` is set) or takes them with no validation.
-/// From that moment it takes such a token for one token lifetime of
-/// its OWN clock, however old the token is by then: the key that
-/// lives on, with a clock that does not, also undoes
-/// `new_token_lifetime_us`.
-/// Microseconds since the Unix epoch are a clock that goes on.
+/// NEW_TOKEN holds the time at which it was made, and a token "from
+/// the future" is not valid. With a clock that starts at zero in
+/// each process, the new process reads the tokens of the one before
+/// it as not yet valid until its own uptime passes their issue time,
+/// and answers those clients with a Retry (if `retry_token_key` is
+/// set) or takes them with no validation. From that moment it takes
+/// such a token for one token lifetime of its OWN clock, however old
+/// the token is by then: the key that lives on, with a clock that
+/// does not, also undoes `new_token_lifetime_us`. So the tokens get
+/// a clock of their own: `Config.new_token_clock` (for example
+/// `quic.unixWallClockUs`), with `new_token_max_clock_skew_us` for
+/// the jumps of a wall clock. `now_us` stays the timer clock.
 /// (Session tickets do not have this problem: TLS ages them on the
 /// wall clock by itself.)
 ///
@@ -1327,6 +1380,7 @@ pub fn feedWithEcn(
     // log rate limit against in-feed time without taking a separate
     // clock argument.
     self.last_feed_now_us = now_us;
+    self.checkLoopThread();
     // Push the same `now_us` to the anti-replay tracker so its
     // BoringSSL `allow_early_data` trampoline (which has no other
     // path to a monotonic clock) ages entries against
@@ -1336,7 +1390,7 @@ pub fn feedWithEcn(
     // A ticket key that was rotated out stops opening tickets one
     // ticket lifetime after the rotation. Checked here so that the
     // handshake this datagram may start already sees it.
-    if (self.session_ticket_ring) |ring| _ = ring.expire(now_us);
+    self.expireTicketKeys(now_us);
     // Global DoS backstop: listener-level packet + byte rate
     // limits. Runs *before* the empty-bytes check, before the
     // 1200-byte Initial size gate, before slot lookup — every
@@ -1676,6 +1730,24 @@ pub fn feedWithEcn(
         self.retries_validated += 1;
     }
     try self.dispatchToSlot(slot, bytes, from, now_us);
+    // A connection that could open NO packet of the datagram that made
+    // it is not a connection: the datagram was a server's first flight
+    // (an embedder that shares a socket between a Server and its own
+    // dials), or junk with a long header. Until v0.28.1 it stayed, half
+    // open, until the handshake timeout, and `feed` said `.accepted`.
+    // MEASURED 2026-10-05: another server's 1200-byte first flight gave
+    // `.accepted` and one connection that lived 11 to 30 s; qmesh-zig's
+    // dials never saw their answers (found by the bugnest session).
+    // A client whose Initial opens and then fails in TLS is not this
+    // case: its packet opened, and the close says why. Nor is a
+    // packet that authenticated and was then refused (reserved bits,
+    // RFC 9000 §17.2.1): the connection closed itself, and the peer
+    // is owed that CONNECTION_CLOSE.
+    if (slot.conn.qlog_packets_received == 0 and slot.conn.closeState() == .open) {
+        self.discardStillbornSlot(slot);
+        self.feeds_dropped += 1;
+        return .dropped;
+    }
     try self.resyncSlotCids(slot);
     // Same first-post-handshake checks the routed path runs — a
     // pathological 0-RTT-only handshake might confirm in the very
@@ -1735,9 +1807,10 @@ pub fn poll(
 /// draining-state slots stay in the loop so their deadlines fire
 /// and the connection eventually transitions to terminal closed.
 pub fn tick(self: *Server, now_us: u64) ConnectionError!void {
+    self.checkLoopThread();
     // Clear a rotated-out ticket key when its time is over, also on a
     // server that gets no datagram.
-    if (self.session_ticket_ring) |ring| _ = ring.expire(now_us);
+    self.expireTicketKeys(now_us);
     for (self.slots.items) |slot| {
         if (slot.conn.closeState() == .closed) continue;
         try slot.conn.tick(now_us);
@@ -1810,6 +1883,21 @@ pub fn reap(self: *Server) usize {
 }
 
 const releaseGeneration = server_tls.releaseGeneration;
+
+/// Take down a slot that `feed` made for a datagram of which no packet
+/// opened (see `feedWithEcn`). The embedder never saw this slot: no
+/// `connection_accepted` log, no `on_connection_will_close`, no
+/// `connection_closed` log. The slot must be the last one appended.
+fn discardStillbornSlot(self: *Server, slot: *Slot) void {
+    std.debug.assert(self.slots.items.len > 0 and self.slots.items[self.slots.items.len - 1] == slot);
+    self.dropAllCidsFromTable(slot);
+    const generation = slot.tls_generation;
+    slot.conn.destroy();
+    if (slot.pending_upgrade) |pu| self.allocator.destroy(pu);
+    self.allocator.destroy(slot);
+    _ = self.slots.pop();
+    self.releaseGeneration(generation);
+}
 
 /// Queue `CONNECTION_CLOSE` on every live slot. Embedders should
 /// keep polling and ticking until each slot becomes `.closed`,

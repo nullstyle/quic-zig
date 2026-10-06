@@ -535,15 +535,13 @@ retry_state_table_capacity: u32 = 4096,
 /// rotation every time the operator rotated the Retry key.
 ///
 /// If the next process gets the same key (so that a returning
-/// client skips the Retry also after a restart), the `now_us` that
-/// you feed must go on across the restart too, for example
-/// microseconds since the Unix epoch. A token holds the `now_us` it
-/// was made at; with a clock that starts at zero in each process
-/// the tokens of the process before read as not yet valid. See
-/// `Server.feed`. The bundled loop (`transport.runUdpServer`) feeds
-/// such a clock: with it, a key from the process before does not
-/// save the Retry, and it lets old tokens through after their
-/// lifetime. Do not give that loop a key that outlives the process.
+/// client skips the Retry also after a restart), the clock that
+/// stamps and checks the tokens must go on across the restart too:
+/// set `new_token_clock` (for example `quic.unixWallClockUs`). With
+/// the default, the `now_us` of `feed`, a clock that starts at zero
+/// in each process (the bundled loop's does) reads the tokens of the
+/// process before as not yet valid, and later as younger than they
+/// are. See `Server.feed`.
 new_token_key: ?conn_mod.NewTokenKey = null,
 /// Lifetime of a minted NEW_TOKEN in microseconds. Returning
 /// clients presenting a token older than this fall through to
@@ -552,6 +550,27 @@ new_token_key: ?conn_mod.NewTokenKey = null,
 /// returning user a day later still skips Retry, short enough
 /// that a stolen token's window of misuse is bounded.
 new_token_lifetime_us: u64 = 24 * 3600 * 1_000_000,
+/// The clock that NEW_TOKEN times are stamped and checked with
+/// (microseconds). Null, the default: the `now_us` of `feed`, which
+/// is the timer clock, and a timer clock starts at zero in each
+/// process (the bundled loop's does). Set it to a clock that goes on
+/// across a restart, so that a `new_token_key` the next process is
+/// given too lets returning clients skip the Retry, and so that an
+/// old token is not taken after its lifetime: `quic.unixWallClockUs`
+/// (microseconds since the Unix epoch) is one. A wall clock can jump;
+/// `new_token_max_clock_skew_us` absorbs small jumps. The timer clock
+/// stays what it is: one clock cannot be both a timer that never
+/// jumps and a time that agrees across processes (asked for by
+/// capnp-zig, 2026-10-04).
+new_token_clock: ?*const fn () u64 = null,
+/// How far a NEW_TOKEN's times may be off the clock when it is
+/// checked, in microseconds: a token from the future by at most this
+/// much is taken, and one past its expiry by at most this much too.
+/// Default 0 (no skew). A few seconds absorb a wall clock that
+/// stepped back between the process that made the token and the one
+/// that checks it (`new_token_clock`), or a monotonic clock that ran
+/// fast over a long uptime.
+new_token_max_clock_skew_us: u64 = 0,
 
 /// QUIC 0-RTT (early data) posture on the auto-built TLS context
 /// (replaces `enable_0rtt: bool` + `early_data_anti_replay: ?*T`
@@ -656,6 +675,26 @@ session_ticket_key: ?SessionTicketKey = null,
 /// TLS reads the wall clock for this, not the `now_us` that `feed`
 /// and `tick` are given.
 session_ticket_lifetime_s: ?u32 = null,
+
+/// The ticket key before `session_ticket_key`, for a process that
+/// starts less than one ticket lifetime after a key change: it still
+/// OPENS the tickets sealed under this key (0-RTT too), as
+/// `Server.rotateSessionTicketKey` keeps the old key in a running
+/// process. New tickets are sealed under `session_ticket_key`. Null
+/// (the default): the process has one key. `init` returns
+/// `InvalidConfig` for a previous key with no `session_ticket_key`,
+/// a previous key of 48 zero bytes, or one with the 16-byte name of
+/// `session_ticket_key`. (Asked for by capnp-zig after v0.27.0,
+/// whose way out was to start with the old key and rotate at once.)
+previous_session_ticket_key: ?SessionTicketKey = null,
+/// When `previous_session_ticket_key` stops opening tickets, on the
+/// clock of `feed` and `tick`. Null (the default): one ticket
+/// lifetime after the first `feed` or `tick`, which is right for a
+/// clock that starts at zero in each process, and a little long for
+/// one that goes on. With a clock that goes on across the restart,
+/// give the time of the key change plus one lifetime, and the old key
+/// ends when it would have ended.
+previous_session_ticket_key_until_us: ?u64 = null,
 
 /// Whether to encode the locally-recorded close-reason string into
 /// outgoing CONNECTION_CLOSE frames. Default `false` (redact) per

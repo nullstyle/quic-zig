@@ -48,7 +48,13 @@ const ServerOptions = struct {
     transport_params: ?quic.tls.TransportParams = null,
     ticket_key: ?quic.SessionTicketKey = null,
     ticket_lifetime_s: ?u32 = null,
+    previous_key: ?quic.SessionTicketKey = null,
+    previous_until_us: ?u64 = null,
 };
+
+/// The client's own ticket limit (`Client.Config.session_ticket_lifetime_s`)
+/// for the clients that `newClient` makes; null = BoringSSL's 2 days.
+var client_ticket_limit_s: ?u32 = null;
 
 /// A test key whose three parts (key name, HMAC key, AES key; 16
 /// bytes each) all differ, and that differs from the key of another
@@ -105,6 +111,8 @@ fn newServer(allocator: std.mem.Allocator, opts: ServerOptions) !quic.Server {
         .retry_token_key = if (opts.retry) retry_key else null,
         .session_ticket_key = opts.ticket_key,
         .session_ticket_lifetime_s = opts.ticket_lifetime_s,
+        .previous_session_ticket_key = opts.previous_key,
+        .previous_session_ticket_key_until_us = opts.previous_until_us,
     });
 }
 
@@ -118,6 +126,7 @@ fn newClient(allocator: std.mem.Allocator, sink: ?*EnvelopeSink, envelope: ?[]co
         .new_session_callback = if (sink != null) EnvelopeSink.cb else null,
         .new_session_user_data = sink,
         .resumption_state = envelope,
+        .session_ticket_lifetime_s = client_ticket_limit_s,
     });
 }
 
@@ -1162,4 +1171,137 @@ test "0-RTT: after the handshake the server's new limits replace the remembered 
     _ = try cli.conn.openBidi(12);
     _ = try cli.conn.openBidi(16);
     try std.testing.expectError(error.StreamLimitExceeded, cli.conn.openBidi(20));
+}
+
+// ------------------------------------------- a previous key at start
+
+test "previous key at start: a process that starts with the new key and the old one opens the tickets of both" {
+    // Lifetime 10 s. The process before rotated from A to B at 100 s
+    // and gave a ticket under each key. The next process starts with
+    // B as its key and A as the previous one, with the old time (110 s):
+    // both tickets resume with 0-RTT, and A ends at 110 s.
+    const allocator = std.testing.allocator;
+    var ticket_a: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_a.deinit();
+    var ticket_b: EnvelopeSink = .{ .allocator = allocator };
+    defer ticket_b.deinit();
+    {
+        var before = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 10 });
+        defer before.deinit();
+        try earnTicket(allocator, &before, &ticket_a, 1321);
+        try before.rotateSessionTicketKey(key_b, 100 * us_per_s);
+        try earnTicket(allocator, &before, &ticket_b, 1322);
+    }
+
+    var srv = try newServer(allocator, .{ .ticket_key = key_b, .ticket_lifetime_s = 10, .previous_key = key_a, .previous_until_us = 110 * us_per_s });
+    defer srv.deinit();
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+    try std.testing.expectEqualSlices(u8, &key_a, &previousKey(&srv).?);
+
+    const old = try resumeWith(allocator, &srv, ticket_a.captured.?, 2321, .{ .start_us = 104 * us_per_s });
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, old.status);
+    try std.testing.expect(old.read_before_handshake_done);
+    const new = try resumeWith(allocator, &srv, ticket_b.captured.?, 2322, .{ .start_us = 105 * us_per_s });
+    try std.testing.expectEqual(quic.EarlyDataStatus.accepted, new.status);
+    try std.testing.expect(new.read_before_handshake_done);
+
+    // The time given is the end, not one lifetime from the start.
+    var edge = try newServer(allocator, .{ .ticket_key = key_b, .ticket_lifetime_s = 10, .previous_key = key_a, .previous_until_us = 110 * us_per_s });
+    defer edge.deinit();
+    try edge.tick(110 * us_per_s - 1);
+    try std.testing.expect(previousKey(&edge) != null);
+    try edge.tick(110 * us_per_s);
+    try std.testing.expect(previousKey(&edge) == null);
+}
+
+test "previous key at start: with no time given, the old key ends one lifetime after the first tick or feed" {
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_b, .ticket_lifetime_s = 10, .previous_key = key_a });
+    defer srv.deinit();
+    try std.testing.expect(previousKey(&srv) != null);
+    // The first tick anchors the time: 7 s + 10 s.
+    try srv.tick(7 * us_per_s);
+    try std.testing.expect(previousKey(&srv) != null);
+    try srv.tick(17 * us_per_s - 1);
+    try std.testing.expect(previousKey(&srv) != null);
+    try srv.tick(17 * us_per_s);
+    try std.testing.expect(previousKey(&srv) == null);
+    try std.testing.expectEqualSlices(u8, &key_b, &sealingKey(&srv).?);
+
+    // A datagram anchors it as well.
+    var by_feed = try newServer(allocator, .{ .ticket_key = key_b, .previous_key = key_a });
+    defer by_feed.deinit();
+    const addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0x45), .port = 4545 } };
+    var junk: [40]u8 = @splat(0x41);
+    _ = try by_feed.feed(&junk, addr, 3 * us_per_s);
+    const two_days_us: u64 = 2 * 24 * 60 * 60 * us_per_s;
+    _ = try by_feed.feed(&junk, addr, 3 * us_per_s + two_days_us - 1);
+    try std.testing.expect(previousKey(&by_feed) != null);
+    _ = try by_feed.feed(&junk, addr, 3 * us_per_s + two_days_us);
+    try std.testing.expect(previousKey(&by_feed) == null);
+}
+
+test "previous key at start: refused with no key, for a zero key, and for a key with the name of the current one" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidConfig, newServer(allocator, .{ .previous_key = key_a }));
+    try std.testing.expectError(error.InvalidConfig, newServer(allocator, .{ .ticket_key = key_b, .previous_key = @splat(0) }));
+    var same_name = key_a;
+    @memcpy(same_name[0..16], key_b[0..16]);
+    try std.testing.expectError(error.InvalidConfig, newServer(allocator, .{ .ticket_key = key_b, .previous_key = same_name }));
+}
+
+// ------------------------------------------- the client's own limit
+
+test "ticket lifetime at the client: a BoringSSL client keeps a ticket for 2 days at most, unless its own limit is raised" {
+    // The server says 7 days. A client with the default limit keeps
+    // the ticket for 2 days; a client whose limit is 7 days keeps it
+    // for 7. The lifetime kept is read from the saved envelope.
+    const allocator = std.testing.allocator;
+    var srv = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 604800 });
+    defer srv.deinit();
+
+    var capped: EnvelopeSink = .{ .allocator = allocator };
+    defer capped.deinit();
+    try earnTicket(allocator, &srv, &capped, 1331);
+    try std.testing.expectEqual(@as(u32, 172800), try quic.Client.resumptionTicketLifetimeSeconds(capped.captured.?));
+
+    client_ticket_limit_s = 604800;
+    defer client_ticket_limit_s = null;
+    var raised: EnvelopeSink = .{ .allocator = allocator };
+    defer raised.deinit();
+    try earnTicket(allocator, &srv, &raised, 1332);
+    try std.testing.expectEqual(@as(u32, 604800), try quic.Client.resumptionTicketLifetimeSeconds(raised.captured.?));
+
+    // The smaller of the two: a server lifetime of 600 s stays 600 s
+    // at a client that allows 7 days.
+    var short = try newServer(allocator, .{ .ticket_key = key_a, .ticket_lifetime_s = 600 });
+    defer short.deinit();
+    var ten_minutes: EnvelopeSink = .{ .allocator = allocator };
+    defer ten_minutes.deinit();
+    try earnTicket(allocator, &short, &ten_minutes, 1333);
+    try std.testing.expectEqual(@as(u32, 600), try quic.Client.resumptionTicketLifetimeSeconds(ten_minutes.captured.?));
+
+    // Not an envelope: an error, not a number.
+    try std.testing.expectError(error.InvalidFormat, quic.Client.resumptionTicketLifetimeSeconds("not an envelope"));
+}
+
+test "ticket lifetime at the client: connect refuses 0, more than 7 days, and a limit with a context of the embedder" {
+    const allocator = std.testing.allocator;
+    client_ticket_limit_s = 0;
+    defer client_ticket_limit_s = null;
+    try std.testing.expectError(error.InvalidConfig, newClient(allocator, null, null));
+    client_ticket_limit_s = 604801;
+    try std.testing.expectError(error.InvalidConfig, newClient(allocator, null, null));
+    client_ticket_limit_s = null;
+
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    try std.testing.expectError(error.InvalidConfig, quic.Client.connect(.{
+        .allocator = allocator,
+        .server_name = "localhost",
+        .alpn_protocols = &protos,
+        .transport_params = common.defaultParams(),
+        .tls_context_override = ctx,
+        .session_ticket_lifetime_s = 3600,
+    }));
 }

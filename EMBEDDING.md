@@ -1147,15 +1147,17 @@ var server = try quic.Server.init(.{
   or `.disabled`, which keeps resumption and drops 0-RTT.
 - **Source validation after a restart.** A `new_token_key` that is
   the same after the restart lets a returning client skip the Retry,
-  but only if the clock you feed (`now_us`) also goes on across the
-  restart, for example microseconds since the Unix epoch: a NEW_TOKEN
-  holds the time it was made at, and a clock that starts at zero in
-  each process reads the tokens of the process before it as not yet
-  valid, and after that as younger than they are (it takes them for
-  one token lifetime of its own clock). The bundled loop
-  (`quic.transport.runUdpServer`) feeds a clock that starts at zero:
-  do not give it a `new_token_key` that outlives the process. When the
-  server does answer with a Retry, the client sends
+  but only if the clock that stamps and checks the tokens goes on
+  across the restart: set `new_token_clock = quic.unixWallClockUs`
+  (microseconds since the Unix epoch) and a
+  `new_token_max_clock_skew_us` of a few seconds. Without it the
+  tokens use the `now_us` of `feed`, and a clock that starts at zero
+  in each process (the bundled loop's does) reads the tokens of the
+  process before it as not yet valid, and after that as younger than
+  they are (it takes them for one token lifetime of its own clock).
+  `now_us` stays your timer clock: a wall clock can jump, and the
+  timers must not. When the server does answer with a Retry, the
+  client sends
   its 0-RTT data again after it (since 0.27.0), so the data still
   arrives before the handshake is done, one round trip later.
   `Connection.retryAccepted()` tells a client that this happened.

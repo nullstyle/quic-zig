@@ -282,6 +282,18 @@ pub const Config = struct {
     new_session_callback: ?NewSessionCallbackImpl = null,
     new_session_user_data: ?*anyopaque = null,
 
+    /// How long this client keeps a session ticket at most, in
+    /// seconds, whatever lifetime the server gave it: a client keeps
+    /// a ticket for the smaller of the two. Null, the default, leaves
+    /// BoringSSL's 2 days, so a server lifetime above 2 days
+    /// (`Server.Config.session_ticket_lifetime_s`) has no effect on a
+    /// quic-zig client unless this is raised too. Allowed: 1 to 604800
+    /// (7 days); anything else, or a value together with
+    /// `tls_context_override`, fails `connect` with
+    /// `Error.InvalidConfig`. The ticket's own value, as kept, is
+    /// `resumptionTicketLifetimeSeconds` of the envelope.
+    session_ticket_lifetime_s: ?u32 = null,
+
     /// QUIC wire-format version the client puts on its first
     /// Initial. RFC 9000 §15: defaults to v1
     /// (`quic.QUIC_VERSION_1`). Embedders that want v2
@@ -401,6 +413,42 @@ fn newSessionEnvelopeTrampoline(user_data: ?*anyopaque, session_in: boringssl.tl
     holder.cb(holder.user_data, envelope);
 }
 
+pub const ResumptionStateError = tls_mod.resumption_state.Error || error{
+    /// The envelope's session bytes are not a session BoringSSL reads.
+    SessionParseFailed,
+    OutOfMemory,
+};
+
+/// The lifetime of the session ticket in `envelope` (bytes from
+/// `Config.new_session_callback`), in seconds, as this client keeps
+/// it: the smaller of what the server said and the client's own limit
+/// (`Config.session_ticket_lifetime_s`, 2 days by default). A ticket
+/// that is older than that at the next `connect` is not offered; the
+/// connection then runs a full handshake. Counted from the moment the
+/// ticket was made, which is not in the envelope: keep that time
+/// beside it.
+///
+/// This reads the session with BoringSSL, so it builds and frees a
+/// TLS context for the call: a few hundred microseconds. Call it once
+/// per envelope, not per connect. (capnp-zig read
+/// `SSL_SESSION_from_bytes` and `SSL_SESSION_get_timeout` through
+/// `boringssl.raw` for this; those stay, but this is the supported
+/// way.)
+pub fn resumptionTicketLifetimeSeconds(envelope: []const u8) ResumptionStateError!u32 {
+    const decoded = try tls_mod.resumption_state.decode(envelope);
+    var ctx = boringssl.tls.Context.initClient(.{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.SessionParseFailed,
+    };
+    defer ctx.deinit();
+    var session = boringssl.tls.Session.fromBytes(ctx, decoded.session_ticket) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.SessionParseFailed,
+    };
+    defer session.deinit();
+    return boringssl.raw.zbssl_SSL_SESSION_get_timeout(session.inner);
+}
+
 /// Errors produced by `Client.connect`. Distinct from
 /// `Connection.Error` so the embedder can distinguish configuration
 /// mistakes from per-handshake failures. Re-exported as `Client.Error`.
@@ -476,6 +524,10 @@ pub fn connect(config: Config) Error!Client {
     // an override context owns its own trust anchors and identity.
     // Rejecting the combination keeps the old failure mode (a CA
     // the embedder believes is pinned but is not) impossible.
+    if (config.session_ticket_lifetime_s) |seconds| {
+        if (!tls_mod.session_ticket.isValidLifetime(seconds)) return Error.InvalidConfig;
+        if (config.tls_context_override != null) return Error.InvalidConfig;
+    }
     if (config.tls_context_override != null) {
         if (config.ca_pem != null) return Error.InvalidConfig;
         if (config.client_cert_pem != null or config.client_key_pem != null) {
@@ -561,6 +613,10 @@ pub fn connect(config: Config) Error!Client {
         owns_tls = true;
     }
     errdefer if (owns_tls) tls_ctx.deinit();
+    if (config.session_ticket_lifetime_s) |seconds| {
+        // Checked above: only with the auto-built context.
+        tls_mod.session_ticket.setLifetime(tls_ctx, seconds);
+    }
 
     // Install the PEM credentials on the auto-built context (both
     // are rejected up front when combined with an override). The

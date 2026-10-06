@@ -23,19 +23,17 @@
 //! monotonically non-decreasing for the lifetime of the server.
 //!
 //! That clock starts at zero each time the loop starts. One thing
-//! does not work with it: a `Config.new_token_key` that the next
-//! process is given too. A NEW_TOKEN holds the `now_us` it was made
-//! at, so the restarted loop reads the tokens of the loop before it
-//! as not yet valid until its own uptime passes their issue time, and
-//! answers those clients with a Retry (or takes them with no
-//! validation). After that it takes them for one token lifetime of
-//! its own clock, however old they are. See `Server.feed`. So do not
-//! give this loop a `new_token_key` that outlives the process.
-//! Session tickets are not touched by
-//! this (TLS ages them on the wall clock). An embedder that needs its
-//! NEW_TOKENs to live through a restart drives `Server.feed` itself,
-//! with a clock that goes on: for example the wall clock at start
-//! plus a monotonic clock from there.
+//! does not work with it alone: a `Config.new_token_key` that the
+//! next process is given too. A NEW_TOKEN holds the time it was made
+//! at; stamped with this clock, the restarted loop reads the tokens
+//! of the loop before it as not yet valid until its own uptime passes
+//! their issue time, and after that takes them for one token lifetime
+//! of its own clock, however old they are. So give the Server a clock
+//! of its own for the tokens: `Config.new_token_clock =
+//! quic.unixWallClockUs` (and a `new_token_max_clock_skew_us` of a
+//! few seconds). The timers keep this loop's clock. Session tickets
+//! are not touched by any of this (TLS ages them on the wall clock).
+//! See `Server.feed`.
 //!
 //! Shutdown
 //! --------

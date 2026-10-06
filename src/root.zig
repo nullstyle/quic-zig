@@ -67,6 +67,15 @@ pub const retry_token = conn.retry_token;
 /// I/O and path-tracking helpers later.
 pub const transport = @import("transport/root.zig");
 
+/// Microseconds since the Unix epoch, from the system's wall clock: a
+/// clock that goes on across a restart, for
+/// `Server.Config.new_token_clock`. Not for `feed` and `tick`: a wall
+/// clock can jump, and the timers must not.
+pub fn unixWallClockUs() u64 {
+    const t = std.time.microTimestamp();
+    return if (t < 0) 0 else @intCast(t);
+}
+
 /// qlog serialization (Unstable tier): `qlog.Writer` turns the
 /// `Connection.setQlogCallback` event stream into a standard JSON-SEQ
 /// `.sqlog` trace that qvis loads directly.

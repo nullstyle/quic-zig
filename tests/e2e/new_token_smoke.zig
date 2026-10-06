@@ -390,10 +390,26 @@ test "Server without Retry accepts a client that shows a token of the old size" 
     try std.testing.expectEqual(quic.Server.FeedOutcome.accepted, first);
 }
 
+/// A clock for the tokens that the tests below move by hand
+/// (`Config.new_token_clock`).
+var token_clock_us: u64 = 0;
+fn tokenClock() u64 {
+    return token_clock_us;
+}
+
+const TokenOptions = struct {
+    clock: ?*const fn () u64 = null,
+    skew_us: u64 = 0,
+};
+
 /// What a server with both token keys says to a first Initial that
 /// carries `token`, when the server's clock is at `now_us`. A new
 /// server and a new client for each call, so nothing is carried over.
 fn firstAnswerAt(token: []const u8, peer_addr: quic.conn.path.Address, now_us: u64) !quic.Server.FeedOutcome {
+    return firstAnswerWith(token, peer_addr, now_us, .{});
+}
+
+fn firstAnswerWith(token: []const u8, peer_addr: quic.conn.path.Address, now_us: u64, opts: TokenOptions) !quic.Server.FeedOutcome {
     const allocator = std.testing.allocator;
     const protos = [_][]const u8{"hq-test"};
     var srv = try quic.Server.init(.{
@@ -404,6 +420,8 @@ fn firstAnswerAt(token: []const u8, peer_addr: quic.conn.path.Address, now_us: u
         .transport_params = common.defaultParams(),
         .new_token_key = new_token_key,
         .retry_token_key = retry_key,
+        .new_token_clock = opts.clock,
+        .new_token_max_clock_skew_us = opts.skew_us,
     });
     defer srv.deinit();
 
@@ -461,4 +479,102 @@ test "A server whose clock starts again reads a token of the process before at t
     try std.testing.expectEqual(taken, try firstAnswerAt(&token, peer_addr, hour_us + s_us));
     try std.testing.expectEqual(taken, try firstAnswerAt(&token, peer_addr, hour_us + day_us - s_us));
     try std.testing.expectEqual(retry, try firstAnswerAt(&token, peer_addr, hour_us + day_us + s_us));
+}
+
+test "A clock of its own for the tokens: the age of a token is read from that clock, not from now_us" {
+    // The cure for the test above (`Config.new_token_clock`). The
+    // token is made at 1 h of the token clock. The next process has
+    // a timer clock that starts at zero again and the same token
+    // clock: it reads the token's age from the token clock.
+    const s_us: u64 = 1_000_000;
+    const hour_us: u64 = 3600 * s_us;
+    const day_us: u64 = 24 * hour_us;
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xd2), .port = 0 } };
+    var addr_buf: [quic.conn.path.Address.context_max_len]u8 = undefined;
+    var token: quic.conn.NewTokenBlob = undefined;
+    _ = try quic.conn.new_token.mint(&token, .{
+        .key = &new_token_key,
+        .now_us = hour_us,
+        .lifetime_us = day_us,
+        .client_address = peer_addr.writeContext(&addr_buf),
+    });
+    const retry = quic.Server.FeedOutcome.retry_sent;
+    const taken = quic.Server.FeedOutcome.accepted;
+    const with_clock: TokenOptions = .{ .clock = tokenClock };
+
+    // The timer clock says 10 s (a fresh process); the token clock
+    // says one second after the token was made: taken.
+    token_clock_us = hour_us + s_us;
+    try std.testing.expectEqual(taken, try firstAnswerWith(&token, peer_addr, 10 * s_us, with_clock));
+    // One second before the token's lifetime ends: taken; one after: a Retry.
+    token_clock_us = hour_us + day_us - s_us;
+    try std.testing.expectEqual(taken, try firstAnswerWith(&token, peer_addr, 10 * s_us, with_clock));
+    token_clock_us = hour_us + day_us + s_us;
+    try std.testing.expectEqual(retry, try firstAnswerWith(&token, peer_addr, 10 * s_us, with_clock));
+    // Before the token was made (the clock stepped back): not yet
+    // valid, a Retry; with an allowed skew of 2 s it is taken.
+    token_clock_us = hour_us - s_us;
+    try std.testing.expectEqual(retry, try firstAnswerWith(&token, peer_addr, 10 * s_us, with_clock));
+    try std.testing.expectEqual(taken, try firstAnswerWith(&token, peer_addr, 10 * s_us, .{ .clock = tokenClock, .skew_us = 2 * s_us }));
+}
+
+test "A clock of its own for the tokens: a server with it stamps the token it makes with that clock" {
+    // The first connection earns a NEW_TOKEN on a server whose token
+    // clock says 1 h while its timer clock says 1 ms. A new server
+    // with the same token clock at 1 h + 1 s and a timer clock at 1 s
+    // takes it; one whose token clock says a day later does not.
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    const s_us: u64 = 1_000_000;
+    const hour_us: u64 = 3600 * s_us;
+    const day_us: u64 = 24 * hour_us;
+    const peer_addr: quic.conn.path.Address = .{ .ipv4 = .{ .addr = @splat(0xd3), .port = 0 } };
+
+    var captured_token: [256]u8 = @splat(0);
+    var captured_len: usize = 0;
+    {
+        token_clock_us = hour_us;
+        var srv = try quic.Server.init(.{
+            .allocator = allocator,
+            .tls_cert_pem = common.test_cert_pem,
+            .tls_key_pem = common.test_key_pem,
+            .alpn_protocols = &protos,
+            .transport_params = common.defaultParams(),
+            .new_token_key = new_token_key,
+            .new_token_clock = tokenClock,
+        });
+        defer srv.deinit();
+        var capture: TokenCapture = .{};
+        var cli = try quic.Client.connect(.{
+            .insecure_skip_verify = true, // self-signed test cert
+            .allocator = allocator,
+            .server_name = "localhost",
+            .alpn_protocols = &protos,
+            .transport_params = common.defaultParams(),
+            .new_token_callback = TokenCapture.callback,
+            .new_token_user_data = &capture,
+        });
+        defer cli.deinit();
+        var rx: [4096]u8 = undefined;
+        try cli.conn.advance();
+        var step: u32 = 0;
+        while (step < 32) : (step += 1) {
+            const now_us: u64 = @as(u64, step) * 1_000;
+            _ = try pumpClientToServer(&cli, &srv, &rx, peer_addr, now_us);
+            while (srv.drainStatelessResponse()) |_| {}
+            _ = try pumpServerToClient(&srv, &cli, &rx, now_us);
+            try srv.tick(now_us);
+            try cli.conn.tick(now_us);
+            if (capture.fired) break;
+        }
+        try std.testing.expect(capture.fired);
+        @memcpy(captured_token[0..capture.len], capture.bytes[0..capture.len]);
+        captured_len = capture.len;
+    }
+    const token = captured_token[0..captured_len];
+    const with_clock: TokenOptions = .{ .clock = tokenClock };
+    token_clock_us = hour_us + s_us;
+    try std.testing.expectEqual(quic.Server.FeedOutcome.accepted, try firstAnswerWith(token, peer_addr, s_us, with_clock));
+    token_clock_us = hour_us + day_us + s_us;
+    try std.testing.expectEqual(quic.Server.FeedOutcome.retry_sent, try firstAnswerWith(token, peer_addr, s_us, with_clock));
 }

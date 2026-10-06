@@ -249,6 +249,14 @@ fn evictOldestSourceRate(server: *Server) void {
 
 // -- Version Negotiation -------------------------------------------
 
+/// The time a NEW_TOKEN is stamped or checked with: the clock of
+/// `Config.new_token_clock` when there is one, else the `now_us` of
+/// `feed` (see the field's doc for why the two differ).
+fn newTokenClock(server: *const Server, now_us: u64) u64 {
+    if (server.new_token_clock) |clock| return clock();
+    return now_us;
+}
+
 pub fn maybeIssueNewToken(
     server: *Server,
     slot: *Slot,
@@ -265,7 +273,7 @@ pub fn maybeIssueNewToken(
     var token: new_token_mod.Token = undefined;
     _ = new_token_mod.mint(&token, .{
         .key = key_ptr,
-        .now_us = now_us,
+        .now_us = newTokenClock(server, now_us),
         .lifetime_us = server.new_token_lifetime_us,
         .client_address = ctx,
         // Bind the connection's negotiated version. Validation on a
@@ -366,9 +374,10 @@ pub fn applyRetryGate(
             const ctx = addressContext(&addr_buf, addr);
             const result = new_token_mod.validate(token.?, .{
                 .key = nt_key,
-                .now_us = now_us,
+                .now_us = newTokenClock(server, now_us),
                 .client_address = ctx,
                 .quic_version = ids.version,
+                .max_clock_skew_us = server.new_token_max_clock_skew_us,
             });
             if (result == .valid) return .new_token_skip;
             // Fall through to Retry validation on malformed,
