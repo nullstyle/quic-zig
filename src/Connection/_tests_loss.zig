@@ -22,6 +22,7 @@ const SentPacketTracker = state.SentPacketTracker;
 const short_packet_mod = state.short_packet_mod;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const util = @import("_test_util.zig");
+const conn_loss = @import("loss.zig");
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
 const installTestEarlyDataWriteSecret = util.installTestEarlyDataWriteSecret;
 
@@ -184,13 +185,31 @@ test "PTO requeues application stream data and arms a probe" {
 
     try conn.tick(conn.ptoDurationForLevel(.application));
 
-    try std.testing.expectEqual(@as(u32, 0), app_sent.liveCount());
+    // RFC 9002 section 6.2.4: the packet is NOT lost. It stays in
+    // flight; its data goes again in the probe.
+    try std.testing.expectEqual(@as(u32, 1), app_sent.liveCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
     try std.testing.expect(!conn.pendingPingForLevel(.application).*);
     try std.testing.expectEqual(@as(u8, 1), conn.primaryPath().pto_probe_count);
     try std.testing.expectEqual(@as(u32, 1), conn.ptoCountForLevel(.application).*);
     const resent = s.send.peekChunk(100).?;
     try std.testing.expectEqual(@as(u64, 0), resent.offset);
     try std.testing.expectEqual(@as(u64, 5), resent.length);
+
+    // The old packet's ACK, after the copy went out: an ordinary ACK
+    // (the chunk's key is gone from the stream, and that is fine).
+    try s.send.recordSent(5, resent);
+    conn.pnSpaceForLevel(.application).next_pn = 6;
+    try conn.handleAckAtLevel(.application, .{
+        .largest_acked = 4,
+        .ack_delay = 0,
+        .first_range = 0,
+        .range_count = 0,
+        .ranges_bytes = &.{},
+        .ecn_counts = null,
+    }, 2 * conn.ptoDurationForLevel(.application));
+    try std.testing.expectEqual(@as(u32, 0), app_sent.liveCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
 }
 
 test "PTO requeues retransmittable control frames" {
@@ -214,6 +233,9 @@ test "PTO requeues retransmittable control frames" {
 
     try std.testing.expectEqual(@as(?u64, 4096), conn.pending_frames.max_data);
     try std.testing.expect(!conn.pendingPingForLevel(.application).*);
+    // The packet stays; nothing is lost (RFC 9002 section 6.2.4).
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.application).liveCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
 }
 
 test "a lost MAX_STREAMS frame is sent again while it carries the current limit" {
@@ -329,6 +351,60 @@ test "PTO arms PING when no retransmittable data can be requeued" {
 
     try conn.tick(conn.ptoDurationForLevel(.application));
 
+    try std.testing.expect(conn.pendingPingForLevel(.application).*);
+    try std.testing.expectEqual(@as(u32, 1), conn.ptoCountForLevel(.application).*);
+    // The packet stays; nothing is lost (RFC 9002 section 6.2.4).
+    try std.testing.expectEqual(@as(u32, 1), app_sent.liveCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
+}
+
+test "the application path's probe deadline runs from the LAST ack-eliciting packet sent (RFC 9002 A.8)" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    const app_sent = conn.sentForLevel(.application);
+    try app_sent.record(.{ .pn = 0, .sent_time_us = 10_000, .bytes = 90, .ack_eliciting = true, .in_flight = true });
+    try app_sent.record(.{ .pn = 1, .sent_time_us = 510_000, .bytes = 90, .ack_eliciting = true, .in_flight = true });
+    // A non-ack-eliciting packet later still does not move it.
+    try app_sent.record(.{ .pn = 2, .sent_time_us = 900_000, .bytes = 40, .ack_eliciting = false, .in_flight = false });
+    const pto = conn.ptoDurationForApplicationPath(conn.primaryPath());
+    try std.testing.expectEqual(@as(?u64, 510_000 + pto), conn_loss.ptoDeadlineForApplicationPath(conn, conn.primaryPath()));
+
+    // Not due at the oldest packet's time plus the timeout.
+    try conn.tick(10_000 + pto + 1);
+    try std.testing.expectEqual(@as(u32, 0), conn.ptoCountForLevel(.application).*);
+    // Due at the newest's.
+    try conn.tick(510_000 + pto + 1);
+    try std.testing.expectEqual(@as(u32, 1), conn.ptoCountForLevel(.application).*);
+}
+
+test "a probe timeout of a full tracker takes the oldest packet out: the escape, a probe needs a slot" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    const app_sent = conn.sentForLevel(.application);
+    var pn: u64 = 0;
+    while (pn < app_sent.capacity()) : (pn += 1) {
+        try app_sent.record(.{
+            .pn = pn,
+            .sent_time_us = pn,
+            .bytes = 90,
+            .ack_eliciting = true,
+            .in_flight = true,
+        });
+    }
+    try std.testing.expect(app_sent.isFull());
+
+    try conn.tick(app_sent.capacity() + conn.ptoDurationForLevel(.application));
+
+    try std.testing.expectEqual(app_sent.capacity() - 1, app_sent.liveCount());
+    try std.testing.expectEqual(@as(u64, 1), conn.qlog_packets_lost);
     try std.testing.expect(conn.pendingPingForLevel(.application).*);
     try std.testing.expectEqual(@as(u32, 1), conn.ptoCountForLevel(.application).*);
 }
@@ -1088,7 +1164,7 @@ test "a spurious loss from an older episode widens the thresholds and takes noth
     try std.testing.expectEqual(@as(u32, 2), sent.reorder.live);
 }
 
-test "a probe timeout's expired packet that is acknowledged after all is a spurious loss" {
+test "a probe timeout declares nothing lost (RFC 9002 6.2.4): the window is unchanged, the packet stays, and its ACK is an ordinary ACK" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
@@ -1109,16 +1185,21 @@ test "a probe timeout's expired packet that is acknowledged after all is a spuri
     });
     conn.pnSpaceForLevel(.application).next_pn = 1;
 
-    // The probe timeout expires packet 0.
+    // The probe timeout: a PING is owed, the packet stays, nothing is
+    // lost, the window is what it was.
     try conn.tick(1_000_000);
-    try std.testing.expectEqual(@as(u64, 1), conn.qlog_packets_lost);
-    try std.testing.expect(conn.congestionWindow() < initial_cwnd);
-    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.application).reorder.live);
-
-    // Its ACK comes after all: 990 ms late on a 10 ms path, past any
-    // width, so the thresholds stay; the reduction is taken back.
-    try conn.handleAckAtLevel(.application, ackOf(0, 0, &.{}), 1_001_000);
-    try std.testing.expectEqual(@as(u64, 1), conn.qlog_packets_spuriously_lost);
-    try std.testing.expectEqual(@as(u64, 3), conn.sentForLevel(.application).reorder.packet_threshold);
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
     try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.application).liveCount());
+    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.application).reorder.live);
+    try std.testing.expect(conn.pendingPingForLevel(.application).*);
+    try std.testing.expectEqual(@as(u32, 1), conn.ptoCountForLevel(.application).*);
+
+    // Its ACK comes: an ordinary ACK of a packet in flight. No
+    // spurious loss, nothing to take back, the backoff reset.
+    try conn.handleAckAtLevel(.application, ackOf(0, 0, &.{}), 1_001_000);
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_spuriously_lost);
+    try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.application).liveCount());
+    try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
+    try std.testing.expectEqual(@as(u32, 0), conn.ptoCountForLevel(.application).*);
 }

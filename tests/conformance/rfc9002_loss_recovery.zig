@@ -406,6 +406,45 @@ test "MUST double the PTO on each subsequent firing [RFC9002 §6.2.1 ¶?]" {
     try std.testing.expectEqual(pto_base * 4, client.ptoMicros());
 }
 
+test "MUST NOT mark packets lost when the PTO expires [RFC9002 §6.2.4 ¶?]" {
+    // §6.2.4: "A PTO timer expiration event does not indicate packet
+    // loss and MUST NOT cause prior unacknowledged packets to be
+    // marked as lost." The probe goes out (the oldest packet's data
+    // again, or a PING); the packet stays in flight; the controller
+    // hears nothing. (Before 0.30.0 the expiry took the oldest packet
+    // out as lost and the controller cut the window.)
+    var pair = try handshake_fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const client = pair.clientConn();
+    client.setCongestionAlgorithm(.cubic);
+    client.pacing_enabled = false; // the pacer would hold the data at one instant
+    const cwnd_before = client.congestionWindow();
+    const lost_before = client.stats().packets_lost;
+
+    const s = try client.openBidi(0);
+    const blob: [1000]u8 = @splat(0x42);
+    _ = try client.streamWrite(s.id, &blob);
+    // Everything that is due goes out (an ACK owed from the handshake
+    // may come first, and it is not ack-eliciting).
+    var pkt_buf: [2048]u8 = undefined;
+    while (try client.poll(&pkt_buf, pair.now_us)) |_| {}
+    const live_before = client.sentForLevel(.application).liveCount();
+    try std.testing.expect(live_before >= 1);
+    try std.testing.expect(client.sentForLevel(.application).ack_eliciting_in_flight > 0);
+
+    pair.now_us += client.ptoMicros() + ms;
+    try client.tick(pair.now_us);
+
+    try std.testing.expectEqual(@as(u32, 1), client.ptoCount());
+    try std.testing.expectEqual(live_before, client.sentForLevel(.application).liveCount());
+    try std.testing.expectEqual(lost_before, client.stats().packets_lost);
+    try std.testing.expectEqual(cwnd_before, client.congestionWindow());
+    // The probe: one more ack-eliciting packet, on top of the window.
+    try std.testing.expect((try client.poll(&pkt_buf, pair.now_us)) != null);
+    try std.testing.expectEqual(live_before + 1, client.sentForLevel(.application).liveCount());
+}
+
 // ---------------------------------------------------------------- §A — ACK processing
 
 test "MUST report whether the largest acked packet was ack-eliciting [RFC9002 §A.7]" {

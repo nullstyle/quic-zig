@@ -224,7 +224,14 @@ pub fn antiDeadlockLevel(conn: *const Connection) ?EncryptionLevel {
 
 pub fn ptoDeadlineForApplicationPath(conn: *const Connection, path: *const PathState) ?u64 {
     if (applicationPtoHeld(conn)) return null;
-    const sent_at = oldestAckElicitingSentTime(&path.sent) orelse return null;
+    // RFC 9002 A.8: from the last ack-eliciting packet sent. An endpoint
+    // that keeps sending keeps the probe timer ahead of it; the losses
+    // in between are the ACKs' business (the thresholds). Until 0.30.0
+    // the timer ran from the OLDEST packet, so a sender with a full
+    // window saw a probe timeout for every packet the peer's ACK was
+    // late for, and each one cost a packet declared lost and a window
+    // reduction (see `firePtoOnApplicationPath`).
+    const sent_at = newestAckElicitingSentTime(&path.sent) orelse return null;
     return sent_at +| ptoDurationForApplicationPath(conn, path);
 }
 
@@ -1227,26 +1234,89 @@ fn firePtoAtLevel(
     return true;
 }
 
+/// The probe timeout of the Application space. RFC 9002 section
+/// 6.2.4: "A PTO timer expiration event does not indicate packet loss
+/// and MUST NOT cause prior unacknowledged packets to be marked as
+/// lost." So nothing is declared lost here, the controller is not
+/// told, and the oldest ack-eliciting packet STAYS in flight: the
+/// probe carries its retransmittable frames again (the section's
+/// "previously sent data"; a PING when it has none), and when the
+/// probe's ACK comes the packet and time thresholds find what was
+/// lost, which is where a reduction belongs. Until 0.30.0 the expiry
+/// took the oldest packet out as lost and cut the window (NewReno and
+/// CUBIC by 0.5 / 0.7, BBR into recovery with a loss event): a second
+/// reaction for a real loss, a reaction for nothing when the ACK was
+/// only late.
+///
+/// DATAGRAM frames are deliberately NOT sent again by the probe (never
+/// sent again; their loss is the thresholds' finding, and the
+/// application's hook hears of it then). A DPLPMTUD probe packet has
+/// nothing to send again either (PADDING and a PING), so a PING goes
+/// out, and its size verdict (RFC 8899 section 4.4) comes from the
+/// thresholds when a later ACK shows it missing. The frames that are
+/// copied leave their packet's record
+/// alone: a stream chunk sent again gets a new key, so the old
+/// packet's ACK or loss later finds nothing for it (`UnknownPacket`,
+/// skipped), CRYPTO data moves to the retransmit queue once, and a
+/// control frame queued twice carries the same current value.
+///
+/// The one exception is a full tracker: a probe needs a slot, and
+/// nothing frees one while the peer is silent, so the old expiry
+/// stays for that case alone (`firePtoOn`), as the escape the send
+/// path's gate relies on.
 fn firePtoOnApplicationPath(
     conn: *Connection,
     path: *PathState,
     now_us: u64,
 ) Error!bool {
-    switch (try firePtoOn(conn, pathTarget(path), now_us)) {
-        .nothing_eligible => return false,
-        .probe => path.pending_ping = false,
-        .regular => |r| {
-            path.pending_ping = !r.requeued;
-            // Per-path only: a bounded probe counter feeding the
-            // multipath send scheduler. send.zig consumes it for
-            // .application / .early_data only, which firePtoAtLevel
-            // never sees — so the missing counterpart there is
-            // correct, not drift.
-            if (r.requeued and path.pto_probe_count < 2) path.pto_probe_count += 1;
-        },
+    if (path.sent.isFull()) {
+        switch (try firePtoOn(conn, pathTarget(path), now_us)) {
+            .nothing_eligible => return false,
+            .probe => path.pending_ping = false,
+            .regular => |r| {
+                path.pending_ping = !r.requeued;
+                if (r.requeued and path.pto_probe_count < 2) path.pto_probe_count += 1;
+            },
+        }
+        path.pto_count +|= 1;
+        return true;
     }
+
+    var requeued = false;
+    var found = false;
+    var i: u32 = 0;
+    while (i < path.sent.count) : (i += 1) {
+        const p = &path.sent.packets[i];
+        if (p.dead or !p.ack_eliciting) continue;
+        found = true;
+        requeued = try requeueFramesForProbe(conn, p, path.id);
+        break;
+    }
+    if (!found) return false;
+    path.pending_ping = !requeued;
+    // Per-path only: a bounded probe counter feeding the multipath send
+    // scheduler and the congestion gate's probe exemption (RFC 9002
+    // section 7.5: a probe is not blocked by the controller; it is
+    // counted as in flight on top).
+    if (requeued and path.pto_probe_count < 2) path.pto_probe_count += 1;
     path.pto_count +|= 1;
     return true;
+}
+
+/// The retransmittable frames of `packet` go into their queues again,
+/// for a probe; the packet stays as it is. See
+/// `firePtoOnApplicationPath` for what is left out and why the record
+/// may stay.
+fn requeueFramesForProbe(
+    conn: *Connection,
+    packet: *const SentPacketTracker.SentPacket,
+    path_id: u32,
+) Error!bool {
+    var any = false;
+    any = (try dispatchLostPacketToStreams(conn, packet)) or any;
+    any = (try requeueSentCryptoForPacket(conn, .application, packet.pn)) or any;
+    any = (try dispatchLostControlFramesOnPath(conn, packet, path_id)) or any;
+    return any;
 }
 
 pub fn fireDuePtoAtLevel(

@@ -170,7 +170,7 @@ test "an ACK advances the sampler and retires a passed app-limited marker" {
     try std.testing.expectEqual(@as(u32, 0), conn.sentForLevel(.application).liveCount());
 }
 
-test "PTO-expired packets reach the sampler's loss ledger" {
+test "a probe timeout adds nothing to the sampler's loss ledger (RFC 9002 6.2.4); the thresholds do" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
@@ -185,9 +185,34 @@ test "PTO-expired packets reach the sampler's loss ledger" {
     try std.testing.expect((try conn.pollDatagram(&pkt, now_us)) != null);
     const b0 = conn.sentForLevel(.application).packets[0].bytes;
 
-    // No ACK ever arrives; the PTO declares the flight lost.
+    // No ACK ever arrives; the probe timeout fires. Nothing is lost
+    // to the sampler (or to anyone): the packet stays in flight.
     try conn.tick(now_us + 4 * conn.ptoDurationForLevel(.application));
     const est = &conn.primaryPath().path.delivery;
-    try std.testing.expectEqual(b0, est.lost);
+    try std.testing.expectEqual(@as(u64, 0), est.lost);
     try std.testing.expectEqual(@as(u64, 0), est.delivered);
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.application).liveCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
+
+    // The thresholds find it: an ACK of a later packet, then a tick
+    // past the time threshold, and the loss reaches the ledger.
+    try conn.sentForLevel(.application).record(.{
+        .pn = 7,
+        .sent_time_us = now_us + 4 * conn.ptoDurationForLevel(.application),
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 8;
+    const ack_us = now_us + 5 * conn.ptoDurationForLevel(.application);
+    try conn.handleAckAtLevel(.application, .{
+        .largest_acked = 7,
+        .ack_delay = 0,
+        .first_range = 0,
+        .range_count = 0,
+        .ranges_bytes = &.{},
+        .ecn_counts = null,
+    }, ack_us);
+    try conn.tick(ack_us + conn.ptoDurationForLevel(.application));
+    try std.testing.expectEqual(b0, est.lost);
 }

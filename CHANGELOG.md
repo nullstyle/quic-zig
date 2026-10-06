@@ -9,6 +9,26 @@ changes.
 
 ### Fixed
 
+- **A probe timeout is not a loss (RFC 9002 section 6.2.4).** "A PTO
+  timer expiration event does not indicate packet loss and MUST NOT
+  cause prior unacknowledged packets to be marked as lost." The
+  Application space's probe timeout took the oldest ack-eliciting
+  packet out as lost, sent its frames again, and told the controller:
+  NewReno and CUBIC cut the window by 0.5 / 0.7, BBR entered recovery
+  with a loss event. A real loss got two reactions; a late ACK got one
+  for nothing. Now the packet stays in flight, the probe carries its
+  retransmittable frames again (a PING when it has none; DATAGRAM
+  frames are not sent again), nothing is declared lost, and when the
+  probe's ACK comes the packet and time thresholds find what was
+  lost. The deadline runs from the last ack-eliciting packet sent
+  (RFC 9002 A.8), not the oldest. A full tracker keeps the old expiry
+  (a probe needs a slot). The handshake spaces are unchanged: their
+  expiry is how a lost flight is sent again. MEASURED: the 18
+  impairment and churn bench cells are byte-identical (the thresholds
+  find every loss there first); the two-CUBIC fairness cell moves
+  from Jain 0.9823 to 0.9640 over its 20 s (the old rule's spurious
+  cuts, for a timeout whose ACK was only late in the 100 ms queue,
+  were an accidental equalizer); the BBR cells are identical.
 - **The probe timeout of the handshake spaces is bounded at about a
   second, and runs from the last packet sent.** RFC 9002 section
   6.2.1 doubles the timeout at every expiry without bound. A client

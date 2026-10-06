@@ -729,7 +729,9 @@ test "PTO requeues retransmittable controls on non-zero application path" {
 
     try conn.tick(conn.ptoDurationForApplicationPath(path));
 
-    try std.testing.expectEqual(@as(u32, 0), path.sent.liveCount());
+    // The packet stays in flight (RFC 9002 section 6.2.4); its frame
+    // goes again in the probe.
+    try std.testing.expectEqual(@as(u32, 1), path.sent.liveCount());
     try std.testing.expect(!path.pending_ping);
     try std.testing.expectEqual(@as(u8, 1), path.pto_probe_count);
     try std.testing.expectEqual(@as(u32, 1), path.pto_count);
