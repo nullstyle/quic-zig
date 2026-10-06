@@ -5,7 +5,20 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.29.0] - 2026-10-06
+
+The open-items release: the seven items that were open after 0.28.1.
+A client that connects through loss (two-datagram probes, a held
+Handshake packet, a CONNECTION_CLOSE sent again); a late packet is
+not a lost packet (loss thresholds that widen on a spurious loss, a
+reduction taken back when every "lost" packet arrived, and the
+recovery period anchored at the detection as RFC 9002 says); a
+connection costs 91 KB on the heap, not 1.09 MB; a `Server` makes no
+connection for a datagram of which no packet opens; the NEW_TOKEN
+times on a clock of their own; the rest of capnp-zig's ticket asks;
+and the 32-bit CI leg by hand. No wire-format change. The congestion
+controllers' loss hooks take the detection time (internal surface).
+Verified toolchain: 0.17.0.
 
 ### Fixed
 

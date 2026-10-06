@@ -1,6 +1,6 @@
 .{
     .name = .quic,
-    .version = "0.28.1",
+    .version = "0.29.0",
     .fingerprint = 0xc0795252bd98740e,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
