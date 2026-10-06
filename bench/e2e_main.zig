@@ -175,12 +175,47 @@ const impairment_cells = [_]harness.ImpairmentOptions{
     // threshold 5 times the RTT) the same 24 seeds give 206 to 306 ms
     // for bbr and 404 to 517 ms for cubic.
     //
-    // Not fixed. A sender can find out that a "lost" packet arrived
-    // (the ACK for it comes later), widen its thresholds, and take the
-    // controller's reaction back; RFC 9002 section 6.1 allows that and
-    // does not specify it. That is a feature with its own design, and
-    // this cell with `--sweep` is the instrument for it.
+    // Since 0.29.0 the sender finds out that a "lost" packet arrived
+    // (the ACK for it comes later), widens its thresholds, and takes
+    // the controller's reaction back (`conn/ReorderWindow.zig`). Not
+    // for this cell: 5 ms is 2.5 round trips of lateness, past the
+    // widest time threshold (twice the RTT), so these packets are
+    // declared lost at any width, and the thresholds are deliberately
+    // NOT widened for them (a copy sent at 9/8 of the RTT arrives
+    // before the original). MEASURED 2026-10-06, 12 seeds, before ->
+    // after: bbr median 137 -> 137 ms, max 2480 -> 2078; cubic median
+    // 4462 -> 3004 ms; new_reno 4512 -> 3264 (the reductions that are
+    // taken back). The two cells below are the ones the mechanism is
+    // for.
     .{ .name = "impairment_reorder10pct", .loss_permille = 0, .reorder_permille = 100 },
+    // The same, with the packets held back 1 ms: half a round trip of
+    // reordering, which is what a sender's thresholds can be expected
+    // to learn (RACK's window stops at one round trip; the time
+    // threshold here stops at twice the RTT). A packet 1 ms late is
+    // still past the fixed thresholds of RFC 9002 (3 packets, 9/8 of
+    // the RTT: 0.25 ms of lateness on this path). MEASURED 2026-10-06,
+    // 12 seeds, fixed thresholds -> widening: bbr median 199 -> 82 ms
+    // and max 2442 -> 94 (the tail is gone); cubic 3472 -> 87 ms;
+    // new_reno 3609 -> 120 ms.
+    .{ .name = "impairment_reorder10pct_1ms", .loss_permille = 0, .reorder_permille = 100, .reorder_extra_us = 1_000 },
+    // Reordering as a real path has it: a 20 ms round trip, a 100 Mbit
+    // link (about 10 packets a millisecond), and 10% of the packets
+    // 1 ms late. The time threshold (9/8 of the RTT) covers a packet
+    // 1 ms late; the packet threshold (3) does not, since 1 ms is about
+    // 10 packets here. The cell for the packet threshold's adaptation.
+    // MEASURED 2026-10-06, 12 seeds, fixed thresholds -> widening: the
+    // thresholds settle at 11 packets after 4 to 8 spurious losses (was
+    // 600 to 800 per run, every one of them spurious); bbr median 1376
+    // -> 773 ms, cubic 9937 -> 790, new_reno 18357 -> 790; 8 MiB over
+    // 100 Mbit is 671 ms, so 773 is the link's floor plus the handshake.
+    .{
+        .name = "impairment_reorder10pct_1ms_rtt20ms_100mbit",
+        .loss_permille = 0,
+        .reorder_permille = 100,
+        .reorder_extra_us = 1_000,
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 12_500_000,
+    },
     // Bottleneck cells: a rate-limited link with a finite buffer, so
     // an overshooting slow start builds a standing queue and inflates
     // RTT. These are the only cells that can evaluate slow-start exit
@@ -402,6 +437,18 @@ fn runImpairment(
     }
 }
 
+/// The sender's loss detection in one run, when it declared anything
+/// lost: how many of the "lost" packets arrived after all, and where
+/// the thresholds ended (`packets` / `time_shift`: 3 is 9/8 of the
+/// RTT, 0 is twice the RTT). A separate line, so the run line above
+/// it stays comparable across versions.
+fn printLossLine(result: harness.ImpairmentResult) void {
+    if (result.packets_lost == 0) return;
+    std.debug.print("  loss: {d} declared, {d} arrived late; thresholds {d} packets, shift {d}\n", .{
+        result.packets_lost, result.packets_spuriously_lost, result.packet_threshold, result.time_shift,
+    });
+}
+
 /// One impairment cell over `count` seeds, from the cell's seed up.
 /// Prints every run and then the minimum, the median and the maximum
 /// virtual time, so that a long tail shows.
@@ -423,6 +470,7 @@ fn sweepImpairment(allocator: std.mem.Allocator, cell: harness.ImpairmentOptions
         std.debug.print("{s} seed {d}: virtual {d} ms (dropped {d}/{d})\n", .{
             result.name, one.seed, ms, result.dropped, result.enqueued,
         });
+        printLossLine(result);
     }
     std.mem.sort(u64, times_ms, {}, std.sort.asc(u64));
     const median_ms = times_ms[count / 2];

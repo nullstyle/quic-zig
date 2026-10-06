@@ -8,16 +8,19 @@
 //!
 //! Division of labour with `Connection/loss.zig`: this module owns the
 //! RFC 9002 constants and predicates (`packet_threshold`,
-//! `timeThresholdUs`, `isLost`), which the live sweep calls. It also
-//! carries `detectLosses`, a self-contained reference implementation
-//! of §6.1 that PRODUCTION DOES NOT CALL — the live sweep needs a
-//! per-packet hook that allocates (frame requeue), touches PMTUD
-//! state, and emits qlog, none of which belong in a pure function.
-//! `detectLosses` is kept deliberately, as the auditable
-//! implementation the RFC 9002 conformance corpus
-//! (tests/conformance/rfc9002_loss_recovery.zig) and bench/loss_ack.zig
-//! exercise. Do not "wire it up"; do keep the two in agreement on the
-//! shared predicates above.
+//! `timeThresholdUs`, `isLost`) at their FIXED values, the starting
+//! point of the live sweep's thresholds. The live sweep reads its
+//! thresholds from the space's `ReorderWindow` (in the tracker), which
+//! starts at these values and widens them when a declared loss turns
+//! out spurious (RFC 9002 §6.1). This module also carries
+//! `detectLosses`, a self-contained reference implementation of §6.1
+//! that PRODUCTION DOES NOT CALL — the live sweep needs a per-packet
+//! hook that allocates (frame requeue), touches PMTUD state, and
+//! emits qlog, none of which belong in a pure function. `detectLosses`
+//! is kept deliberately, as the auditable implementation the RFC 9002
+//! conformance corpus (tests/conformance/rfc9002_loss_recovery.zig)
+//! and bench/loss_ack.zig exercise. Do not "wire it up"; do keep the
+//! two in agreement on the shared predicates above.
 
 const std = @import("std");
 const ack_range = @import("../frame/ack_range.zig");
@@ -32,17 +35,20 @@ const granularity_us = @import("RttEstimator.zig").granularity_us;
 
 /// kPacketThreshold from RFC 9002 §6.1.1: 3.
 ///
-/// These three thresholds are FIXED. A packet that arrives later than
-/// they allow is declared lost although it arrives, and the congestion
-/// controller cannot tell that from real loss. MEASURED 2026-10-03
-/// (bench cell `impairment_reorder10pct`: nothing dropped, 10% of the
-/// packets 5 ms late on a 2 ms path): 10.4% of the packets declared
-/// lost, CUBIC and NewReno at 15 Mbit/s on a path with no rate limit,
-/// BBR at about 20 Mbit/s once its startup ends. With thresholds wide
-/// enough for that reordering the same runs are 9 times faster for
-/// CUBIC. RFC 9002 §6.1 allows thresholds that adapt when a loss
-/// turns out to be spurious; this implementation does not detect a
-/// spurious loss yet. See the note at that cell in bench/e2e_main.zig.
+/// These three thresholds are the STARTING values. A packet that
+/// arrives later than they allow is declared lost although it arrives,
+/// and the congestion controller cannot tell that from real loss.
+/// MEASURED 2026-10-03 (bench cell `impairment_reorder10pct`: nothing
+/// dropped, 10% of the packets 5 ms late on a 2 ms path): 10.4% of the
+/// packets declared lost, CUBIC and NewReno at 15 Mbit/s on a path
+/// with no rate limit. Since 0.29.0 the live sweep's thresholds live
+/// in `ReorderWindow` and widen when a declared loss turns out
+/// spurious (an ACK covers the packet after all), as RFC 9002 §6.1
+/// allows; the controller takes a spurious reduction back. MEASURED
+/// 2026-10-06 (`impairment_reorder10pct_1ms_rtt20ms_100mbit`, 12
+/// seeds): CUBIC 9.9 s -> 0.79 s, NewReno 18.4 s -> 0.79 s, BBR 1.4 s
+/// -> 0.77 s, the link's floor. See the notes at those cells in
+/// bench/e2e_main.zig.
 pub const packet_threshold: u64 = 3;
 /// kTimeThreshold numerator from RFC 9002 §6.1.2.
 pub const time_threshold_num: u64 = 9;

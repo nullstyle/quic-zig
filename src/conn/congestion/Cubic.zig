@@ -34,8 +34,9 @@ cwnd: u64,
 /// Slow-start threshold; null = infinity (initial slow start).
 ssthresh: ?u64 = null,
 /// Recovery-period anchor — identical semantics to NewReno
-/// (RFC 9002 §7.3.1): set on decrease, cleared by an ACK of a
-/// packet sent after it; re-entry suppressed inside the period.
+/// (RFC 9002 §7.3.1 / §B.6): the detection time, set on decrease,
+/// cleared by an ACK of a packet sent after it; re-entry suppressed
+/// inside the period.
 recovery_start_time_us: ?u64 = null,
 
 // -- RFC 9438 state ------------------------------------------------------
@@ -59,6 +60,12 @@ w_est: u64 = 0,
 /// (HyStart++ governs when slow start ends, CUBIC governs the
 /// congestion-avoidance curve).
 hystart: hystart_mod.State = .{},
+/// The loss episodes, and the state before the current one's
+/// reduction, for `onSpuriousLoss`.
+episodes: congestion.LossEpisodes = .{},
+undo_cwnd: u64 = 0,
+undo_ssthresh: ?u64 = null,
+undo_w_max: u64 = 0,
 
 pub fn init(cfg: congestion.Config) Cubic {
     return .{
@@ -181,26 +188,27 @@ pub fn onPacketLost(
     self: *Cubic,
     bytes_lost: u64,
     lost_largest_sent_time_us: u64,
+    now_us: u64,
 ) void {
     _ = bytes_lost;
-    if (self.recovery_start_time_us) |rec_start| {
-        if (lost_largest_sent_time_us <= rec_start) return;
-    }
-    self.recovery_start_time_us = lost_largest_sent_time_us;
+    if (self.isInRecovery(lost_largest_sent_time_us)) return;
+    self.recovery_start_time_us = now_us;
     self.reduce();
 }
 
 /// ECN-CE congestion event — same decrease path as loss
 /// (RFC 9438 §4.6 treats them identically).
-pub fn onCongestionEvent(self: *Cubic, ce_packet_sent_time_us: u64) void {
-    if (self.recovery_start_time_us) |rec_start| {
-        if (ce_packet_sent_time_us <= rec_start) return;
-    }
-    self.recovery_start_time_us = ce_packet_sent_time_us;
+pub fn onCongestionEvent(self: *Cubic, ce_packet_sent_time_us: u64, now_us: u64) void {
+    if (self.isInRecovery(ce_packet_sent_time_us)) return;
+    self.recovery_start_time_us = now_us;
     self.reduce();
 }
 
 fn reduce(self: *Cubic) void {
+    self.episodes.open();
+    self.undo_cwnd = self.cwnd;
+    self.undo_ssthresh = self.ssthresh;
+    self.undo_w_max = self.w_max;
     // §4.7 fast convergence: a reduction below the previous W_max
     // signals a shrinking pipe — release capacity faster by
     // remembering a further-reduced ceiling.
@@ -221,6 +229,29 @@ fn reduce(self: *Cubic) void {
     // Loss/CE ends slow start through ssthresh; HyStart++ has
     // nothing left to track.
     self.hystart.reset();
+}
+
+pub fn lossEpisode(self: *const Cubic) u32 {
+    return self.episodes.episode;
+}
+
+pub fn noteDeclaredLost(self: *Cubic, count: u32) void {
+    self.episodes.noteDeclaredLost(count);
+}
+
+/// A packet declared lost in the current episode arrived. When every
+/// one of them has, the reduction was for nothing: the window, the
+/// threshold and W_max go back to what they were before it (the window
+/// never below where it is now), the recovery period ends, and the
+/// next ACK anchors a fresh epoch. Linux's `bictcp_undo_cwnd` restores
+/// the window to W_max the same way.
+pub fn onSpuriousLoss(self: *Cubic) void {
+    if (!self.episodes.arrived()) return;
+    self.cwnd = @max(self.cwnd, self.undo_cwnd);
+    self.ssthresh = self.undo_ssthresh;
+    self.w_max = self.undo_w_max;
+    self.recovery_start_time_us = null;
+    self.epoch_start_us = null;
 }
 
 /// RFC 9002 §7.6 persistent congestion: collapse to the minimum
@@ -351,7 +382,7 @@ fn ackOneRtt(cubic: *Cubic, now_us: *u64, srtt_us: u64) void {
 test "reduction multiplies cwnd by beta = 0.7 and floors at min window" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200, .algorithm = .new_reno });
     cubic.cwnd = 100_000;
-    cubic.onPacketLost(1200, 1_000_000);
+    cubic.onPacketLost(1200, 1_000_000, 1_000_000);
     try testing.expectEqual(@as(u64, 70_000), cubic.cwnd);
     try testing.expectEqual(@as(?u64, 70_000), cubic.ssthresh);
     try testing.expectEqual(@as(u64, 100_000), cubic.w_max);
@@ -359,28 +390,30 @@ test "reduction multiplies cwnd by beta = 0.7 and floors at min window" {
     // Floor: a tiny window reduces to min, not below.
     cubic.recovery_start_time_us = null;
     cubic.cwnd = 2_500;
-    cubic.onPacketLost(1200, 2_000_000);
+    cubic.onPacketLost(1200, 2_000_000, 2_000_000);
     try testing.expectEqual(cubic.cfg.minWindow(), cubic.cwnd);
 }
 
 test "fast convergence remembers a reduced ceiling when the pipe shrinks" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic.cwnd = 100_000;
-    cubic.onPacketLost(1200, 1_000_000); // w_max = 100k, cwnd = 70k
+    cubic.onPacketLost(1200, 1_000_000, 1_000_000); // w_max = 100k, cwnd = 70k
     // Second reduction BELOW the previous ceiling: w_max takes the
     // §4.7 haircut — cwnd·(1+β)/2 = 70k·0.85 = 59.5k, not 70k.
-    cubic.onPacketLost(1200, 2_000_000);
+    cubic.onPacketLost(1200, 2_000_000, 2_000_000);
     try testing.expectEqual(@as(u64, 59_500), cubic.w_max);
 }
 
 test "recovery period suppresses repeated reductions (RFC 9002 §7.3.1 parity)" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic.cwnd = 100_000;
-    cubic.onPacketLost(1200, 1_000_000);
+    cubic.onPacketLost(1200, 1_000_000, 1_020_000);
     const after_first = cubic.cwnd;
-    cubic.onPacketLost(1200, 999_000); // inside the recovery period
+    cubic.onPacketLost(1200, 999_000, 1_020_100); // inside the recovery period
     try testing.expectEqual(after_first, cubic.cwnd);
-    cubic.onCongestionEvent(500_000); // CE inside the period: same rule
+    cubic.onCongestionEvent(500_000, 1_020_200); // CE inside the period: same rule
+    try testing.expectEqual(after_first, cubic.cwnd);
+    cubic.onPacketLost(1200, 1_019_000, 1_020_300); // sent before the detection: inside
     try testing.expectEqual(after_first, cubic.cwnd);
 }
 
@@ -388,7 +421,7 @@ test "post-reduction growth regains W_max on the cubic curve around t=K" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     const srtt: u64 = 25_000; // 25 ms
     cubic.cwnd = 120_000;
-    cubic.onPacketLost(1200, 1_000_000);
+    cubic.onPacketLost(1200, 1_000_000, 1_000_000);
     const w_max = cubic.w_max;
     try testing.expectEqual(@as(u64, 120_000), w_max);
 

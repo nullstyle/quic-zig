@@ -90,7 +90,7 @@ fn earliestLossDeadline(
     rtt: *const RttEstimator,
 ) ?u64 {
     const largest_acked = pn_space.largest_acked_sent orelse return null;
-    const time_threshold = loss_recovery_mod.timeThresholdUs(rtt);
+    const time_threshold = sent.reorder.timeThresholdUs(rtt);
 
     var best: ?u64 = null;
     var i: u32 = 0;
@@ -717,6 +717,7 @@ fn onPacketsLostAtLevel(
     conn: *Connection,
     lvl: EncryptionLevel,
     stats: LossStats,
+    now_us: u64,
 ) void {
     if (stats.in_flight_bytes_lost == 0) return;
     if (lvl == .application) {
@@ -724,6 +725,7 @@ fn onPacketsLostAtLevel(
         cc.onPacketLost(
             stats.in_flight_bytes_lost,
             stats.largest_lost_sent_time_us,
+            now_us,
         );
         if (isPersistentCongestion(conn, lvl, stats)) {
             cc.onPersistentCongestion();
@@ -735,11 +737,13 @@ fn onApplicationPathPacketsLost(
     conn: *Connection,
     path: *PathState,
     stats: LossStats,
+    now_us: u64,
 ) void {
     if (stats.in_flight_bytes_lost == 0) return;
     path.path.cc.onPacketLost(
         stats.in_flight_bytes_lost,
         stats.largest_lost_sent_time_us,
+        now_us,
     );
     if (isPersistentCongestionFromBasePto(
         basePtoDurationForApplicationPath(conn, path),
@@ -814,8 +818,10 @@ const LossTarget = struct {
 /// predicate; they are split across entry points here only because
 /// they run on different schedules (ACK receipt vs tick).
 const LossPredicate = union(enum) {
-    /// §6.1.1: `largest_acked - pn >= kPacketThreshold`.
-    packet_threshold: struct { largest_acked: u64 },
+    /// §6.1.1: `largest_acked - pn >= threshold`, the threshold being
+    /// the space's (`ReorderWindow.packet_threshold`: kPacketThreshold
+    /// until a spurious loss widens it).
+    packet_threshold: struct { largest_acked: u64, threshold: u64 },
     /// §6.1.2: sent before `now - kTimeThreshold`, and at or below
     /// largest_acked (which may be absent, in which case nothing is
     /// eligible).
@@ -824,7 +830,7 @@ const LossPredicate = union(enum) {
     fn matches(self: LossPredicate, p: SentPacketTracker.SentPacket) bool {
         return switch (self) {
             .packet_threshold => |c| p.pn <= c.largest_acked and
-                (c.largest_acked - p.pn) >= loss_recovery_mod.packet_threshold,
+                (c.largest_acked - p.pn) >= c.threshold,
             .time_threshold => |c| blk: {
                 const la = c.largest_acked orelse break :blk false;
                 break :blk p.pn <= la and p.sent_time_us < c.cutoff;
@@ -887,9 +893,24 @@ const SweepCtx = struct {
                 target.path.path.cc.onPacketNewlyLost(&info);
             }
             pmtudHandleRegularLoss(ctx.conn, target.path);
+            // A late packet is not a lost packet: remember it, so the
+            // ACK that covers it after all is a spurious loss
+            // (`recv_ack_handlers`). The episode is stamped after the
+            // controller has been told (`noteDeclaredLost`).
+            target.sent.reorder.remember(ctx.conn.allocator, lost.pn, lost.sent_time_us);
         }
     }
 };
+
+/// After the controller has been told about a sweep's losses: count
+/// them in its loss episode and stamp their records with it, so the
+/// ACK of one of them can take the episode's reaction back.
+fn noteDeclaredLost(target: LossTarget, count: u32) void {
+    if (!target.isApplication() or count == 0) return;
+    const cc = &target.path.path.cc;
+    cc.noteDeclaredLost(count);
+    target.sent.reorder.stampLast(count, cc.lossEpisode());
+}
 
 /// The one loss-detection sweep: walk the tracker, remove contiguous
 /// runs of packets the predicate declares lost, and fold the results
@@ -933,9 +954,10 @@ fn sweepLosses(
     conn.qlog_packets_lost +|= ctx.stats.count;
     conn_qlog.emitLossDetected(conn, target.lvl, ctx.stats, ctx.reason);
     switch (target.scope) {
-        .level => onPacketsLostAtLevel(conn, target.lvl, ctx.stats),
-        .path => onApplicationPathPacketsLost(conn, target.path, ctx.stats),
+        .level => onPacketsLostAtLevel(conn, target.lvl, ctx.stats, now_us),
+        .path => onApplicationPathPacketsLost(conn, target.path, ctx.stats, now_us),
     }
+    noteDeclaredLost(target, ctx.stats.count);
     conn_qlog.emitCongestionStateIfChanged(conn, now_us);
 }
 
@@ -966,7 +988,10 @@ pub fn detectLossesByPacketThresholdAtLevel(
 ) Error!void {
     const target = levelTarget(conn, lvl);
     const largest_acked = target.pn_space.largest_acked_sent orelse return;
-    try sweepLosses(conn, target, .{ .packet_threshold = .{ .largest_acked = largest_acked } }, now_us);
+    try sweepLosses(conn, target, .{ .packet_threshold = .{
+        .largest_acked = largest_acked,
+        .threshold = target.sent.reorder.packet_threshold,
+    } }, now_us);
 }
 
 pub fn detectLossesByPacketThresholdOnApplicationPath(
@@ -976,7 +1001,10 @@ pub fn detectLossesByPacketThresholdOnApplicationPath(
 ) Error!void {
     const target = pathTarget(path);
     const largest_acked = target.pn_space.largest_acked_sent orelse return;
-    try sweepLosses(conn, target, .{ .packet_threshold = .{ .largest_acked = largest_acked } }, now_us);
+    try sweepLosses(conn, target, .{ .packet_threshold = .{
+        .largest_acked = largest_acked,
+        .threshold = target.sent.reorder.packet_threshold,
+    } }, now_us);
 }
 
 pub fn detectLossesByTimeThresholdAtLevel(
@@ -984,9 +1012,9 @@ pub fn detectLossesByTimeThresholdAtLevel(
     lvl: EncryptionLevel,
     now_us: u64,
 ) Error!void {
-    const time_threshold = loss_recovery_mod.timeThresholdUs(conn.rttForLevelConst(lvl));
-    if (now_us <= time_threshold) return;
     const target = levelTarget(conn, lvl);
+    const time_threshold = target.sent.reorder.timeThresholdUs(conn.rttForLevelConst(lvl));
+    if (now_us <= time_threshold) return;
     try sweepLosses(conn, target, .{ .time_threshold = .{
         .largest_acked = target.pn_space.largest_acked_sent,
         .cutoff = now_us - time_threshold,
@@ -998,9 +1026,9 @@ pub fn detectLossesByTimeThresholdOnApplicationPath(
     path: *PathState,
     now_us: u64,
 ) Error!void {
-    const time_threshold = loss_recovery_mod.timeThresholdUs(&path.path.rtt);
-    if (now_us <= time_threshold) return;
     const target = pathTarget(path);
+    const time_threshold = target.sent.reorder.timeThresholdUs(&path.path.rtt);
+    if (now_us <= time_threshold) return;
     try sweepLosses(conn, target, .{ .time_threshold = .{
         .largest_acked = target.pn_space.largest_acked_sent,
         .cutoff = now_us - time_threshold,
@@ -1030,7 +1058,7 @@ const PtoOutcome = union(enum) {
     regular: struct { requeued: bool },
 };
 
-fn firePtoOn(conn: *Connection, target: LossTarget) Error!PtoOutcome {
+fn firePtoOn(conn: *Connection, target: LossTarget, now_us: u64) Error!PtoOutcome {
     var i: u32 = 0;
     while (i < target.sent.count) : (i += 1) {
         const p = target.sent.packets[i];
@@ -1061,16 +1089,22 @@ fn firePtoOn(conn: *Connection, target: LossTarget) Error!PtoOutcome {
         stats.add(lost);
         // Delivery-rate sampler C.lost: PTO-expired packets are real
         // losses to the estimator too (probe losses returned above).
-        if (target.isApplication() and lost.in_flight) {
-            const info = target.path.path.delivery.onPacketLost(&lost);
-            target.path.path.cc.onPacketNewlyLost(&info);
+        if (target.isApplication()) {
+            if (lost.in_flight) {
+                const info = target.path.path.delivery.onPacketLost(&lost);
+                target.path.path.cc.onPacketNewlyLost(&info);
+            }
+            // An expired packet that is acknowledged after all is a
+            // spurious loss like any other (see `SweepCtx.handle`).
+            target.sent.reorder.remember(conn.allocator, lost.pn, lost.sent_time_us);
         }
         conn.qlog_packets_lost +|= stats.count;
         conn_qlog.emitLossDetected(conn, target.lvl, stats, .pto_probe);
         switch (target.scope) {
-            .level => onPacketsLostAtLevel(conn, target.lvl, stats),
-            .path => onApplicationPathPacketsLost(conn, target.path, stats),
+            .level => onPacketsLostAtLevel(conn, target.lvl, stats, now_us),
+            .path => onApplicationPathPacketsLost(conn, target.path, stats, now_us),
         }
+        noteDeclaredLost(target, stats.count);
         return .{ .regular = .{ .requeued = requeued } };
     }
     return .nothing_eligible;
@@ -1081,7 +1115,7 @@ fn firePtoAtLevel(
     lvl: EncryptionLevel,
     now_us: u64,
 ) Error!bool {
-    switch (try firePtoOn(conn, levelTarget(conn, lvl))) {
+    switch (try firePtoOn(conn, levelTarget(conn, lvl), now_us)) {
         .nothing_eligible => {
             // The client's anti-deadlock probe (see
             // `antiDeadlockLevel`): nothing to send again, so a PING.
@@ -1147,8 +1181,9 @@ fn firePtoAtLevel(
 fn firePtoOnApplicationPath(
     conn: *Connection,
     path: *PathState,
+    now_us: u64,
 ) Error!bool {
-    switch (try firePtoOn(conn, pathTarget(path))) {
+    switch (try firePtoOn(conn, pathTarget(path), now_us)) {
         .nothing_eligible => return false,
         .probe => path.pending_ping = false,
         .regular => |r| {
@@ -1182,5 +1217,5 @@ pub fn fireDuePtoOnApplicationPath(
 ) Error!void {
     const deadline = ptoDeadlineForApplicationPath(conn, path) orelse return;
     if (now_us < deadline) return;
-    _ = try firePtoOnApplicationPath(conn, path);
+    _ = try firePtoOnApplicationPath(conn, path, now_us);
 }

@@ -210,7 +210,7 @@ test "NORMATIVE Startup exits on sustained loss and seeds inflight_longterm [dra
     d.ack(&bbr, .{ .rate = 1_000_000 });
     // Enter fast recovery, anchored beyond every future ack's sent
     // time so the "one full round in recovery" criterion can mature.
-    bbr.onPacketLost(1_200, 99_000_000);
+    bbr.onPacketLost(1_200, 99_000_000, 99_000_000);
     try std.testing.expect(bbr.recovery_start_time_us != null);
     d.ack(&bbr, .{ .rate = 1_000_000 }); // a full round inside recovery
     // Six discontiguous loss events this round (packet proxy — see the
@@ -402,6 +402,48 @@ test "NORMATIVE probe loss above 2% cuts inflight_longterm to max(at-threshold, 
     try std.testing.expect(bbr.state == .probe_down);
 }
 
+test "NORMATIVE a spurious loss episode restores the model bounds saved before its first loss [draft-ietf-ccwg-bbr-06 §5.5.11]" {
+    var bbr = newBbr();
+    var d: Drive = .{};
+    driveToProbeBwDown(&bbr, &d);
+    d.ack(&bbr, .{ .rate = 1_100_000, .inflight = 20_000 });
+    d.ack(&bbr, .{ .rate = 1_100_000, .inflight = 50_000, .advance_us = 4 * us_per_s });
+    d.ack(&bbr, .{ .rate = 1_100_000, .inflight = 60_000 });
+    try std.testing.expect(bbr.state == .probe_up);
+    const longterm_before = bbr.inflight_longterm;
+    const shortterm_before = bbr.inflight_shortterm;
+    const bw_shortterm_before = bbr.bw_shortterm;
+    // The loss walk, in the transport's order: the per-packet inlet
+    // (SaveStateUponLoss, then HandleInflightTooHigh cuts
+    // inflight_longterm), then the aggregate (recovery entry).
+    bbr.onPacketNewlyLost(&.{
+        .bytes = 1_200,
+        .tx_in_flight = 60_000,
+        .lost_at_send = d.lost,
+        .delivered_at_send = d.delivered,
+        .is_app_limited = false,
+        .sent_time_us = d.now_us,
+        .c_lost = d.lost + 2_400,
+        .c_delivered = d.delivered,
+    });
+    bbr.lost_total = d.lost + 2_400;
+    try std.testing.expect(bbr.inflight_longterm < longterm_before);
+    bbr.onPacketLost(1_200, d.now_us, d.now_us + 1);
+    bbr.noteDeclaredLost(1);
+    try std.testing.expect(bbr.recovery_start_time_us != null);
+    try std.testing.expectEqual(@as(u32, 1), bbr.lossEpisode());
+    // The packet arrived after all (RestoreStateUponSpuriousLoss):
+    // the bounds are what they were BEFORE the cut, the loss round is
+    // clean, and recovery is over.
+    bbr.onSpuriousLoss();
+    try std.testing.expectEqual(longterm_before, bbr.inflight_longterm);
+    try std.testing.expectEqual(shortterm_before, bbr.inflight_shortterm);
+    try std.testing.expectEqual(bw_shortterm_before, bbr.bw_shortterm);
+    try std.testing.expectEqual(@as(?u64, null), bbr.recovery_start_time_us);
+    try std.testing.expect(!bbr.is_loss_in_round);
+    try std.testing.expectEqual(@as(u16, 0), bbr.loss_events_in_round);
+}
+
 test "NORMATIVE a non-probing loss round decays the short-term model by 0.7 once per round [draft-ietf-ccwg-bbr-06 §5.5.10.3]" {
     var bbr = newBbr();
     var d: Drive = .{};
@@ -558,7 +600,7 @@ test "MUST treat CE marks as congestion when sending ECT [draft-ietf-ccwg-bbr-06
     try std.testing.expectEqual(std.math.maxInt(u64), bbr.bw_shortterm);
     // A CE-marked ACK arrives: BBR counts it as a congestion round,
     // and the round close applies the short-term decay.
-    bbr.onCongestionEvent(1_000_000);
+    bbr.onCongestionEvent(1_000_000, 1_000_000);
     d.ack(&bbr, .{ .rate = 1_100_000, .inflight = 50_000 });
     try std.testing.expect(bbr.bw_shortterm != std.math.maxInt(u64));
 }

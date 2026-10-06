@@ -19,9 +19,6 @@
 //!
 //! Deliberate deviations, each conservative and marked DEVIATION at
 //! its implementation site:
-//!  - §5.5.11 spurious-loss undo is NOT implemented: the transport has
-//!    no spurious-recovery signal to forward. Damage is bounded —
-//!    REFILL resets the short-term model every probe cycle (§5.3.3.3).
 //!  - §5.3.1.3's "6 discontiguous sequence ranges" Startup-loss
 //!    criterion is approximated by 6 lost packets in the round (the
 //!    per-packet loss inlet has no range structure). More permissive =
@@ -50,6 +47,17 @@
 //! credit-starvation behind the pacing gate) — fixed before the
 //! flip; the fairness cells are the regression instrument. Rollback
 //! is one line at any layer: `congestion_control = .cubic`.
+//!
+//! CORRECTION (2026-10-06): the BBR-vs-CUBIC shares above (31.1% deep
+//! / 61.3% shallow) were measured against a CUBIC whose recovery
+//! period was anchored at the lost packet's send time instead of the
+//! detection (RFC 9002 §B.6), so it reduced its window at every loss
+//! inside one round trip instead of once. With that repaired (0.29.0)
+//! the deep-buffer share is 22.3% (2.16 Mbps of 10) and the shallow
+//! one 62.5%; the BBR-only cells are unchanged (2-flow Jain 1.0000,
+//! 4-flow 0.9970, staggered 1.0000). Still no starvation, and the
+//! lower deep-buffer share is what a correct CUBIC takes from BBRv3
+//! in a deep buffer.
 //!
 //! CORRECTION (2026-10-03): the "full interop battery" above did not
 //! run. The fairness cells were real; the interop evidence was not.
@@ -316,6 +324,18 @@ closed_round_had_loss: bool = false,
 closed_round_loss_events: u16 = 0,
 /// round_count at recovery entry (§5.3.1.3's one-round gate).
 recovery_entry_round: u64 = 0,
+/// §5.5.11 undo: the loss episodes, and the model's bounds before
+/// the current episode's first loss (SaveStateUponLoss), for
+/// `onSpuriousLoss` (RestoreStateUponSpuriousLoss). The bounds are
+/// saved at the first per-packet loss outside recovery, BEFORE
+/// HandleInflightTooHigh cuts inflight_longterm in the same walk;
+/// `model_saved` holds them until the aggregate loss opens the
+/// episode.
+episodes: congestion.LossEpisodes = .{},
+model_saved: bool = false,
+undo_bw_shortterm: u64 = infinity,
+undo_inflight_shortterm: u64 = infinity,
+undo_inflight_longterm: u64 = infinity,
 
 // -- §2.13 Startup full-pipe estimator --
 full_bw: u64 = 0,
@@ -470,6 +490,7 @@ pub fn onPacketSent(
 /// during the loss walk (before the aggregate onPacketLost).
 pub fn onPacketNewlyLost(self: *Bbr, info: *const delivery_rate.LostPacketInfo) void {
     self.lost_total = @max(self.lost_total, info.c_lost);
+    if (self.recovery_start_time_us == null and !self.model_saved) self.saveStateUponLoss();
     self.noteLoss(info.c_delivered);
     if (!self.is_bw_probe_sample) return; // only packets sent while probing
     var tx_in_flight = info.tx_in_flight;
@@ -482,17 +503,61 @@ pub fn onPacketNewlyLost(self: *Bbr, info: *const delivery_rate.LostPacketInfo) 
 /// Aggregate loss: the recovery-entry edge (§5.6.4.4
 /// OnEnterFastRecovery — SaveCwnd). cwnd is NOT cut here; the
 /// §5.5.10 model response owns the reaction.
-pub fn onPacketLost(self: *Bbr, bytes_lost: u64, lost_largest_sent_time_us: u64) void {
+pub fn onPacketLost(self: *Bbr, bytes_lost: u64, lost_largest_sent_time_us: u64, now_us: u64) void {
     _ = bytes_lost;
     if (self.recovery_start_time_us) |rec_start| {
-        // RFC 9002 §7.3.1: losses inside the period don't re-arm.
+        // RFC 9002 §7.3.1: losses inside the period don't re-arm. A
+        // loss of a packet sent after the period began extends it to
+        // now (one episode, so a spurious one is taken back whole).
         if (lost_largest_sent_time_us <= rec_start) return;
-        self.recovery_start_time_us = lost_largest_sent_time_us;
+        self.recovery_start_time_us = now_us;
         return;
     }
     self.saveCwnd();
+    if (!self.model_saved) self.saveStateUponLoss();
+    self.model_saved = false;
+    self.episodes.open();
     self.recovery_entry_round = self.round_count;
-    self.recovery_start_time_us = lost_largest_sent_time_us;
+    // RFC 9002 §B.6: the period starts at the detection, and ends
+    // with the ACK of a packet sent after it.
+    self.recovery_start_time_us = now_us;
+}
+
+/// §5.5.11 SaveStateUponLoss: the model's bounds before the episode.
+fn saveStateUponLoss(self: *Bbr) void {
+    self.model_saved = true;
+    self.undo_bw_shortterm = self.bw_shortterm;
+    self.undo_inflight_shortterm = self.inflight_shortterm;
+    self.undo_inflight_longterm = self.inflight_longterm;
+}
+
+pub fn lossEpisode(self: *const Bbr) u32 {
+    return self.episodes.episode;
+}
+
+pub fn noteDeclaredLost(self: *Bbr, count: u32) void {
+    self.episodes.noteDeclaredLost(count);
+}
+
+/// §5.5.11 RestoreStateUponSpuriousLoss: a packet declared lost in
+/// the current episode arrived. When every one of them has, the
+/// episode was spurious: the bounds go back to what they were before
+/// it, the loss round is clean again, the full-pipe estimator starts
+/// over (a spurious slow-down, as Linux's `bbr_undo_cwnd` treats it),
+/// and the recovery period ends with the window restored. A Startup
+/// exit the losses caused is not taken back (Linux does not either).
+pub fn onSpuriousLoss(self: *Bbr) void {
+    if (!self.episodes.arrived()) return;
+    self.bw_shortterm = self.undo_bw_shortterm;
+    self.inflight_shortterm = self.undo_inflight_shortterm;
+    self.inflight_longterm = self.undo_inflight_longterm;
+    self.is_loss_in_round = false;
+    self.loss_events_in_round = 0;
+    self.resetFullBw();
+    if (self.recovery_start_time_us != null) {
+        self.recovery_start_time_us = null;
+        self.restoreCwnd();
+    }
 }
 
 /// RFC 9002 §7.6.2 MUST: collapse to the transport's minimum
@@ -511,8 +576,9 @@ pub fn onPersistentCongestion(self: *Bbr) void {
 /// short-term decay (§5.5.10.3) fires at the round close.
 /// DEVIATION: nothing quantitative beyond that; the draft declines
 /// to specify a response magnitude.
-pub fn onCongestionEvent(self: *Bbr, ce_packet_sent_time_us: u64) void {
+pub fn onCongestionEvent(self: *Bbr, ce_packet_sent_time_us: u64, now_us: u64) void {
     _ = ce_packet_sent_time_us;
+    _ = now_us;
     self.noteLoss(self.delivered_total);
 }
 
@@ -744,8 +810,7 @@ fn updateMinRtt(self: *Bbr, now_us: u64) void {
     }
 }
 
-/// §5.5.10.2/§5.5.10.3 NoteLoss. (SaveStateUponLoss is the §5.5.11
-/// undo machinery — DEVIATION, not implemented; see the header.)
+/// §5.5.10.2/§5.5.10.3 NoteLoss.
 fn noteLoss(self: *Bbr, c_delivered_at_loss: u64) void {
     if (!self.is_loss_in_round) {
         self.loss_round_delivered = c_delivered_at_loss;
@@ -1419,11 +1484,11 @@ test "pickProbeWait draws from [2s, 3s) deterministically from the fixed seed" {
 test "recovery edges: SaveCwnd on entry, RestoreCwnd + re-bound on exit, no re-arm inside" {
     var bbr = Bbr.init(testCfg());
     bbr.cwnd = 60_000;
-    bbr.onPacketLost(1_200, 1_000_000);
+    bbr.onPacketLost(1_200, 1_000_000, 1_000_000);
     try testing.expectEqual(@as(?u64, 1_000_000), bbr.recovery_start_time_us);
     try testing.expectEqual(@as(u64, 60_000), bbr.prior_cwnd);
     // Loss inside the period must not move the anchor.
-    bbr.onPacketLost(1_200, 900_000);
+    bbr.onPacketLost(1_200, 900_000, 900_000);
     try testing.expectEqual(@as(?u64, 1_000_000), bbr.recovery_start_time_us);
     try testing.expect(bbr.isInRecovery(1_000_000));
     try testing.expect(!bbr.isInRecovery(1_000_001));

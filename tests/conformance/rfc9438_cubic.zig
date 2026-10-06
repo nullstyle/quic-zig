@@ -42,33 +42,33 @@ const CongestionController = congestion.CongestionController;
 test "MUST multiply cwnd by beta_cubic = 0.7 on a congestion event [RFC9438 §4.6 ¶2]" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic.cwnd = 100_000;
-    cubic.onPacketLost(1200, 1_000_000);
+    cubic.onPacketLost(1200, 1_000_000, 1_000_000);
     try std.testing.expectEqual(@as(u64, 70_000), cubic.cwnd);
     try std.testing.expectEqual(@as(?u64, 70_000), cubic.ssthresh);
 
     // The ECN-CE decrease path applies the same factor.
     var cubic_ce = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic_ce.cwnd = 100_000;
-    cubic_ce.onCongestionEvent(1_000_000);
+    cubic_ce.onCongestionEvent(1_000_000, 1_000_000);
     try std.testing.expectEqual(@as(u64, 70_000), cubic_ce.cwnd);
 }
 
 test "MUST NOT reduce below the minimum window [RFC9438 §4.6 / RFC9002 §7.2]" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic.cwnd = 2_500; // 0.7x would be 1750, below 2*MSS = 2400
-    cubic.onPacketLost(1200, 1_000_000);
+    cubic.onPacketLost(1200, 1_000_000, 1_000_000);
     try std.testing.expectEqual(cubic.cfg.minWindow(), cubic.cwnd);
 }
 
 test "SHOULD apply fast convergence when reducing below the previous W_max [RFC9438 §4.7 ¶2]" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic.cwnd = 100_000;
-    cubic.onPacketLost(1200, 1_000_000);
+    cubic.onPacketLost(1200, 1_000_000, 1_000_000);
     // First reduction was from the ceiling: W_max = the old cwnd.
     try std.testing.expectEqual(@as(u64, 100_000), cubic.w_max);
     // Second reduction happens below that ceiling: W_max takes the
     // (1+β)/2 haircut of the current window — 70_000 · 0.85 = 59_500.
-    cubic.onPacketLost(1200, 2_000_000);
+    cubic.onPacketLost(1200, 2_000_000, 2_000_000);
     try std.testing.expectEqual(@as(u64, 59_500), cubic.w_max);
 }
 
@@ -127,10 +127,31 @@ test "SHOULD NOT grow cwnd when application limited [RFC9002 §7.8 ¶1] (all alg
 test "MUST NOT re-enter recovery for losses inside the recovery period [RFC9002 §7.3.1]" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic.cwnd = 100_000;
-    cubic.onPacketLost(1200, 1_000_000);
+    cubic.onPacketLost(1200, 1_000_000, 1_020_000);
     const once = cubic.cwnd;
-    cubic.onPacketLost(1200, 999_999);
+    cubic.onPacketLost(1200, 999_999, 1_020_500);
     try std.testing.expectEqual(once, cubic.cwnd);
+    // Sent after the first lost packet, before its detection (§B.6:
+    // the period starts at the detection): still inside.
+    cubic.onPacketLost(1200, 1_019_000, 1_021_000);
+    try std.testing.expectEqual(once, cubic.cwnd);
+}
+
+test "the reduction, W_max and the threshold are restored when every packet it was for arrives [RFC9002 §6.1 ¶?]" {
+    var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
+    cubic.cwnd = 100_000;
+    cubic.w_max = 110_000;
+    cubic.ssthresh = 90_000;
+    cubic.onPacketLost(1200, 1_000_000, 1_020_000);
+    cubic.noteDeclaredLost(1);
+    try std.testing.expectEqual(@as(u64, 70_000), cubic.cwnd);
+    try std.testing.expectEqual(@as(u64, 85_000), cubic.w_max); // fast convergence: cwnd * (1 + 0.7) / 2
+    cubic.onSpuriousLoss();
+    try std.testing.expectEqual(@as(u64, 100_000), cubic.cwnd);
+    try std.testing.expectEqual(@as(u64, 110_000), cubic.w_max);
+    try std.testing.expectEqual(@as(?u64, 90_000), cubic.ssthresh);
+    try std.testing.expectEqual(@as(?u64, null), cubic.recovery_start_time_us);
+    try std.testing.expectEqual(@as(?u64, null), cubic.epoch_start_us);
 }
 
 test "MUST collapse to the minimum window on persistent congestion [RFC9002 §7.6 ¶2]" {
@@ -145,6 +166,6 @@ test "config selects CUBIC through the wrapper-facing union" {
     try std.testing.expectEqual(congestion.Algorithm.cubic, cc.algorithm());
     // The dispatched surface behaves: a loss applies the CUBIC β.
     cc.setCwndForTest(100_000);
-    cc.onPacketLost(1200, 1_000_000);
+    cc.onPacketLost(1200, 1_000_000, 1_000_000);
     try std.testing.expectEqual(@as(u64, 70_000), cc.cwndBytes());
 }

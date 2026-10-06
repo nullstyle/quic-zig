@@ -50,6 +50,9 @@ pub const congestion = @import("congestion.zig");
 pub const delivery_rate = @import("delivery_rate.zig");
 /// RFC 9002 §6 ACK processing and loss detection primitives.
 pub const loss_recovery = @import("loss_recovery.zig");
+/// The sender's memory of the packets it declared lost, and the loss
+/// thresholds it widens when one of them arrives (RFC 9002 §6.1).
+pub const reorder_window = @import("ReorderWindow.zig");
 /// RFC 9002 §7.7 token-bucket packet pacing.
 pub const pacing = @import("Pacer.zig");
 /// RFC 9406 HyStart++ slow-start exit, shared by both controllers.
@@ -267,6 +270,7 @@ test {
     _ = congestion;
     _ = delivery_rate;
     _ = loss_recovery;
+    _ = reorder_window;
     _ = flow_control;
     _ = path_validator;
     _ = send_stream;

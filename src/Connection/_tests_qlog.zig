@@ -396,7 +396,7 @@ test "qlog: a loss episode emits a recovery congestion state matching pathStats"
 
     // Enter recovery: a packet sent at t=1s is declared lost, so the
     // controller latches the recovery boundary at its send time.
-    cc.onPacketLost(1200, 1_000_000);
+    cc.onPacketLost(1200, 1_000_000, 1_000_000);
     try std.testing.expect(cc.recoveryStartTimeUs() != null);
 
     // Observed 50 ms later — strictly AFTER the boundary, which is

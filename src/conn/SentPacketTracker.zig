@@ -11,6 +11,7 @@ pub const SentPacketTracker = @This();
 
 const std = @import("std");
 const frame_types = @import("../frame/types.zig");
+const ReorderWindow = @import("ReorderWindow.zig");
 
 /// Maximum number of control frames a single tracked packet can carry
 /// for retransmission bookkeeping.
@@ -369,6 +370,10 @@ bytes_in_flight: u64 = 0,
 /// Used for some loss-recovery state; tracked separately so
 /// we don't have to walk the array.
 ack_eliciting_in_flight: u64 = 0,
+/// The packets this tracker declared lost that may yet arrive, and
+/// the loss thresholds of this space (RFC 9002 §6.1, widened when one
+/// of them does). Nothing is allocated until the first loss.
+reorder: ReorderWindow = .{},
 
 /// The storage a tracker starts with, in slots, when its capacity is
 /// larger: the Initial/Handshake trackers' whole capacity, and a
@@ -411,6 +416,7 @@ fn grow(self: *SentPacketTracker) std.mem.Allocator.Error!void {
 pub fn shrinkToMinimum(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
     std.debug.assert(self.liveCount() == 0);
     self.resetRetainingCapacity();
+    self.reorder.release(allocator);
     if (self.packets.len <= 4) return;
     self.packets = allocator.realloc(self.packets, 4) catch return;
 }
@@ -420,6 +426,7 @@ pub fn shrinkToMinimum(self: *SentPacketTracker, allocator: std.mem.Allocator) v
 /// ownership) — deinit'ing them would double-free.
 pub fn deinit(self: *SentPacketTracker, allocator: std.mem.Allocator) void {
     self.clear(allocator);
+    self.reorder.release(allocator);
     allocator.free(self.packets);
     self.* = undefined;
 }

@@ -211,7 +211,7 @@ test "MUST trigger NewReno congestion event on a peer-reported CE increase [RFC9
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 24000;
     try std.testing.expectEqual(@as(?u64, null), nr.recovery_start_time_us);
-    nr.onCongestionEvent(2_000_000);
+    nr.onCongestionEvent(2_000_000, 2_000_000);
     try std.testing.expectEqual(@as(?u64, 12000), nr.ssthresh);
     try std.testing.expectEqual(@as(u64, 12000), nr.cwnd);
     try std.testing.expectEqual(@as(?u64, 2_000_000), nr.recovery_start_time_us);
@@ -225,9 +225,9 @@ test "MUST NOT halve cwnd twice for a CE bump on a packet sent before the recove
     // helper.
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 24000;
-    nr.onCongestionEvent(2_000_000);
+    nr.onCongestionEvent(2_000_000, 2_000_000);
     const first_cwnd = nr.cwnd;
-    nr.onCongestionEvent(1_500_000); // earlier sent-time → suppress.
+    nr.onCongestionEvent(1_500_000, 1_500_000); // earlier sent-time → suppress.
     try std.testing.expectEqual(first_cwnd, nr.cwnd);
 }
 

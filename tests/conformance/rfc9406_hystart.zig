@@ -127,7 +127,7 @@ test "MUST NOT alter congestion avoidance [RFC9406 §4.3] (both algorithms)" {
         var cc = CongestionController.init(.{ .max_datagram_size = 1200, .algorithm = algo });
         // Force congestion avoidance: cwnd at ssthresh.
         cc.setCwndForTest(50_000);
-        cc.onPacketLost(1200, 1_000_000); // sets ssthresh, leaves slow start
+        cc.onPacketLost(1200, 1_000_000, 1_000_000); // sets ssthresh, leaves slow start
         try std.testing.expect(!cc.isSlowStart());
         const cwnd_before = cc.cwndBytes();
         // Wildly inflating RTT must not move cwnd through HyStart++,

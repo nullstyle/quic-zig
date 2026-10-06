@@ -383,6 +383,11 @@ pub const ImpairmentOptions = struct {
     seed: u64 = 0xbe9c4,
     loss_permille: u16 = 0,
     reorder_permille: u16 = 0,
+    /// How long a reordered packet is held back (sim_net's
+    /// `reorder_extra_us`). The link's round trip is 2 ms by default
+    /// (`one_way_delay_us`): 5 ms is 2.5 round trips of reordering,
+    /// 1 ms is half of one.
+    reorder_extra_us: u64 = 5_000,
     /// Bottleneck link rate in bytes/s (0 = unlimited). A rate-limited
     /// link builds a standing queue under an overshooting sender,
     /// which is what inflates RTT — the only condition under which
@@ -421,6 +426,13 @@ pub const ImpairmentResult = struct {
     /// Bottleneck-model observability (0 when no bottleneck configured).
     queue_dropped: u64 = 0,
     peak_queue_delay_us: u64 = 0,
+    /// The sender's loss detection: packets declared lost, how many of
+    /// them arrived after all, and the thresholds at the end (RFC 9002
+    /// §6.1, widened by spurious losses).
+    packets_lost: u64 = 0,
+    packets_spuriously_lost: u64 = 0,
+    packet_threshold: u64 = 0,
+    time_shift: u8 = 0,
 };
 
 /// Bulk transfer through the seeded impairment net, measured in
@@ -436,6 +448,7 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .seed = opts.seed,
         .loss_permille = opts.loss_permille,
         .reorder_permille = opts.reorder_permille,
+        .reorder_extra_us = opts.reorder_extra_us,
         .base_delay_us = opts.one_way_delay_us,
         .bottleneck_bytes_per_s = opts.bottleneck_bytes_per_s,
         .max_queue_delay_us = opts.max_queue_delay_us,
@@ -551,6 +564,10 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .seed = opts.seed,
         .queue_dropped = net.queue_dropped,
         .peak_queue_delay_us = net.peak_queue_delay_us,
+        .packets_lost = pair.client.qlog_packets_lost,
+        .packets_spuriously_lost = pair.client.qlog_packets_spuriously_lost,
+        .packet_threshold = pair.client.paths.primaryConst().sent.reorder.packet_threshold,
+        .time_shift = pair.client.paths.primaryConst().sent.reorder.time_shift,
     };
 }
 

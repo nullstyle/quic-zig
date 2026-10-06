@@ -71,6 +71,53 @@ pub fn exitRecoveryOrStall(rec: *?u64, largest_acked_sent_time_us: u64) bool {
     return true;
 }
 
+/// A controller's loss episodes, for taking a spurious one back.
+///
+/// A loss episode opens when the controller reacts to a loss (a
+/// reduction, or BBR's recovery entry) and the state before the
+/// reaction is saved. Every packet declared lost is counted in the
+/// episode that is open when it is declared (`noteDeclaredLost`), and
+/// the loss sweep stamps the packet's record with the episode number.
+/// When an ACK covers a packet declared lost, the packet arrived; if
+/// it was counted in the current episode, `arrived` takes one off the
+/// count. When the count reaches zero every packet the controller
+/// reacted to has arrived, there was no congestion, and the controller
+/// restores the saved state. Linux keeps the same count as
+/// `undo_retrans`; a later real loss opens a new episode and the old
+/// one is never taken back.
+pub const LossEpisodes = struct {
+    /// Episodes opened so far (0: none yet).
+    episode: u32 = 0,
+    /// Packets declared lost in the current episode whose ACK has not
+    /// come.
+    pending: u32 = 0,
+    /// The reaction of the current episode is saved and not yet taken
+    /// back.
+    undoable: bool = false,
+
+    /// The controller reacts: a new episode, nothing pending yet.
+    pub fn open(self: *LossEpisodes) void {
+        self.episode +%= 1;
+        self.pending = 0;
+        self.undoable = true;
+    }
+
+    pub fn noteDeclaredLost(self: *LossEpisodes, count: u32) void {
+        self.pending +|= count;
+    }
+
+    /// A packet counted in the current episode arrived. True once
+    /// every one of them has, while the reaction is still there to
+    /// take back; the caller then restores its saved state.
+    pub fn arrived(self: *LossEpisodes) bool {
+        if (self.pending == 0) return false;
+        self.pending -= 1;
+        if (self.pending != 0 or !self.undoable) return false;
+        self.undoable = false;
+        return true;
+    }
+};
+
 /// Selectable congestion-control algorithm.
 pub const Algorithm = enum {
     /// RFC 9002 §7 / Appendix B NewReno.
@@ -189,13 +236,20 @@ pub const CongestionController = union(Algorithm) {
         };
     }
 
+    /// Packets were declared lost; `lost_largest_sent_time_us` is the
+    /// send time of the newest of them, `now_us` the time of the
+    /// detection. RFC 9002 §B.6: no reaction when the newest lost
+    /// packet was sent inside the current recovery period; otherwise a
+    /// new period starts NOW (not at the packet's send time) and the
+    /// controller reduces.
     pub fn onPacketLost(
         self: *CongestionController,
         bytes_lost: u64,
         lost_largest_sent_time_us: u64,
+        now_us: u64,
     ) void {
         switch (self.*) {
-            inline else => |*impl| impl.onPacketLost(bytes_lost, lost_largest_sent_time_us),
+            inline else => |*impl| impl.onPacketLost(bytes_lost, lost_largest_sent_time_us, now_us),
         }
     }
 
@@ -205,9 +259,37 @@ pub const CongestionController = union(Algorithm) {
         }
     }
 
-    pub fn onCongestionEvent(self: *CongestionController, ce_packet_sent_time_us: u64) void {
+    /// An ECN-CE report on a packet sent at `ce_packet_sent_time_us`,
+    /// seen at `now_us`: the same period rule as `onPacketLost`.
+    pub fn onCongestionEvent(self: *CongestionController, ce_packet_sent_time_us: u64, now_us: u64) void {
         switch (self.*) {
-            inline else => |*impl| impl.onCongestionEvent(ce_packet_sent_time_us),
+            inline else => |*impl| impl.onCongestionEvent(ce_packet_sent_time_us, now_us),
+        }
+    }
+
+    /// The controller's current loss episode (see `LossEpisodes`).
+    /// The loss sweep stamps the packets it declared lost with it,
+    /// after it has told the controller about them.
+    pub fn lossEpisode(self: *const CongestionController) u32 {
+        return switch (self.*) {
+            inline else => |*impl| impl.lossEpisode(),
+        };
+    }
+
+    /// `count` packets were declared lost, in the current episode.
+    /// Fired after the aggregate `onPacketLost` of the same sweep.
+    pub fn noteDeclaredLost(self: *CongestionController, count: u32) void {
+        switch (self.*) {
+            inline else => |*impl| impl.noteDeclaredLost(count),
+        }
+    }
+
+    /// A packet declared lost in the current episode arrived (an ACK
+    /// covered it). When every packet of the episode has, the
+    /// controller takes its reaction back.
+    pub fn onSpuriousLoss(self: *CongestionController) void {
+        switch (self.*) {
+            inline else => |*impl| impl.onSpuriousLoss(),
         }
     }
 
@@ -367,9 +449,15 @@ pub const NewReno = struct {
     /// Slow-start threshold. `null` means infinity (slow start
     /// continues until first loss).
     ssthresh: ?u64 = null,
-    /// Recovery start time in microseconds, if currently in
-    /// recovery. Set on loss; cleared once an ACK arrives for a
-    /// packet sent after recovery_start_time.
+    /// The recovery period's start, if currently in recovery: the
+    /// time the loss (or CE report) was detected (RFC 9002 §B.6
+    /// `congestion_recovery_start_time = now()`). Cleared once an ACK
+    /// arrives for a packet sent after it (§7.3.2). ANCHORED AT THE
+    /// DETECTION, not at the lost packet's send time (as before
+    /// 0.29.0): with the send time as the anchor the period ended at
+    /// the next ACK, so every loss in one round trip was a new
+    /// reduction, and a spurious reduction could never be taken back
+    /// (its second packet opened a new episode).
     recovery_start_time_us: ?u64 = null,
     /// Bytes acknowledged since the last cwnd update during
     /// congestion avoidance. We compound increments per
@@ -377,6 +465,11 @@ pub const NewReno = struct {
     bytes_acked_in_ca: u64 = 0,
     /// RFC 9406 HyStart++ slow-start exit state.
     hystart: HyStart = .{},
+    /// The loss episodes, and the window before the current one's
+    /// reduction, for `onSpuriousLoss`.
+    episodes: LossEpisodes = .{},
+    undo_cwnd: u64 = 0,
+    undo_ssthresh: ?u64 = null,
 
     /// Build a fresh controller with `cfg` and `cwnd = initialWindow()`.
     pub fn init(cfg: Config) NewReno {
@@ -445,21 +538,21 @@ pub const NewReno = struct {
 
     /// Process a packet declared lost. RFC 9002 §B.6.
     /// `lost_largest_sent_time_us` is the send time of the latest
-    /// lost packet; recovery period starts at that time.
+    /// lost packet (was it sent inside the current recovery period?),
+    /// `now_us` the detection time, where a new period starts.
     pub fn onPacketLost(
         self: *NewReno,
         bytes_lost: u64,
         lost_largest_sent_time_us: u64,
+        now_us: u64,
     ) void {
         _ = bytes_lost; // tracked externally; unused here
 
         // Don't re-enter recovery for losses that happened during
         // an existing recovery period.
-        if (self.recovery_start_time_us) |rec_start| {
-            if (lost_largest_sent_time_us <= rec_start) return;
-        }
+        if (self.isInRecovery(lost_largest_sent_time_us)) return;
 
-        self.recovery_start_time_us = lost_largest_sent_time_us;
+        self.recovery_start_time_us = now_us;
         self.reduce();
     }
 
@@ -479,13 +572,11 @@ pub const NewReno = struct {
     /// byte budget — packets aren't actually lost from the
     /// in-flight pool by an ECN-CE report, just the controller window
     /// shrinks.
-    pub fn onCongestionEvent(self: *NewReno, ce_packet_sent_time_us: u64) void {
+    pub fn onCongestionEvent(self: *NewReno, ce_packet_sent_time_us: u64, now_us: u64) void {
         // Suppress re-entry into recovery for ECN events that report
         // CE on packets sent before the current recovery period.
-        if (self.recovery_start_time_us) |rec_start| {
-            if (ce_packet_sent_time_us <= rec_start) return;
-        }
-        self.recovery_start_time_us = ce_packet_sent_time_us;
+        if (self.isInRecovery(ce_packet_sent_time_us)) return;
+        self.recovery_start_time_us = now_us;
         self.reduce();
     }
 
@@ -493,6 +584,9 @@ pub const NewReno = struct {
     /// ECN-CE paths (the RFC defines a single OnCongestionEvent
     /// procedure invoked from both).
     fn reduce(self: *NewReno) void {
+        self.episodes.open();
+        self.undo_cwnd = self.cwnd;
+        self.undo_ssthresh = self.ssthresh;
         // ssthresh = cwnd * 0.5
         self.ssthresh = @max(
             self.cwnd * loss_reduction_factor_num / loss_reduction_factor_den,
@@ -503,6 +597,27 @@ pub const NewReno = struct {
         // Loss/CE ends slow start through ssthresh; HyStart++ has
         // nothing left to track.
         self.hystart.reset();
+    }
+
+    pub fn lossEpisode(self: *const NewReno) u32 {
+        return self.episodes.episode;
+    }
+
+    pub fn noteDeclaredLost(self: *NewReno, count: u32) void {
+        self.episodes.noteDeclaredLost(count);
+    }
+
+    /// A packet declared lost in the current episode arrived. When
+    /// every one of them has, the reduction was for nothing: the
+    /// window goes back to what it was before it (never below where
+    /// it is now), and the recovery period ends. The analog of
+    /// Linux's `tcp_undo_cwnd_reduction`.
+    pub fn onSpuriousLoss(self: *NewReno) void {
+        if (!self.episodes.arrived()) return;
+        self.cwnd = @max(self.cwnd, self.undo_cwnd);
+        self.ssthresh = self.undo_ssthresh;
+        self.recovery_start_time_us = null;
+        self.bytes_acked_in_ca = 0;
     }
 
     /// Post-ACK hook driving RFC 9406 HyStart++ (see `hystart.zig`).
@@ -600,7 +715,7 @@ test "slow start adds bytes_acked to cwnd" {
 test "loss halves cwnd to ssthresh and enters recovery" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 12000;
-    nr.onPacketLost(1200, 1_000_000);
+    nr.onPacketLost(1200, 1_000_000, 1_000_000);
     try std.testing.expectEqual(@as(?u64, 6000), nr.ssthresh);
     try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
     try std.testing.expect(nr.recovery_start_time_us != null);
@@ -611,13 +726,13 @@ test "loss halves cwnd to ssthresh and enters recovery" {
 test "loss can't shrink cwnd below min_window" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 2000; // already small
-    nr.onPacketLost(1200, 1_000_000);
+    nr.onPacketLost(1200, 1_000_000, 1_000_000);
     try std.testing.expectEqual(nr.cfg.minWindow(), nr.cwnd);
 }
 
 test "recovery period prevents cwnd growth from in-recovery acks" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
-    nr.onPacketLost(1200, 1_000_000);
+    nr.onPacketLost(1200, 1_000_000, 1_000_000);
     const cwnd_after_loss = nr.cwnd;
     // ACK for a packet sent before recovery → ignored for cwnd.
     nr.onPacketAcked(1200, 999_999, 0, 0, nr.cwnd);
@@ -661,7 +776,7 @@ test "persistent congestion resets cwnd to min_window" {
 test "onCongestionEvent halves cwnd to ssthresh and arms recovery" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 12000;
-    nr.onCongestionEvent(1_000_000);
+    nr.onCongestionEvent(1_000_000, 1_000_000);
     try std.testing.expectEqual(@as(?u64, 6000), nr.ssthresh);
     try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
     try std.testing.expectEqual(@as(?u64, 1_000_000), nr.recovery_start_time_us);
@@ -672,18 +787,18 @@ test "onCongestionEvent can't shrink cwnd below min_window" {
     // share the same decrease body and must honor the same floor.
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 2000; // already small
-    nr.onCongestionEvent(1_000_000);
+    nr.onCongestionEvent(1_000_000, 1_000_000);
     try std.testing.expectEqual(nr.cfg.minWindow(), nr.cwnd);
 }
 
 test "onCongestionEvent suppresses re-entry within an existing recovery period" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 12000;
-    nr.onCongestionEvent(1_000_000);
+    nr.onCongestionEvent(1_000_000, 1_000_000);
     const cwnd_after_first = nr.cwnd;
     // A second CE on a packet sent before the recovery boundary is
     // a duplicate signal — shouldn't shrink cwnd further.
-    nr.onCongestionEvent(999_999);
+    nr.onCongestionEvent(999_999, 999_999);
     try std.testing.expectEqual(cwnd_after_first, nr.cwnd);
 }
 
@@ -714,7 +829,7 @@ test "app-limited ACK still exits recovery (state maintenance precedes the gate)
     inline for ([_]Algorithm{ .new_reno, .cubic }) |algo| {
         var cc = CongestionController.init(.{ .max_datagram_size = 1200, .algorithm = algo });
         cc.setCwndForTest(12000);
-        cc.onPacketLost(1200, 1_000_000);
+        cc.onPacketLost(1200, 1_000_000, 1_000_000);
         try std.testing.expect(cc.recoveryStartTimeUs() != null);
         const cwnd_in_recovery = cc.cwndBytes();
         // Post-recovery ACK with an empty pipe: recovery must clear
@@ -757,12 +872,12 @@ test "CongestionController dispatch is observably identical to direct NewReno" {
                 boxed.onPacketAcked(a.bytes, a.sent_us, 1_000, 25_000, boxed.cwndBytes());
             },
             .loss => |l| {
-                direct.onPacketLost(l.bytes, l.sent_us);
-                boxed.onPacketLost(l.bytes, l.sent_us);
+                direct.onPacketLost(l.bytes, l.sent_us, l.sent_us);
+                boxed.onPacketLost(l.bytes, l.sent_us, l.sent_us);
             },
             .ce => |t| {
-                direct.onCongestionEvent(t);
-                boxed.onCongestionEvent(t);
+                direct.onCongestionEvent(t, t);
+                boxed.onCongestionEvent(t, t);
             },
             .persistent => {
                 direct.onPersistentCongestion();
@@ -831,7 +946,7 @@ test "rate-sample surface: no-op hooks leave observables untouched, pacing outle
                 );
             }
         }
-        cc.onPacketLost(1_200, 2_000_000);
+        cc.onPacketLost(1_200, 2_000_000, 2_000_000);
         try std.testing.expect(!cc.isSlowStart());
         for ([_]u64{ 500, 25_000 }) |srtt| {
             try std.testing.expectEqual(

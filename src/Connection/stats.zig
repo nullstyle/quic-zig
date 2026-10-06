@@ -30,6 +30,13 @@ pub const ConnectionStats = struct {
     packets_sent: u64,
     packets_received: u64,
     packets_lost: u64,
+    /// Of `packets_lost`, the packets that arrived after all (an ACK
+    /// covered them later): reordering on the path, not loss. The
+    /// loss thresholds widen on each one (RFC 9002 §6.1), and a
+    /// congestion response in which every "lost" packet arrived is
+    /// taken back. A value that keeps rising with `packets_lost` means
+    /// the path reorders more than the thresholds have grown to.
+    packets_spuriously_lost: u64,
     /// Inbound RFC 9221 DATAGRAMs shed under queue/memory pressure
     /// instead of queued (receiver-side drop is permitted by §5.3;
     /// the connection stays up). Monotonic. A rising value means the
@@ -65,6 +72,7 @@ pub fn stats(conn: *const Connection) ConnectionStats {
         .packets_sent = conn.qlog_packets_sent,
         .packets_received = conn.qlog_packets_received,
         .packets_lost = conn.qlog_packets_lost,
+        .packets_spuriously_lost = conn.qlog_packets_spuriously_lost,
         .datagrams_dropped_recv = conn.datagrams_dropped_recv,
 
         .active_path_id = active_id,

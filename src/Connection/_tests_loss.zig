@@ -906,3 +906,219 @@ test "gcClosedStreams batch cap rolls surplus to the next tick" {
     }
     try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
 }
+
+// ------------------------------------------------ spurious losses
+
+/// A client with CUBIC pinned and five application packets in flight,
+/// sent 1 ms apart from 10 ms. The ACK of the newest alone declares
+/// the two oldest lost by the packet threshold (they trail by 4 and
+/// 3); an ACK that covers them after that is a spurious loss.
+fn spuriousLossFixture(allocator: std.mem.Allocator, ctx: boringssl.tls.Context) !*Connection {
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    errdefer conn.destroy();
+    conn.setCongestionAlgorithm(.cubic);
+    var pn: u64 = 0;
+    while (pn <= 4) : (pn += 1) {
+        try conn.sentForLevel(.application).record(.{
+            .pn = pn,
+            .sent_time_us = 10_000 + pn * 1_000,
+            .bytes = 1200,
+            .ack_eliciting = true,
+            .in_flight = true,
+        });
+    }
+    conn.pnSpaceForLevel(.application).next_pn = 5;
+    return conn;
+}
+
+fn ackOf(largest: u64, first_range: u64, ranges_bytes: []const u8) state.frame_types.Ack {
+    return .{
+        .largest_acked = largest,
+        .ack_delay = 0,
+        .first_range = first_range,
+        .range_count = if (ranges_bytes.len == 0) 0 else 1,
+        .ranges_bytes = ranges_bytes,
+        .ecn_counts = null,
+    };
+}
+
+test "a declared loss that an ACK then covers is spurious: the thresholds widen and the reduction is taken back" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try spuriousLossFixture(allocator, ctx);
+    defer conn.destroy();
+    const initial_cwnd = conn.congestionWindow();
+    const sent = conn.sentForLevel(.application);
+
+    // The ACK of 4 alone: 0 and 1 are lost by the packet threshold.
+    try conn.handleAckAtLevel(.application, ackOf(4, 0, &.{}), 60_000);
+    try std.testing.expectEqual(@as(u64, 2), conn.qlog_packets_lost);
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_spuriously_lost);
+    try std.testing.expect(conn.congestionWindow() < initial_cwnd);
+    try std.testing.expectEqual(@as(u32, 2), sent.reorder.live);
+    try std.testing.expectEqual(@as(u32, 1), conn.ccForApplication().lossEpisode());
+    try std.testing.expectEqual(@as(u64, 3), sent.reorder.packet_threshold);
+
+    // Two more packets go out before the late ACK comes.
+    var pn: u64 = 5;
+    while (pn <= 6) : (pn += 1) {
+        try sent.record(.{
+            .pn = pn,
+            .sent_time_us = 10_000 + pn * 1_000,
+            .bytes = 1200,
+            .ack_eliciting = true,
+            .in_flight = true,
+        });
+    }
+    conn.pnSpaceForLevel(.application).next_pn = 7;
+
+    // An ACK that covers 0 to 6: both "lost" packets arrived.
+    try conn.handleAckAtLevel(.application, ackOf(6, 6, &.{}), 61_000);
+    try std.testing.expectEqual(@as(u64, 2), conn.qlog_packets_spuriously_lost);
+    try std.testing.expectEqual(@as(u64, 2), conn.stats().packets_spuriously_lost);
+    try std.testing.expectEqual(@as(u32, 0), sent.reorder.live);
+    // Packet 0 trailed the largest acknowledged BEFORE this ACK (4) by
+    // 4: the threshold is one more than that now. (Not 7: the largest
+    // acknowledged by the ACK that covers it says nothing about how
+    // far the packet trailed when it was declared lost.)
+    try std.testing.expectEqual(@as(u64, 5), sent.reorder.packet_threshold);
+    // Every packet of the episode arrived: the window is back, the
+    // threshold too (slow start: none), and the period is over.
+    try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
+    try std.testing.expectEqual(@as(?u64, null), conn.ccForApplication().ssthreshBytes());
+    try std.testing.expectEqual(@as(?u64, null), conn.ccForApplication().recoveryStartTimeUs());
+
+    // The same ACK again finds nothing to take back a second time.
+    try conn.handleAckAtLevel(.application, ackOf(6, 6, &.{}), 62_000);
+    try std.testing.expectEqual(@as(u64, 2), conn.qlog_packets_spuriously_lost);
+    try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
+
+    // The wider threshold holds: five more packets, the ACK of the
+    // newest alone. 7 trails 11 by 4, which is under 5 now: nothing
+    // is declared lost, where the fixed threshold declared two.
+    pn = 7;
+    while (pn <= 11) : (pn += 1) {
+        try sent.record(.{
+            .pn = pn,
+            .sent_time_us = 10_000 + pn * 1_000,
+            .bytes = 1200,
+            .ack_eliciting = true,
+            .in_flight = true,
+        });
+    }
+    conn.pnSpaceForLevel(.application).next_pn = 12;
+    try conn.handleAckAtLevel(.application, ackOf(11, 0, &.{}), 63_000);
+    try std.testing.expectEqual(@as(u64, 2), conn.qlog_packets_lost);
+    try std.testing.expectEqual(@as(u32, 4), sent.liveCount());
+    try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
+}
+
+test "a spurious loss that is not the whole episode widens the thresholds and takes nothing back yet" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try spuriousLossFixture(allocator, ctx);
+    defer conn.destroy();
+    const initial_cwnd = conn.congestionWindow();
+    const sent = conn.sentForLevel(.application);
+
+    try conn.handleAckAtLevel(.application, ackOf(4, 0, &.{}), 60_000);
+    const reduced = conn.congestionWindow();
+    try std.testing.expect(reduced < initial_cwnd);
+
+    // Ranges [4, 4] and [1, 1] (a gap of 2 packets, 3 and 2, is coded
+    // as 1): only packet 1 is found to have arrived; 0 is still out.
+    try conn.handleAckAtLevel(.application, ackOf(4, 0, &.{ 1, 0 }), 61_000);
+    try std.testing.expectEqual(@as(u64, 1), conn.qlog_packets_spuriously_lost);
+    try std.testing.expectEqual(@as(u32, 1), sent.reorder.live);
+    try std.testing.expectEqual(@as(u64, 4), sent.reorder.packet_threshold); // 1 trailed 4 by 3
+    try std.testing.expectEqual(reduced, conn.congestionWindow());
+    try std.testing.expect(conn.ccForApplication().ssthreshBytes() != null);
+
+    // Now 0 as well: the episode is whole, the reduction goes.
+    try conn.handleAckAtLevel(.application, ackOf(4, 4, &.{}), 62_000);
+    try std.testing.expectEqual(@as(u64, 2), conn.qlog_packets_spuriously_lost);
+    try std.testing.expectEqual(@as(u64, 5), sent.reorder.packet_threshold);
+    try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
+    try std.testing.expectEqual(@as(?u64, null), conn.ccForApplication().ssthreshBytes());
+}
+
+test "a spurious loss from an older episode widens the thresholds and takes nothing back" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try spuriousLossFixture(allocator, ctx);
+    defer conn.destroy();
+    const initial_cwnd = conn.congestionWindow();
+    const sent = conn.sentForLevel(.application);
+
+    try conn.handleAckAtLevel(.application, ackOf(4, 0, &.{}), 60_000);
+    const reduced = conn.congestionWindow();
+    try std.testing.expect(reduced < initial_cwnd);
+
+    // A second loss event after the period (packets 5 to 9 from 75 ms,
+    // the ACK of 9 alone at 85 ms): episode 2, a second reduction. It
+    // declares 2, 3, 5 and 6 lost (they trail 9 by 7, 6, 4 and 3).
+    var pn: u64 = 5;
+    while (pn <= 9) : (pn += 1) {
+        try sent.record(.{
+            .pn = pn,
+            .sent_time_us = 70_000 + pn * 1_000,
+            .bytes = 1200,
+            .ack_eliciting = true,
+            .in_flight = true,
+        });
+    }
+    conn.pnSpaceForLevel(.application).next_pn = 10;
+    try conn.handleAckAtLevel(.application, ackOf(9, 0, &.{}), 85_000);
+    try std.testing.expectEqual(@as(u32, 2), conn.ccForApplication().lossEpisode());
+    const reduced_twice = conn.congestionWindow();
+    try std.testing.expect(reduced_twice < reduced);
+    try std.testing.expectEqual(@as(u64, 6), conn.qlog_packets_lost);
+
+    // Packets 0 to 4 arrive now (a gap of 4 packets, 8 to 5, coded as
+    // 3; a range of 5, coded as 4): 0 and 1 are episode 1's, 2 and 3
+    // episode 2's. All four are spurious and the thresholds widen;
+    // episode 2's reduction stays, since 5 and 6 are still out.
+    try conn.handleAckAtLevel(.application, ackOf(9, 0, &.{ 3, 4 }), 86_000);
+    try std.testing.expectEqual(@as(u64, 4), conn.qlog_packets_spuriously_lost);
+    try std.testing.expectEqual(@as(u64, 10), sent.reorder.packet_threshold); // 0 trailed 9 by 9
+    try std.testing.expectEqual(reduced_twice, conn.congestionWindow());
+    try std.testing.expectEqual(@as(u32, 2), sent.reorder.live);
+}
+
+test "a probe timeout's expired packet that is acknowledged after all is a spurious loss" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    conn.setCongestionAlgorithm(.cubic);
+    const initial_cwnd = conn.congestionWindow();
+    conn.rttForLevel(.application).smoothed_rtt_us = 10_000;
+    conn.rttForLevel(.application).latest_rtt_us = 10_000;
+    conn.rttForLevel(.application).rtt_var_us = 1_000;
+    conn.rttForLevel(.application).first_sample_taken = true;
+    try conn.sentForLevel(.application).record(.{
+        .pn = 0,
+        .sent_time_us = 10_000,
+        .bytes = 1200,
+        .ack_eliciting = true,
+        .in_flight = true,
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 1;
+
+    // The probe timeout expires packet 0.
+    try conn.tick(1_000_000);
+    try std.testing.expectEqual(@as(u64, 1), conn.qlog_packets_lost);
+    try std.testing.expect(conn.congestionWindow() < initial_cwnd);
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.application).reorder.live);
+
+    // Its ACK comes after all: 990 ms late on a 10 ms path, past any
+    // width, so the thresholds stay; the reduction is taken back.
+    try conn.handleAckAtLevel(.application, ackOf(0, 0, &.{}), 1_001_000);
+    try std.testing.expectEqual(@as(u64, 1), conn.qlog_packets_spuriously_lost);
+    try std.testing.expectEqual(@as(u64, 3), conn.sentForLevel(.application).reorder.packet_threshold);
+    try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
+}

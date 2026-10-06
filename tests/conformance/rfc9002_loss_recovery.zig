@@ -558,18 +558,84 @@ test "MUST grow cwnd by ~MSS per RTT in congestion avoidance [RFC9002 §B.5 ¶?]
 
 test "MUST halve cwnd to ssthresh and enter recovery on loss [RFC9002 §B.6 ¶?]" {
     // §B.6 / §7.3: ssthresh = cwnd/2 (kLossReductionFactor=1/2),
-    // cwnd = ssthresh, recovery_start_time set to the latest lost
-    // packet's send time.
+    // cwnd = ssthresh, congestion_recovery_start_time = now(): the
+    // time of the detection, NOT the lost packet's send time.
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 12000;
 
-    nr.onPacketLost(1200, 1_000_000);
+    nr.onPacketLost(1200, 1_000_000, 1_020_000);
 
     try std.testing.expectEqual(@as(?u64, 6000), nr.ssthresh);
     try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
-    try std.testing.expect(nr.recovery_start_time_us != null);
+    try std.testing.expectEqual(@as(?u64, 1_020_000), nr.recovery_start_time_us);
     try std.testing.expect(nr.isInRecovery(500_000));
-    try std.testing.expect(!nr.isInRecovery(1_500_000));
+    // Sent after the lost packet but before the detection: inside.
+    try std.testing.expect(nr.isInRecovery(1_015_000));
+    try std.testing.expect(!nr.isInRecovery(1_025_000));
+}
+
+test "MUST NOT reduce again for a loss detected inside the period, however late the packet was sent [RFC9002 §B.6 ¶?]" {
+    // §B.6 OnCongestionEvent(sent_time): "No reaction if already in a
+    // recovery period", where the period began at the detection of
+    // the first loss. A packet sent 15 ms after the first lost packet
+    // (but before that loss was detected) and lost too is the same
+    // congestion event: one reduction, not two. (Before 0.29.0 the
+    // period was anchored at the lost packet's send time, and such a
+    // loss halved the window a second time.)
+    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
+    nr.cwnd = 12000;
+    nr.onPacketLost(1200, 1_000_000, 1_020_000);
+    try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
+    nr.onPacketLost(1200, 1_015_000, 1_021_000);
+    try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
+    try std.testing.expectEqual(@as(?u64, 1_020_000), nr.recovery_start_time_us);
+    // A loss of a packet sent after the period began: a new event.
+    nr.onPacketLost(1200, 1_021_000, 1_041_000);
+    try std.testing.expectEqual(@as(u64, 3000), nr.cwnd);
+    try std.testing.expectEqual(@as(?u64, 1_041_000), nr.recovery_start_time_us);
+}
+
+test "the reduction is taken back when every packet it was for arrives [RFC9002 §6.1 ¶?]" {
+    // §6.1: a sender MAY widen its thresholds on a spurious loss; the
+    // controller's part is to take the reaction back, as Linux's
+    // tcp_undo_cwnd_reduction does when every retransmission of the
+    // episode is confirmed spurious (undo_retrans reaches zero).
+    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
+    nr.cwnd = 12000;
+    nr.ssthresh = 20000;
+    nr.onPacketLost(2400, 1_000_000, 1_020_000);
+    nr.noteDeclaredLost(2);
+    try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
+    try std.testing.expectEqual(@as(u32, 1), nr.lossEpisode());
+    // One of the two arrived: not yet.
+    nr.onSpuriousLoss();
+    try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
+    // Both arrived: the window and the threshold are back, and the
+    // recovery period is over.
+    nr.onSpuriousLoss();
+    try std.testing.expectEqual(@as(u64, 12000), nr.cwnd);
+    try std.testing.expectEqual(@as(?u64, 20000), nr.ssthresh);
+    try std.testing.expectEqual(@as(?u64, null), nr.recovery_start_time_us);
+    // A third report is nothing (the episode has no pending packet).
+    nr.onSpuriousLoss();
+    try std.testing.expectEqual(@as(u64, 12000), nr.cwnd);
+}
+
+test "a reduction with a real loss in it is never taken back [RFC9002 §6.1 ¶?]" {
+    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
+    nr.cwnd = 12000;
+    nr.onPacketLost(2400, 1_000_000, 1_020_000);
+    nr.noteDeclaredLost(2);
+    nr.onSpuriousLoss(); // one arrived; the other never will
+    try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
+    // A later, real event opens a new episode; the old one's second
+    // packet arriving now changes nothing (the caller checks the
+    // episode before it reports; the count was reset either way).
+    nr.onPacketLost(1200, 1_030_000, 1_050_000);
+    try std.testing.expectEqual(@as(u32, 2), nr.lossEpisode());
+    try std.testing.expectEqual(@as(u64, 3000), nr.cwnd);
+    nr.onSpuriousLoss();
+    try std.testing.expectEqual(@as(u64, 3000), nr.cwnd);
 }
 
 test "MUST NOT shrink cwnd below min_window on loss [RFC9002 §B.6 ¶?]" {
@@ -579,7 +645,7 @@ test "MUST NOT shrink cwnd below min_window on loss [RFC9002 §B.6 ¶?]" {
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
     nr.cwnd = 2000; // already below 2*MSS
 
-    nr.onPacketLost(1200, 1_000_000);
+    nr.onPacketLost(1200, 1_000_000, 1_000_000);
 
     try std.testing.expectEqual(nr.cfg.minWindow(), nr.cwnd);
 }
@@ -589,7 +655,7 @@ test "MUST NOT grow cwnd from ACKs of packets sent before recovery [RFC9002 §7.
     // congestion window in response to an ACK." Recovery clears only
     // when an ACK arrives for a packet sent after recovery began.
     var nr = NewReno.init(.{ .max_datagram_size = 1200 });
-    nr.onPacketLost(1200, 1_000_000);
+    nr.onPacketLost(1200, 1_000_000, 1_000_000);
     const cwnd_after_loss = nr.cwnd;
 
     // ACK for a packet sent at 999_999 — strictly before recovery_start.

@@ -9,6 +9,58 @@ changes.
 
 ### Fixed
 
+- **A late packet is not a lost packet: the loss thresholds widen when
+  a declared loss turns out spurious, and a reduction made for one is
+  taken back (RFC 9002 section 6.1).** The thresholds were fixed at 3
+  packets and 9/8 of the RTT, so a path that reorders declared packets
+  lost that arrived, and every controller saw loss. Now each space
+  remembers the packets it declared lost (`conn/ReorderWindow.zig`, a
+  ring of 256 records, allocated at the first loss); an ACK that covers
+  one of them is a spurious loss. The packet threshold grows to one
+  past the distance the packet trailed the largest acknowledged
+  packet, and the time threshold grows (9/8, 5/4, 3/2, then 2 times
+  the RTT) until it covers how late the packet was. Only for a packet
+  the widest thresholds could have covered: a packet later than twice
+  the RTT is lost at any width, and widening for it would only send
+  its copy later. The thresholds only grow, for the life of the
+  connection (Chromium's `GeneralLossAlgorithm` does the same with its
+  packet threshold). The controller counts the packets declared lost in
+  each loss episode; when every one of them has arrived, there was no
+  congestion, and the reduction is taken back: NewReno and CUBIC
+  restore the window, the threshold and W_max (Linux's
+  `tcp_undo_cwnd_reduction`), BBR restores its model bounds (the
+  draft's section 5.5.11, SaveStateUponLoss, until now a documented
+  deviation). A probe timeout's expired packet counts the same way.
+  MEASURED (`bench-e2e`, 12 seeds, before -> after):
+  `impairment_reorder10pct_1ms_rtt20ms_100mbit` (a 20 ms round trip,
+  100 Mbit/s, 10% of the packets 1 ms late; new): bbr median 1376 ->
+  773 ms (the link's floor), cubic 9937 -> 790, new_reno 18357 -> 790;
+  600 to 800 packets declared lost per run, all spurious, now 4 to 8.
+  `impairment_reorder10pct_1ms` (2 ms round trip; new): bbr median
+  199 -> 82 ms and max 2442 -> 94, cubic 3472 -> 87, new_reno 3609 ->
+  120. `impairment_reorder10pct` (5 ms late on a 2 ms path, 2.5 round
+  trips, past any width): bbr 137 -> 137, max 2480 -> 2078; cubic
+  4462 -> 3004; new_reno 4512 -> 3264. The 17 other cells are
+  unchanged. `ConnectionStats.packets_spuriously_lost` counts them.
+- **The recovery period starts at the detection of the loss, not at
+  the lost packet's send time (RFC 9002 section B.6,
+  `congestion_recovery_start_time = now()`).** NewReno, CUBIC and
+  BBR anchored the period at the send time of the newest lost packet,
+  so it ended at the next ACK (of any packet sent after that one), and
+  every loss found inside one round trip was a new reduction: 0.7 of
+  0.7 of 0.7 of the window for one congestion event, where the RFC
+  reduces once. Now a loss of a packet sent before the detection is
+  inside the period, and the period ends with the ACK of a packet sent
+  after the detection, as in TCP's fast recovery. MEASURED: the
+  fairness cells change where CUBIC is in them, since a CUBIC that
+  reduces once per round trip takes more: `fairness_10mbit_2f_mixed`
+  (bbr against cubic, deep buffer) bbr share 31.1% -> 22.3%, the
+  shallow one 61.3% -> 62.5%, `fairness_10mbit_2f_cubic` Jain 0.9996
+  -> 0.9823 (56.7% / 43.3% over 20 s); the BBR-only cells are
+  byte-identical. The controllers' `onPacketLost` and
+  `onCongestionEvent` take the detection time as a third / second
+  argument (internal; `quic.CongestionController` is not an embedder
+  surface).
 - **A handshake probe is two datagrams while there is no RTT sample
   (RFC 9002 section 6.2.4).** A client whose Initial datagram was lost
   sent it again after 1 s, 3 s, 7 s and 15 s, one datagram each time
@@ -97,6 +149,14 @@ changes.
 
 ### Measured
 
+- `bench-e2e`: two new reorder cells, `impairment_reorder10pct_1ms`
+  and `impairment_reorder10pct_1ms_rtt20ms_100mbit` (the impairment
+  options take `reorder_extra_us`), and a loss line under each run of
+  a sweep: packets declared lost, how many arrived late, the
+  thresholds at the end.
+- The ACK frame's range cap (16 lower ranges, 128 bytes) re-measured
+  with the reorder cells at 64 / 512 and 254 / 1024: more of the late
+  packets are seen acknowledged, the transfers are no faster. Kept.
 - `tests/e2e/handshake_loss.zig`, 30% loss each way, 300 seeds, a
   ClientHello of two packets, a 10 s budget: 0 handshakes not done
   (4 before), 79 at 900 ms or more (79 before: the client's own first

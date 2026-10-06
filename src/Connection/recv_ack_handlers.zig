@@ -17,6 +17,7 @@ const frame_types = state_mod.frame_types;
 const ack_range_mod = state_mod.ack_range_mod;
 const SentPacketTracker = state_mod.SentPacketTracker;
 const PnSpace = state_mod.PnSpace;
+const ReorderWindow = @import("../conn/ReorderWindow.zig");
 const transport_error_protocol_violation = state_mod.transport_error_protocol_violation;
 
 /// Scale a peer-reported ACK Delay (a varint, 0..2^62-1) by the peer's
@@ -190,6 +191,27 @@ fn dispatchAcked(
     conn_datagram.recordDatagramAcked(ctx.conn, acked);
 }
 
+const SpuriousLossCtx = struct {
+    conn: *Connection,
+    target: AckTarget,
+    previous_largest_acked: ?u64,
+    now_us: u64,
+};
+
+/// A packet this space declared lost arrived after all (an ACK range
+/// covers it). The space's thresholds widen so the same reordering is
+/// not a loss again (RFC 9002 §6.1), and the controller is told, so
+/// that an episode in which every "lost" packet arrived is taken
+/// back. The packet's frames were sent again in the meantime; the
+/// peer discards the copies (RFC 9000 §13.3).
+fn onSpuriousLoss(sctx: *SpuriousLossCtx, rec: ReorderWindow.LostRecord) void {
+    const target = sctx.target;
+    sctx.conn.qlog_packets_spuriously_lost +|= 1;
+    target.sent.reorder.widen(rec, sctx.previous_largest_acked, sctx.now_us, &target.path.path.rtt);
+    const cc = &target.path.path.cc;
+    if (rec.episode == cc.lossEpisode()) cc.onSpuriousLoss();
+}
+
 /// Apply one inbound ACK to `target`: validate, walk the ranges,
 /// fold the results into PMTUD / RTT / congestion / delivery-rate
 /// state, run packet-threshold loss detection, and emit qlog.
@@ -229,6 +251,9 @@ fn apply(
     if (!ecn_ok) {
         target.pn_space.validation = .failed;
     }
+    // For a spurious loss: the largest acknowledged packet before this
+    // ACK is how far a late packet trailed (`ReorderWindow.widen`).
+    const previous_largest_acked = target.pn_space.largest_acked_sent;
     target.pn_space.onAckReceived(a.largest_acked);
 
     var ctx: AckDispatchCtx = .{
@@ -255,6 +280,19 @@ fn apply(
         // the tracker is O(K log N) where K = packets matched
         // and N = tracker size, both bounded by our own send
         // rate × CWND.
+        // A late packet is not a lost packet: a range that covers a
+        // packet this space declared lost says it arrived. Checked
+        // BEFORE the tracker walk `continue`s on an empty range, since
+        // a declared-lost packet is no longer in the tracker.
+        if (target.isApplication()) {
+            var sctx: SpuriousLossCtx = .{
+                .conn = conn,
+                .target = target,
+                .previous_largest_acked = previous_largest_acked,
+                .now_us = now_us,
+            };
+            _ = target.sent.reorder.takeCovered(interval.smallest, interval.largest, &sctx, onSpuriousLoss);
+        }
         const start = target.sent.lowerBound(interval.smallest) orelse continue;
         var end = start;
         while (end < target.sent.count and target.sent.packets[end].pn <= interval.largest) : (end += 1) {}
@@ -341,7 +379,7 @@ fn apply(
         0;
     if (ce_delta_packets > 0) {
         const ce_anchor = if (ctx.largest_acked_send_time_us) |t| t else now_us;
-        target.path.path.cc.onCongestionEvent(ce_anchor);
+        target.path.path.cc.onCongestionEvent(ce_anchor, now_us);
     }
 
     // Loss detection — packet-threshold only (time-threshold lives

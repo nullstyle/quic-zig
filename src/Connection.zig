@@ -554,6 +554,9 @@ qlog_packets_sent: u64 = 0,
 qlog_packets_received: u64 = 0,
 /// Total packets declared lost.
 qlog_packets_lost: u64 = 0,
+/// Packets declared lost that an ACK then covered: they arrived, late
+/// (`ReorderWindow`). Counted in `qlog_packets_lost` too.
+qlog_packets_spuriously_lost: u64 = 0,
 /// Total UDP payload bytes we've sent.
 qlog_bytes_sent: u64 = 0,
 /// Total UDP payload bytes the peer has sent us.
@@ -1298,6 +1301,13 @@ pub const application_ack_eliciting_threshold: u8 = 1;
 /// workload that demonstrably makes the 16-range cap bind (bursty or
 /// correlated loss producing many disjoint gaps) — not on the
 /// principle alone.
+///   * 2026-10-06: re-measured with the reorder cells (10% of the
+///     packets late, hundreds of gaps open at once at the unlimited
+///     rate) at 64 ranges / 512 bytes and at 254 / 1024: the sender
+///     saw more of its late packets acknowledged (554 of 786 instead
+///     of 871 of 1349 in one run), and the transfers were no faster
+///     (the limit there is the reordering itself, see
+///     `conn/ReorderWindow.zig`). Kept at 16 / 128.
 pub const max_application_ack_ranges_bytes: usize = 128;
 /// Hard cap on the number of additional (non-largest) ACK ranges per application packet.
 pub const max_application_ack_lower_ranges: u64 = 16;
