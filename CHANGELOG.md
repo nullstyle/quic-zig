@@ -5,6 +5,27 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.30.1] - 2026-10-06
+
+A build fix for 0.30.0: it did not compile on Windows. No change for
+any other target beyond a test's tolerance. Verified toolchain:
+0.17.0.
+
+### Fixed
+
+- **0.30.0 did not compile on Windows.** `quic.unixWallClockUs`
+  called libc's `clock_gettime`, and Windows' libc has none:
+  `std.c.timespec` is `void` there, and the test that keeps the
+  function compiled (new in 0.30.0) took the Windows test binary down
+  with it. On Windows it reads `RtlGetSystemTimePrecise` now (100 ns
+  intervals since 1601, rebased to the Unix epoch). `just
+  check-windows` sees it; the `test` workflow's Windows job did, on
+  the tag. Do not pin 0.30.0 for a Windows build.
+- A ticket-lifetime test read 599 for 600 on the Windows runner in
+  Debug: BoringSSL counts a ticket's lifetime down from the moment it
+  was made, and a slow handshake crosses a second. The three
+  lifetime checks allow 5 s under the value set.
+
 ## [0.30.0] - 2026-10-06
 
 The probes release. A probe timeout is not a loss (RFC 9002 section
