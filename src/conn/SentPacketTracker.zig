@@ -904,7 +904,12 @@ test "SentPacket size stays pinned (tracker footprint = 4096 of these)" {
     // layout decision changed, so the A/B has nothing to judge. The
     // pin follows the verified toolchain: re-measure whenever it moves
     // again.
-    try std.testing.expectEqual(@as(usize, 200), @sizeOf(SentPacket));
+    //
+    // On a 32-bit target (x86-linux-musl, measured in CI 2026-10-05)
+    // the same struct is 152 bytes: pointers and usize are 4 bytes,
+    // and a u64 aligns to 4. The pin is per pointer size.
+    const expected: usize = if (@sizeOf(usize) == 8) 200 else 152;
+    try std.testing.expectEqual(expected, @sizeOf(SentPacket));
 }
 
 test "compaction triggers inside record and preserves order + search" {
