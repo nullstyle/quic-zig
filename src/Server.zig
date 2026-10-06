@@ -1301,6 +1301,21 @@ fn checkLoopThread(self: *Server) void {
     }
 }
 
+/// Make the calling thread the loop thread of this Server: the one
+/// `feed`, `tick` and `rotateSessionTicketKey` may run on. For an
+/// embedder that hands a Server from one thread to another at a
+/// quiescent point (nothing of the Server runs on the old thread any
+/// more), as capnp-zig's `adoptOwnerThread` does for a server-side
+/// connection; without it the Debug tripwire of `checkLoopThread`
+/// trips on the first `feed` or `tick` of the new thread (v0.29.0
+/// did; found by capnp-zig). Only the latch moves; this is not a
+/// lock, and two threads that run the Server at once are still a
+/// programming error. Nothing in a release build.
+pub fn adoptLoopThread(self: *Server) void {
+    if (builtin.mode != .debug) return;
+    self.loop_thread = std.Thread.getCurrentId();
+}
+
 /// Number of live connections currently in the table.
 pub fn connectionCount(self: *const Server) usize {
     return self.slots.items.len;
@@ -1346,6 +1361,15 @@ pub fn iterator(self: *Server) []*Slot {
 /// internally; the embedder must drain them via
 /// `drainStatelessResponse` and forward them on the same UDP
 /// socket the datagram came in on.
+///
+/// `bytes` is changed in place, whatever the outcome: header
+/// protection is removed and a packet is opened where it lies, and a
+/// datagram that comes back `.dropped` may already have its first
+/// byte and packet-number bytes changed. An embedder that gives a
+/// `.dropped` datagram to something else (its own dials, on one
+/// socket) must give that a COPY taken BEFORE this call (found by the
+/// bugnest session in qmesh-zig, 2026-10-06: a dial handed the bytes
+/// after `feed` stalled in its handshake).
 pub fn feed(
     self: *Server,
     bytes: []u8,

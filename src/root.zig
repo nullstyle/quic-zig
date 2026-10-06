@@ -71,9 +71,30 @@ pub const transport = @import("transport/root.zig");
 /// clock that goes on across a restart, for
 /// `Server.Config.new_token_clock`. Not for `feed` and `tick`: a wall
 /// clock can jump, and the timers must not.
+///
+/// Through libc's `clock_gettime(CLOCK_REALTIME)`, which quic links
+/// everywhere (BoringSSL needs libc): Zig 0.17.0's `std.time` has no
+/// timestamp function of its own (it reads clocks through `std.Io`).
+/// v0.29.0 called `std.time.microTimestamp`, which does not exist on
+/// 0.17.0; no test referenced the function, so no gate compiled it
+/// (found by capnp-zig; the test below keeps it compiled).
 pub fn unixWallClockUs() u64 {
-    const t = std.time.microTimestamp();
-    return if (t < 0) 0 else @intCast(t);
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 0;
+    if (ts.sec < 0) return 0;
+    const sec: u64 = @intCast(ts.sec);
+    const nsec: u64 = @intCast(ts.nsec);
+    return sec *| std.time.us_per_s +| nsec / std.time.ns_per_us;
+}
+
+test "unixWallClockUs is a Unix wall clock in microseconds, and it compiles" {
+    const a = unixWallClockUs();
+    // After 2024-01-01 (1,704,067,200 s since the epoch) and before
+    // 2100 (4,102,444,800 s): a wall clock, not a boot clock.
+    try std.testing.expect(a > 1_704_067_200 * @as(u64, std.time.us_per_s));
+    try std.testing.expect(a < 4_102_444_800 * @as(u64, std.time.us_per_s));
+    const b = unixWallClockUs();
+    try std.testing.expect(b + std.time.us_per_s >= a);
 }
 
 /// qlog serialization (Unstable tier): `qlog.Writer` turns the

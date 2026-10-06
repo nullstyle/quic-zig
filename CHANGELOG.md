@@ -9,6 +9,28 @@ changes.
 
 ### Fixed
 
+- **`quic.unixWallClockUs` compiles on Zig 0.17.0.** v0.29.0's new
+  function called `std.time.microTimestamp`, which 0.17.0 does not
+  have (its `std.time` reads clocks through `std.Io`); no test
+  referenced the function, so no gate compiled it. It reads libc's
+  `clock_gettime(CLOCK_REALTIME)` now, and a test keeps it compiled.
+  Found by capnp-zig.
+- **`Server.feed` says that it changes `bytes` in place, whatever the
+  outcome.** A datagram that comes back `.dropped` may already have
+  its first byte and packet-number bytes changed (header protection
+  is removed where the packet lies). An embedder that routes a
+  `.dropped` datagram to its own dials on one socket must hand them a
+  copy taken before `feed`. Found by the bugnest session in qmesh-zig
+  (a dial given the bytes after `feed` stalled in its handshake);
+  0.29.0's note said "route on `.dropped`" without the copy.
+- **`Server.adoptLoopThread()`**: makes the calling thread the loop
+  thread of the Server, for an embedder that hands a Server to another
+  thread at a quiescent point. v0.29.0's Debug tripwire
+  (`checkLoopThread`, which `feed`, `tick` and
+  `rotateSessionTicketKey` run) latched the first thread and tripped
+  on the first step of the new one, which broke capnp-zig's documented
+  `adoptOwnerThread` handoff for a server-side connection in Debug
+  builds (release builds were never affected). Found by capnp-zig.
 - **A probe timeout is not a loss (RFC 9002 section 6.2.4).** "A PTO
   timer expiration event does not indicate packet loss and MUST NOT
   cause prior unacknowledged packets to be marked as lost." The
