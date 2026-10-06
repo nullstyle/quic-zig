@@ -5,6 +5,104 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Fixed
+
+- **A handshake probe is two datagrams while there is no RTT sample
+  (RFC 9002 section 6.2.4).** A client whose Initial datagram was lost
+  sent it again after 1 s, 3 s, 7 s and 15 s, one datagram each time
+  (the first probe timeout is 1 s with no sample, and it doubles). A
+  quic-go server forgets a half-open connection after 5 s, so the
+  handshake failed whenever the datagrams at 0, 1 and 3 s were all
+  lost. MEASURED (interop `handshakeloss` and `handshakecorruption`,
+  quic-zig as the client against quic-go, 10 runs each on 0.28.1):
+  5 and 6 passes of 10. Now the CRYPTO data of the expired packet is
+  queued twice, so the probe leaves in two datagrams; a network that
+  loses up to three datagrams in a row cannot hold the client off past
+  3 s. Only the Initial and Handshake spaces, and only while the
+  connection has no RTT sample: with a sample the retries are quick,
+  and a second datagram would only double the cues that the peer
+  answers with a copy of its flight (measured in the handshake-loss
+  tests: it used up the peer's eight early copies in a 100 ms outage).
+  A server with no sample does the same with its flight.
+- **A Handshake packet that arrives before its keys is kept and read
+  when the keys come (RFC 9000 section 12.2).** The datagram with the
+  ServerHello is lost or late, the datagram with the rest of the
+  flight is not: the client had no Handshake keys and dropped it, and
+  the server sent it again after its own loss detection. Now the
+  client keeps up to two such packets (`max_held_handshake_packets`)
+  and reads them as soon as the ServerHello gives it the keys; they
+  are freed when the Handshake keys are discarded. In the
+  handshake-loss tests, a flight of three datagrams with the second
+  delivered before the first is done with no copy of anything.
+- **A lost CONNECTION_CLOSE is sent again at the peer's next packet.**
+  The rate limit of RFC 9000 section 10.2.1 was time: not before two
+  probe timeouts since the last close, while the closing state ends
+  at three. So a peer that did not get the close, and probes on its
+  own timer, got the repeat only by luck (measured: probes at 100 ms to
+  9 s after the close, no answer to any). The limit counts the peer's
+  packets now: the first packet after the close earns the close again,
+  then two more, then four, and so on, so a flood of N packets gets
+  log2(N) closes.
+
+- **A `Server` makes no connection for a datagram of which no packet
+  opens.** `feed` built a whole connection from the long header of a
+  1200-byte datagram before any packet was authenticated, and said
+  `.accepted` also when none was: the connection stayed, half open,
+  until the handshake timeout. An embedder with ONE socket for a
+  `Server` and its own dials, which gave each datagram to the Server
+  first and to a dial on `.dropped`, lost the answers to its dials
+  since 0.26.0 (a server's first flight is 1200 bytes since then;
+  qmesh-zig, found by the bugnest session; measured: `.accepted`, one
+  connection, gone 11 to 30 s later). Now a connection that opened no
+  packet of the datagram that made it is taken down at once and
+  `feed` says `.dropped`, as it did before 0.26.0 for that datagram.
+  A client whose Initial opens and then fails in TLS is not this case.
+
+### Added
+
+- **`Server.Config.new_token_clock` and `new_token_max_clock_skew_us`:
+  a clock of their own for NEW_TOKEN times.** A token holds the time
+  it was made at. Stamped with the `now_us` of `feed` (a timer clock,
+  which starts at zero in each process), a `new_token_key` that the
+  next process is given too did not let returning clients skip the
+  Retry, and let old tokens through after their lifetime. Now the
+  tokens can be stamped and checked with a clock that goes on across
+  a restart (`quic.unixWallClockUs`, microseconds since the Unix
+  epoch, is one), with an allowed skew for the jumps of a wall clock,
+  and the timers keep their clock. Three asks of capnp-zig's handoff
+  (2026-10-04) that 0.27.0 answered with docs only. The bundled loop
+  needs nothing else.
+- **`Server.Config.previous_session_ticket_key` (and
+  `previous_session_ticket_key_until_us`)**: a process that starts
+  less than one ticket lifetime after a key change still opens the
+  tickets of the key before, as a running process does after
+  `rotateSessionTicketKey`. Refused: with no `session_ticket_key`, 48
+  zero bytes, or the 16-byte name of the current key. Asked for by
+  capnp-zig after it ran 0.27.0 (its way out was to start with the old
+  key and rotate at once).
+- **`Client.Config.session_ticket_lifetime_s`**: the client's own
+  limit on how long it keeps a ticket. A BoringSSL client keeps a
+  ticket for the smaller of the server's lifetime and 2 days, so a
+  server lifetime above 2 days had no effect on a quic-zig client.
+  1 to 604800; refused with `tls_context_override`.
+- **`Client.resumptionTicketLifetimeSeconds(envelope)`**: the lifetime
+  of the ticket in a saved resumption envelope, as the client keeps
+  it. capnp-zig read it through `boringssl.raw` for this.
+- **`Server.rotateSessionTicketKey` checks the thread in a Debug
+  build**: a call from a thread that is not the one of `feed` and
+  `tick` trips an assert (the keys it changes are read by the
+  handshakes on that thread). Asked for by capnp-zig.
+
+### Measured
+
+- `tests/e2e/handshake_loss.zig`, 30% loss each way, 300 seeds, a
+  ClientHello of two packets, a 10 s budget: 0 handshakes not done
+  (4 before), 79 at 900 ms or more (79 before: the client's own first
+  second when it never heard anything). 30% toward the client only: 0
+  not done and 23 slow, as before.
+
 ## [0.28.1] - 2026-10-05
 
 A build fix for 0.28.0: it did not compile for a 32-bit target. No
