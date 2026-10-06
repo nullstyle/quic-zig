@@ -790,6 +790,34 @@ test "handshake loss: the client's probe timeout sends its ClientHello in two da
     try std.testing.expect(out.done_at_us < 1200 * us_per_ms);
 }
 
+test "handshake loss: a ClientHello lost eight times in a row is sent again every second, two datagrams each time" {
+    // The probe timeout of a client with no RTT sample is about 1 s,
+    // and the bound on the handshake backoff (`max_handshake_pto_us`)
+    // keeps it there instead of 1, 2, 4, 8 s: with the first eight
+    // datagrams lost (the ClientHello, then two per probe at 1, 2 and
+    // 3 s, then the first of the probe at 4 s) the ninth gets through
+    // at 4 s; with the doubling it was the probe at 8 s. MEASURED
+    // 2026-10-06 with the bound alone (client x quiche x
+    // handshakecorruption): the deadline ran from the oldest packet,
+    // each expiry left the next-oldest past its deadline, and the
+    // probes were 2, then 4, then 8 datagrams. The deadline runs from
+    // the last packet sent now (RFC 9002 A.8): one expiry per second,
+    // two datagrams each.
+    const out = try run(std.testing.allocator, .{ .drop_client = .{ .first = 1, .count = 8 } });
+    try std.testing.expect(out.done);
+    try std.testing.expectEqual(@as(usize, 8), out.client_dropped);
+    try std.testing.expect(out.client_datagrams >= 9);
+    var k: usize = 1;
+    while (k <= 7) : (k += 2) {
+        const expected_us = @as(u64, (k + 1) / 2) * us_per_s;
+        try std.testing.expect(out.client_us[k] >= expected_us - 100 * us_per_ms);
+        try std.testing.expect(out.client_us[k] < expected_us + 200 * us_per_ms);
+        try std.testing.expectEqual(out.client_us[k], out.client_us[k + 1]);
+    }
+    try std.testing.expect(out.done_at_us >= 4 * us_per_s - 100 * us_per_ms);
+    try std.testing.expect(out.done_at_us < 4 * us_per_s + 500 * us_per_ms);
+}
+
 test "handshake loss: a Handshake packet that arrives before the ServerHello is kept and read when the ServerHello comes (RFC 9000 12.2)" {
     // A flight of three datagrams; the network delivers the second
     // (Handshake packets) before the first (the ServerHello). The

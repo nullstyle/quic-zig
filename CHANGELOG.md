@@ -5,6 +5,32 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Fixed
+
+- **The probe timeout of the handshake spaces is bounded at about a
+  second, and runs from the last packet sent.** RFC 9002 section
+  6.2.1 doubles the timeout at every expiry without bound. A client
+  that waited for the rest of a server's flight under 31% corruption
+  (interop `handshakecorruption`, a quiche server) probed at gaps of
+  0.4, 0.7, 1.2, 2.3, 4.4 and 8.7 s: ten probes in the 30 s the
+  handshake had, and the flight never got through. Now the gap in the
+  Initial and Handshake spaces never grows past the probe timeout of
+  an endpoint with no RTT sample (`max_handshake_pto_us`, about 1 s),
+  so a client with a sample never probes less often than one without;
+  below that every probe is where the RFC puts it. A deviation,
+  recorded at the constant; the Application space keeps the doubling.
+  And the deadline runs from the LAST ack-eliciting packet sent (RFC
+  9002 A.8), not from the oldest: with the bound, the oldest anchor
+  cascaded (the expiry of the oldest packet left the next-oldest past
+  its deadline, and one probe timeout sent 2, 4, then 8 datagrams).
+  MEASURED, 10 runs each: client x quiche x handshakecorruption 7 of
+  10 -> 9 of 10; client x quic-go x handshakeloss + handshakecorruption
+  10 of 10 -> 10 of 10; server x quiche x handshakeloss 9 of 10 -> 9
+  of 10; a ClientHello lost eight times in a row completes the
+  handshake at 4 s (8 s before). The bench cells are byte-identical.
+
 ## [0.29.0] - 2026-10-06
 
 The open-items release: the seven items that were open after 0.28.1.

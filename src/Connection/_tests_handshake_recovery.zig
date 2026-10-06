@@ -34,9 +34,14 @@ fn sendCrypto(conn: *Connection, lvl: EncryptionLevel, pn: u64, offset: u64, tex
 /// Put one ack-eliciting packet with no CRYPTO data (a PING probe) in
 /// flight at `lvl`.
 fn sendPing(conn: *Connection, lvl: EncryptionLevel, pn: u64) !void {
+    try sendPingAt(conn, lvl, pn, start_us);
+}
+
+/// The same, sent at `at_us`.
+fn sendPingAt(conn: *Connection, lvl: EncryptionLevel, pn: u64, at_us: u64) !void {
     try conn.sentForLevel(lvl).record(.{
         .pn = pn,
-        .sent_time_us = start_us,
+        .sent_time_us = at_us,
         .bytes = 1200,
         .ack_eliciting = true,
         .in_flight = true,
@@ -721,4 +726,99 @@ test "CryptoBuffer: discarding a level's keys releases its buffers" {
     conn.discardHandshakeKeys();
     try std.testing.expectEqual(@as(usize, 0), conn.inbox[hsk].buf.len);
     try std.testing.expectEqual(@as(usize, 0), conn.outbox[hsk].buf.len);
+}
+
+test "the handshake spaces' probe gap never grows past the no-sample probe timeout; the application space's does" {
+    // MEASURED 2026-10-06 (client x quiche x handshakecorruption, 31% of
+    // the datagrams corrupted both ways, `ccell-oi6-quicheC1-10`): a
+    // client that had acknowledged the server's Initial and waited for
+    // the rest of its flight probed at 2.2, 2.7, 3.4, 4.8, 7.6, 12.6 and
+    // 22.5 s (the gaps double from a 150 ms base), ten probes in the
+    // 30 s the handshake had, and the flight never got through. The
+    // gap stops growing at the no-sample probe timeout (about 1 s)
+    // now: in the same 30 s the client probes about 25 times. Only
+    // the Initial and Handshake spaces, and only the growth: below
+    // the bound the probes are where RFC 9002 section 6.2.1 puts them.
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+    const ceiling = conn_loss.max_handshake_pto_us;
+    try std.testing.expect(ceiling >= 900_000 and ceiling <= 1_100_000);
+
+    // The anti-deadlock probe: nothing in flight, the timer runs from
+    // the ACK of the ClientHello; the base is a few tens of ms.
+    try sendCrypto(conn, .initial, 0, 0, "client-hello");
+    const ack_us = start_us + 10_000;
+    try ackThrough(conn, .initial, 0, ack_us);
+    const base = conn_loss.basePtoDurationForLevel(conn, .initial);
+    try std.testing.expect(base < ceiling / 8);
+    conn.pto_count[0] = 3;
+    try std.testing.expectEqual(ack_us + 8 * base, conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+    conn.pto_count[0] = 9;
+    try std.testing.expectEqual(ack_us + ceiling, conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+    conn.pto_count[0] = 16;
+    try std.testing.expectEqual(ack_us + ceiling, conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+
+    // The normal probe timer of the Handshake space, a packet in flight.
+    try sendCrypto(conn, .handshake, 0, 0, "finished");
+    const hsk_base = conn_loss.basePtoDurationForLevel(conn, .handshake);
+    conn.pto_count[1] = 2;
+    try std.testing.expectEqual(start_us + 4 * hsk_base, conn_loss.ptoDeadlineForLevel(conn, .handshake).?);
+    conn.pto_count[1] = 7;
+    try std.testing.expectEqual(start_us + ceiling, conn_loss.ptoDeadlineForLevel(conn, .handshake).?);
+
+    // A base above the bound (a very slow path) is never cut to it.
+    conn.rttForLevel(.handshake).smoothed_rtt_us = 2_000_000;
+    conn.rttForLevel(.handshake).rtt_var_us = 100_000;
+    conn.pto_count[1] = 0;
+    try std.testing.expectEqual(start_us + 2_400_000, conn_loss.ptoDeadlineForLevel(conn, .handshake).?);
+    conn.pto_count[1] = 5;
+    try std.testing.expectEqual(start_us + 2_400_000, conn_loss.ptoDeadlineForLevel(conn, .handshake).?);
+
+    // The Application space keeps RFC 9002's doubling, by either
+    // name (the level function and the path function must agree).
+    const path = conn.primaryPath();
+    path.pto_count = 7;
+    const app_base = conn_loss.basePtoDurationForLevel(conn, .application);
+    try std.testing.expectEqual(app_base << 7, conn_loss.ptoDurationForApplicationPath(conn, path));
+    try std.testing.expectEqual(app_base << 7, conn.ptoDurationForLevel(.application));
+}
+
+test "the handshake spaces' probe deadline runs from the LAST ack-eliciting packet sent (RFC 9002 A.8), so a bounded backoff cannot cascade" {
+    // MEASURED 2026-10-06 (client x quiche x handshakecorruption, the
+    // first build with `max_handshake_pto_us`): the deadline ran from
+    // the oldest packet, so after one expiry the next-oldest packet
+    // was already past its deadline, and a client with no RTT sample
+    // sent 2, then 4, then 8 Initial datagrams at 2, 3 and 4 s.
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try newClient(&ctx);
+    defer conn.destroy();
+    const pto = conn.ptoDurationForLevel(.initial);
+
+    // Two packets in flight, half a second apart: the deadline is the
+    // newer one's send time plus the timeout.
+    try sendCrypto(conn, .initial, 0, 0, "client-hello");
+    const second_us = start_us + 500_000;
+    try sendPingAt(conn, .initial, 1, second_us);
+    try std.testing.expectEqual(second_us + pto, conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+
+    // The probe timeout fires: the oldest packet expires, and the
+    // probe goes out (the next poll sends it). The deadline runs from
+    // the probe, a whole timeout on, never from a packet already
+    // behind it. (With no RTT sample the base IS the bound, so the
+    // timeout does not grow; the anchor is what keeps one expiry per
+    // timeout.)
+    const fired_us = second_us + pto;
+    try conn_loss.fireDuePtoAtLevel(conn, .initial, fired_us);
+    try std.testing.expectEqual(@as(u32, 1), conn.pto_count[0]);
+    try std.testing.expectEqual(@as(u32, 1), conn.sentForLevel(.initial).liveCount());
+    try sendPingAt(conn, .initial, 2, fired_us);
+    try std.testing.expectEqual(fired_us + conn.ptoDurationForLevel(.initial), conn_loss.ptoDeadlineForLevel(conn, .initial).?);
+    try std.testing.expect(conn.ptoDurationForLevel(.initial) >= pto);
+    // Not due again before that: one expiry per timeout.
+    try conn_loss.fireDuePtoAtLevel(conn, .initial, fired_us + 1);
+    try std.testing.expectEqual(@as(u32, 1), conn.pto_count[0]);
+    try std.testing.expectEqual(@as(u32, 2), conn.sentForLevel(.initial).liveCount());
 }

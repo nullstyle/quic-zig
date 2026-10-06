@@ -45,8 +45,36 @@ pub fn basePtoDurationForLevel(conn: *const Connection, lvl: EncryptionLevel) u6
     return conn.rttForLevelConst(lvl).pto(max_ack_delay_us);
 }
 
+/// The longest wait between two probes in the Initial and Handshake
+/// spaces: the probe timeout of an endpoint with no RTT sample (RFC
+/// 9002 section 6.2.2, about 1 s). So a client WITH a sample never
+/// probes less often than one without. RFC 9002 section 6.2.1 doubles
+/// the timeout at every expiry without a bound; this bound is a
+/// DEVIATION, for the handshake only, where the time is budgeted (a
+/// peer forgets a half-open connection, an interop test gives 30 s).
+/// MEASURED 2026-10-06 (client x quiche x handshakecorruption, 31% of
+/// the datagrams corrupted both ways, `ccell-oi6-quicheC1-10`): a
+/// client waiting for the rest of the server's flight probed at gaps
+/// of 0.4, 0.7, 1.2, 2.3, 4.4, 8.7 s (a 150 ms base doubled), ten
+/// probes in 30 s, and the flight never got through. A bound of 8
+/// times the base instead floods a 2 ms path (the client's retries
+/// inside a 100 ms outage used up the server's early copies, and the
+/// handshake waited for the server's 1 s probe timeout: 134 ms ->
+/// 1019 ms in tests/e2e/handshake_loss.zig), so the bound is a time.
+/// The Application space keeps the RFC's doubling (quic-go bounds it
+/// at 60 s; a lost packet there has no budget).
+pub const max_handshake_pto_us: u64 = blk: {
+    const no_sample: RttEstimator = .{};
+    break :blk no_sample.pto(0);
+};
+
 pub fn ptoDurationForLevel(conn: *const Connection, lvl: EncryptionLevel) u64 {
-    return backoffDuration(basePtoDurationForLevel(conn, lvl), conn.ptoCountForLevelConst(lvl).*);
+    const base = basePtoDurationForLevel(conn, lvl);
+    const backed_off = backoffDuration(base, conn.ptoCountForLevelConst(lvl).*);
+    return switch (lvl) {
+        .initial, .handshake => @max(base, @min(backed_off, max_handshake_pto_us)),
+        .early_data, .application => backed_off,
+    };
 }
 
 fn basePtoDurationForApplicationPath(conn: *const Connection, path: *const PathState) u64 {
@@ -131,8 +159,29 @@ pub fn lossDeadlineForApplicationPath(conn: *const Connection, path: *const Path
     return earliestLossDeadline(&path.sent, &path.app_pn_space, &path.path.rtt);
 }
 
+/// Send time of the newest live ack-eliciting tracked packet: the
+/// anchor of the handshake spaces' probe deadline (RFC 9002 A.8,
+/// `time_of_last_ack_eliciting_packet`). The deadline ran from the
+/// OLDEST packet until 0.30.0; with a bounded backoff
+/// (`max_handshake_pto_us`) that cascades: the expiry of the oldest
+/// packet leaves the next-oldest already past its deadline, and one
+/// probe timeout sent 2, then 4, then 8 datagrams (MEASURED
+/// 2026-10-06, client x quiche x handshakecorruption, image `pr1`).
+/// From the last send, a probe moves the deadline a whole timeout on.
+fn newestAckElicitingSentTime(sent: *const SentPacketTracker) ?u64 {
+    var newest: ?u64 = null;
+    var i: u32 = 0;
+    while (i < sent.count) : (i += 1) {
+        const p = sent.packets[i];
+        if (p.dead) continue;
+        if (!p.ack_eliciting) continue;
+        if (newest == null or p.sent_time_us > newest.?) newest = p.sent_time_us;
+    }
+    return newest;
+}
+
 pub fn ptoDeadlineForLevel(conn: *const Connection, lvl: EncryptionLevel) ?u64 {
-    if (oldestAckElicitingSentTime(conn.sentForLevelConst(lvl))) |sent_at| {
+    if (newestAckElicitingSentTime(conn.sentForLevelConst(lvl))) |sent_at| {
         return sent_at +| ptoDurationForLevel(conn, lvl);
     }
     // Nothing in flight at this level. A client may still owe a probe.
