@@ -1348,7 +1348,7 @@ fn fuzzConnStreamWindow(_: void, smith: *std.testing.Smith) anyerror!void {
             const payload_len = frame_mod.encode(&frame_buf, f) catch return;
             // A frame for a reaped stream is post-terminal: it is
             // ignored (RFC 9000 §3.2). No error, no close.
-            const late = op != .streams_blocked and reaped[@intFromBool(!bidi)][index];
+            const late = op != .streams_blocked and reaped[@intFromBool(!bidi)][@as(usize, @intCast(index))];
             conn.dispatchFrames(.application, frame_buf[0..payload_len], now_us) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => try std.testing.expect(!late),

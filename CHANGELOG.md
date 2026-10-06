@@ -5,6 +5,33 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Fixed
+
+- **0.28.0 did not compile for a 32-bit target** (`x86-linux-musl`).
+  `src/conn/RecvEndRing.zig` asserted at comptime that a `Record` is
+  40 bytes. It is 40 where a u64 aligns to 8, and 36 where it aligns to
+  4, so every build that uses `Connection` failed on that target with
+  "reached unreachable code". The check is on the layout now (four u64
+  and the flags byte, padded to the alignment of u64), and the module
+  doc says both sizes. Found by http3-zig's CI (its
+  `x86-linux-musl` leg), which went back to 0.27.0 for it.
+- Five places in tests and examples put a u64 (a transport parameter)
+  where a usize is wanted, which a 32-bit target refuses
+  (`examples/request_response_server.zig`, `tests/e2e/app_driver.zig`,
+  `tests/e2e/testing_loopback.zig`, `src/Connection/_tests_fuzz.zig`,
+  a test in `src/conn/RecvStream.zig`). The library itself compiled;
+  the suite did not.
+
+### CI and tests
+
+- A 32-bit leg in the `test` workflow: `build-test (ubuntu-latest,
+  x86-linux-musl)` compiles and RUNS the suite (an x86-64 Linux
+  runner runs 32-bit static binaries). No leg here could see the
+  0.28.0 break. `just check-x86` is the compile-only form for a host
+  that cannot run the binaries, beside `just check-windows`.
+
 ## [0.28.0] - 2026-10-05
 
 "The end of a stream that cannot be lost". An application now learns

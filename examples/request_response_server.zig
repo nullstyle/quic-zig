@@ -222,8 +222,10 @@ const TestPeers = struct {
                 .on_stream_end = App.onStreamEnd,
                 .on_disconnect = App.onDisconnect,
             },
-            .max_tracked_streams = common.transportParams().initial_max_streams_bidi +
-                common.transportParams().initial_max_streams_uni,
+            // The parameters are u64; the table size is a usize (a 32-bit
+            // target cannot take a u64 here without the cast).
+            .max_tracked_streams = @intCast(common.transportParams().initial_max_streams_bidi +
+                common.transportParams().initial_max_streams_uni),
         });
         errdefer self.driver.deinit();
         self.server = try quic.Server.init(.{

@@ -19,9 +19,9 @@
 //! unknown", which callers must treat as a cut stream.
 //!
 //! Records are a lossless encoding of `Connection.StreamRecvEnd`,
-//! packed to 40 bytes so the whole ring stays near 10 KiB. It is
-//! heap-allocated once per connection, on the first reclaim that
-//! needs it.
+//! packed to 40 bytes (36 on a 32-bit target, where a u64 aligns to
+//! 4) so the whole ring stays near 10 KiB. It is heap-allocated once
+//! per connection, on the first reclaim that needs it.
 
 const RecvEndRing = @This();
 
@@ -79,9 +79,14 @@ pub fn find(self: *const RecvEndRing, id: u64) ?Record {
 }
 
 comptime {
-    // The size the module doc promises; a field added without packing
-    // shows up here instead of as silent per-connection growth.
-    std.debug.assert(@sizeOf(Record) == 40);
+    // The size the module doc promises: four u64 and the flags byte,
+    // padded to the alignment of u64. That is 40 bytes where a u64
+    // aligns to 8 and 36 where it aligns to 4 (x86-linux-musl), so the
+    // check is on the layout, not on a number: a field added without
+    // packing shows up here instead of as silent per-connection
+    // growth, and a 32-bit target still compiles. v0.28.0 asserted
+    // `== 40` and did not compile for x86-linux-musl.
+    std.debug.assert(@sizeOf(Record) == 4 * @sizeOf(u64) + @alignOf(u64));
 }
 
 const testing = std.testing;

@@ -237,8 +237,8 @@ test "Driver: echo application over the Server/Client wrappers, with lifecycle h
             .on_event = EchoApp.onEvent,
             .on_disconnect = EchoApp.onDisconnect,
         },
-        .max_tracked_streams = common.defaultParams().initial_max_streams_bidi +
-            common.defaultParams().initial_max_streams_uni,
+        .max_tracked_streams = @intCast(common.defaultParams().initial_max_streams_bidi +
+            common.defaultParams().initial_max_streams_uni),
     });
     defer driver.deinit();
     // The loud canary: if the driver failed to resolve the stream

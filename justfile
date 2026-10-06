@@ -65,6 +65,25 @@ check-windows:
     fi
     echo "windows cross-compile clean"
 
+# The same check for a 32-bit target. v0.28.0 did not compile for
+# x86-linux-musl (a comptime assert on a struct size that holds only
+# where a u64 aligns to 8); five test sites also put a u64 where a
+# usize is. CI runs this suite for real (an x86-64 Linux runner runs
+# 32-bit binaries); here only compile errors count.
+check-x86:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    zig build -Dtarget=x86-linux-musl --summary all || exit 1
+    echo "--- test binaries: compile-only ---"
+    errs=$(zig build test -Dtarget=x86-linux-musl 2>&1 \
+        | grep "error:" | grep -v "unable to execute binaries")
+    if [ -n "$errs" ]; then
+        echo "$errs"
+        echo "32-BIT COMPILE ERRORS (above)"
+        exit 1
+    fi
+    echo "x86-linux-musl cross-compile clean"
+
 clean:
     rm -rf .zig-cache zig-out
 

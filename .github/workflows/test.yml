@@ -182,3 +182,48 @@ jobs:
 
       - name: zig build test -Dsanitize-c=full
         run: zig build test -Dsanitize-c=full --summary all
+
+  # A 32-bit target. v0.28.0 did not compile for x86-linux-musl (a
+  # comptime assert on a struct size that holds only where a u64 aligns
+  # to 8), and no leg here could see it: http3-zig's CI found it. The
+  # runner is x86-64 Linux, which runs 32-bit static binaries, so this
+  # leg compiles AND runs the suite. `just check-x86` is the
+  # compile-only form for a host that cannot run them.
+  build-test-32bit:
+    name: build-test (ubuntu-latest, x86-linux-musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout quic-zig
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up mise (project tools)
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4
+        with:
+          install: true
+          cache: true
+
+      - name: Cache Zig packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-global-cache
+            zig-pkg
+          key: zig-pkg-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-
+
+      - name: Prefetch Zig dependencies (retry on network flake)
+        run: |
+          for i in 1 2 3 4 5; do
+            if zig build --fetch; then exit 0; fi
+            echo "fetch attempt $i failed; retrying in $((i * 10))s"
+            sleep $((i * 10))
+          done
+          echo "::error::dependency prefetch failed after 5 attempts"
+          exit 1
+
+      - name: zig build -Dtarget=x86-linux-musl
+        run: zig build -Dtarget=x86-linux-musl --summary all
+
+      - name: zig build test -Dtarget=x86-linux-musl
+        run: zig build test -Dtarget=x86-linux-musl --summary all

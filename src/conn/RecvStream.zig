@@ -708,8 +708,9 @@ test "stress: 64 KiB random shuffle reassembles in order with FIN" {
     prng.random().shuffle(usize, &indices);
 
     for (indices, 0..) |idx, k| {
-        const off: u64 = @intCast(idx * chunk);
-        const slice = data[off..][0..chunk];
+        const start: usize = idx * chunk;
+        const off: u64 = start;
+        const slice = data[start..][0..chunk];
         const fin = (k == chunks - 1) and idx == chunks - 1;
         try s.recv(off, slice, fin);
     }

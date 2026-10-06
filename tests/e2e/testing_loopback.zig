@@ -35,7 +35,7 @@ test "Loopback drives a full echo exchange in memory" {
             .on_stream_data = EchoApp.onStreamData,
             .on_stream_end = EchoApp.onStreamEnd,
         },
-        .max_tracked_streams = common.defaultParams().initial_max_streams_bidi,
+        .max_tracked_streams = @intCast(common.defaultParams().initial_max_streams_bidi),
     });
     defer driver.deinit();
     try std.testing.expect(driver.streamsServiced());
