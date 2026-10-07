@@ -5,7 +5,14 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.31.1] - 2026-10-06
+
+The idle-timer fix: a dead peer's connection ends one idle timeout
+after the first probe, not three (a regression of v0.30.1, found by
+the qmsg session). No wire change, no API change, the same option
+map. Every downstream on v0.30.1 or v0.31.0 wants this one: qmsg's
+dead-peer gate failed about 2 runs in 5 there. Verified toolchain:
+0.17.0.
 
 ### Fixed
 
