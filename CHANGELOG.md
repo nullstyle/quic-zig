@@ -124,7 +124,13 @@ dead-peer gate failed about 2 runs in 5 there. Verified toolchain:
   v0.30.1 and v0.31.0, after 2.2 s on v0.29.0; qmsg's dead-peer test
   failed about 2 runs in 5). And every datagram received restarted
   it, before its packet was opened, so a spoofed datagram to a known
-  connection kept it alive. Also: the idle timeout is at least three
+  connection kept it alive. (History, from capnp-zig's review on
+  2026-10-07: that second restart is older than v0.30.1, in every
+  release before this one since at least v0.24.1; the send restart is
+  old too, and v0.30.0's probe timeout that is not a loss is what made
+  it a regression. Only the dead-peer lifetime is a regression of
+  v0.30.1; the unopened-datagram restart is a fix of long standing.)
+  Also: the idle timeout is at least three
   times the PTO (section 10.1 paragraph 4, a MUST that was missing),
   the PTO without its backoff. Three conformance tests. No wire
   change, no API change.
