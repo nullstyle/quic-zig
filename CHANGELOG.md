@@ -5,7 +5,14 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
-## [Unreleased]
+## [0.31.0] - 2026-10-06
+
+The "feed and confirm" release: two small repairs, behavior only, no
+wire-format change, no API an embedder must change, the same option
+map and the same boringssl-zig (0.6.7). A client confirms its
+handshake on an ACK of a 1-RTT packet of its own (RFC 9001 section
+4.1.2, a MAY), and `Server.feed` leaves a `.dropped` datagram as it
+was. Verified toolchain: 0.17.0.
 
 ### Changed
 
