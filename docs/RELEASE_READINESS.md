@@ -1376,3 +1376,30 @@ written for it; `just check-windows` clean before the tag.
 - QNS image: (run 37560064076) built and pushed from that commit (`Build and push QNS image: success`; the longest build step 208.9 s).
 - pin-lint: (run 37560064089) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.0-DnSYvcIFPAAlKQ7WKeI6Sbd7DfxLy-zoJa9qMUNI5iok`.
+
+## v0.31.1: the idle-timer fix
+
+v0.31.1 (tag `a32dcba`, 2026-10-06) fixes a regression of v0.30.1 found
+by the qmsg session: a dead peer's connection lived about three times
+the idle timeout (qmsg's measurement: a 2 s timeout noticed a dead
+peer after 5.9 to 6.0 s on v0.30.1 and v0.31.0, after 2.2 s on
+v0.29.0). Every datagram sent restarted the timer, and v0.30.1's probe
+timeout probes on to a dead peer; every datagram received restarted it
+before its packet was opened. The rule now, RFC 9000 section 10.1: one
+send restart per receipt (the first ack-eliciting packet since the
+last packet that opened), a received packet counts once it opened,
+and the timeout is at least three times the PTO (paragraph 4, a MUST
+that was missing; the PTO without its backoff). No wire change, no
+API change, the same option map. Four conformance tests in
+`tests/conformance/rfc9000_streams_flow.zig`, red before the fix;
+five mutants killed by them; 20 of 20 bench cells byte-identical to
+v0.31.0; `just check-windows` clean.
+
+**The gates on `a32dcba`**, each read at its evidence line.
+
+- `test`: seven jobs green, the Windows one included; 2,015 of 2,031 tests in Debug (16 skipped) on the Unix jobs, the 32-bit leg and the sanitizer job, 1,975 of 1,991 in ReleaseSafe, 1,952 of 1,991 on Windows (39 skipped); `check-modes: 6 of 6 as expected`; `consumer-smoke ok: quic-zig 0.31.1` (run 37564393998).
+- rc-fuzz: (run 37564395744) `n_runs=2,187,187 unique_runs=12,394 pcs_len=45,231`, `coverage verified: instrumented, 2,187,187 executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop`: (run 37564394025) `interop evidence: pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image: (run 37564394022) built and pushed from that commit (`Build and push QNS image: success`).
+- pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
+- The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
