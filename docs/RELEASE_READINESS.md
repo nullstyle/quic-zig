@@ -1403,3 +1403,73 @@ v0.31.0; `just check-windows` clean.
 - QNS image: (run 37564394022) built and pushed from that commit (`Build and push QNS image: success`).
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
+
+## v0.32.0: the single-stream limits release
+
+v0.32.0 (tag `ffdb251`, 2026-10-07) is the "reorder follow-ups" sprint:
+the owner asked for loss thresholds that shrink back, the BBR
+mechanism behind a slow reordering cell, and a decision on the ACK
+range cap. The measurement answered a different question. BBR was
+never the brake under reordering (a trace showed it in Startup with a
+2 MB window and a 110 MB/s pacing rate while the bytes in flight fell
+to 20 to 80 KB at every hole); two fixed sizes were: the receive
+credit the engine gave after the initial window (1 MiB per stream and
+16 MiB per connection, whatever the transport parameters announced)
+and the 1 MiB send buffer with no knob. Now the window an endpoint
+keeps open is the one it announced (the defaults announce exactly the
+old constants, so a default embedder sees no change; the QNS endpoint
+announces 16 MiB and keeps it), `max_buffered_send` exists on
+Connection, Client.Config and Server.Config (default 1 MiB), the ACK
+frame carries 64 lower ranges (was 16), and the thresholds shrink
+back after 16 clean round trips by send time (RFC 8985's shape; not
+the controller's loss episodes, which BBR never closes under steady
+loss). Measured, 8 MiB on one stream over 1 Gbit with a 20 ms round
+trip, bbr: 361 -> 220 ms clean, 768 -> 294 ms with 10% of the packets
+20 ms late (279 with the wider ACK). CUBIC stays at 1527 ms there in
+every setting: its own response to spurious losses, the first
+candidate of the next sprint. No wire-format change, no API an
+embedder must change, the same option map.
+
+Local before the tag: the full suite (1,357 in the e2e and
+conformance binaries, one e2e threshold re-measured: the answering
+side of the 20,000-stream test no longer sends a MAX_STREAM_DATA frame
+on the first read of every stream, which its 1 MiB running window over
+the 256 KiB it announced made it do), `just check-windows` clean, ten
+mutants killed, the bench cells (the four bottleneck and three churn
+cells byte-identical; every cell the old running window had capped
+faster, since the harness announces 4 MiB; the six fairness cells
+inside their noise). After the tag: the wide local interop matrix on
+the tag's image, client role 42 of 45 (the one failure the known
+quiche handshakeloss chance cell, two ECN cells unsupported), server
+role 41 of 45 with no failure (four unsupported): 83 of 90, against
+42 and 40 at v0.30.1.
+
+**The gates on `ffdb251`**, each read at its evidence line.
+
+- `test` (run 37692543374): seven jobs; the sanitizer job 2,022 of
+  2,038 (16 skipped); macos-26, macos-15, ubuntu arm and ubuntu x86
+  2,022 of 2,038 in Debug and 1,982 of 1,998 in ReleaseSafe;
+  windows-latest 1,959 of 1,998 (39 skipped) in both modes;
+  x86-linux-musl 2,022 of 2,038.
+- rc-fuzz (run 37692566750): `n_runs=2,179,373 unique_runs=12,580
+  pcs_len=45384`, `coverage verified: instrumented, 2,179,373
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37692543362): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37692543357): built and pushed from that commit.
+- pin-lint (run 37692543364): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The package hash of the tag's archive:
+  `quic-0.32.0-DnSYvcGOPADCEZMispvPbD9RznRtyIGq77zHIgmS8iVl`.
+
+**Two rules changed the same day (owner decision, 2026-10-07; the
+text is in CONTRIBUTING.md "Releases").** A tag used to cost about an
+hour of serial gates and six downstreams waited on it, while the
+suite itself takes minutes. From here: a tag goes out on the fast
+local gates (the full suite, `just check-windows`, `just check-x86`;
+`tools/release.sh X.Y.Z` runs them and does the rest), and the five
+CI gates prove it within the hour, read at the evidence line; a red
+gate is answered with a patch tag. And the consumers move per
+cluster, not in lockstep: cluster A (nest, qmsg, qmesh-zig,
+mruby-quic, one binary) with one script, cluster B (http3-zig,
+capnp-zig) by its own sessions, the option map the same for all.
+Cluster A moved to v0.32.0 the same afternoon (qmsg v0.8.2).

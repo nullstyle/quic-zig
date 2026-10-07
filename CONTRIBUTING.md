@@ -70,16 +70,21 @@ modes:
   `std.testing.fuzz` site in the unfiltered test binary its own budget.
   Limit mode is single-instance (see caveats), so it saturates one core;
   give it a large `$ITERS` and let it run.
-- **Pre-release gate.** Before a release is tagged, a completed green run
-  of `.github/workflows/rc-fuzz.yml` must exist for the release commit.
-  Default budget is `50000` per site (40 sites as of 2026-10-02, so ~2M
-  executions; the gate counts the sites itself with
+- **Release gate.** Every release commit gets a run of
+  `.github/workflows/rc-fuzz.yml`: `tools/release.sh` dispatches it as
+  it pushes the tag, and it is one of the five gates read at the
+  evidence line within the hour after the tag (see "Releases"). Through
+  v0.32.0 the rule was a green run BEFORE the tag; since 2026-10-07 the
+  tag goes out on the fast local gates and the slow gates prove it
+  after, a red one answered with a patch tag. Default budget is `50000`
+  per site (40 sites as of 2026-10-02, so ~2M executions; the gate
+  counts the sites itself with
   `grep -rho 'std\.testing\.fuzz(' src --include='*.zig' | wc -l` rather
   than trusting this sentence). Unlike the weekly fuzz job, this gate is
-  blocking. Anyone — maintainer, contributor, or an agent session — can
-  dispatch it (`gh workflow run rc-fuzz.yml --ref <ref>`) and tag on
-  green; the gate is about the evidence existing, not about who pushes
-  the button.
+  blocking: a release whose run is red is superseded. Anyone —
+  maintainer, contributor, or an agent session — can dispatch it
+  (`gh workflow run rc-fuzz.yml --ref <ref>`); the gate is about the
+  evidence existing, not about who pushes the button.
 
   It used to be `1M` (~5 hours) and that was the wrong trade. Measured
   on the pinned toolchain: coverage is 8.81% at 39k executions and 9.48%
@@ -241,9 +246,40 @@ RELEASE_READINESS.md, not an open item.)
 
 - **Every release gets a tag** (`vX.Y.Z`), including hardening and patch
   releases. Only tagged commits are advertised as consumable — a bare
-  commit SHA between tags carries no compatibility promise. (Release
-  tags additionally wait for the rc-fuzz gate above and the platform
-  tiers in [docs/RELEASE_READINESS.md](https://github.com/nullstyle/quic-zig/blob/main/docs/RELEASE_READINESS.md).)
+  commit SHA between tags carries no compatibility promise. (The five
+  CI gates run on the tag's commit and are read at the evidence line
+  after it; the platform tiers are in
+  [docs/RELEASE_READINESS.md](https://github.com/nullstyle/quic-zig/blob/main/docs/RELEASE_READINESS.md).)
+- **Tag on the fast gates; CI proves the tag** (owner decision,
+  2026-10-07). Before the tag, locally: the full suite, `just
+  check-windows` and `just check-x86` — about five minutes on a warm
+  cache, and the two compile checks are the cases that shipped broken
+  tags before (v0.28.0 on 32-bit, v0.30.0 on Windows). `tools/release.sh
+  X.Y.Z` runs them, bumps the version, commits, tags, pushes and
+  dispatches rc-fuzz. After the tag, within the hour: the five CI gates
+  (test on seven jobs, rc-fuzz, quic-go-interop, QNS Image, pin-lint),
+  each read at its evidence line, never at its colour. A red gate is
+  fixed on `main` and answered with a patch tag; the bad tag stays (a
+  consumer may have fetched it) and its note says "do not pin". The
+  slow local checks — mutants of a changed rule, the bench cells, the
+  wide interop matrix — are the engineer's call per change (a new
+  rule: mutants; a congestion or loss change: cells; a wire-visible or
+  flow-control change: the matrix), before or after the tag, recorded
+  in the release record either way. Why: a tag used to cost about an
+  hour of serial gates, and every downstream waited on it; the suite
+  itself is minutes.
+- **Downstreams move per cluster, not in lockstep** (owner decision,
+  2026-10-07). The coordinated option map stays for every consumer
+  (`.target`, `.release = optimize != .debug`, `.@"sanitize-c" =
+  "trap"`; modules `quic` and `boringssl` from quic), because Zig
+  links one quic only when every parent pins the same package with the
+  same map. But only repos that link into ONE binary must agree on the
+  pin, and they move together on their own cadence: cluster A is nest,
+  qmsg, qmesh-zig and mruby-quic (one command moves it, kept with the
+  quic-zig session's tools); cluster B is http3-zig and capnp-zig, by
+  their own sessions when they choose. A quic release note still goes
+  to the whole set (information), and a security fix is a move for
+  everyone at once; otherwise a cluster may sit on an older tag.
 - **Any breaking change to the public surface bumps the manifest
   version** — pre-1.0 that means the minor (`0.x` → `0.(x+1)`) — in the
   same change that lands the break, using a `-dev` pre-release suffix
