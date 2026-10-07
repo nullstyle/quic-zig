@@ -1335,3 +1335,44 @@ eight times in a row completes at 4 s (8 s before).
 - A fresh consumer from an archive of the tag (hash
   `quic-0.30.1-DnSYvVnOOwBfpDxHQWI41E6YxM1RqqkCuven5bK46jXR`):
   `consumer-smoke ok: quic-zig 0.30.1`.
+
+## v0.31.0: the feed-and-confirm release
+
+v0.31.0 (tag `35b3983`, 2026-10-06) is the "feed and confirm" sprint after
+v0.30.1 (record: `SPRINT-2026-10-06-feed-confirm.md` in the handoff
+notes): two small repairs, behavior only, no wire-format change, no API
+an embedder must change, the same option map, the same boringssl-zig.
+
+- `37f1dd0` a client confirms its handshake on an ACK of a 1-RTT
+  packet of its own (RFC 9001 section 4.1.2 paragraph 2, a MAY): the
+  server can only have opened such a packet after it processed the
+  client's Finished. `one_rtt_acked`, latched in
+  `recv_ack_handlers.dispatchAcked` for the client and never for a
+  0-RTT packet; the discard at the end of the datagram keys on either
+  latch. A client whose HANDSHAKE_DONE was lost sends no Finished
+  again once any 1-RTT packet of its own is acknowledged.
+- `86fc86d` `Server.feed` leaves a `.dropped` datagram as it was: the
+  new-connection path copies the datagram before it opens it (a
+  2048-byte stack buffer, the heap above) and puts it back on the
+  stillborn branch. A datagram that comes back anything but `.routed`
+  or `.accepted` is as it came.
+
+MEASURED for the sprint, on the image of the release code, v0.30.1 as
+the control: client x quiche x handshakecorruption 9 of 10 (control 7
+of 10; 7, 8, 9 of 10 in earlier batches: no signal at N = 10, the
+failures are quiche's own server backoff); client x quiche x
+handshakeloss 5 of 5 (new); client x quic-go x handshakeloss +
+handshakecorruption 10 of 10 cells (control 10 of 10); server x quiche
+x handshakeloss 9 of 10 (control 9 of 10); the wide matrix client
+43/0/2 (control 43/0/2) and server `cells=45 succeeded=40 failed=1 unsupported=4` (control 40/1/4; the one failure is quiche x handshakeloss, the chance cell the dedicated run puts at 9 of 10; the first attempt died in the runner's TShark capture on the host and was run again); 20 of 20 bench
+cells byte-identical to v0.30.1; six mutants killed, each by the test
+written for it; `just check-windows` clean before the tag.
+
+**The gates on `35b3983`**, each read at its evidence line.
+
+- `test`: seven jobs green, the Windows one included; 2,011 of 2,027 tests in Debug (16 skipped) on the Unix jobs, the 32-bit leg and the sanitizer job, 1,971 of 1,987 in ReleaseSafe, 1,948 of 1,987 on Windows (39 skipped); `check-modes: 6 of 6 as expected`; `consumer-smoke ok: quic-zig 0.31.0` (run 37560064112).
+- rc-fuzz: (run 37560066071) `n_runs=2,179,774 unique_runs=11,560 pcs_len=45,224`, `coverage verified: instrumented, 2,179,774 executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop`: (run 37560064085) `interop evidence: pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image: (run 37560064076) built and pushed from that commit (`Build and push QNS image: success`; the longest build step 208.9 s).
+- pin-lint: (run 37560064089) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
+- The package hash of the tag's archive: `quic-0.31.0-DnSYvcIFPAAlKQ7WKeI6Sbd7DfxLy-zoJa9qMUNI5iok`.
