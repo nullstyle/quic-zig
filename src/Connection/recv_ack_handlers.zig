@@ -274,6 +274,9 @@ fn apply(
     // per-packet deliveries and any losses this event declares fold
     // into one sample.
     if (target.isApplication()) target.path.path.delivery.beginAckEvent();
+    // The remembered losses the reach has passed are real: they count
+    // toward the thresholds' decay (RFC 8985's rule).
+    if (target.isApplication()) target.sent.reorder.settle(now_us, &target.path.path.rtt);
 
     var ack_it = ack_range_mod.iter(a);
     while (try ack_it.next()) |interval| {

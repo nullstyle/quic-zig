@@ -22,11 +22,30 @@
 //!   distance the packet trailed the largest acknowledged packet, and
 //!   the time threshold grows (9/8 -> 5/4 -> 3/2 -> 2 times the RTT)
 //!   until it would have covered how late the packet was.
-//! - The thresholds only grow, for the life of the connection; the
-//!   packet threshold stops at `max_packet_threshold`, the time
+//! - The packet threshold stops at `max_packet_threshold`, the time
 //!   threshold at twice the RTT (where RACK's window stops too). A
 //!   real loss is still found: by the time threshold within two
 //!   round trips at the widest, and by the probe timeout always.
+//! - The thresholds shrink back (since v0.32.0), after RFC 8985's
+//!   rule for RACK's window (its section 6.2.3: the window grows on a
+//!   DSACK and resets after 16 loss recoveries without one). A
+//!   remembered loss whose packet is older than the reach (twice the
+//!   RTT since its send) can never widen the thresholds again, so it
+//!   is a settled, real loss. A round trip (by send time) with such
+//!   losses counts once, a spurious hit restarts the count and its
+//!   own round counts for nothing, and after `decay_after_rounds`
+//!   clean rounds the thresholds go back to RFC 9002's. The rounds
+//!   are the window's own, not the controller's loss episodes: BBR
+//!   extends one recovery period at every later loss, so under
+//!   steady loss its episode never ends (MEASURED 2026-10-07: with
+//!   episodes counted the rule never fired for BBR). Nothing moves on
+//!   a path that keeps reordering (a hit every few rounds) or never
+//!   loses (no rounds).
+//!   MEASURED 2026-10-06 (`impairment_reorder_then_loss_20ms`, a 15 ms
+//!   reordering burst on a 20 ms path, then 0.5% loss): with the
+//!   thresholds left at their widest the loss phase detected a loss
+//!   after 45 ms on average, two RTTs; see the cell for the numbers
+//!   with the decay.
 //!
 //! The memory is a ring of `ring_slots` records, allocated at the
 //! first loss (a connection that loses nothing pays nothing) and
@@ -60,6 +79,10 @@ pub const initial_time_shift: u2 = 3;
 /// Records the ring holds. Sized with `max_packet_threshold`: a burst
 /// of that many packets declared lost at once fits.
 pub const ring_slots: usize = 256;
+/// Clean rounds with real losses in a row after which the thresholds
+/// go back to RFC 9002's: RFC 8985's `RACK.reo_wnd_persist` (16 loss
+/// recoveries).
+pub const decay_after_rounds: u32 = 16;
 
 /// One packet declared lost.
 pub const LostRecord = struct {
@@ -69,6 +92,9 @@ pub const LostRecord = struct {
     /// `stampLast`; a spurious loss from an older episode widens the
     /// thresholds but takes nothing back.
     episode: u32 = 0,
+    /// Older than the reach, so a real loss, counted toward the decay
+    /// (`settle`); never counted twice.
+    settled: bool = false,
 };
 
 /// A record whose packet was found to have arrived, or whose slot was
@@ -94,6 +120,18 @@ packet_threshold: u64 = initial_packet_threshold,
 time_shift: u2 = initial_time_shift,
 /// Packets declared lost that arrived, for the life of the window.
 spurious_count: u64 = 0,
+/// Rounds with real losses settled, in a row since the last spurious
+/// hit (`settle`); the thresholds go back at `decay_after_rounds`.
+clean_rounds: u32 = 0,
+/// The send time of the last settled loss that counted: a settled
+/// loss sent within a round trip after it is of the same round.
+last_counted_sent_us: ?u64 = null,
+/// The send time of the last spurious hit's packet: a settled loss
+/// sent within a round trip of it counts for nothing (the path
+/// reordered in that round).
+last_spurious_sent_us: ?u64 = null,
+/// How often the thresholds went back, for the life of the window.
+decays: u64 = 0,
 
 /// RFC 9002 §6.1.2 time threshold at the current width:
 /// `max(rtt + (rtt >> time_shift), kGranularity)` over `max(latest_rtt,
@@ -181,6 +219,10 @@ pub fn widen(
     rtt_est: *const RttEstimator,
 ) void {
     self.spurious_count += 1;
+    // The path reorders: the decay starts its count over, and the
+    // settled losses of this round count for nothing.
+    self.clean_rounds = 0;
+    self.last_spurious_sent_us = rec.sent_time_us;
     // Only for a packet the widest thresholds could have covered. A
     // packet later than twice the RTT is declared lost at any width
     // (the time threshold stops there), so widening for it would only
@@ -204,6 +246,45 @@ pub fn widen(
     while (self.time_shift > 0 and
         reference_rtt +| (reference_rtt >> self.time_shift) < needed) : (self.time_shift -= 1)
     {}
+}
+
+/// Settle the remembered losses the reach has passed: a record whose
+/// packet is older than twice the RTT can never widen the thresholds
+/// (`widen` ignores a later ACK), so it is a real loss. A round trip
+/// of such losses (by send time) counts once, a round with a spurious
+/// hit not at all, and after `decay_after_rounds` clean rounds in a
+/// row the thresholds go back to RFC 9002's (the count starts over).
+/// Called with every ACK of the space, before the ACK's ranges are
+/// searched.
+pub fn settle(self: *ReorderWindow, now_us: u64, rtt_est: *const RttEstimator) void {
+    if (self.live == 0) return;
+    const reference_rtt = @max(rtt_est.latest_rtt_us, rtt_est.smoothed_rtt_us);
+    const reach = reference_rtt +| reference_rtt;
+    const cap: u32 = @intCast(self.records.len);
+    var i: u32 = 0;
+    while (i < self.len) : (i += 1) {
+        const rec = &self.records[(self.head + i) % cap];
+        if (rec.pn == tombstone_pn or rec.settled) continue;
+        // Records are remembered in declaration order, so the first
+        // one inside the reach ends the settled prefix.
+        if (now_us -| rec.sent_time_us <= reach) break;
+        rec.settled = true;
+        if (self.last_spurious_sent_us) |sp| {
+            if (rec.sent_time_us <= sp +| reference_rtt and sp <= rec.sent_time_us +| reference_rtt) continue;
+        }
+        if (self.last_counted_sent_us) |lc| {
+            if (rec.sent_time_us < lc +| reference_rtt) continue;
+        }
+        self.last_counted_sent_us = rec.sent_time_us;
+        self.clean_rounds += 1;
+        if (self.clean_rounds >= decay_after_rounds) {
+            self.clean_rounds = 0;
+            if (self.packet_threshold == initial_packet_threshold and self.time_shift == initial_time_shift) continue;
+            self.packet_threshold = initial_packet_threshold;
+            self.time_shift = initial_time_shift;
+            self.decays += 1;
+        }
+    }
 }
 
 /// Release the ring. The thresholds stay as they are.
@@ -353,6 +434,89 @@ test "the thresholds start at RFC 9002's and widen to what the spurious loss nee
     w.widen(.{ .pn = 500, .sent_time_us = 50_000 }, null, 50_001, &rtt);
     try testing.expectEqual(max_packet_threshold, w.packet_threshold);
     try testing.expectEqual(@as(u64, 7), w.spurious_count);
+}
+
+test "settled real losses count once per round trip, and sixteen clean rounds put the thresholds back" {
+    var w: ReorderWindow = .{};
+    defer w.release(testing.allocator);
+    var rtt: RttEstimator = .{};
+    rtt.latest_rtt_us = 2_000;
+    rtt.smoothed_rtt_us = 2_000;
+    // Widened by a spurious loss of a packet sent at 10 ms.
+    w.remember(testing.allocator, 1, 10_000);
+    w.widen(.{ .pn = 1, .sent_time_us = 10_000 }, 30, 12_500, &rtt);
+    try testing.expectEqual(@as(u64, 30), w.packet_threshold);
+    try testing.expectEqual(@as(u2, 2), w.time_shift);
+    try testing.expectEqual(@as(u32, 0), w.clean_rounds);
+
+    // Sixteen rounds of real losses, 10 ms (five round trips) apart,
+    // two records each sent 1 ms apart (the same round), every one
+    // older than the reach (4 ms) when settled.
+    var now: u64 = 100_000;
+    var round: u32 = 1;
+    while (round <= 16) : (round += 1) {
+        w.remember(testing.allocator, 100 + round * 2, now);
+        w.remember(testing.allocator, 101 + round * 2, now + 1_000);
+        now += 10_000;
+        // Within the reach: nothing settles yet.
+        w.settle(now - 8_000, &rtt);
+        try testing.expectEqual(round - 1, w.clean_rounds);
+        // Past it: this round counts, once (two records).
+        w.settle(now, &rtt);
+        if (round < 16) try testing.expectEqual(round, w.clean_rounds);
+    }
+    // The sixteenth clean round put the thresholds back.
+    try testing.expectEqual(initial_packet_threshold, w.packet_threshold);
+    try testing.expectEqual(initial_time_shift, w.time_shift);
+    try testing.expectEqual(@as(u64, 1), w.decays);
+    try testing.expectEqual(@as(u32, 0), w.clean_rounds);
+    // Settling again changes nothing: the records are settled.
+    w.settle(now + 100_000, &rtt);
+    try testing.expectEqual(@as(u32, 0), w.clean_rounds);
+    // Sixteen more clean rounds at the RFC's thresholds: the count
+    // wraps, nothing went back.
+    round = 1;
+    while (round <= 16) : (round += 1) {
+        w.remember(testing.allocator, 200 + round, now);
+        now += 10_000;
+        w.settle(now, &rtt);
+    }
+    try testing.expectEqual(@as(u64, 1), w.decays);
+    try testing.expectEqual(@as(u32, 0), w.clean_rounds);
+}
+
+test "a spurious hit restarts the decay's count, and its own round counts for nothing" {
+    var w: ReorderWindow = .{};
+    defer w.release(testing.allocator);
+    var rtt: RttEstimator = .{};
+    rtt.latest_rtt_us = 2_000;
+    rtt.smoothed_rtt_us = 2_000;
+    // Ten clean rounds.
+    var now: u64 = 100_000;
+    var round: u32 = 1;
+    while (round <= 10) : (round += 1) {
+        w.remember(testing.allocator, round, now);
+        now += 10_000;
+        w.settle(now, &rtt);
+    }
+    try testing.expectEqual(@as(u32, 10), w.clean_rounds);
+    // Round 11: of two packets sent 1 ms apart one arrives after all
+    // (a hit), one is real.
+    w.remember(testing.allocator, 50, now);
+    w.remember(testing.allocator, 51, now + 1_000);
+    w.widen(.{ .pn = 50, .sent_time_us = now }, 60, now + 2_500, &rtt);
+    try testing.expectEqual(@as(u32, 0), w.clean_rounds);
+    now += 10_000;
+    w.settle(now, &rtt);
+    // The real one settles but counts for nothing: its round
+    // reordered.
+    try testing.expectEqual(@as(u32, 0), w.clean_rounds);
+    // The next round counts again.
+    w.remember(testing.allocator, 70, now);
+    now += 10_000;
+    w.settle(now, &rtt);
+    try testing.expectEqual(@as(u32, 1), w.clean_rounds);
+    try testing.expectEqual(@as(u64, 0), w.decays);
 }
 
 test "the time threshold keeps the granularity floor at every width" {

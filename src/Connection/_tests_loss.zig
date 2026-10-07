@@ -574,6 +574,48 @@ test "packet-threshold loss reduces congestion window" {
     try std.testing.expectEqual(@as(u64, 2), conn.stats().loss_detection_delays);
 }
 
+test "an ACK settles the remembered losses the reach has passed, toward the thresholds' decay" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    conn.rttForLevel(.application).smoothed_rtt_us = 10_000;
+    conn.rttForLevel(.application).latest_rtt_us = 10_000;
+    conn.rttForLevel(.application).first_sample_taken = true;
+
+    // A loss remembered long ago (its packet sent at 0), the
+    // thresholds widened by hand as a spurious loss would.
+    const reorder = &conn.sentForLevel(.application).reorder;
+    reorder.remember(allocator, 1, 0);
+    reorder.packet_threshold = 100;
+    reorder.time_shift = 0;
+
+    // An ACK of a later packet, 200 ms on (far past the reach of
+    // 20 ms): the ACK handler settles the old record, a real loss,
+    // the first clean round of the decay.
+    try conn.sentForLevel(.application).record(.{
+        .pn = 2,
+        .sent_time_us = 190_000,
+        .bytes = 1200,
+        .ack_eliciting = true,
+        .in_flight = true,
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 3;
+    try conn.handleAckAtLevel(.application, .{
+        .largest_acked = 2,
+        .ack_delay = 0,
+        .first_range = 0,
+        .range_count = 0,
+        .ranges_bytes = &.{},
+        .ecn_counts = null,
+    }, 200_000);
+    try std.testing.expectEqual(@as(u32, 1), reorder.clean_rounds);
+    // The thresholds stay wide until the sixteenth.
+    try std.testing.expectEqual(@as(u64, 100), reorder.packet_threshold);
+}
+
 test "persistent congestion resets congestion window to minimum" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
