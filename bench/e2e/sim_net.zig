@@ -43,6 +43,14 @@ pub const Options = struct {
     /// for the link finds the queue full and is dropped. Models a
     /// finite router buffer.
     max_queue_delay_us: u64 = 100_000,
+    /// From `after_us` after the first packet (0 = never), the network
+    /// uses `after_loss_permille` and `after_reorder_permille` instead
+    /// of the two rates above: a reordering burst that stops, then a
+    /// lossy path. The random draws are the same either way, so a cell
+    /// that never switches is byte-identical to one without the knobs.
+    after_us: u64 = 0,
+    after_loss_permille: u16 = 0,
+    after_reorder_permille: u16 = 0,
 };
 
 const Packet = struct {
@@ -74,6 +82,9 @@ pub const SimNet = struct {
     /// When the bottleneck link finishes transmitting everything
     /// already queued (bottleneck model only).
     link_free_at_us: u64 = 0,
+    /// When the first packet was enqueued: the phase change counts
+    /// from it.
+    first_enqueue_us: ?u64 = null,
     /// Packets tail-dropped because the bottleneck queue was full.
     queue_dropped: u64 = 0,
     /// Largest queueing delay any delivered packet experienced.
@@ -102,12 +113,16 @@ pub const SimNet = struct {
         const random = self.prng.random();
         const loss_roll = random.uintLessThan(u16, 1000);
         const reorder_roll = random.uintLessThan(u16, 1000);
-        if (loss_roll < self.opts.loss_permille) {
+        if (self.first_enqueue_us == null) self.first_enqueue_us = now_us;
+        const after = self.opts.after_us != 0 and now_us -| self.first_enqueue_us.? >= self.opts.after_us;
+        const loss_permille = if (after) self.opts.after_loss_permille else self.opts.loss_permille;
+        const reorder_permille = if (after) self.opts.after_reorder_permille else self.opts.reorder_permille;
+        if (loss_roll < loss_permille) {
             self.dropped += 1;
             return;
         }
         var delay = self.opts.base_delay_us;
-        if (reorder_roll < self.opts.reorder_permille) delay += self.opts.reorder_extra_us;
+        if (reorder_roll < reorder_permille) delay += self.opts.reorder_extra_us;
 
         // Bottleneck serialization. Only the data direction contends
         // for the link; ACKs are small enough that modelling them adds

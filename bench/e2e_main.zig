@@ -287,6 +287,47 @@ const impairment_cells = [_]harness.ImpairmentOptions{
         .streams = 16,
         .total_bytes = 256 << 20,
     },
+    // A reordering burst that stops, then a lossy path: the cells for
+    // the thresholds' decay (sprint "reorder follow-ups", 2026-10-06).
+    // The first 30 ms are the 1 ms cell above (the thresholds widen to
+    // their widest: the time threshold to twice the RTT, the packet
+    // threshold toward the tracker's size); from then on no packet is
+    // late and 1% are lost. What the loss phase pays for the wide
+    // thresholds is the loss detection delay (the mean on the loss
+    // line) and, maybe, the time.
+    .{
+        .name = "impairment_reorder_then_loss_1ms",
+        .reorder_permille = 100,
+        .reorder_extra_us = 1_000,
+        .after_us = 30_000,
+        .after_loss_permille = 10,
+        .after_reorder_permille = 0,
+    },
+    // The same on the realistic path: 20 ms RTT, 100 Mbit, 10% of the
+    // packets 15 ms late for the first 300 ms (past 9/8 of the RTT and
+    // within twice it, so the time threshold widens to its widest:
+    // 40 ms for a 20 ms RTT), then 0.5% loss and no reordering.
+    .{
+        .name = "impairment_reorder_then_loss_20ms",
+        .reorder_permille = 100,
+        .reorder_extra_us = 15_000,
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 12_500_000,
+        .after_us = 300_000,
+        .after_loss_permille = 5,
+        .after_reorder_permille = 0,
+    },
+    // Hundreds of gaps open at once: 20 ms RTT, 1 Gbit (about 100
+    // packets a millisecond), 10% of the packets 20 ms late. The cell
+    // for the ACK frame's range cap (16 lower ranges, 128 bytes) and
+    // the receiver's 255-range tracker.
+    .{
+        .name = "impairment_reorder_gaps_1gbit",
+        .reorder_permille = 100,
+        .reorder_extra_us = 20_000,
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 125_000_000,
+    },
 };
 
 // The fairness matrix is fixed (specific matchups), NOT varied by
@@ -444,8 +485,9 @@ fn runImpairment(
 /// it stays comparable across versions.
 fn printLossLine(result: harness.ImpairmentResult) void {
     if (result.packets_lost == 0) return;
-    std.debug.print("  loss: {d} declared, {d} arrived late; thresholds {d} packets, shift {d}\n", .{
-        result.packets_lost, result.packets_spuriously_lost, result.packet_threshold, result.time_shift,
+    const mean_delay_us = if (result.loss_detection_delays == 0) 0 else result.loss_detection_delay_sum_us / result.loss_detection_delays;
+    std.debug.print("  loss: {d} declared, {d} arrived late; thresholds {d} packets, shift {d}; detection delay mean {d} us over {d}\n", .{
+        result.packets_lost, result.packets_spuriously_lost, result.packet_threshold, result.time_shift, mean_delay_us, result.loss_detection_delays,
     });
 }
 

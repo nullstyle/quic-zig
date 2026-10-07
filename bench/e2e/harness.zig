@@ -410,6 +410,13 @@ pub const ImpairmentOptions = struct {
     max_virtual_us: u64 = 600 * std.time.us_per_s,
     /// One-way delay of the link. The round trip is twice this.
     one_way_delay_us: u64 = 1_000,
+    /// A phase change `after_us` after the first packet (0 = never):
+    /// from then on `after_loss_permille` and `after_reorder_permille`
+    /// apply (sim_net's knobs): a reordering burst that stops, then a
+    /// lossy path.
+    after_us: u64 = 0,
+    after_loss_permille: u16 = 0,
+    after_reorder_permille: u16 = 0,
 };
 
 pub const ImpairmentResult = struct {
@@ -433,6 +440,11 @@ pub const ImpairmentResult = struct {
     packets_spuriously_lost: u64 = 0,
     packet_threshold: u64 = 0,
     time_shift: u8 = 0,
+    /// The sender's loss detection delay: for every packet declared
+    /// lost, the time from its send to its declaration, summed, and
+    /// how many. The mean is what the thresholds control.
+    loss_detection_delay_sum_us: u64 = 0,
+    loss_detection_delays: u64 = 0,
 };
 
 /// Bulk transfer through the seeded impairment net, measured in
@@ -452,6 +464,9 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .base_delay_us = opts.one_way_delay_us,
         .bottleneck_bytes_per_s = opts.bottleneck_bytes_per_s,
         .max_queue_delay_us = opts.max_queue_delay_us,
+        .after_us = opts.after_us,
+        .after_loss_permille = opts.after_loss_permille,
+        .after_reorder_permille = opts.after_reorder_permille,
     });
     defer net.deinit();
 
@@ -568,6 +583,8 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .packets_spuriously_lost = pair.client.qlog_packets_spuriously_lost,
         .packet_threshold = pair.client.paths.primaryConst().sent.reorder.packet_threshold,
         .time_shift = pair.client.paths.primaryConst().sent.reorder.time_shift,
+        .loss_detection_delay_sum_us = pair.client.qlog_loss_delay_sum_us,
+        .loss_detection_delays = pair.client.qlog_loss_delays,
     };
 }
 

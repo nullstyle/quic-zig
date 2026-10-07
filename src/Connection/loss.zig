@@ -917,6 +917,7 @@ const SweepCtx = struct {
     conn: *Connection,
     target: LossTarget,
     reason: conn_qlog.QlogLossReason,
+    now_us: u64,
     stats: LossStats = .{},
 
     fn handle(ctx: *SweepCtx, lost: *SentPacketTracker.SentPacket) Error!void {
@@ -954,6 +955,8 @@ const SweepCtx = struct {
             // (`recv_ack_handlers`). The episode is stamped after the
             // controller has been told (`noteDeclaredLost`).
             target.sent.reorder.remember(ctx.conn.allocator, lost.pn, lost.sent_time_us);
+            ctx.conn.qlog_loss_delay_sum_us +|= ctx.now_us -| lost.sent_time_us;
+            ctx.conn.qlog_loss_delays +|= 1;
         }
     }
 };
@@ -985,6 +988,7 @@ fn sweepLosses(
         .conn = conn,
         .target = target,
         .reason = pred.qlogReason(),
+        .now_us = now_us,
     };
 
     var i: u32 = 0;
@@ -1153,6 +1157,8 @@ fn firePtoOn(conn: *Connection, target: LossTarget, now_us: u64) Error!PtoOutcom
             // An expired packet that is acknowledged after all is a
             // spurious loss like any other (see `SweepCtx.handle`).
             target.sent.reorder.remember(conn.allocator, lost.pn, lost.sent_time_us);
+            conn.qlog_loss_delay_sum_us +|= now_us -| lost.sent_time_us;
+            conn.qlog_loss_delays +|= 1;
         }
         conn.qlog_packets_lost +|= stats.count;
         conn_qlog.emitLossDetected(conn, target.lvl, stats, .pto_probe);

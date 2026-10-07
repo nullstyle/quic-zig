@@ -566,6 +566,12 @@ test "packet-threshold loss reduces congestion window" {
 
     try std.testing.expect(conn.congestionWindow() < initial_cwnd);
     try std.testing.expect(conn.ccForApplication().ssthreshBytes() != null);
+    // The loss detection delay of the two packets declared lost
+    // (0 and 1, sent at 0 and 1 ms, declared at 50 ms): the stat the
+    // thresholds control (`ConnectionStats`).
+    try std.testing.expectEqual(@as(u64, 2), conn.qlog_loss_delays);
+    try std.testing.expectEqual(@as(u64, 99_000), conn.qlog_loss_delay_sum_us);
+    try std.testing.expectEqual(@as(u64, 2), conn.stats().loss_detection_delays);
 }
 
 test "persistent congestion resets congestion window to minimum" {

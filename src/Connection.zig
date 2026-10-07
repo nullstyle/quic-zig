@@ -576,6 +576,12 @@ qlog_packets_lost: u64 = 0,
 /// Packets declared lost that an ACK then covered: they arrived, late
 /// (`ReorderWindow`). Counted in `qlog_packets_lost` too.
 qlog_packets_spuriously_lost: u64 = 0,
+/// For every Application-space packet declared lost (the two threshold
+/// sweeps and a probe timeout's expiry), the time from its send to its
+/// declaration, summed, and how many: the loss detection delay the
+/// thresholds control (`ConnectionStats.loss_detection_delay_sum_us`).
+qlog_loss_delay_sum_us: u64 = 0,
+qlog_loss_delays: u64 = 0,
 /// Total UDP payload bytes we've sent.
 qlog_bytes_sent: u64 = 0,
 /// Total UDP payload bytes the peer has sent us.
