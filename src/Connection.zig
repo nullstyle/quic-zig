@@ -710,17 +710,27 @@ early_data_rejection_processed: bool = false,
 /// own timestamp through every call. Read-only for embedders —
 /// quic maintains it.
 ///
-/// Both directions refresh it: every datagram this side emits —
-/// including PTO probes and close retransmits — and every non-empty
-/// datagram it receives. The send-side refresh has an operational
-/// consequence for the idle timeout: a peer that dies while our
-/// ack-eliciting data is unacked is PTO-probed forever, and each
-/// probe restarts the idle clock, so death-under-load never trips
-/// the idle timeout at the connection layer. That failure mode is
-/// answered by RFC 9000 §10.3 stateless resets (`Server.Config.
-/// stateless_reset_key`): a replacement listener holding the same
-/// key resets the dead instance's orphans on their first probe.
+/// RFC 9000 §10.1 ¶3 says what refreshes it: a packet received and
+/// processed (it opened), and the first ack-eliciting packet sent
+/// since then (`ack_eliciting_sent_since_recv`); the probes after it
+/// do not. So a peer that dies while our data is unacked is gone one
+/// idle timeout after our first probe. Through v0.31.0 every datagram
+/// sent and every datagram received refreshed it, and the backed-off
+/// probes kept a dead peer's connection alive about three times the
+/// timeout (MEASURED by the qmsg session, 2026-10-06: 5.9 to 6.0 s for
+/// a 2 s timeout, 2.2 s on v0.29.0). RFC 9000 §10.3 stateless resets
+/// (`Server.Config.stateless_reset_key`) still end a dead instance's
+/// orphans on their first probe, sooner than that.
 last_activity_us: u64 = 0,
+/// RFC 9000 §10.1 ¶3: a send restarts the idle timer only "if no
+/// other ack-eliciting packets have been sent since last receiving
+/// and processing a packet". Set by that first send, cleared by a
+/// packet that opens.
+ack_eliciting_sent_since_recv: bool = false,
+/// `poll` scratch: the datagram being built holds an ack-eliciting
+/// packet (set where a packet is recorded, read when the datagram
+/// is done).
+poll_sent_ack_eliciting: bool = false,
 
 /// Handshake-liveness budget in microseconds: how long the
 /// connection may live without its handshake being CONFIRMED
@@ -3663,7 +3673,13 @@ pub fn idleTimeoutUs(self: *const Connection) ?u64 {
     if (local == 0) return null;
     const params = self.cached_peer_transport_params orelse return null;
     if (params.max_idle_timeout_ms == 0) return null;
-    return @min(local, params.max_idle_timeout_ms) * RttEstimator.ms;
+    const negotiated = @min(local, params.max_idle_timeout_ms) * RttEstimator.ms;
+    // RFC 9000 §10.1 ¶4: "endpoints MUST increase the idle timeout
+    // period to be at least three times the current Probe Timeout
+    // (PTO)." The PTO without its backoff: with it, the probes to a
+    // dead peer would stretch the very timeout that bounds them.
+    const pto = conn_loss.basePtoDurationForApplicationPath(self, self.primaryPathConst());
+    return @max(negotiated, 3 *| pto);
 }
 
 /// Absolute deadline after which an incomplete handshake is torn

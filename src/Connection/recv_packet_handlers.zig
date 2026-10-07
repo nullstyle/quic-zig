@@ -628,6 +628,10 @@ fn finishOpenedPacket(
     }
     pn_space.onPacketReceivedWithEcn(conn.last_recv_ecn);
     conn.qlog_packets_received +|= 1;
+    // RFC 9000 §10.1 ¶3: a packet received and processed restarts the
+    // idle timer, and the next ack-eliciting send may restart it once.
+    conn.last_activity_us = now_us;
+    conn.ack_eliciting_sent_since_recv = false;
     conn_qlog.emitPacketReceived(conn, lvl, pn, @intCast(ret_len), cls.frame_count);
     if (!duplicate_pn) {
         const handshake_level = lvl == .initial or lvl == .handshake;

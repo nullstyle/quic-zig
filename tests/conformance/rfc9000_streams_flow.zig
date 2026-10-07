@@ -92,6 +92,7 @@ const frame = quic.frame;
 const boringssl = @import("boringssl");
 const conn_state = quic.conn.state;
 const fixture = @import("_handshake_fixture.zig");
+const short_packet = quic.wire.short_packet;
 
 const test_alloc = std.testing.allocator;
 
@@ -1723,6 +1724,166 @@ test "MUST honour the smaller of local and peer idle_timeout values [RFC9000 §1
     const cli_event = cli_conn.closeEvent() orelse return error.TestExpectedClientIdleClose;
     try std.testing.expectEqual(quic.CloseSource.idle_timeout, srv_event.source);
     try std.testing.expectEqual(quic.CloseSource.idle_timeout, cli_event.source);
+}
+
+test "MUST restart the idle timer on a send only for the first ack-eliciting packet since the last receipt [RFC9000 §10.1 ¶3]" {
+    // §10.1 ¶3: "An endpoint restarts its idle timer when a packet
+    // from its peer is received and processed successfully. An
+    // endpoint also restarts its idle timer when sending an
+    // ack-eliciting packet if no other ack-eliciting packets have been
+    // sent since last receiving and processing a packet." Through
+    // v0.31.0 every datagram sent restarted the timer, so the probes
+    // to a dead peer (backed off, each one a send) kept its connection
+    // alive until one probe gap was longer than the timeout: about
+    // three times the idle timeout. MEASURED by the qmsg session,
+    // 2026-10-06: a 2 s timeout noticed a dead peer after 5.9 to 6.0 s
+    // on v0.30.1 and v0.31.0, after 2.2 s on v0.29.0 (whose probe
+    // timeout declared the packet lost instead of probing on).
+    var p = fixture.defaultParams();
+    p.max_idle_timeout_ms = 2_000;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, p, p);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const srv = try pair.serverConn();
+
+    // The client dies. The server has a PING to send: its first send
+    // after its last receipt restarts the timer; the probes after it
+    // do not.
+    const last_receipt = srv.last_activity_us;
+    srv.requestPing();
+    var first_send: ?u64 = null;
+    var closed_at: ?u64 = null;
+    const start = pair.now_us;
+    var t = start;
+    while (t < start + 8_000_000) : (t += 10_000) {
+        while (try srv.poll(&pair.rx_buf, t)) |_| {
+            if (first_send == null) first_send = t;
+        }
+        try srv.tick(t);
+        if (srv.closeEvent()) |ev| {
+            try std.testing.expectEqual(quic.CloseSource.idle_timeout, ev.source);
+            closed_at = t;
+            break;
+        }
+        if (first_send) |fs| try std.testing.expectEqual(fs, srv.last_activity_us);
+    }
+    const fs = first_send orelse return error.TestExpectedASend;
+    try std.testing.expect(fs >= last_receipt);
+    const at = closed_at orelse return error.TestExpectedIdleClose;
+    // Gone one timeout after the first send, within one step.
+    try std.testing.expect(at >= fs + 2_000_000);
+    try std.testing.expect(at <= fs + 2_000_000 + 10_000);
+}
+
+test "a packet received re-arms the one send restart of the idle timer [RFC9000 §10.1 ¶3]" {
+    // The send-side restart is "if no other ack-eliciting packets
+    // have been sent since last receiving and processing a packet":
+    // one restart per receipt. A packet that opens makes the next
+    // ack-eliciting send a restart again.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const srv = try pair.serverConn();
+    const cli = pair.clientConn();
+
+    const Steps = struct {
+        fn clientSends(p: *fixture.HandshakePair, c: *quic.conn.Connection, t: u64) !void {
+            c.requestPing();
+            var fed: usize = 0;
+            while (try c.poll(&p.rx_buf, t)) |len| {
+                fed += 1;
+                _ = try p.server.feed(p.rx_buf[0..len], p.peer_addr, t);
+            }
+            try std.testing.expect(fed >= 1);
+        }
+        fn serverSends(p: *fixture.HandshakePair, s_conn: *quic.conn.Connection, t: u64) !void {
+            s_conn.requestPing();
+            var sent: usize = 0;
+            while (try s_conn.poll(&p.rx_buf, t)) |_| sent += 1;
+            try std.testing.expect(sent >= 1);
+        }
+    };
+
+    // A packet from the client opens at t1: the timer restarts.
+    var t = pair.now_us + 10_000;
+    try Steps.clientSends(&pair, cli, t);
+    try std.testing.expectEqual(t, srv.last_activity_us);
+    // The server's first ack-eliciting send after it restarts (t2)...
+    t += 10_000;
+    try Steps.serverSends(&pair, srv, t);
+    try std.testing.expectEqual(t, srv.last_activity_us);
+    // ...the one after it does not (t2 stays).
+    t += 10_000;
+    try Steps.serverSends(&pair, srv, t);
+    try std.testing.expectEqual(t - 10_000, srv.last_activity_us);
+    // Another packet from the client (t4) re-arms the send restart:
+    // the next ack-eliciting send restarts again (t5).
+    t += 10_000;
+    try Steps.clientSends(&pair, cli, t);
+    try std.testing.expectEqual(t, srv.last_activity_us);
+    t += 10_000;
+    try Steps.serverSends(&pair, srv, t);
+    try std.testing.expectEqual(t, srv.last_activity_us);
+}
+
+test "MUST NOT restart the idle timer for a datagram that is not processed successfully [RFC9000 §10.1 ¶3]" {
+    // "received and processed successfully": a datagram that does not
+    // authenticate is not the peer's activity. Through v0.31.0 any
+    // datagram with bytes restarted the timer before its packet was
+    // opened (found by the qmsg session, 2026-10-06, by reading): a
+    // spoofed datagram to a known connection kept it alive.
+    var pair = try fixture.HandshakePair.init(std.testing.allocator);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const cli = pair.clientConn();
+    const srv = try pair.serverConn();
+    const before = cli.last_activity_us;
+    const packets_before = cli.qlog_packets_received;
+
+    // A 1-RTT packet sealed with the server's keys, then damaged: it
+    // does not open.
+    const keys = (try srv.packetKeys(.application, .write)) orelse return error.NoKeys;
+    const pn = srv.allocApplicationPacketNumberForTesting() orelse return error.PnSpaceExhausted;
+    var pkt: [2048]u8 = undefined;
+    const ping = [_]u8{0x01};
+    const n = try short_packet.seal1Rtt(&pkt, .{
+        .dcid = srv.peer_dcid.slice(),
+        .pn = pn,
+        .payload = &ping,
+        .keys = &keys,
+        .key_phase = false,
+    });
+    pkt[n - 1] ^= 0xff;
+    try cli.handle(pkt[0..n], null, pair.now_us + 500_000);
+    try std.testing.expectEqual(packets_before, cli.qlog_packets_received);
+    try std.testing.expectEqual(before, cli.last_activity_us);
+}
+
+test "MUST raise the idle timeout to at least three times the PTO [RFC9000 §10.1 ¶4]" {
+    // §10.1 ¶4: "To avoid excessively small idle timeout periods,
+    // endpoints MUST increase the idle timeout period to be at least
+    // three times the current Probe Timeout (PTO)." The PTO without
+    // its backoff: with it, the probes to a dead peer would stretch
+    // the timeout they are meant to be bounded by.
+    var p = fixture.defaultParams();
+    p.max_idle_timeout_ms = 20;
+    var pair = try fixture.HandshakePair.initWith(std.testing.allocator, p, p);
+    defer pair.deinit();
+    try pair.driveToHandshakeConfirmed();
+    const srv = try pair.serverConn();
+    const pto = srv.primaryPathConst().path.rtt.pto(0);
+    const idle = srv.idleTimeoutUs() orelse return error.TestExpectedIdleTimeout;
+    try std.testing.expect(idle >= 3 * pto);
+    try std.testing.expect(idle > 20_000);
+    try std.testing.expect(idle < 1_000_000);
+    // Alive 25 ms after its last activity, past the advertised 20 ms...
+    const base = srv.last_activity_us;
+    try srv.tick(base + 25_000);
+    try std.testing.expect(srv.closeEvent() == null);
+    // ...and gone once the raised timeout has passed.
+    try srv.tick(base + idle + 1_000);
+    const ev = srv.closeEvent() orelse return error.TestExpectedIdleClose;
+    try std.testing.expectEqual(quic.CloseSource.idle_timeout, ev.source);
 }
 
 // ---------------------------------------------------------------- §10.3 stateless reset

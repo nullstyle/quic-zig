@@ -5,6 +5,28 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Fixed
+
+- **A dead peer's connection ends one idle timeout after the first
+  probe, not three.** RFC 9000 section 10.1: a send restarts the idle
+  timer only for the first ack-eliciting packet since the last packet
+  received and processed, and a received packet restarts it only when
+  it is processed (it opened). Through v0.31.0 every datagram sent
+  restarted it, so the backed-off probes to a dead peer (v0.30.1's
+  probe timeout probes on instead of declaring a loss) kept the
+  connection alive until one probe gap was longer than the timeout:
+  about three times the timeout (MEASURED by the qmsg session,
+  2026-10-06: a 2 s timeout noticed a dead peer after 5.9 to 6.0 s on
+  v0.30.1 and v0.31.0, after 2.2 s on v0.29.0; qmsg's dead-peer test
+  failed about 2 runs in 5). And every datagram received restarted
+  it, before its packet was opened, so a spoofed datagram to a known
+  connection kept it alive. Also: the idle timeout is at least three
+  times the PTO (section 10.1 paragraph 4, a MUST that was missing),
+  the PTO without its backoff. Three conformance tests. No wire
+  change, no API change.
+
 ## [0.31.0] - 2026-10-06
 
 The "feed and confirm" release: two small repairs, behavior only, no

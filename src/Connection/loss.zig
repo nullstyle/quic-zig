@@ -77,7 +77,7 @@ pub fn ptoDurationForLevel(conn: *const Connection, lvl: EncryptionLevel) u64 {
     };
 }
 
-fn basePtoDurationForApplicationPath(conn: *const Connection, path: *const PathState) u64 {
+pub fn basePtoDurationForApplicationPath(conn: *const Connection, path: *const PathState) u64 {
     return path.path.rtt.pto(conn.peerMaxAckDelayUs());
 }
 

@@ -92,10 +92,12 @@ pub fn handleWithEcn(
         conn_qlog.emitPacketDropped(conn, null, @intCast(bytes.len), .payload_too_large);
         return;
     }
-    if (bytes.len > 0) {
-        conn.last_activity_us = now_us;
-        conn.qlog_bytes_received +|= bytes.len;
-    }
+    // RFC 9000 §10.1 ¶3: the idle timer restarts for a packet
+    // "received and processed successfully", so it restarts where a
+    // packet opens (`recv_packet_handlers`), not here for any bytes
+    // that arrive. Through v0.31.0 a datagram that did not open
+    // restarted it too (found by the qmsg session, 2026-10-06).
+    if (bytes.len > 0) conn.qlog_bytes_received +|= bytes.len;
     const incoming_path_id = conn.incomingPathId(from);
     conn.current_incoming_path_id = incoming_path_id;
     conn.current_incoming_addr = from;

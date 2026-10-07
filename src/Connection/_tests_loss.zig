@@ -810,15 +810,16 @@ test "idle timer closes and enters draining" {
 
     // Per RFC 9000 §10.1 ¶2 the effective idle timeout is the min of
     // local and peer; either side advertising 0 means no timeout. Set
-    // both so the idle gate actually arms.
-    try conn.setTransportParams(.{ .max_idle_timeout_ms = 5 });
-    conn.cached_peer_transport_params = .{ .max_idle_timeout_ms = 5 };
+    // both so the idle gate actually arms. 5 s: above three PTOs of a
+    // fresh connection (§10.1 ¶4 raises a smaller value to them).
+    try conn.setTransportParams(.{ .max_idle_timeout_ms = 5_000 });
+    conn.cached_peer_transport_params = .{ .max_idle_timeout_ms = 5_000 };
     conn.last_activity_us = 1_000;
     const deadline = conn.nextTimerDeadline(1_000).?;
     try std.testing.expectEqual(TimerKind.idle, deadline.kind);
-    try std.testing.expectEqual(@as(u64, 6_000), deadline.at_us);
+    try std.testing.expectEqual(@as(u64, 5_001_000), deadline.at_us);
 
-    try conn.tick(6_000);
+    try conn.tick(5_001_000);
     try std.testing.expect(conn.isClosed());
     try std.testing.expectEqual(CloseState.draining, conn.closeState());
     try std.testing.expect(conn.lifecycle.draining_deadline_us != null);
@@ -868,9 +869,18 @@ test "idle timer disabled when either endpoint advertises 0 [RFC9000 §10.1 ¶2]
     }
     // Both non-zero → uses min.
     {
+        const deadline = (try Helper.run(allocator, ctx, 30_000, 5_000)).?;
+        try std.testing.expectEqual(TimerKind.idle, deadline.kind);
+        try std.testing.expectEqual(@as(u64, 5_001_000), deadline.at_us);
+    }
+    // Under three PTOs the value is raised to them (RFC 9000 §10.1 ¶4):
+    // a fresh connection's PTO is about a second (an initial RTT of
+    // 333 ms), so 5 ms becomes about 3 s.
+    {
         const deadline = (try Helper.run(allocator, ctx, 30_000, 5)).?;
         try std.testing.expectEqual(TimerKind.idle, deadline.kind);
-        try std.testing.expectEqual(@as(u64, 6_000), deadline.at_us);
+        try std.testing.expect(deadline.at_us >= 1_000 + 3_000_000);
+        try std.testing.expect(deadline.at_us <= 1_000 + 3_100_000);
     }
 }
 

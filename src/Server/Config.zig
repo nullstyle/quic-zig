@@ -323,8 +323,9 @@ local_cid_len: u8 = 8,
 /// emit a reset an orphan recognizes when it holds the SAME key
 /// the dead instance minted that CID's token under. Per-instance
 /// keys strand orphans: they die only by their peers' idle
-/// timeouts — or, with unacked ack-eliciting data outstanding,
-/// never (see `Connection.last_activity_us`).
+/// timeouts, one timeout after the orphan's first probe (RFC 9000
+/// §10.1; through v0.31.0 every probe restarted the timer, and an
+/// orphan with unacked data lived about three timeouts).
 ///
 /// Do NOT hand-set `transport_params.stateless_reset_token`
 /// instead: §18.2's token belongs to the handshake CID, which

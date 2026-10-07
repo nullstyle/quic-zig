@@ -109,6 +109,7 @@ pub fn pollDatagram(
     conn.queueHandshakeDoneIfReady();
     try conn.refreshEarlyDataStatus();
     conn.poll_addr_override = null;
+    conn.poll_sent_ack_eliciting = false;
 
     // The budget is for the DATAGRAM. A datagram that holds a packet
     // with a long header is `conn.mtu` bytes at most (1200; the peer's
@@ -205,7 +206,15 @@ pub fn pollDatagram(
     // the Handshake packet behind it.
     if (sent_handshake and conn.role == .client and !conn.initial_keys_discarded) conn_keys.discardInitialKeys(conn);
 
-    conn.last_activity_us = now_us;
+    // RFC 9000 §10.1 ¶3: a send restarts the idle timer only for the
+    // first ack-eliciting packet since the last packet received and
+    // processed. Through v0.31.0 every datagram restarted it, and the
+    // backed-off probes to a dead peer kept its connection alive about
+    // three times the timeout (found by the qmsg session, 2026-10-06).
+    if (conn.poll_sent_ack_eliciting and !conn.ack_eliciting_sent_since_recv) {
+        conn.last_activity_us = now_us;
+        conn.ack_eliciting_sent_since_recv = true;
+    }
     const out_path = conn_paths.pathForId(conn, app_path_id);
     const out_addr = if (pos > app_start_pos) conn.poll_addr_override orelse out_path.peerAddress() else out_path.peerAddress();
     conn.poll_addr_override = null;
@@ -1485,6 +1494,7 @@ pub fn pollLevelOnPath(
     sent_packet.bytes = n;
     sent_packet.ack_eliciting = ack_eliciting;
     sent_packet.in_flight = ack_eliciting;
+    if (ack_eliciting) conn.poll_sent_ack_eliciting = true;
     sent_packet.is_early_data = lvl == .early_data;
     sent_packet.datagram = sent_datagram;
     if (lvl == .application) conn_keys.recordApplicationPacketProtected(conn, &sent_packet);
