@@ -5,6 +5,101 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.32.0] - 2026-10-07
+
+The single-stream limits release: a stream can now go as fast as the
+windows its endpoints announce, and the loss thresholds that widened
+for reordering shrink back when the reordering stops. One behavior
+change for embedders who announce flow-control windows other than the
+defaults (the window they announce now stays the window), two new
+knobs, a wider ACK frame under heavy reordering. No wire-format
+change, no API an embedder must change, the same option map. Verified
+toolchain: 0.17.0.
+
+### Fixed
+
+- **The receive window an endpoint keeps open is the one it
+  announced.** Through v0.31.1 the credit given after the initial
+  window was a fixed 1 MiB per stream and 16 MiB per connection,
+  whatever the transport parameters said: an embedder announcing
+  4 MiB per stream got 4 MiB for the first 4 MiB of a stream and
+  1 MiB after; one announcing 64 KiB got 1 MiB. Now the credit stays
+  one announced window ahead of what the application read. The
+  defaults (`Client.Config.defaultTransportParams`,
+  `Server.Config.defaultTransportParams`) announce exactly the old
+  constants, so an embedder on them sees no change. MEASURED
+  (`impairment_clean_1gbit_rtt20ms`, 8 MiB on 1 Gbit with a 20 ms
+  round trip, bbr, the harness announcing 4 MiB): 361 ms -> 285 ms;
+  with the send buffer below as well, 220 ms.
+
+### Added
+
+- **`Connection.max_buffered_send`, `Client.Config.max_buffered_send`,
+  `Server.Config.max_buffered_send`**: the send buffer of every stream
+  the connection opens from then on (`SendStream.max_buffered`,
+  default `Connection.default_max_buffered_send` = 1 MiB, as before).
+  The buffer holds every byte written and not yet acknowledged in
+  order, so it is the window a stream's sender has: on a path whose
+  bandwidth-delay product is larger, or under reordering (a hole
+  holds the oldest byte until its repair is acknowledged), a single
+  stream cannot go faster than this buffer per round trip of repair.
+  MEASURED (`impairment_reorder_gaps_1gbit`, 8 MiB on 1 Gbit with a
+  20 ms round trip and 10% of the packets 20 ms late, bbr): 768 ms
+  with the default, 294 ms with an 8 MiB buffer and a 4 MiB announced
+  receive window (the clean link: 220 ms). The congestion controller
+  was never the brake there: BBR sat in Startup with a 2 MB window
+  and a 110 MB/s pacing rate.
+- **The loss thresholds shrink back** (`conn/ReorderWindow.zig`,
+  after RFC 8985's rule for RACK's reordering window): a remembered
+  loss whose packet is older than twice the round trip can never
+  widen the thresholds again, so it is a real loss; a round trip with
+  such losses counts once, a spurious hit restarts the count and its
+  own round counts for nothing, and after 16 clean rounds in a row
+  the thresholds go back to RFC 9002's (3 packets, 9/8 of the round
+  trip). Nothing moves on a path that keeps reordering or never
+  loses. The rounds are the window's own, by send time, not the
+  controller's loss episodes: BBR extends one recovery period at
+  every later loss, so under steady loss its episode never ends.
+  MEASURED (`impairment_reorder_then_loss_20ms`, 24 MiB: a 15 ms
+  reordering burst on a 20 ms path, then 0.5% loss; 12 seeds): with
+  the rule the loss detection delay, averaged over the run, fell
+  about 20% (bbr 36 to 49 ms -> 28 to 43; the phase after the decay
+  finds a loss at the RFC's 9/8 round trip instead of two), the
+  transfer time unchanged for BBR (median 2325 -> 2331 ms) and 4.7%
+  longer for CUBIC (19.7 -> 20.6 s: random loss found a round trip
+  sooner cuts its window a round trip sooner; its seeds spread 17 to
+  23 s either way). The 8 MiB version of the cell, about 26 round
+  trips of loss, never reached 16 clean rounds.
+- Bench cells `impairment_clean_1gbit_rtt20ms` (the gaps cell's link
+  with nothing late), `impairment_clean_1gbit_rtt20ms_buf8m` and
+  `impairment_reorder_gaps_1gbit_buf8m` (an 8 MiB send buffer through
+  the new `ImpairmentOptions.send_buffer_bytes`); the bench's loss
+  line prints the decay's counters.
+
+### Changed
+
+- **The ACK frame carries up to 64 ranges below the largest (512
+  bytes), from 16 (128).** Under heavy reordering (hundreds of gaps
+  open at once) the 16-range frame left received packets unseen by
+  the sender until they fell out of the receiver's tracker: declared
+  lost, sent again, and counted as losses. MEASURED
+  (`impairment_reorder_gaps_1gbit`, 12 seeds, bbr): 455 to 620
+  packets declared lost at 16 ranges, 117 to 299 at 64; 254 adds
+  nothing over 64; the time 5% (once the windows above no longer
+  bind: 294 -> 279 ms, one seed). Cost: an ACK frame of up to 512
+  bytes of ranges only when that many gaps are open.
+- `impairment_reorder_then_loss_20ms` transfers 24 MiB (was 8): long
+  enough for the decay to fire well before the end.
+- The bench cells moved with the window fix: the harness announces
+  4 MiB per stream, which the engine ran at 1 MiB after the first
+  4 MiB through v0.31.1. Every cell the old running window had capped
+  is faster (8 MiB on the 2 ms link: 38 -> 30 ms with nothing lost,
+  54 -> 46 with 1% lost, 93 -> 56 with 5%; the 2 ms reorder cells 114
+  -> 102 and 74 -> 72; the fat-window cell 7.9 -> 7.3 s); the four
+  bottleneck cells and the three churn cells are byte-identical; the
+  six fairness cells moved inside their noise (Jain 0.964 -> 0.982 for
+  two CUBIC flows, 0.764 -> 0.802 for a BBR and a CUBIC flow).
+
 ## [0.31.1] - 2026-10-06
 
 The idle-timer fix: a dead peer's connection ends one idle timeout
