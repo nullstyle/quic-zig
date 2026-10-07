@@ -417,6 +417,12 @@ pub const ImpairmentOptions = struct {
     after_us: u64 = 0,
     after_loss_permille: u16 = 0,
     after_reorder_permille: u16 = 0,
+    /// The sender's send buffer per stream (`Connection.max_buffered_send`;
+    /// null = the engine's default, 1 MiB). The buffer holds every
+    /// byte written and not yet acknowledged in order, so on a fat
+    /// link, or under reordering, it is the window a single stream
+    /// gets.
+    send_buffer_bytes: ?usize = null,
 };
 
 pub const ImpairmentResult = struct {
@@ -445,6 +451,10 @@ pub const ImpairmentResult = struct {
     /// how many. The mean is what the thresholds control.
     loss_detection_delay_sum_us: u64 = 0,
     loss_detection_delays: u64 = 0,
+    /// The thresholds' decay (`ReorderWindow.settle`): how often the
+    /// thresholds went back, and the clean rounds counted at the end.
+    reorder_decays: u64 = 0,
+    reorder_clean_rounds: u32 = 0,
 };
 
 /// Bulk transfer through the seeded impairment net, measured in
@@ -477,6 +487,8 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
 
     var rbuf: [64 << 10]u8 = undefined;
     var pkt: [2048]u8 = undefined;
+
+    if (opts.send_buffer_bytes) |b| pair.client.max_buffered_send = b;
 
     // Client-initiated bidi stream ids are 0, 4, 8, ... (RFC 9000 §2.1).
     const stream_count: u32 = @max(1, opts.streams);
@@ -585,6 +597,8 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .time_shift = pair.client.paths.primaryConst().sent.reorder.time_shift,
         .loss_detection_delay_sum_us = pair.client.qlog_loss_delay_sum_us,
         .loss_detection_delays = pair.client.qlog_loss_delays,
+        .reorder_decays = pair.client.paths.primaryConst().sent.reorder.decays,
+        .reorder_clean_rounds = pair.client.paths.primaryConst().sent.reorder.clean_rounds,
     };
 }
 

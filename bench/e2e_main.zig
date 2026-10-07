@@ -316,17 +316,57 @@ const impairment_cells = [_]harness.ImpairmentOptions{
         .after_us = 300_000,
         .after_loss_permille = 5,
         .after_reorder_permille = 0,
+        // Long enough for the thresholds' decay (16 rounds with a
+        // real loss, then the reach) to fire well before the end: the
+        // loss phase runs about 75 round trips (8 MiB gave 26, and
+        // 6 to 13 clean rounds at the end).
+        .total_bytes = 24 << 20,
     },
     // Hundreds of gaps open at once: 20 ms RTT, 1 Gbit (about 100
-    // packets a millisecond), 10% of the packets 20 ms late. The cell
-    // for the ACK frame's range cap (16 lower ranges, 128 bytes) and
-    // the receiver's 255-range tracker.
+    // packets a millisecond), 10% of the packets 20 ms late. Built for
+    // the ACK frame's range cap (`max_application_ack_lower_ranges`)
+    // and the receiver's 255-range tracker.
+    //
+    // MEASURED 2026-10-07 (8 MiB, one seed, bbr): 768 ms, against 361
+    // on the same link with nothing late (the cell below), while BBR
+    // sat in Startup with a 2 MB window and a 110 MB/s pacing rate.
+    // The brakes were two fixed sizes: the sender's 1 MiB send
+    // buffer, whose floor a hole holds (`Connection.max_buffered_send`
+    // since v0.32.0, the `_buf8m` cells below), and the receiver's
+    // stream credit, which fell back to 1 MiB after the announced
+    // 4 MiB (fixed in v0.32.0: the announced window stays). With an
+    // 8 MiB buffer and the announced window: 294 ms (the clean link:
+    // 220); the range cap at 64: 279. CUBIC: 1527 ms whatever the
+    // sizes (its own response to the spurious losses).
     .{
         .name = "impairment_reorder_gaps_1gbit",
         .reorder_permille = 100,
         .reorder_extra_us = 20_000,
         .one_way_delay_us = 10_000,
         .bottleneck_bytes_per_s = 125_000_000,
+    },
+    // The gaps cell's link with nothing late: the control.
+    .{
+        .name = "impairment_clean_1gbit_rtt20ms",
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 125_000_000,
+    },
+    // The same two cells with a send buffer the whole transfer fits
+    // in: what the link and the receiver's window allow, without the
+    // sender's 1 MiB buffer in the way.
+    .{
+        .name = "impairment_clean_1gbit_rtt20ms_buf8m",
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 125_000_000,
+        .send_buffer_bytes = 8 << 20,
+    },
+    .{
+        .name = "impairment_reorder_gaps_1gbit_buf8m",
+        .reorder_permille = 100,
+        .reorder_extra_us = 20_000,
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 125_000_000,
+        .send_buffer_bytes = 8 << 20,
     },
 };
 
@@ -486,8 +526,8 @@ fn runImpairment(
 fn printLossLine(result: harness.ImpairmentResult) void {
     if (result.packets_lost == 0) return;
     const mean_delay_us = if (result.loss_detection_delays == 0) 0 else result.loss_detection_delay_sum_us / result.loss_detection_delays;
-    std.debug.print("  loss: {d} declared, {d} arrived late; thresholds {d} packets, shift {d}; detection delay mean {d} us over {d}\n", .{
-        result.packets_lost, result.packets_spuriously_lost, result.packet_threshold, result.time_shift, mean_delay_us, result.loss_detection_delays,
+    std.debug.print("  loss: {d} declared, {d} arrived late; thresholds {d} packets, shift {d}; detection delay mean {d} us over {d}; decays {d}, clean rounds {d}\n", .{
+        result.packets_lost, result.packets_spuriously_lost, result.packet_threshold, result.time_shift, mean_delay_us, result.loss_detection_delays, result.reorder_decays, result.reorder_clean_rounds,
     });
 }
 
