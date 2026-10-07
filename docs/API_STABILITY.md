@@ -130,7 +130,7 @@ suite.
   the same microsecond origin you pass to `handle` / `poll` / `tick`)
   and the mutable posture switches the wrappers thread onto each
   connection (`ecn_enabled`, `reveal_close_reason_on_wire`,
-  `delayed_ack_packet_threshold`), which `Server`/`Client` set from
+  `delayed_ack_packet_threshold`, `max_buffered_send`), which `Server`/`Client` set from
   `Config` and a raw-`Connection` embedder sets directly.
 - The low-level `frame` and `wire` codecs are exported for tests and
   advanced use, but are **not** covered by the stability guarantee.

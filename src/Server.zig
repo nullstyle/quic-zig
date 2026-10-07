@@ -1016,6 +1016,7 @@ pub fn init(config: Config) Error!Server {
         .tunables = .{
             .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
             .max_connection_memory = config.max_connection_memory,
+            .max_buffered_send = config.max_buffered_send,
             .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
             .ecn_enabled = config.enable_ecn,
             .pmtud = config.pmtud,

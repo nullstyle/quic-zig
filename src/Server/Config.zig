@@ -719,6 +719,14 @@ reveal_close_reason_on_wire: bool = false,
 /// caps to do their job before this aggregate cap fires.
 max_connection_memory: u64 = conn_mod.state.default_max_connection_memory,
 
+/// The send buffer of every stream on every accepted connection
+/// (`Connection.max_buffered_send`): the window a stream's sender
+/// has. Default `Connection.default_max_buffered_send` (1 MiB); a
+/// server that sends large responses on a fat or reordering path
+/// raises it, and announces a receive window to match on the client
+/// side of the contract (the peer's `initial_max_stream_data_*`).
+max_buffered_send: usize = conn_mod.state.default_max_buffered_send,
+
 /// Number of ack-eliciting application packets the server requires
 /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
 /// matches `quic.conn.state.application_ack_eliciting_threshold`.

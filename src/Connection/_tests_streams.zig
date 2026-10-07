@@ -27,6 +27,27 @@ const util = @import("_test_util.zig");
 const installTestEarlyDataReadSecret = util.installTestEarlyDataReadSecret;
 const testEarlyDataPacketKeys = util.testEarlyDataPacketKeys;
 
+test "max_buffered_send is the send buffer of every stream the connection opens" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try std.testing.expectEqual(state.default_max_buffered_send, conn.max_buffered_send);
+
+    conn.max_buffered_send = 8;
+    _ = try conn.openBidi(0);
+    try std.testing.expectEqual(@as(usize, 8), conn.stream(0).?.send.max_buffered);
+    // The buffer is the sender's window: a write past it takes less.
+    try std.testing.expectEqual(@as(usize, 8), try conn.streamWrite(0, "0123456789"));
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamWrite(0, "more"));
+    // A stream opened before a change keeps its own.
+    conn.max_buffered_send = 64;
+    _ = try conn.openBidi(4);
+    try std.testing.expectEqual(@as(usize, 8), conn.stream(0).?.send.max_buffered);
+    try std.testing.expectEqual(@as(usize, 64), conn.stream(4).?.send.max_buffered);
+}
+
 test "streamReset publicly aborts the send half" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

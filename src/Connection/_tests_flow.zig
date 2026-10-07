@@ -533,6 +533,102 @@ test "receive flow-control MAX updates are paced by half-window" {
     try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_data);
 }
 
+test "receive credit keeps the announced windows when they are smaller than the defaults" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // An embedder that wants less memory per stream than the
+    // defaults announces 64 KiB per stream and 128 KiB for the
+    // connection: the credit it gives later is one such window ahead
+    // of what it read, not the default's.
+    const stream_window: u64 = 64 * 1024;
+    const conn_window: u64 = 128 * 1024;
+    try conn.setTransportParams(.{
+        .initial_max_data = conn_window,
+        .initial_max_stream_data_bidi_remote = stream_window,
+        .initial_max_streams_bidi = 1,
+    });
+    const chunk = try allocator.alloc(u8, 40 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+    try conn.handleStream(.application, .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = chunk,
+        .has_length = true,
+    });
+    var buf: [64 * 1024]u8 = undefined;
+    try std.testing.expectEqual(chunk.len, try conn.streamRead(0, &buf));
+    // 24 KiB of the stream window left, under half of it: the credit
+    // goes out, one announced window ahead of the read offset.
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.max_stream_data.items.len);
+    try std.testing.expectEqual(
+        @as(u64, chunk.len) + stream_window,
+        conn.pending_frames.max_stream_data.items[0].maximum_stream_data,
+    );
+    // 88 KiB of the connection window left, more than half: not yet.
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_data);
+
+    try conn.handleStream(.application, .{
+        .stream_id = 0,
+        .offset = chunk.len,
+        .data = chunk,
+        .has_length = true,
+    });
+    try std.testing.expectEqual(chunk.len, try conn.streamRead(0, &buf));
+    // 48 KiB of 128 left: the connection credit goes out, one announced
+    // window ahead of the bytes read.
+    try std.testing.expectEqual(
+        @as(?u64, 2 * @as(u64, chunk.len) + conn_window),
+        conn.pending_frames.max_data,
+    );
+}
+
+test "receive credit keeps the announced windows when they are larger than the defaults" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+
+    // A 4 MiB stream window, as the bench harness announces: on a
+    // fat link the sender needs it for the whole transfer, not only
+    // the first 4 MiB. MEASURED 2026-10-07 (bench cell
+    // `impairment_clean_1gbit_rtt20ms`, 8 MiB, bbr): the credit
+    // falling back to the default's 1 MiB after the initial window
+    // held the sender at 546 KB in flight and 361 ms; 285 ms with the
+    // announced window.
+    const stream_window: u64 = 4 * 1024 * 1024;
+    try conn.setTransportParams(.{
+        .initial_max_data = default_connection_receive_window,
+        .initial_max_stream_data_bidi_remote = stream_window,
+        .initial_max_streams_bidi = 1,
+    });
+    const half = try allocator.alloc(u8, stream_window / 2);
+    defer allocator.free(half);
+    @memset(half, 'x');
+    try conn.handleStream(.application, .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = half,
+        .has_length = true,
+    });
+    var buf: [64 * 1024]u8 = undefined;
+    var read: u64 = 0;
+    while (read < half.len) read += try conn.streamRead(0, &buf);
+    try std.testing.expectEqual(@as(u64, half.len), read);
+    // Half the announced window read: the credit goes out, a whole
+    // announced window ahead.
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_frames.max_stream_data.items.len);
+    try std.testing.expectEqual(
+        read + stream_window,
+        conn.pending_frames.max_stream_data.items[0].maximum_stream_data,
+    );
+}
+
 test "stream flow block queues STREAM_DATA_BLOCKED and clears on MAX_STREAM_DATA" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

@@ -444,10 +444,15 @@ test "stream window: one connection completes 20,000 streams of each type, each 
             .budget_steps = 5_000,
         });
         try std.testing.expect(r.peak_bidi <= 100 and r.peak_uni <= 100);
-        // Measured: 6,678 late datagrams for 20,000 streams, every one
-        // of them after its streams were reaped.
-        try std.testing.expect(r.late_delivered > streams / 10);
-        try std.testing.expect(r.late_after_reap > streams / 10);
+        // Measured 2026-10-07: 185 late datagrams for 20,000 streams,
+        // every one of them after its streams were reaped. Through
+        // v0.31.1 it was 6,678: the answering side sent a
+        // MAX_STREAM_DATA frame on the first read of every stream (its
+        // running window of 1 MiB was more than the 256 KiB it had
+        // announced), one datagram each, and 690 iterations instead of
+        // about 1,700 (every one of those datagrams carried an ACK).
+        try std.testing.expect(r.late_delivered > streams / 200);
+        try std.testing.expect(r.late_after_reap > streams / 200);
     }
 }
 

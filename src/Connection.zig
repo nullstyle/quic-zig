@@ -181,6 +181,23 @@ reveal_close_reason_on_wire: bool = false,
 /// individual buffer stays under its own cap.
 max_connection_memory: u64 = default_max_connection_memory,
 
+/// The send buffer of every stream this connection opens from now on
+/// (`SendStream.max_buffered`): the bytes `streamWrite` holds that
+/// the peer has not yet acknowledged in order. `streamWrite` takes
+/// less than offered when the buffer is full. The buffer is the
+/// window a stream's sender has: on a path whose bandwidth-delay
+/// product is larger, or under reordering (a hole holds the oldest
+/// byte), a single stream cannot go faster than this buffer per
+/// round trip of repair. MEASURED 2026-10-07 (bench cells
+/// `impairment_reorder_gaps_1gbit` and its `_buf8m` twin, 8 MiB,
+/// bbr, 1 Gbit, 20 ms, 10% of the packets 20 ms late): 768 ms with
+/// the default, 294 ms with an 8 MiB buffer and a 4 MiB announced
+/// receive window (the clean link: 361 -> 220 ms). Defaults to
+/// `default_max_buffered_send` (1 MiB); `Client.Config` and
+/// `Server.Config` carry it (`max_buffered_send`). A stream opened
+/// before a change keeps its own `send.max_buffered`.
+max_buffered_send: usize = default_max_buffered_send,
+
 /// Number of ack-eliciting application packets received before
 /// forcing an immediate ACK (RFC 9000 §13.2.1 ¶2: "An endpoint
 /// MUST acknowledge ack-eliciting packets within its advertised
@@ -862,6 +879,8 @@ pub const PacketKeys = short_packet_mod.PacketKeys;
 pub const Suite = short_packet_mod.Suite;
 /// Send half of a QUIC stream (RFC 9000 §3) — owns offset, flow credit, retransmit queue.
 pub const SendStream = send_stream_mod.SendStream;
+/// The default `max_buffered_send` (1 MiB).
+pub const default_max_buffered_send = send_stream_mod.default_max_buffered_send;
 /// Receive half of a QUIC stream — owns reassembly buffer and flow-control window.
 pub const RecvStream = recv_stream_mod.RecvStream;
 /// One network path (4-tuple plus DCID/SCID) — RFC 9000 §9 / multipath draft-21.
@@ -1345,9 +1364,22 @@ pub const application_ack_eliciting_threshold: u8 = 1;
 ///     of 871 of 1349 in one run), and the transfers were no faster
 ///     (the limit there is the reordering itself, see
 ///     `conn/ReorderWindow.zig`). Kept at 16 / 128.
-pub const max_application_ack_ranges_bytes: usize = 128;
+///   * 2026-10-07: RAISED to 64 / 512. The cell
+///     `impairment_reorder_gaps_1gbit` (1 Gbit, 20 ms, 10% of the
+///     packets 20 ms late, 8 MiB, bbr, 12 seeds): at 16 ranges 455 to
+///     620 packets declared lost, 60 to 130 of them received but
+///     never seen acknowledged (their ranges did not fit the frame
+///     before they fell out of the receiver's tracker); at 64 ranges
+///     117 to 299 declared, 64 to 148 never seen; 254 ranges adds
+///     nothing over 64. The time moved 5% (median 927 -> 876 ms)
+///     while the sender's buffer and the receiver's window bound the
+///     transfer, and 5% again once they did not (294 -> 279 ms, one
+///     seed, 8 MiB buffer and 4 MiB window). Cost: an ACK frame of up
+///     to 512 bytes of ranges when that many gaps are open, nothing
+///     otherwise; the receiver's tracker already held 255 ranges.
+pub const max_application_ack_ranges_bytes: usize = 512;
 /// Hard cap on the number of additional (non-largest) ACK ranges per application packet.
-pub const max_application_ack_lower_ranges: u64 = 16;
+pub const max_application_ack_lower_ranges: u64 = 64;
 /// Per-`handle`-cycle ceiling on cumulative ACK ranges drained from
 /// inbound ACK / PATH_ACK frames. Sized at 4× the per-frame decoder
 /// cap (`frame.decode.max_incoming_ack_ranges = 256`) so well-behaved
@@ -1362,9 +1394,15 @@ pub const incoming_ack_range_cap: u64 = 4 * @import("frame/decode.zig").max_inco
 /// rotating CIDs aggressively without enabling a flood attack.
 pub const incoming_retire_cid_cap: u64 = 64;
 
-/// Default per-stream receive credit advertised in transport params.
+/// Default per-stream receive credit advertised in transport params
+/// (`Client.Config.defaultTransportParams`, `Server.Config.defaultTransportParams`).
+/// The window an endpoint keeps open for a stream is the one it
+/// announced, this by default: see `streams.zig`'s credit (since
+/// v0.32.0; before, the credit after the initial window was this
+/// constant whatever was announced).
 pub const default_stream_receive_window: u64 = 1024 * 1024;
-/// Default connection-level receive credit advertised in transport params.
+/// Default connection-level receive credit advertised in transport
+/// params, kept open the same way.
 pub const default_connection_receive_window: u64 = 16 * 1024 * 1024;
 /// Hard ceiling on `initial_max_streams_*` we will ever advertise.
 pub const max_stream_count_limit: u64 = @as(u64, 1) << 60;
@@ -2255,6 +2293,9 @@ pub const Tunables = struct {
     /// See `Connection.max_connection_memory` (the per-connection
     /// aggregate memory DoS cap).
     max_connection_memory: u64,
+    /// See `Connection.max_buffered_send` (the send buffer of every
+    /// stream).
+    max_buffered_send: usize,
     /// See `Connection.delayed_ack_packet_threshold` (RFC 9000
     /// §13.2.1).
     delayed_ack_packet_threshold: u8,
@@ -2290,6 +2331,7 @@ pub const Tunables = struct {
 pub fn applyTunables(self: *Connection, t: Tunables) void {
     self.reveal_close_reason_on_wire = t.reveal_close_reason_on_wire;
     self.max_connection_memory = t.max_connection_memory;
+    self.max_buffered_send = t.max_buffered_send;
     self.delayed_ack_packet_threshold = t.delayed_ack_packet_threshold;
     self.ecn_enabled = t.ecn_enabled;
     // RFC 8899 DPLPMTUD: `setPmtudConfig` also re-initialises every

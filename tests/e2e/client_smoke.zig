@@ -152,6 +152,37 @@ test "Client.Config.max_connection_memory threads onto the Connection" {
     );
 }
 
+test "Client.Config.max_buffered_send threads onto the Connection" {
+    const protos = [_][]const u8{"hq-test"};
+
+    var client = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+    });
+    defer client.deinit();
+    try std.testing.expectEqual(
+        quic.Connection.default_max_buffered_send,
+        client.conn.max_buffered_send,
+    );
+
+    var tuned = try quic.Client.connect(.{
+        .insecure_skip_verify = true, // self-signed test cert
+        .allocator = std.testing.allocator,
+        .server_name = "example.com",
+        .alpn_protocols = &protos,
+        .transport_params = defaultParams(),
+        .max_buffered_send = 8 * 1024 * 1024,
+    });
+    defer tuned.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 8 * 1024 * 1024),
+        tuned.conn.max_buffered_send,
+    );
+}
+
 test "Client.connect drives the first Initial out via poll" {
     const protos = [_][]const u8{"hq-test"};
 

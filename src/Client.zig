@@ -215,6 +215,11 @@ pub const Config = struct {
     /// existed.
     max_connection_memory: u64 = Connection.default_max_connection_memory,
 
+    /// The send buffer of every stream this client opens
+    /// (`Connection.max_buffered_send`): the window a stream's sender
+    /// has. Default `Connection.default_max_buffered_send` (1 MiB).
+    max_buffered_send: usize = Connection.default_max_buffered_send,
+
     /// Number of ack-eliciting application packets the client requires
     /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
     /// matches `quic.conn.state.application_ack_eliciting_threshold`.
@@ -666,6 +671,7 @@ pub fn connect(config: Config) Error!Client {
     conn_ptr.applyTunables(.{
         .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
         .max_connection_memory = config.max_connection_memory,
+        .max_buffered_send = config.max_buffered_send,
         .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
         .ecn_enabled = config.enable_ecn,
         .pmtud = config.pmtud,

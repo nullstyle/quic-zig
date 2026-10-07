@@ -29,8 +29,6 @@ const recv_stream_mod = state_mod.recv_stream_mod;
 const max_stream_count_limit = state_mod.max_stream_count_limit;
 const max_local_skipped_stream_ranges = state_mod.max_local_skipped_stream_ranges;
 const StreamIdSpace = @import("../conn/StreamIdSpace.zig");
-const default_stream_receive_window = state_mod.default_stream_receive_window;
-const default_connection_receive_window = state_mod.default_connection_receive_window;
 const transport_error_stream_limit = state_mod.transport_error_stream_limit;
 const transport_error_stream_state = state_mod.transport_error_stream_state;
 const transport_error_flow_control = state_mod.transport_error_flow_control;
@@ -132,6 +130,9 @@ fn materializeStream(conn: *Connection, id: u64, max_hole_ranges: usize) Error!*
         .recv_max_data = initialRecvStreamLimit(conn, id),
         .send_max_data = initialSendStreamLimit(conn, id),
     };
+    // The connection's send buffer size at the open is the stream's
+    // for its life (`Connection.max_buffered_send`).
+    ptr.send.max_buffered = conn.max_buffered_send;
     conn.streams.putAssumeCapacity(id, ptr);
     conn_qlog.emitQlog(conn, .{
         .name = .stream_state_updated,
@@ -849,12 +850,17 @@ fn afterStreamConsume(
         conn.releaseResidentBytes(physical_before - s.recv.bytes.items.len);
     }
     if (n > 0) {
-        if (Connection.shouldQueueReceiveCredit(
-            s.recv.read_offset,
-            s.recv_max_data,
-            default_stream_receive_window,
-        )) {
-            try conn_flow.queueMaxStreamData(conn, id, s.recv.read_offset +| default_stream_receive_window);
+        // The window kept open is the one this endpoint announced for
+        // the stream (its transport parameter), smaller or larger
+        // than the default: an embedder that announces 4 MiB on a fat
+        // link needs it for the whole transfer, not only the first
+        // 4 MiB. MEASURED 2026-10-07 (`impairment_clean_1gbit_rtt20ms`,
+        // 8 MiB, bbr, the harness announcing 4 MiB): with the credit
+        // falling back to the default's 1 MiB the sender held 546 KB
+        // in flight, 361 ms; 285 ms with the announced window.
+        const window = initialRecvStreamLimit(conn, id);
+        if (Connection.shouldQueueReceiveCredit(s.recv.read_offset, s.recv_max_data, window)) {
+            try conn_flow.queueMaxStreamData(conn, id, s.recv.read_offset +| window);
         }
         creditConnectionRecvWindow(conn, n);
     }
@@ -874,12 +880,10 @@ fn afterStreamConsume(
 pub fn creditConnectionRecvWindow(conn: *Connection, n: u64) void {
     if (n == 0) return;
     conn.recv_stream_bytes_read += n;
-    if (Connection.shouldQueueReceiveCredit(
-        conn.recv_stream_bytes_read,
-        conn.local_max_data,
-        default_connection_receive_window,
-    )) {
-        conn_flow.queueMaxData(conn, conn.recv_stream_bytes_read +| default_connection_receive_window);
+    // The announced connection window, as for a stream above.
+    const window = conn.local_transport_params.initial_max_data;
+    if (Connection.shouldQueueReceiveCredit(conn.recv_stream_bytes_read, conn.local_max_data, window)) {
+        conn_flow.queueMaxData(conn, conn.recv_stream_bytes_read +| window);
     }
 }
 
