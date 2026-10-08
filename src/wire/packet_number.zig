@@ -58,20 +58,37 @@ pub fn encodedLength(pn_to_send: u64, largest_acked: ?u64) Error!u8 {
 
 /// Sender-side packet-number length policy used by the seal paths:
 /// enough bytes to carry `pn - largest_acked` unambiguously
-/// (RFC 9000 §17.1). Returns 1..4.
+/// (RFC 9000 §17.1). Returns 2..4: never one byte.
+///
+/// Why never one byte. The receiver recovers a packet number against
+/// the largest it has decrypted (§A.3): a packet that arrives after
+/// more than half a window of newer packets decodes to the wrong
+/// number, fails to open, and is dropped without a trace. One byte is
+/// a window of 256, so 128 newer packets (150 KB at 1200 bytes) are
+/// enough. §17.1's rule (room for twice the unacknowledged range)
+/// covers reordering by about one RTT; a reorder of 20 ms at
+/// 1 Gbit/s is ~2000 packets, which a sender with 100 packets in
+/// flight meets with one byte. Measured (v0.33.0): ~7 of every 100
+/// late packets in the reorder bench cell never reached the ACK
+/// tracker, so their loss episodes were never taken back, and CUBIC
+/// ran the cell 2.6x slower than with two bytes. Two bytes cover
+/// 32768 newer packets (39 MB) for one byte per packet; quic-go made
+/// the same choice.
 ///
 /// Deliberately NOT the same rule as `encodedLength` (§A.2); this is
 /// total where `encodedLength` errors, and more conservative at every
-/// boundary. The three disagreements, kept as sender headroom rather
-/// than reconciled:
-///  - boundaries are off by one in the safe direction: 1 byte only
-///    while `pn - largest_acked` <= 127, where §A.2 still allows
-///    1 byte at num_unacked = 128 (and likewise at each wider size);
+/// boundary. The disagreements, kept as sender headroom rather than
+/// reconciled:
+///  - never one byte (above), where §A.2 allows it up to
+///    num_unacked = 128;
+///  - boundaries are off by one in the safe direction: 2 bytes only
+///    while `pn - largest_acked` <= 32767, where §A.2 still allows
+///    2 bytes at num_unacked = 32768 (and likewise at each wider size);
 ///  - `largest_acked == null` always yields 4 bytes, where §A.2's
 ///    `num_unacked = pn + 1` rule could pick 1-2 for small PNs;
-///  - `pn <= largest_acked` silently clamps to a 1-byte space, where
-///    `encodedLength` returns `Error.InvalidLength` (unreachable for
-///    a monotonic sender).
+///  - `pn <= largest_acked` silently clamps to the smallest space,
+///    where `encodedLength` returns `Error.InvalidLength` (unreachable
+///    for a monotonic sender).
 /// Over-sized PNs are always decodable on the wire, so the gap is
 /// waste, not an interop bug. Switching the sender to `encodedLength`
 /// would change wire bytes (shorter PNs pre-first-ACK) and add an
@@ -82,7 +99,6 @@ pub fn chooseLength(pn: u64, largest_acked: ?u64) u8 {
         (if (pn > la) pn - la else 1)
     else
         std.math.maxInt(u64);
-    if (space < (1 << 7)) return 1;
     if (space < (1 << 15)) return 2;
     if (space < (1 << 23)) return 3;
     return 4;
@@ -267,16 +283,32 @@ test "chooseLength: with no largest_acked, uses 4 bytes" {
     try std.testing.expectEqual(@as(u8, 4), chooseLength(1_000_000, null));
 }
 
-test "chooseLength: scales with delta" {
-    try std.testing.expectEqual(@as(u8, 1), chooseLength(50, 0));
-    try std.testing.expectEqual(@as(u8, 1), chooseLength(127, 0));
-    // Boundary disagreement with §A.2, recorded in the doc comment:
-    // `encodedLength(128, null)` above asserts 2 as well, but
-    // `encodedLength(128, 0)` would allow 1 byte (num_unacked = 128).
+test "chooseLength: scales with delta, never below two bytes" {
+    // §A.2 would allow one byte here (`encodedLength(11, 10) == 1`
+    // above); the sender never uses it, see the doc comment.
+    try std.testing.expectEqual(@as(u8, 2), chooseLength(1, 0));
+    try std.testing.expectEqual(@as(u8, 2), chooseLength(50, 0));
+    try std.testing.expectEqual(@as(u8, 2), chooseLength(127, 0));
     try std.testing.expectEqual(@as(u8, 2), chooseLength(128, 0));
     try std.testing.expectEqual(@as(u8, 2), chooseLength(32_767, 0));
+    // Boundary disagreement with §A.2, recorded in the doc comment:
+    // `encodedLength(32_768, 0)` would allow 2 bytes.
     try std.testing.expectEqual(@as(u8, 3), chooseLength(32_768, 0));
     try std.testing.expectEqual(@as(u8, 4), chooseLength(8_388_608, 0));
+}
+
+test "chooseLength: a packet that arrives after 2000 newer ones still decodes to its number" {
+    // A sender with 10 packets out picks the length; the packet is
+    // reordered by 20 ms at 1 Gbit/s, so the receiver has seen ~2000
+    // newer packets when it arrives. One byte would decode it as
+    // pn + 2048 (and the AEAD would reject it); two bytes decode it
+    // right.
+    const pn: u64 = 1000;
+    const len = chooseLength(pn, pn - 10);
+    const truncated = truncate(pn, len);
+    try std.testing.expectEqual(pn, try decode(truncated, len, pn + 2000));
+    // The one-byte encoding this rule used to pick is the failure.
+    try std.testing.expect((try decode(truncate(pn, 1), 1, pn + 2000)) != pn);
 }
 
 test "truncate keeps only the low `length` bytes" {

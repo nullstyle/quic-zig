@@ -711,6 +711,40 @@ test "seal1Rtt + open1Rtt round-trip" {
     try testing.expectEqualSlices(u8, protected[0..len], packet[0..len]);
 }
 
+test "open1Rtt: a packet reordered past 2000 newer ones still opens" {
+    // The receiver decodes the packet number against the largest it
+    // has seen (RFC 9000 §A.3). A packet sealed while 10 were out,
+    // delivered after 2000 newer ones (20 ms of reordering at
+    // 1 Gbit/s), must still open: the sender's number length has to
+    // leave that much room. With a one-byte number this open fails
+    // the tag and the packet is dropped without a trace (the loss it
+    // was declared is never taken back).
+    const secret = fromHex(
+        "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea",
+    );
+    const keys = try derivePacketKeys(.aes128_gcm_sha256, &secret);
+    const dcid: [8]u8 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const payload = "a late STREAM frame";
+    var packet: [256]u8 = undefined;
+
+    const len = try seal1Rtt(&packet, .{
+        .dcid = &dcid,
+        .pn = 1000,
+        .largest_acked = 990,
+        .payload = payload,
+        .keys = &keys,
+    });
+
+    var pt_buf: [256]u8 = undefined;
+    const opened = try open1Rtt(&pt_buf, packet[0..len], .{
+        .dcid_len = 8,
+        .keys = &keys,
+        .largest_received = 3000,
+    });
+    try testing.expectEqual(@as(u64, 1000), opened.pn);
+    try testing.expectEqualSlices(u8, payload, opened.payload);
+}
+
 test "seal1Rtt + open1Rtt round-trip across all supported cipher suites" {
     const suites = [_]Suite{
         .aes128_gcm_sha256,
