@@ -423,6 +423,11 @@ pub const ImpairmentOptions = struct {
     /// link, or under reordering, it is the window a single stream
     /// gets.
     send_buffer_bytes: ?usize = null,
+    /// The windows both endpoints announce (`PairOptions`): 16 MiB for
+    /// the connection and 4 MiB per stream by default here; the
+    /// engine's own defaults are 16 MiB and 1 MiB.
+    initial_max_data: u64 = 1 << 24,
+    initial_max_stream_data: u64 = 1 << 22,
 };
 
 pub const ImpairmentResult = struct {
@@ -463,6 +468,8 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
     const pair = try Pair.create(allocator, .{
         .congestion_control = opts.congestion_control,
         .hystart = opts.hystart,
+        .initial_max_data = opts.initial_max_data,
+        .initial_max_stream_data = opts.initial_max_stream_data,
     });
     defer pair.destroy(allocator);
 

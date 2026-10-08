@@ -368,6 +368,26 @@ const impairment_cells = [_]harness.ImpairmentOptions{
         .bottleneck_bytes_per_s = 125_000_000,
         .send_buffer_bytes = 8 << 20,
     },
+    // The same two cells on the ENGINE'S defaults: the windows
+    // `Server.Config.defaultTransportParams` announces (1 MiB per
+    // stream, 16 MiB per connection) and the 1 MiB send buffer, which
+    // is what an embedder that sets nothing gets. The sprint "line
+    // rate by default" (2026-10-07) measures itself here: a stream
+    // should go as fast as the path allows with no configuration.
+    .{
+        .name = "impairment_clean_1gbit_rtt20ms_defaults",
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 125_000_000,
+        .initial_max_stream_data = 1 << 20,
+    },
+    .{
+        .name = "impairment_reorder_gaps_1gbit_defaults",
+        .reorder_permille = 100,
+        .reorder_extra_us = 20_000,
+        .one_way_delay_us = 10_000,
+        .bottleneck_bytes_per_s = 125_000_000,
+        .initial_max_stream_data = 1 << 20,
+    },
 };
 
 // The fairness matrix is fixed (specific matchups), NOT varied by
