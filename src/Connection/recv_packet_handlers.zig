@@ -104,10 +104,10 @@ pub fn handleShort(
         return bytes.len;
     }
 
-    var pt_buf: [max_recv_plaintext]u8 = undefined;
+    const pt_buf: *[max_recv_plaintext]u8 = &conn.scratch.pt_buf;
     const open_result = (try conn_recv_dispatch.openApplicationPacket(
         conn,
-        &pt_buf,
+        pt_buf,
         bytes,
         app_path,
         largest_received,

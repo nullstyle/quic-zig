@@ -127,7 +127,7 @@ pub fn pollDatagram(
     // Initial + Handshake + 1-RTT 1453, Handshake + a PMTUD probe
     // 2427. A path that carries 1232 bytes dropped each of them.
     const long_dst = dst[0..@min(dst.len, conn.mtu)];
-    var initial: InitialInDatagram = .{};
+    var initial: InitialInDatagram = .{ .payload = &conn.scratch.initial_payload };
     conn.poll_initial = &initial;
     defer conn.poll_initial = null;
     conn.poll_datagram_used = 0;
@@ -268,7 +268,9 @@ pub const InitialInDatagram = struct {
     /// size must follow the padding.
     tracked: bool = false,
     payload_len: usize = 0,
-    payload: [max_recv_plaintext]u8 = undefined,
+    /// The connection's scratch (`Connection.Scratch.initial_payload`):
+    /// inline, the buffer made every `.{}` a 4 KB template copy.
+    payload: *[max_recv_plaintext]u8,
 };
 
 /// Seal one Initial packet of this connection into `dst`. The one
@@ -430,7 +432,7 @@ pub fn pollLevelOnPath(
     // is the AEAD-supported ceiling on either direction; sizing
     // `pl_buf` to that gives headroom for any probe size we'd
     // accept on receive.
-    var pl_buf: [max_recv_plaintext]u8 = undefined;
+    const pl_buf: *[max_recv_plaintext]u8 = &conn.scratch.pl_buf;
     var pl_pos: usize = 0;
     var ack_eliciting = false;
     var sent_packet: SentPacketTracker.SentPacket = .{
@@ -792,6 +794,7 @@ pub fn pollLevelOnPath(
                 .largest_acked = largest_acked_close,
                 .payload = pl_buf[0..pl_pos],
                 .keys = &keys,
+                .staging = &conn.scratch.stage_buf,
                 .key_phase = conn_keys.applicationWriteKeyPhase(
                     conn,
                 ),
@@ -876,7 +879,7 @@ pub fn pollLevelOnPath(
     // 1) ACK frame (if pending in this level's space).
     const recv_tracker = &pn_space.received;
     if (lvl != .early_data and recv_tracker.pending_ack) {
-        var ranges_buf: [default_mtu]u8 = undefined;
+        const ranges_buf: *[default_mtu]u8 = &conn.scratch.ranges_buf;
         const available = max_payload - pl_pos;
         var ranges_budget: usize = @min(ranges_buf.len, available);
         if (lvl == .application) {
@@ -905,7 +908,7 @@ pub fn pollLevelOnPath(
                 std.math.maxInt(u64);
             const ack_frame = try recv_tracker.toAckFrameLimitedRangesWithEcn(
                 conn.ackDelayScaled(recv_tracker, now_us),
-                &ranges_buf,
+                ranges_buf,
                 ranges_budget,
                 max_lower_ranges,
                 ack_ecn_counts,
@@ -1107,7 +1110,7 @@ pub fn pollLevelOnPath(
 
     if (app_credit and conn.pending_frames.max_data != null) {
         const md: frame_types.MaxData = .{ .maximum_data = conn.pending_frames.max_data.? };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .max_data = md })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .max_data = md })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_data = md });
             conn.pending_frames.max_data = null;
             ack_eliciting = true;
@@ -1119,7 +1122,7 @@ pub fn pollLevelOnPath(
             .stream_id = item.stream_id,
             .maximum_stream_data = item.maximum_stream_data,
         };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .max_stream_data = msd })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .max_stream_data = msd })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_stream_data = msd });
             _ = conn.pending_frames.max_stream_data.orderedRemove(0);
             ack_eliciting = true;
@@ -1132,7 +1135,7 @@ pub fn pollLevelOnPath(
             .bidi = bidi,
             .maximum_streams = pending.*.?,
         };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .max_streams = ms })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .max_streams = ms })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_streams = ms });
             pending.* = null;
             ack_eliciting = true;
@@ -1140,7 +1143,7 @@ pub fn pollLevelOnPath(
     }
     if (app_credit and conn.pending_frames.data_blocked != null) {
         const db: frame_types.DataBlocked = .{ .maximum_data = conn.pending_frames.data_blocked.? };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .data_blocked = db })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .data_blocked = db })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .data_blocked = db });
             conn.pending_frames.data_blocked = null;
             ack_eliciting = true;
@@ -1148,7 +1151,7 @@ pub fn pollLevelOnPath(
     }
     if (app_credit and conn.pending_frames.stream_data_blocked.items.len > 0) {
         const item = conn.pending_frames.stream_data_blocked.items[0];
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .stream_data_blocked = item })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .stream_data_blocked = item })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .stream_data_blocked = item });
             _ = conn.pending_frames.stream_data_blocked.orderedRemove(0);
             ack_eliciting = true;
@@ -1161,7 +1164,7 @@ pub fn pollLevelOnPath(
             .bidi = bidi,
             .maximum_streams = pending.*.?,
         };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .streams_blocked = sb })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .streams_blocked = sb })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .streams_blocked = sb });
             pending.* = null;
             ack_eliciting = true;
@@ -1178,7 +1181,7 @@ pub fn pollLevelOnPath(
             .connection_id = item.connection_id,
             .stateless_reset_token = item.stateless_reset_token,
         };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .new_connection_id = ncid })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .new_connection_id = ncid })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .new_connection_id = ncid });
             _ = conn.pending_frames.new_connection_ids.orderedRemove(0);
             ack_eliciting = true;
@@ -1187,7 +1190,7 @@ pub fn pollLevelOnPath(
 
     if (app_control and conn.pending_frames.retire_connection_ids.items.len > 0) {
         const item = conn.pending_frames.retire_connection_ids.items[0];
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .retire_connection_id = item })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .retire_connection_id = item })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .retire_connection_id = item });
             _ = conn.pending_frames.retire_connection_ids.orderedRemove(0);
             ack_eliciting = true;
@@ -1207,7 +1210,7 @@ pub fn pollLevelOnPath(
             .v4 => |a| .{ .alternative_v4_address = a },
             .v6 => |a| .{ .alternative_v6_address = a },
         };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, candidate)) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, candidate)) {
             const retx: SentPacketTracker.RetransmitFrame = switch (item) {
                 .v4 => |a| .{ .alternative_v4_address = a },
                 .v6 => |a| .{ .alternative_v6_address = a },
@@ -1225,7 +1228,7 @@ pub fn pollLevelOnPath(
             .stream_id = item.stream_id,
             .application_error_code = item.application_error_code,
         };
-        if (try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .stop_sending = ss })) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .stop_sending = ss })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .stop_sending = ss });
             _ = conn.pending_frames.stop_sending.orderedRemove(0);
             ack_eliciting = true;
@@ -1263,7 +1266,7 @@ pub fn pollLevelOnPath(
         conn.poll_addr_override = conn.pending_frames.path_response_addr;
         // The enclosing condition already reserved the frame's exact
         // encoded size, so this cannot fail to fit.
-        std.debug.assert(try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .path_response = pr }));
+        std.debug.assert(try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .path_response = pr }));
         try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_response = pr });
         conn.pending_frames.path_response = null;
         conn.pending_frames.path_response_addr = null;
@@ -1275,7 +1278,7 @@ pub fn pollLevelOnPath(
     {
         const pc: frame_types.PathChallenge = .{ .data = conn.pending_frames.path_challenge.? };
         // Same reservation as PATH_RESPONSE above: cannot fail to fit.
-        std.debug.assert(try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .path_challenge = pc }));
+        std.debug.assert(try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .path_challenge = pc }));
         try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_challenge = pc });
         conn.pending_frames.path_challenge = null;
         ack_eliciting = true;
@@ -1284,7 +1287,7 @@ pub fn pollLevelOnPath(
     // 2e) Draft-21 multipath control frames. Coalesce as many as
     //     fit while preserving per-frame retransmit metadata.
     if (!path_response_used_addr_override and !congestion_blocked and lvl == .application) {
-        if (try emitPendingMultipathFrames(conn, &sent_packet, &pl_buf, &pl_pos, max_payload)) {
+        if (try emitPendingMultipathFrames(conn, &sent_packet, pl_buf, &pl_pos, max_payload)) {
             ack_eliciting = true;
         }
     }
@@ -1303,7 +1306,7 @@ pub fn pollLevelOnPath(
                     .application_error_code = ri.error_code,
                     .final_size = ri.final_size,
                 };
-                if (!try encodeFrameIfFits(&pl_buf, &pl_pos, max_payload, .{ .reset_stream = rs })) break;
+                if (!try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .reset_stream = rs })) break;
                 try sent_packet.addRetransmitFrame(conn.allocator, .{ .reset_stream = rs });
                 ri.queued = true;
                 ack_eliciting = true;
@@ -1452,6 +1455,7 @@ pub fn pollLevelOnPath(
             .largest_acked = largest_acked,
             .payload = pl_buf[0..pl_pos],
             .keys = &keys,
+            .staging = &conn.scratch.stage_buf,
             .key_phase = conn_keys.applicationWriteKeyPhase(
                 conn,
             ),

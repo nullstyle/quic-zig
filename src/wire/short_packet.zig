@@ -413,7 +413,19 @@ pub const SealOptions = struct {
     /// payload. RFC 8899 DPLPMTUD probe packets use this to inflate a
     /// PADDING+PING bundle to the probed size. 0 disables (default).
     pad_to: usize = 0,
+    /// A buffer the seal may stage a padded plaintext in
+    /// (`staging_len` bytes) instead of a local of its own. The
+    /// connection's send path passes its scratch; a seal with none
+    /// pays a 2 KB fill per PADDED packet (ReleaseSafe fills an
+    /// `undefined` local), never per plain one.
+    staging: ?*[staging_len]u8 = null,
 };
+
+/// The staging buffer for a padded plaintext: the max QUIC v1 datagram
+/// (~1500 B) with room; DPLPMTUD probes (RFC 8899) push the padded
+/// length up close to that ceiling, and RFC 9001 §5.4.2's 4-byte
+/// sample floor fits trivially.
+pub const staging_len: usize = 2048;
 
 /// Build a fully-protected 1-RTT packet into `dst`. Returns the
 /// total bytes written. RFC 9001 §5.4.2 requires the post-PN
@@ -464,20 +476,31 @@ pub fn seal1Rtt(dst: []u8, opts: SealOptions) Error!usize {
     } });
 
     // Stage the plaintext if we need to pad. Common case (no padding)
-    // hands the caller's slice straight through. Staging buffer is
-    // sized for the max QUIC v1 datagram (~1500 B); DPLPMTUD probes
-    // (RFC 8899) push pt_len up close to that ceiling. The 4-byte
-    // sample-floor pad needed by RFC 9001 §5.4.2 still fits trivially.
-    var staged_buf: [2048]u8 = undefined;
-    const pt_slice: []const u8 = if (pt_len == opts.payload.len)
-        opts.payload
-    else blk: {
-        std.debug.assert(pt_len <= staged_buf.len);
-        @memcpy(staged_buf[0..opts.payload.len], opts.payload);
-        @memset(staged_buf[opts.payload.len..pt_len], 0);
-        break :blk staged_buf[0..pt_len];
-    };
+    // hands the caller's slice straight through; a padded one goes
+    // through the caller's staging buffer, or a local that only a
+    // padded packet pays for.
+    if (pt_len == opts.payload.len) return sealStaged(dst, opts, hdr_len, pn_len, opts.payload);
+    if (opts.staging) |staging| return sealStaged(dst, opts, hdr_len, pn_len, stagePadded(staging, opts.payload, pt_len));
+    return sealPaddedWithLocal(dst, opts, hdr_len, pn_len, pt_len);
+}
 
+fn stagePadded(staging: *[staging_len]u8, payload: []const u8, pt_len: usize) []const u8 {
+    std.debug.assert(pt_len <= staging.len);
+    @memcpy(staging[0..payload.len], payload);
+    @memset(staging[payload.len..pt_len], 0);
+    return staging[0..pt_len];
+}
+
+/// A padded seal with no staging buffer from the caller. The local
+/// lives in this function alone, so its fill is paid only here.
+fn sealPaddedWithLocal(dst: []u8, opts: SealOptions, hdr_len: usize, pn_len: u8, pt_len: usize) Error!usize {
+    var staged_buf: [staging_len]u8 = undefined;
+    return sealStaged(dst, opts, hdr_len, pn_len, stagePadded(&staged_buf, opts.payload, pt_len));
+}
+
+/// The seal proper, after the header is written and the plaintext
+/// (padded or not) is in `pt_slice`: AEAD, then header protection.
+fn sealStaged(dst: []u8, opts: SealOptions, hdr_len: usize, pn_len: u8, pt_slice: []const u8) Error!usize {
     const ct_len = try sealPayloadWithKeys(
         opts.keys,
         opts.multipath_path_id,
