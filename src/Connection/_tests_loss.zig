@@ -23,6 +23,7 @@ const short_packet_mod = state.short_packet_mod;
 const transport_error_protocol_violation = state.transport_error_protocol_violation;
 const util = @import("_test_util.zig");
 const conn_loss = @import("loss.zig");
+const max_packet_threshold = @import("../conn/ReorderWindow.zig").max_packet_threshold;
 const installTestApplicationWriteSecret = util.installTestApplicationWriteSecret;
 const installTestEarlyDataWriteSecret = util.installTestEarlyDataWriteSecret;
 
@@ -584,6 +585,7 @@ test "an ACK settles the remembered losses the reach has passed, toward the thre
     conn.rttForLevel(.application).smoothed_rtt_us = 10_000;
     conn.rttForLevel(.application).latest_rtt_us = 10_000;
     conn.rttForLevel(.application).first_sample_taken = true;
+    conn.rttForLevel(.application).rtt_var_us = 1_000;
 
     // A loss remembered long ago (its packet sent at 0), the
     // thresholds widened by hand as a spurious loss would.
@@ -1112,11 +1114,9 @@ test "a declared loss that an ACK then covers is spurious: the thresholds widen 
     try std.testing.expectEqual(@as(u64, 2), conn.qlog_packets_spuriously_lost);
     try std.testing.expectEqual(@as(u64, 2), conn.stats().packets_spuriously_lost);
     try std.testing.expectEqual(@as(u32, 0), sent.reorder.live);
-    // Packet 0 trailed the largest acknowledged BEFORE this ACK (4) by
-    // 4: the threshold is one more than that now. (Not 7: the largest
-    // acknowledged by the ACK that covers it says nothing about how
-    // far the packet trailed when it was declared lost.)
-    try std.testing.expectEqual(@as(u64, 5), sent.reorder.packet_threshold);
+    // The path reorders: the packet rule is off (the threshold at its
+    // maximum; since v0.35.0, before it grew to the distance trailed).
+    try std.testing.expectEqual(max_packet_threshold, sent.reorder.packet_threshold);
     // Every packet of the episode arrived: the window is back, the
     // threshold too (slow start: none), and the period is over.
     try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
@@ -1166,14 +1166,14 @@ test "a spurious loss that is not the whole episode widens the thresholds and ta
     try conn.handleAckAtLevel(.application, ackOf(4, 0, &.{ 1, 0 }), 61_000);
     try std.testing.expectEqual(@as(u64, 1), conn.qlog_packets_spuriously_lost);
     try std.testing.expectEqual(@as(u32, 1), sent.reorder.live);
-    try std.testing.expectEqual(@as(u64, 4), sent.reorder.packet_threshold); // 1 trailed 4 by 3
+    try std.testing.expectEqual(max_packet_threshold, sent.reorder.packet_threshold); // the packet rule is off
     try std.testing.expectEqual(reduced, conn.congestionWindow());
     try std.testing.expect(conn.ccForApplication().ssthreshBytes() != null);
 
     // Now 0 as well: the episode is whole, the reduction goes.
     try conn.handleAckAtLevel(.application, ackOf(4, 4, &.{}), 62_000);
     try std.testing.expectEqual(@as(u64, 2), conn.qlog_packets_spuriously_lost);
-    try std.testing.expectEqual(@as(u64, 5), sent.reorder.packet_threshold);
+    try std.testing.expectEqual(max_packet_threshold, sent.reorder.packet_threshold);
     try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
     try std.testing.expectEqual(@as(?u64, null), conn.ccForApplication().ssthreshBytes());
 }
@@ -1220,7 +1220,7 @@ test "a spurious loss from an older episode widens the thresholds, and takes tha
     // before, an older episode's packets took nothing back).
     try conn.handleAckAtLevel(.application, ackOf(9, 0, &.{ 3, 4 }), 86_000);
     try std.testing.expectEqual(@as(u64, 4), conn.qlog_packets_spuriously_lost);
-    try std.testing.expectEqual(@as(u64, 10), sent.reorder.packet_threshold); // 0 trailed 9 by 9
+    try std.testing.expectEqual(max_packet_threshold, sent.reorder.packet_threshold); // the packet rule is off
     try std.testing.expect(conn.congestionWindow() >= reduced);
     try std.testing.expect(conn.congestionWindow() < initial_cwnd);
     try std.testing.expectEqual(@as(u32, 2), sent.reorder.live);

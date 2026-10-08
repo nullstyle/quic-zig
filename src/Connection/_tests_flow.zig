@@ -641,6 +641,55 @@ test "receive credit: a stream window doubles for a reader that keeps up" {
     );
 }
 
+test "receive credit: a reader held by a hole is not a slow reader; the window grows on the bytes received" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try tuneTestConn(conn, 64 * 1024, default_connection_receive_window);
+    const chunk = try allocator.alloc(u8, 40 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+
+    // The first 40 KiB, read: the epoch's clock starts.
+    try tuneFeedAndRead(conn, chunk, 0);
+    conn.clock_us += 1_000;
+    // 8 KiB in order and 20 KiB beyond a hole of 32 KiB. The app reads
+    // the 8 KiB, everything deliverable: it keeps up. The bytes received
+    // (100 KiB) are the pace: 60 KiB into the epoch inside the budget,
+    // the window doubles, and the credit is the 48 KiB read plus the
+    // 128 KiB window. (Through v0.34.0 the pace was the 8 KiB read: no
+    // growth, and the sender ran out of credit at every hole.)
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 80 * 1024, .data = chunk[0 .. 20 * 1024], .has_length = true });
+    try tuneFeedAndRead(conn, chunk[0 .. 8 * 1024], 40 * 1024);
+    try std.testing.expectEqual(@as(u64, 128 * 1024), conn.stream(0).?.recv_window);
+    const frames = conn.pending_frames.max_stream_data.items;
+    try std.testing.expectEqual(@as(u64, 48 * 1024 + 128 * 1024), frames[frames.len - 1].maximum_stream_data);
+}
+
+test "receive credit: a reader that leaves deliverable bytes is slow, hole or not" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try tuneTestConn(conn, 64 * 1024, default_connection_receive_window);
+    const chunk = try allocator.alloc(u8, 40 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+
+    try tuneFeedAndRead(conn, chunk, 0);
+    conn.clock_us += 1_000;
+    // 16 KiB deliverable and 20 KiB beyond a hole; the app reads 4 KiB
+    // of the 16 and leaves the rest: a slow reader. The window stays.
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 80 * 1024, .data = chunk[0 .. 20 * 1024], .has_length = true });
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 40 * 1024, .data = chunk[0 .. 16 * 1024], .has_length = true });
+    var small: [4 * 1024]u8 = undefined;
+    try std.testing.expectEqual(small.len, try conn.streamRead(0, &small));
+    try std.testing.expectEqual(@as(u64, 64 * 1024), conn.stream(0).?.recv_window);
+}
+
 test "receive credit: a slow reader's stream window stays" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});

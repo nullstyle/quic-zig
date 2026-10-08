@@ -18,14 +18,22 @@
 //! - A packet declared lost is remembered here: its number, its send
 //!   time, and the controller's loss episode it was counted in.
 //! - An ACK that covers a remembered packet is a spurious loss: the
-//!   packet arrived. The packet threshold grows to one more than the
-//!   distance the packet trailed the largest acknowledged packet, and
-//!   the time threshold grows (9/8 -> 5/4 -> 3/2 -> 2 times the RTT)
-//!   until it would have covered how late the packet was.
-//! - The packet threshold stops at `max_packet_threshold`, the time
-//!   threshold at twice the RTT (where RACK's window stops too). A
-//!   real loss is still found: by the time threshold within two
-//!   round trips at the widest, and by the probe timeout always.
+//!   packet arrived. The path reorders, so the packet rule is off
+//!   from then on (the threshold goes to `max_packet_threshold`; RFC
+//!   8985 6.2 does the same with DupThresh once reordering is seen),
+//!   and the time threshold grows (9/8 -> 5/4 -> 3/2 -> 2 times the
+//!   RTT, plus a jitter margin at the widest) until it would have
+//!   covered how late the packet was. Through v0.34.0 the packet
+//!   threshold grew to the distance the packet trailed by, one
+//!   spurious loss at a time: on a path whose rate doubles every
+//!   round trip the distance doubles too, and every doubling opened
+//!   loss episodes until the threshold caught up (85 of them in one
+//!   8 MiB transfer; see `widestThresholdUs` for the cell).
+//! - The time threshold stops at `widestThresholdUs`: twice the RTT
+//!   (where RACK's window stops too) plus the probe timeout's jitter
+//!   margin. A real loss is still found: by the time threshold within
+//!   about two round trips at the widest, and by the probe timeout
+//!   always.
 //! - The thresholds shrink back (since v0.32.0), after RFC 8985's
 //!   rule for RACK's window (its section 6.2.3: the window grows on a
 //!   DSACK and resets after 16 loss recoveries without one). A
@@ -77,8 +85,9 @@ pub const max_packet_threshold: u64 = 4096;
 /// The time threshold is `rtt + (rtt >> time_shift)`: 3 is RFC 9002's
 /// 9/8, 0 is twice the RTT.
 pub const initial_time_shift: u2 = 3;
-/// Records the ring holds. Sized with `max_packet_threshold`: a burst
-/// of that many packets declared lost at once fits.
+/// Records the ring holds: a round trip of late packets at 1 Gbit/s
+/// (about 200) fits. MEASURED (sprint B, 2026-10-08): 1024 changed no
+/// reorder cell by a millisecond.
 pub const ring_slots: usize = 256;
 /// Clean rounds with real losses in a row after which the thresholds
 /// go back to RFC 9002's: RFC 8985's `RACK.reo_wnd_persist` (16 loss
@@ -138,7 +147,29 @@ decays: u64 = 0,
 /// `max(rtt + (rtt >> time_shift), kGranularity)` over `max(latest_rtt,
 /// smoothed_rtt)`. At the initial shift this is the RFC's 9/8 exactly
 /// (`r + r/8 == 9r/8` in integers).
+/// The widest the time threshold goes: twice the RTT (where RACK's
+/// window stops too) plus a jitter margin, the larger of four times
+/// the RTT variance (the probe timeout's) and a quarter of the RTT.
+/// Without the margin a packet late by one round trip sits on the
+/// cliff: its queueing delay decides whether it is declared lost, and
+/// each one that is opens a loss episode. MEASURED (sprint B,
+/// 2026-10-08, `impairment_reorder_gaps_1gbit_defaults`: 8 MiB on
+/// 1 Gbit/s, 20 ms RTT, 10% of the packets 20 ms late, nothing
+/// dropped; 12 seeds, median): with the packet rule off and the
+/// margin at four times the variance alone (about 1 ms here, the
+/// simulated path jitters little) CUBIC took 447 ms, with the quarter
+/// RTT 422; the packet rule and the margin together took CUBIC from
+/// 524 to 422 and BBR from 371 to 367. The `settle` reach is this
+/// width too: a packet later than it is declared lost at any width,
+/// so its loss is a settled one.
+pub fn widestThresholdUs(rtt_est: *const RttEstimator) u64 {
+    const reference_rtt = @max(rtt_est.latest_rtt_us, rtt_est.smoothed_rtt_us);
+    const margin = @max(rtt_est.rtt_var_us *| 4, reference_rtt / 4);
+    return reference_rtt +| reference_rtt +| margin;
+}
+
 pub fn timeThresholdUs(self: *const ReorderWindow, rtt_est: *const RttEstimator) u64 {
+    if (self.time_shift == 0) return @max(widestThresholdUs(rtt_est), granularity_us);
     const reference_rtt = @max(rtt_est.latest_rtt_us, rtt_est.smoothed_rtt_us);
     return @max(reference_rtt +| (reference_rtt >> self.time_shift), granularity_us);
 }
@@ -234,16 +265,14 @@ pub fn widen(
     // the median; left alone, the copy arrives before the original.
     const needed = now_us -| rec.sent_time_us;
     const reference_rtt = @max(rtt_est.latest_rtt_us, rtt_est.smoothed_rtt_us);
-    if (needed > reference_rtt +| reference_rtt) return;
-    if (previous_largest_acked) |la| {
-        if (la > rec.pn) {
-            const distance = la - rec.pn;
-            self.packet_threshold = @max(
-                self.packet_threshold,
-                @min(distance + 1, max_packet_threshold),
-            );
-        }
-    }
+    if (needed > widestThresholdUs(rtt_est)) return;
+    // Reordering seen: the packet rule is off until the decay puts the
+    // thresholds back (RFC 8985 6.2 stops using DupThresh once
+    // reordering is observed); the time rule alone declares losses.
+    // The distance the packet trailed by is no longer the measure:
+    // see the module doc for what growing to it cost.
+    _ = previous_largest_acked;
+    self.packet_threshold = max_packet_threshold;
     while (self.time_shift > 0 and
         reference_rtt +| (reference_rtt >> self.time_shift) < needed) : (self.time_shift -= 1)
     {}
@@ -260,7 +289,7 @@ pub fn widen(
 pub fn settle(self: *ReorderWindow, now_us: u64, rtt_est: *const RttEstimator) void {
     if (self.live == 0) return;
     const reference_rtt = @max(rtt_est.latest_rtt_us, rtt_est.smoothed_rtt_us);
-    const reach = reference_rtt +| reference_rtt;
+    const reach = widestThresholdUs(rtt_est);
     const cap: u32 = @intCast(self.records.len);
     var i: u32 = 0;
     while (i < self.len) : (i += 1) {
@@ -397,33 +426,45 @@ test "the thresholds start at RFC 9002's and widen to what the spurious loss nee
     var rtt: RttEstimator = .{};
     rtt.latest_rtt_us = 2000;
     rtt.smoothed_rtt_us = 2000;
+    rtt.rtt_var_us = 100;
     try testing.expectEqual(@as(u64, 3), w.packet_threshold);
     try testing.expectEqual(@as(u64, 2250), w.timeThresholdUs(&rtt)); // 9/8
+    // The widest: twice the RTT plus the larger of four variances
+    // (400) and a quarter RTT (500).
+    try testing.expectEqual(@as(u64, 4500), widestThresholdUs(&rtt));
 
     // A packet 40 behind the largest acked, acked 2.5 ms after it was
-    // sent: the packet threshold goes to 41, the time threshold to 5/4
+    // sent: the path reorders, so the packet rule is off (the
+    // threshold at its maximum) and the time threshold goes to 5/4
     // (2500 >= 2500).
     w.widen(.{ .pn = 100, .sent_time_us = 10_000 }, 140, 12_500, &rtt);
-    try testing.expectEqual(@as(u64, 41), w.packet_threshold);
+    try testing.expectEqual(max_packet_threshold, w.packet_threshold);
     try testing.expectEqual(@as(u2, 2), w.time_shift);
     try testing.expectEqual(@as(u64, 2500), w.timeThresholdUs(&rtt));
     try testing.expectEqual(@as(u64, 1), w.spurious_count);
 
     // A smaller reordering changes nothing: the thresholds only grow.
     w.widen(.{ .pn = 200, .sent_time_us = 20_000 }, 210, 22_100, &rtt);
-    try testing.expectEqual(@as(u64, 41), w.packet_threshold);
+    try testing.expectEqual(max_packet_threshold, w.packet_threshold);
     try testing.expectEqual(@as(u2, 2), w.time_shift);
 
-    // 5 ms late on a 2 ms path: past the widest setting (twice the
-    // RTT), so nothing moves: no width could have covered this
-    // packet, and widening for it would only delay the copy.
+    // 4.3 ms late on a 2 ms path: past twice the RTT but inside the
+    // margin, so the time threshold goes to the widest, which carries
+    // the margin.
+    w.widen(.{ .pn = 250, .sent_time_us = 25_000 }, 300, 29_300, &rtt);
+    try testing.expectEqual(@as(u2, 0), w.time_shift);
+    try testing.expectEqual(@as(u64, 4500), w.timeThresholdUs(&rtt));
+
+    // 7 ms late: past the widest setting, so nothing moves: no width
+    // could have covered this packet, and widening for it would only
+    // delay the copy.
     w.widen(.{ .pn = 300, .sent_time_us = 30_000 }, 400, 37_000, &rtt);
-    try testing.expectEqual(@as(u2, 2), w.time_shift);
-    try testing.expectEqual(@as(u64, 41), w.packet_threshold);
-    // 3.9 ms late: within reach, and the threshold goes to its widest.
+    try testing.expectEqual(@as(u2, 0), w.time_shift);
+    try testing.expectEqual(max_packet_threshold, w.packet_threshold);
+    // 3.9 ms late: within reach; the threshold stays at its widest.
     w.widen(.{ .pn = 310, .sent_time_us = 31_000, .episode = 0 }, 311, 34_900, &rtt);
     try testing.expectEqual(@as(u2, 0), w.time_shift);
-    try testing.expectEqual(@as(u64, 4000), w.timeThresholdUs(&rtt));
+    try testing.expectEqual(@as(u64, 4500), w.timeThresholdUs(&rtt));
     // Exactly twice the RTT late: still within reach (no change left).
     w.widen(.{ .pn = 320, .sent_time_us = 32_000 }, 321, 36_000, &rtt);
     try testing.expectEqual(@as(u2, 0), w.time_shift);
@@ -434,7 +475,7 @@ test "the thresholds start at RFC 9002's and widen to what the spurious loss nee
     // No largest-acked (nothing acked before): only the time rule runs.
     w.widen(.{ .pn = 500, .sent_time_us = 50_000 }, null, 50_001, &rtt);
     try testing.expectEqual(max_packet_threshold, w.packet_threshold);
-    try testing.expectEqual(@as(u64, 7), w.spurious_count);
+    try testing.expectEqual(@as(u64, 8), w.spurious_count);
 }
 
 test "settled real losses count once per round trip, and sixteen clean rounds put the thresholds back" {
@@ -443,10 +484,11 @@ test "settled real losses count once per round trip, and sixteen clean rounds pu
     var rtt: RttEstimator = .{};
     rtt.latest_rtt_us = 2_000;
     rtt.smoothed_rtt_us = 2_000;
+    rtt.rtt_var_us = 100;
     // Widened by a spurious loss of a packet sent at 10 ms.
     w.remember(testing.allocator, 1, 10_000);
     w.widen(.{ .pn = 1, .sent_time_us = 10_000 }, 30, 12_500, &rtt);
-    try testing.expectEqual(@as(u64, 30), w.packet_threshold);
+    try testing.expectEqual(max_packet_threshold, w.packet_threshold);
     try testing.expectEqual(@as(u2, 2), w.time_shift);
     try testing.expectEqual(@as(u32, 0), w.clean_rounds);
 
@@ -492,6 +534,7 @@ test "a spurious hit restarts the decay's count, and its own round counts for no
     var rtt: RttEstimator = .{};
     rtt.latest_rtt_us = 2_000;
     rtt.smoothed_rtt_us = 2_000;
+    rtt.rtt_var_us = 100;
     // Ten clean rounds.
     var now: u64 = 100_000;
     var round: u32 = 1;
@@ -525,6 +568,7 @@ test "the time threshold keeps the granularity floor at every width" {
     var rtt: RttEstimator = .{};
     rtt.latest_rtt_us = 100;
     rtt.smoothed_rtt_us = 100;
+    rtt.rtt_var_us = 0;
     try testing.expectEqual(granularity_us, w.timeThresholdUs(&rtt));
     w.time_shift = 0;
     try testing.expectEqual(granularity_us, w.timeThresholdUs(&rtt));

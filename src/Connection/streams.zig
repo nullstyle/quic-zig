@@ -878,7 +878,19 @@ fn afterStreamConsume(
         // since v0.33.0 the window tunes itself for a reader that
         // keeps up (`tuneWindow`).
         const conn_cap = connectionWindowCap(conn);
-        const grew = tuneWindow(conn, &s.recv_window, &s.recv_epoch_start_offset, &s.recv_epoch_start_us, s.recv.read_offset, @min(conn.max_stream_receive_window, conn_cap));
+        // The pace the window is tuned on: the bytes the app read, or,
+        // when it has read everything deliverable, the bytes received,
+        // holes included. Under reordering the app is held by the
+        // network, not slow, and the window must cover the rate times
+        // the reorder delay as well as the round trip; a reader that
+        // keeps up reads everything deliverable, so it is told apart
+        // from a slow one by what it leaves. MEASURED (sprint B,
+        // 2026-10-08, `impairment_reorder_gaps_1gbit_defaults`, 12
+        // seeds, median): cubic 422 -> 378 ms, bbr 367 -> 311; the
+        // window had stalled at 2 MiB for a 2.5 MB BDP plus a 20 ms
+        // hole, with the sender out of credit half the time.
+        const pace = if (s.recv.readableBytes() == 0) @max(s.recv.read_offset, s.recv.end_offset) else s.recv.read_offset;
+        const grew = tuneWindow(conn, &s.recv_window, &s.recv_epoch_start_offset, &s.recv_epoch_start_us, pace, @min(conn.max_stream_receive_window, conn_cap));
         if (grew) {
             // A connection window at least one and a half times any
             // stream's, so the stream's growth is not held back at the
