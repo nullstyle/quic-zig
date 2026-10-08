@@ -221,9 +221,14 @@ pub fn recv(
     if (span > self.max_buffered_span) return Error.BufferLimitExceeded;
     const buf_required: usize = @intCast(span);
     if (self.liveBytes() < buf_required) {
-        const grow_by = (self.buf_start + buf_required) - self.bytes.items.len;
+        const old_len = self.bytes.items.len;
+        const grow_by = (self.buf_start + buf_required) - old_len;
         const slack = try self.bytes.addManyAsSlice(self.allocator, grow_by);
-        @memset(slack, 0);
+        // Only a gap before this frame's bytes needs zeroing: the frame
+        // ends the buffer and overwrites the rest below. (Zeroing it
+        // all wrote every in-order byte twice, 1% of the engine's CPU.)
+        const data_rel_start: usize = self.buf_start + @as(usize, @intCast(clip_offset - self.read_offset));
+        if (data_rel_start > old_len) @memset(slack[0 .. data_rel_start - old_len], 0);
     }
 
     // Track the high water-mark only after sparse-offset allocation

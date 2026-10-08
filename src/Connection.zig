@@ -1353,6 +1353,10 @@ pub const Scratch = struct {
     /// A stream chunk that crosses its ring's wrap, made contiguous
     /// (`SendStream.chunkBytesContiguous`).
     chunk_buf: [max_recv_plaintext]u8,
+    /// The sendable streams of the packet being built, by priority.
+    pri_buf: [SentPacketTracker.max_stream_keys_per_packet]*Stream,
+    /// The stream chunks packed into the packet being built.
+    sent_chunks: [SentPacketTracker.max_stream_keys_per_packet]conn_send.SentStreamChunk,
 };
 /// Largest UDP payload size we will advertise to the peer in transport params.
 pub const max_supported_udp_payload_size: usize = max_recv_plaintext;

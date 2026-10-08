@@ -366,6 +366,14 @@ pub fn pollLevel(
     return pollLevelOnPath(conn, lvl, conn.primaryPath().id, dst, now_us);
 }
 
+/// A stream chunk packed into the packet being built, with its stream
+/// and the connection-local key ACK and loss route by.
+pub const SentStreamChunk = struct {
+    stream: *Stream,
+    chunk: send_stream_mod.Chunk,
+    stream_key: u64,
+};
+
 pub fn pollLevelOnPath(
     conn: *Connection,
     lvl: EncryptionLevel,
@@ -1341,12 +1349,9 @@ pub fn pollLevelOnPath(
     // 3b) STREAM frames (Application PN space). Pack as many
     // independent streams as fit; each chunk gets its own
     // connection-local key so ACK/loss can still route precisely.
-    const SentStreamChunk = struct {
-        stream: *Stream,
-        chunk: send_stream_mod.Chunk,
-        stream_key: u64,
-    };
-    var sent_chunks: [SentPacketTracker.max_stream_keys_per_packet]SentStreamChunk = undefined;
+    // The array lives in the connection's scratch: as a local it was
+    // a 1,280-byte 0xAA fill per packet (2% of the engine's CPU).
+    const sent_chunks: *[SentPacketTracker.max_stream_keys_per_packet]SentStreamChunk = &conn.scratch.sent_chunks;
     var sent_chunk_count: usize = 0;
     var planned_conn_new_bytes: u64 = 0;
     if (!path_response_used_addr_override and !congestion_blocked and (lvl == .application or lvl == .early_data)) {
@@ -1355,8 +1360,7 @@ pub fn pollLevelOnPath(
         // lead each packet. Bounded to the per-packet chunk cap; excess
         // ready streams are served on later packets. With no explicit
         // priorities every stream is urgency 3, so this is stream-id order.
-        var pri_buf: [SentPacketTracker.max_stream_keys_per_packet]*Stream = undefined;
-        const ready_streams = conn.collectSendableStreamsByPriority(&pri_buf);
+        const ready_streams = conn.collectSendableStreamsByPriority(&conn.scratch.pri_buf);
         for (ready_streams) |s| {
             if (sent_chunk_count >= sent_chunks.len) break;
             const stream_overhead: usize = 25;
