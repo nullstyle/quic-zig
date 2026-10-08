@@ -373,7 +373,7 @@ test "pollLevel emits PATH_ACK for non-zero application path ACKs" {
     const keys = (try conn.packetKeys(.application, .write)).?;
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..n], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
     });
     const decoded = try frame_mod.decode(opened.payload);
@@ -406,13 +406,13 @@ test "multipath-negotiated non-zero path packets use draft-21 nonce" {
         boringssl.crypto.aead.Error.Auth,
         short_packet_mod.open1Rtt(&plaintext, packet_buf[0..n], .{
             .dcid_len = 1,
-            .keys = &keys,
+            .keys = keys,
             .largest_received = 0,
         }),
     );
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..n], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
         .multipath_path_id = path_id,
     });
@@ -578,7 +578,7 @@ test "PATH_RESPONSE during pending rebinding is sent to the challenge address" {
     const keys = (try conn.packetKeys(.application, .write)).?;
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..datagram.len], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
     });
     const decoded = try frame_mod.decode(opened.payload);

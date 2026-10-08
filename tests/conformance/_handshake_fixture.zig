@@ -233,7 +233,7 @@ pub const HandshakePair = struct {
             .dcid = dcid,
             .pn = pn,
             .payload = frame_bytes,
-            .keys = &keys,
+            .keys = keys,
             .key_phase = false,
         });
 
@@ -269,7 +269,7 @@ pub const HandshakePair = struct {
             .dcid = dcid,
             .pn = pn,
             .payload = frame_bytes,
-            .keys = &keys,
+            .keys = keys,
             .key_phase = false,
             .reserved_bits = reserved_bits,
         });
@@ -305,7 +305,7 @@ pub const HandshakePair = struct {
             .dcid = dcid,
             .pn = pn,
             .payload = frame_bytes,
-            .keys = &keys,
+            .keys = keys,
             .key_phase = false,
         });
 

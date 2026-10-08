@@ -125,7 +125,7 @@ fn decodeHandshakeConnectionClose(
         return error.NoHandshakeWriteKeys;
     var plaintext: [2048]u8 = undefined;
     const opened = try quic.wire.long_packet.openHandshake(&plaintext, packet, .{
-        .keys = &keys,
+        .keys = keys,
     });
     const decoded = try frame.decode(opened.payload);
     try std.testing.expect(decoded.frame == .connection_close);
@@ -143,7 +143,7 @@ fn decodeApplicationConnectionClose(
     var plaintext: [2048]u8 = undefined;
     const opened = try quic.wire.short_packet.open1Rtt(&plaintext, packet, .{
         .dcid_len = dcid_len,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = largest_received,
     });
     const decoded = try frame.decode(opened.payload);
@@ -1204,7 +1204,7 @@ test "NORMATIVE retransmit a CONNECTION_CLOSE in response to attributed packets 
         .dcid = dcid,
         .pn = pn,
         .payload = &ping_frame,
-        .keys = &cli_keys,
+        .keys = cli_keys,
         .key_phase = false,
     });
     _ = try pair.server.feed(ping_packet[0..ping_n], pair.peer_addr, pair.now_us);
@@ -1275,7 +1275,7 @@ test "NORMATIVE rate-limit suppresses CONNECTION_CLOSE retransmits in the closin
         fn run(
             inner_pair: *fixture.HandshakePair,
             inner_cli: *quic.conn.Connection,
-            inner_keys: quic.conn.state.PacketKeys,
+            inner_keys: *const quic.conn.state.PacketKeys,
             inner_dcid: []const u8,
         ) !void {
             const inner_pn = inner_cli.allocApplicationPacketNumberForTesting() orelse
@@ -1285,7 +1285,7 @@ test "NORMATIVE rate-limit suppresses CONNECTION_CLOSE retransmits in the closin
                 .dcid = inner_dcid,
                 .pn = inner_pn,
                 .payload = &ping_frame,
-                .keys = &inner_keys,
+                .keys = inner_keys,
                 .key_phase = false,
             });
             _ = try inner_pair.server.feed(pkt[0..n], inner_pair.peer_addr, inner_pair.now_us);
@@ -1340,7 +1340,7 @@ test "SHOULD keep retransmitted CONNECTION_CLOSE error_code and frame_type consi
         fn run(
             inner_pair: *fixture.HandshakePair,
             inner_cli: *quic.Connection,
-            inner_keys: conn_state.PacketKeys,
+            inner_keys: *const conn_state.PacketKeys,
             inner_dcid: []const u8,
         ) !void {
             const pn = inner_cli.allocApplicationPacketNumberForTesting() orelse
@@ -1350,7 +1350,7 @@ test "SHOULD keep retransmitted CONNECTION_CLOSE error_code and frame_type consi
                 .dcid = inner_dcid,
                 .pn = pn,
                 .payload = &ping_frame,
-                .keys = &inner_keys,
+                .keys = inner_keys,
                 .key_phase = false,
             });
             _ = try inner_pair.server.feed(pkt[0..n], inner_pair.peer_addr, inner_pair.now_us);
@@ -1505,7 +1505,7 @@ test "MUST NOT emit a queued ACK once draining [RFC9000 §10.2.2 ¶1]" {
             .dcid = dcid,
             .pn = pn,
             .payload = &ping,
-            .keys = &cli_keys,
+            .keys = cli_keys,
             .key_phase = false,
         });
         pair.now_us +%= 1_000;
@@ -1529,7 +1529,7 @@ test "MUST NOT emit a queued ACK once draining [RFC9000 §10.2.2 ¶1]" {
             .dcid = dcid,
             .pn = pn,
             .payload = cc_buf[0..cc_n],
-            .keys = &cli_keys,
+            .keys = cli_keys,
             .key_phase = false,
         });
         pair.now_us +%= 1_000;
@@ -1850,7 +1850,7 @@ test "MUST NOT restart the idle timer for a datagram that is not processed succe
         .dcid = srv.peer_dcid.slice(),
         .pn = pn,
         .payload = &ping,
-        .keys = &keys,
+        .keys = keys,
         .key_phase = false,
     });
     pkt[n - 1] ^= 0xff;

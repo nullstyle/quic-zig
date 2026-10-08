@@ -98,7 +98,7 @@ test "pollLevel caps ACK ranges to packet budget" {
     const keys = (try conn.packetKeys(.application, .write)).?;
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..n], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
     });
     const decoded = try frame_mod.decode(opened.payload);

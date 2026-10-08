@@ -331,7 +331,7 @@ fn padInitialDatagram(
     // for a short buffer: it then goes as it is.
     if (dst.len < min_initial_datagram_len) return pos;
     const pad = min_initial_datagram_len - pos;
-    const keys = conn.initial_keys_write orelse return pos;
+    const keys: *const PacketKeys = if (conn.initial_keys_write) |*k| k else return pos;
     if (pos > initial.len) {
         // The slices overlap, and the bytes move toward the end.
         @memmove(dst[initial.len + pad .. pos + pad], dst[initial.len..pos]);
@@ -342,7 +342,7 @@ fn padInitialDatagram(
         initial.pn,
         initial.largest_acked,
         initial.payload[0..initial.payload_len],
-        &keys,
+        keys,
         initial.quic_bit,
         initial.len + pad,
     );
@@ -376,14 +376,14 @@ pub fn pollLevelOnPath(
     // Determine keys for this level. Initial keys are derived
     // from `initial_dcid`; Handshake/Application keys come from
     // the TLS bridge.
-    var keys: PacketKeys = undefined;
+    var keys: *const PacketKeys = undefined;
     var have_keys = false;
     switch (lvl) {
         .initial => {
             try conn_keys.ensureInitialKeys(
                 conn,
             );
-            if (conn.initial_keys_write) |k| {
+            if (conn.initial_keys_write) |*k| {
                 keys = k;
                 have_keys = true;
             }
@@ -771,7 +771,7 @@ pub fn pollLevelOnPath(
                 pn,
                 largest_acked_close,
                 pl_buf[0..pl_pos],
-                &keys,
+                keys,
                 close_quic_bit,
                 if (conn.poll_initial == null and initialNeedsExpansion(conn, false) and dst.len >= min_initial_datagram_len)
                     min_initial_datagram_len
@@ -785,7 +785,7 @@ pub fn pollLevelOnPath(
                 .pn = pn,
                 .largest_acked = largest_acked_close,
                 .payload = pl_buf[0..pl_pos],
-                .keys = &keys,
+                .keys = keys,
                 .quic_bit = close_quic_bit,
             }),
             .application => try short_packet_mod.seal1Rtt(dst, .{
@@ -793,7 +793,7 @@ pub fn pollLevelOnPath(
                 .pn = pn,
                 .largest_acked = largest_acked_close,
                 .payload = pl_buf[0..pl_pos],
-                .keys = &keys,
+                .keys = keys,
                 .staging = &conn.scratch.stage_buf,
                 .key_phase = conn_keys.applicationWriteKeyPhase(
                     conn,
@@ -808,7 +808,7 @@ pub fn pollLevelOnPath(
                 .pn = pn,
                 .largest_acked = largest_acked_close,
                 .payload = pl_buf[0..pl_pos],
-                .keys = &keys,
+                .keys = keys,
                 .quic_bit = close_quic_bit,
             }),
         };
@@ -1437,7 +1437,7 @@ pub fn pollLevelOnPath(
             // with an ack-eliciting packet: `initial_ack_eliciting_blocked`.)
             if (expand and packet_room < min_initial_datagram_len) return Error.OutputTooSmall;
             const pad_to: usize = if (expand and conn.poll_initial == null) min_initial_datagram_len else 0;
-            break :blk try sealInitialPacket(conn, dst, pn, largest_acked, pl_buf[0..pl_pos], &keys, quic_bit, pad_to);
+            break :blk try sealInitialPacket(conn, dst, pn, largest_acked, pl_buf[0..pl_pos], keys, quic_bit, pad_to);
         },
         .handshake => try long_packet_mod.sealHandshake(dst, .{
             .version = conn.version,
@@ -1446,7 +1446,7 @@ pub fn pollLevelOnPath(
             .pn = pn,
             .largest_acked = largest_acked,
             .payload = pl_buf[0..pl_pos],
-            .keys = &keys,
+            .keys = keys,
             .quic_bit = quic_bit,
         }),
         .application => try short_packet_mod.seal1Rtt(dst, .{
@@ -1454,7 +1454,7 @@ pub fn pollLevelOnPath(
             .pn = pn,
             .largest_acked = largest_acked,
             .payload = pl_buf[0..pl_pos],
-            .keys = &keys,
+            .keys = keys,
             .staging = &conn.scratch.stage_buf,
             .key_phase = conn_keys.applicationWriteKeyPhase(
                 conn,
@@ -1489,7 +1489,7 @@ pub fn pollLevelOnPath(
             .pn = pn,
             .largest_acked = largest_acked,
             .payload = pl_buf[0..pl_pos],
-            .keys = &keys,
+            .keys = keys,
             .quic_bit = quic_bit,
         }),
     };

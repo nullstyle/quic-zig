@@ -90,13 +90,13 @@ test "1-RTT keys derive cross-consistently and round-trip a packet" {
         .dcid = &dcid,
         .pn = 1,
         .payload = payload,
-        .keys = &c_write,
+        .keys = c_write,
     });
 
     var pt: [256]u8 = undefined;
     const opened = try quic.wire.short_packet.open1Rtt(&pt, buf[0..n], .{
         .dcid_len = dcid.len,
-        .keys = &s_read,
+        .keys = s_read,
         .largest_received = 0,
     });
     try std.testing.expectEqual(@as(u64, 1), opened.pn);
@@ -108,11 +108,11 @@ test "1-RTT keys derive cross-consistently and round-trip a packet" {
         .dcid = &dcid,
         .pn = 1,
         .payload = reply,
-        .keys = &s_write,
+        .keys = s_write,
     });
     const opened2 = try quic.wire.short_packet.open1Rtt(&pt, buf[0..m], .{
         .dcid_len = dcid.len,
-        .keys = &c_read,
+        .keys = c_read,
         .largest_received = 0,
     });
     try std.testing.expectEqualSlices(u8, reply, opened2.payload);
@@ -185,13 +185,13 @@ test "frames round-trip end-to-end through 1-RTT seal/open" {
         .dcid = &dcid,
         .pn = 7,
         .payload = fbuf[0..fpos],
-        .keys = &c_write,
+        .keys = c_write,
     });
 
     var pt: [256]u8 = undefined;
     const opened = try quic.wire.short_packet.open1Rtt(&pt, pkt[0..n], .{
         .dcid_len = dcid.len,
-        .keys = &s_read,
+        .keys = s_read,
         .largest_received = 0,
     });
     try std.testing.expectEqual(@as(u64, 7), opened.pn);

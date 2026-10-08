@@ -356,7 +356,7 @@ test "application ACK ranges use bounded emission budget" {
     const keys = (try conn.packetKeys(.application, .write)).?;
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..n], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
     });
     const decoded = try frame_mod.decode(opened.payload);
@@ -581,15 +581,15 @@ test "Handshake-level packet keys are derived once per secret, not per call" {
 
     const read_first = (try conn.packetKeys(.handshake, .read)).?;
     const read_second = (try conn.packetKeys(.handshake, .read)).?;
-    try std.testing.expectEqual(aeadCtxAddr(&read_first), aeadCtxAddr(&read_second));
+    try std.testing.expectEqual(aeadCtxAddr(read_first), aeadCtxAddr(read_second));
 
     const write_first = (try conn.packetKeys(.handshake, .write)).?;
     const write_second = (try conn.packetKeys(.handshake, .write)).?;
-    try std.testing.expectEqual(aeadCtxAddr(&write_first), aeadCtxAddr(&write_second));
+    try std.testing.expectEqual(aeadCtxAddr(write_first), aeadCtxAddr(write_second));
 
     // Read and write are different secrets — their contexts must not
     // collapse into one shared cache slot.
-    try std.testing.expect(aeadCtxAddr(&read_first) != aeadCtxAddr(&write_first));
+    try std.testing.expect(aeadCtxAddr(read_first) != aeadCtxAddr(write_first));
 }
 
 test "0-RTT packet keys are derived once per secret, not per call" {
@@ -602,7 +602,7 @@ test "0-RTT packet keys are derived once per secret, not per call" {
     installTestEarlyDataWriteSecret(conn);
     const first = (try conn.packetKeys(.early_data, .write)).?;
     const second = (try conn.packetKeys(.early_data, .write)).?;
-    try std.testing.expectEqual(aeadCtxAddr(&first), aeadCtxAddr(&second));
+    try std.testing.expectEqual(aeadCtxAddr(first), aeadCtxAddr(second));
 }
 
 test "discardHandshakeKeys frees the cached Handshake packet keys" {

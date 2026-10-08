@@ -217,8 +217,7 @@ pub fn handleInitial(
         conn,
     );
     const unopened_len = unopenedLongPacketLen(bytes);
-    const r_keys_opt = conn.initial_keys_read;
-    const r_keys = r_keys_opt orelse {
+    const r_keys: *const PacketKeys = if (conn.initial_keys_read) |*k| k else {
         conn_qlog.emitPacketDropped(conn, .initial, @intCast(bytes.len), .keys_unavailable);
         return unopened_len;
     };
@@ -229,7 +228,7 @@ pub fn handleInitial(
         &pt_buf,
         bytes,
         .initial,
-        &r_keys,
+        r_keys,
         if (conn.pnSpaceForLevel(.initial).received.largest) |l| l else 0,
     )) orelse return unopened_len;
 
@@ -392,7 +391,7 @@ pub fn handleZeroRtt(
         &pt_buf,
         bytes,
         .early_data,
-        &r_keys,
+        r_keys,
         largest_received,
     )) orelse return unopened_len;
 
@@ -443,7 +442,7 @@ pub fn handleHandshake(
         &pt_buf,
         bytes,
         .handshake,
-        &r_keys,
+        r_keys,
         if (conn.pnSpaceForLevel(.handshake).received.largest) |l| l else 0,
     )) orelse return unopened_len;
 

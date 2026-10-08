@@ -191,7 +191,7 @@ test "all-unknown-frames payload: Connection rejects with FRAME_ENCODING_ERROR (
         .pn = pn,
         .largest_acked = null,
         .payload = payload,
-        .keys = &keys,
+        .keys = keys,
     });
 
     // Feed the packet through the public `handle` API and pin the
@@ -293,7 +293,7 @@ test "replayed 1-RTT DATAGRAM packet is delivered only once (L1)" {
         .pn = pn,
         .largest_acked = null,
         .payload = payload,
-        .keys = &keys,
+        .keys = keys,
     });
 
     const before = server.pendingDatagrams();

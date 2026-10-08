@@ -80,11 +80,17 @@ pub fn packetKeys(
     conn: *Connection,
     lvl: EncryptionLevel,
     dir: Direction,
-) Error!?PacketKeys {
+) Error!?*const PacketKeys {
+    // A pointer into the connection, never a copy: the keys carry the
+    // AES key schedules and the AEAD context, and copying them per
+    // packet was 2% of the engine's CPU (the sprint "CPU per packet",
+    // 2026-10-08). The pointer is good until the next key event
+    // (a level's keys discarded, an epoch replaced), which never
+    // happens inside one packet's seal or open.
     if (lvl == .application) {
         switch (dir) {
-            .read => if (conn.app_read_current) |epoch| return epoch.keys,
-            .write => if (conn.app_write_current) |epoch| return epoch.keys,
+            .read => if (conn.app_read_current) |*epoch| return &epoch.keys,
+            .write => if (conn.app_write_current) |*epoch| return &epoch.keys,
         }
     }
     const slot = &conn.levels[lvl.idx()];
@@ -92,7 +98,7 @@ pub fn packetKeys(
         .read => &slot.read_keys,
         .write => &slot.write_keys,
     };
-    if (cached.*) |*keys| return keys.*;
+    if (cached.*) |*keys| return keys;
     const material_opt = switch (dir) {
         .read => slot.read,
         .write => slot.write,
@@ -102,7 +108,7 @@ pub fn packetKeys(
         return Error.UnsupportedCipherSuite;
     const secret = material.secret[0..material.secret_len];
     cached.* = try short_packet_mod.derivePacketKeys(suite, secret);
-    return cached.*.?;
+    return &cached.*.?;
 }
 
 /// Free a level slot's cached packet keys — the heap `EVP_AEAD_CTX`

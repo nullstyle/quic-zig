@@ -620,7 +620,7 @@ test "replayed 0-RTT DATAGRAM packet is delivered only once (L1)" {
         .pn = pn,
         .largest_acked = null,
         .payload = payload,
-        .keys = &keys,
+        .keys = keys,
     });
 
     // Long-header open strips header protection IN PLACE on the

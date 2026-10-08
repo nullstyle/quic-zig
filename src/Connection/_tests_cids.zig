@@ -164,7 +164,7 @@ test "retiring paths retain peer CIDs and emit PATH_ACK during drain" {
     const keys = (try conn.packetKeys(.application, .write)).?;
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..datagram.len], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
         .multipath_path_id = path_id,
     });
@@ -214,7 +214,7 @@ test "incoming short packets are routed by local CID before multipath nonce open
         .dcid = path.path.local_cid.slice(),
         .pn = 0,
         .payload = payload[0..payload_len],
-        .keys = &keys,
+        .keys = keys,
         .multipath_path_id = path_id,
     });
 
@@ -576,7 +576,7 @@ test "RETIRE_CONNECTION_ID emits with retransmit metadata and requeues on loss" 
     const keys = (try conn.packetKeys(.application, .write)).?;
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..n], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
     });
     const decoded = try frame_mod.decode(opened.payload);

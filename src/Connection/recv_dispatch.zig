@@ -474,7 +474,7 @@ pub fn openApplicationPacket(
         largest_received,
         multipath_path_id,
         hp_mask,
-        conn.app_read_current,
+        if (conn.app_read_current) |*e| e else null,
         .current,
     )) |result| return result;
     if (try tryOpenApplicationPacketWithEpoch(
@@ -485,7 +485,7 @@ pub fn openApplicationPacket(
         largest_received,
         multipath_path_id,
         hp_mask,
-        conn.app_read_previous,
+        if (conn.app_read_previous) |*e| e else null,
         .previous,
     )) |result| return result;
     if (conn.app_read_next == null) try conn_keys.refreshNextApplicationReadKey(
@@ -499,7 +499,7 @@ pub fn openApplicationPacket(
         largest_received,
         multipath_path_id,
         hp_mask,
-        conn.app_read_next,
+        if (conn.app_read_next) |*e| e else null,
         .next,
     )) |result| return result;
     return null;
@@ -513,7 +513,7 @@ fn tryOpenApplicationPacketWithEpoch(
     largest_received: u64,
     multipath_path_id: ?u32,
     hp_mask: ?[protection.mask_len]u8,
-    maybe_epoch: ?ApplicationKeyEpoch,
+    maybe_epoch: ?*const ApplicationKeyEpoch,
     slot: ApplicationReadKeySlot,
 ) Error!?ApplicationOpenResult {
     _ = conn;

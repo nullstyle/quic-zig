@@ -134,7 +134,7 @@ test "authenticated NAT rebinding starts validation and resets recovery after re
         .dcid = conn.local_scid.slice(),
         .pn = 0,
         .payload = payload[0..payload_len],
-        .keys = &keys,
+        .keys = keys,
     });
 
     try conn.handle(packet_buf[0..packet_len], new_addr, 1_000_000);
@@ -214,7 +214,7 @@ test "client peer-address rebind: pollDatagram exposes the new server tuple afte
         .dcid = conn.local_scid.slice(),
         .pn = 0,
         .payload = payload[0..payload_len],
-        .keys = &keys,
+        .keys = keys,
     });
 
     try conn.handle(packet_buf[0..packet_len], new_addr, 1_000_000);
@@ -348,7 +348,7 @@ test "peer-initiated migration emits PATH_CHALLENGE as the first frame even with
     const keys = (try conn.packetKeys(.application, .write)).?;
     const opened = try short_packet_mod.open1Rtt(&plaintext, packet_buf[0..datagram.len], .{
         .dcid_len = 1,
-        .keys = &keys,
+        .keys = keys,
         .largest_received = 0,
     });
 
