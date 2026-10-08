@@ -58,17 +58,22 @@ pub fn rateBytesPerSecond(cwnd: u64, srtt_us: u64, slow_start: bool) u64 {
     const srtt = @max(srtt_us, granularity_us);
     const num: u64 = if (slow_start) gain_num_ss else gain_num_ca;
     const den: u64 = if (slow_start) gain_den_ss else gain_den_ca;
-    const scaled = (@as(u128, cwnd) * num * std.time.us_per_s) / (@as(u128, den) * srtt);
-    return std.math.lossyCast(u64, scaled);
+    return mulDiv(cwnd *| num, std.time.us_per_s, den * srtt);
+}
+
+/// `a * b / d` without overflow: in 64 bits when the product fits
+/// (every realistic rate, window and interval), in 128 bits otherwise.
+/// A 128-bit division per packet was 1% of the engine's CPU (the
+/// sprint "CPU per packet", 2026-10-08); the result is the same.
+fn mulDiv(a: u64, b: u64, d: u64) u64 {
+    if (b == 0 or a <= std.math.maxInt(u64) / b) return (a * b) / d;
+    return std.math.lossyCast(u64, (@as(u128, a) * b) / d);
 }
 
 /// Bucket capacity in bytes: the §7.7 initial-window burst floor, or
 /// one `granularity_us` quantum of line rate, whichever is larger.
 pub fn bucketCapacity(rate_bytes_per_s: u64, mds: u64) u64 {
-    const quantum = std.math.lossyCast(
-        u64,
-        (@as(u128, rate_bytes_per_s) * granularity_us) / std.time.us_per_s,
-    );
+    const quantum = mulDiv(rate_bytes_per_s, granularity_us, std.time.us_per_s);
     return @max(burst_packets * mds, quantum);
 }
 
@@ -87,7 +92,7 @@ primed: bool = false,
 /// throughput pinned below the paced rate).
 fn projectedTokens(self: *const Pacer, now_us: u64, rate: u64, capacity: i64) i64 {
     const elapsed = now_us -| self.last_refill_us;
-    const accrued = std.math.lossyCast(i64, (@as(u128, rate) * elapsed) / std.time.us_per_s);
+    const accrued = std.math.lossyCast(i64, mulDiv(rate, elapsed, std.time.us_per_s));
     return @min(self.tokens +| accrued, capacity);
 }
 
@@ -163,8 +168,8 @@ pub fn nextReadyUs(
     const need = std.math.lossyCast(i64, bytes);
     if (effective >= need) return null;
     if (rate == 0) return null; // degenerate; treat as unpaced
-    const deficit: u128 = @intCast(need - effective);
-    const wait_us = std.math.lossyCast(u64, (deficit * std.time.us_per_s) / rate);
+    const deficit: u64 = @intCast(need - effective);
+    const wait_us = mulDiv(deficit, std.time.us_per_s, rate);
     return now_us +| @max(wait_us, 1);
 }
 
