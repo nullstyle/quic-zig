@@ -133,8 +133,8 @@ test "NORMATIVE the receive-PN tracker is idempotent on duplicate adds [RFC9000 
     t.add(7, 1000);
     t.add(7, 1001); // duplicate — must not double-count or split a range
     try std.testing.expectEqual(@as(u8, 1), t.range_count);
-    try std.testing.expectEqual(@as(u64, 7), t.ranges[0].smallest);
-    try std.testing.expectEqual(@as(u64, 7), t.ranges[0].largest);
+    try std.testing.expectEqual(@as(u64, 7), t.slots()[0].smallest);
+    try std.testing.expectEqual(@as(u64, 7), t.slots()[0].largest);
     try std.testing.expectEqual(@as(?u64, 7), t.largest);
 }
 

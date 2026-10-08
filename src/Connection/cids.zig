@@ -498,13 +498,14 @@ pub fn recordConnectionIdsNeeded(
     if (!cidPathCanBeManaged(conn, path_id)) return;
     const info = connectionIdReplenishInfoFor(conn, path_id, reason, blocked_next_sequence_number);
     if (info.issue_budget == 0 and info.blocked_next_sequence_number == null) return;
-    for (conn.connection_id_events.slice()) |*existing| {
+    const queues = conn.eventQueues() orelse return;
+    for (queues.connection_ids.slice()) |*existing| {
         if (existing.path_id == path_id and existing.reason == reason) {
             existing.* = info;
             return;
         }
     }
-    conn.connection_id_events.push(info);
+    queues.connection_ids.push(info);
 }
 
 // Pub for `_internal.zig` (subsystem-private). Called from `_internal.refreshConnectionIdEventsForPath`.

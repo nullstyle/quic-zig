@@ -545,7 +545,8 @@ pub fn handleAlternativeAddressV4(
     a: frame_types.AlternativeV4Address,
 ) void {
     if (!acceptAltAddrSequence(conn, a.status_sequence_number)) return;
-    conn.alternative_server_address_events.push(.{ .v4 = .{
+    const queues = conn.eventQueues() orelse return;
+    queues.alternative_server_address.push(.{ .v4 = .{
         .address = a.address,
         .port = a.port,
         .status_sequence_number = a.status_sequence_number,
@@ -561,7 +562,8 @@ pub fn handleAlternativeAddressV6(
     a: frame_types.AlternativeV6Address,
 ) void {
     if (!acceptAltAddrSequence(conn, a.status_sequence_number)) return;
-    conn.alternative_server_address_events.push(.{ .v6 = .{
+    const queues = conn.eventQueues() orelse return;
+    queues.alternative_server_address.push(.{ .v6 = .{
         .address = a.address,
         .port = a.port,
         .status_sequence_number = a.status_sequence_number,

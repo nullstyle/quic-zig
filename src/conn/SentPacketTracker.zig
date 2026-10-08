@@ -384,10 +384,35 @@ ack_eliciting_in_flight: u64 = 0,
 reorder: ReorderWindow = .{},
 
 /// The storage a tracker starts with, in slots, when its capacity is
-/// larger: the Initial/Handshake trackers' whole capacity, and a
-/// window of 256 packets (300 KB of 1200-byte datagrams) for the
-/// Application space before the first growth.
-pub const initial_slots: usize = 256;
+/// larger. 16 slots: a connection pays for the window it uses, and
+/// most connections of a server use almost none of it. MEASURED
+/// 2026-10-08 (the sprint "many connections"): with 256 slots the
+/// Application tracker was 51,200 of the 91,889 bytes an idle server
+/// connection held on the Zig heap, and three such trackers were
+/// 153,600 of the 196,568 bytes at the handshake's peak; an idle
+/// connection holds 0 to 3 packets. A bulk sender doubles from 16 to
+/// the capacity in ten steps, each a copy of the live packets.
+pub const initial_slots: usize = 16;
+
+/// `shrinkIdle` gives the storage back only above this many slots:
+/// a request/reply pattern whose bursts fit a small storage does not
+/// reallocate between every two bursts.
+pub const shrink_above: usize = initial_slots * 4;
+
+/// Give a large storage back while nothing is tracked. The
+/// connection's `tick` calls this between bursts: a bulk transfer
+/// grows the storage to the capacity (16,384 slots, 3.2 MB) and a
+/// connection that then idles must not hold it. A storage of
+/// `shrink_above` slots or fewer stays; a tracker over caller-managed
+/// storage never changes.
+pub fn shrinkIdle(self: *SentPacketTracker) void {
+    if (self.max_capacity == 0) return;
+    if (self.liveCount() != 0 or self.packets.len <= shrink_above) return;
+    // Nothing live: every physical entry is a tombstone, and
+    // tombstones own nothing.
+    self.resetRetainingCapacity();
+    self.packets = self.allocator.realloc(self.packets, initial_slots) catch return;
+}
 
 /// Allocate a tracker with room for `cap` live packets. The storage
 /// behind it is `min(cap, initial_slots)` slots at first and doubles
@@ -1209,7 +1234,7 @@ test "storage grows on demand toward the capacity, and shrinks to the minimum wh
     try std.testing.expectEqual(@as(u32, max_tracked), t.capacity());
     try std.testing.expectEqual(initial_slots, t.packets.len);
 
-    // 1000 live packets: three doublings (256 -> 512 -> 1024), and
+    // 1000 live packets: six doublings (16 -> ... -> 1024), and
     // every packet is still there, in order.
     var pn: u64 = 0;
     while (pn < 1000) : (pn += 1) {
@@ -1233,6 +1258,45 @@ test "storage grows on demand toward the capacity, and shrinks to the minimum wh
     t.shrinkToMinimum(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 4), t.packets.len);
     try std.testing.expectEqual(@as(u32, max_tracked), t.capacity());
+}
+
+test "shrinkIdle gives a large storage back when nothing is tracked, and leaves a small one" {
+    var t = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer t.deinit(std.testing.allocator);
+    var pn: u64 = 0;
+    while (pn < 1000) : (pn += 1) {
+        try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 100, .ack_eliciting = true, .in_flight = true });
+    }
+    try std.testing.expectEqual(@as(usize, 1024), t.packets.len);
+    // One packet still live: the storage stays.
+    var i: u32 = 0;
+    while (i < 999) : (i += 1) _ = t.removeAt(i);
+    t.shrinkIdle();
+    try std.testing.expectEqual(@as(usize, 1024), t.packets.len);
+    try std.testing.expectEqual(@as(u32, 1), t.liveCount());
+    // Nothing live: back to the initial storage, the capacity intact,
+    // and the tracker records again from there.
+    _ = t.removeAt(999);
+    t.shrinkIdle();
+    try std.testing.expectEqual(initial_slots, t.packets.len);
+    try std.testing.expectEqual(@as(u32, 0), t.count);
+    try std.testing.expectEqual(@as(u32, max_tracked), t.capacity());
+    try t.record(.{ .pn = pn, .sent_time_us = pn, .bytes = 100, .ack_eliciting = true, .in_flight = true });
+    try std.testing.expectEqual(@as(u32, 1), t.liveCount());
+    try std.testing.expectEqual(pn, t.packets[0].pn);
+
+    // A small storage (at most `shrink_above` slots) stays as it is.
+    var small = try SentPacketTracker.init(std.testing.allocator, max_tracked);
+    defer small.deinit(std.testing.allocator);
+    var q: u64 = 0;
+    while (q < shrink_above) : (q += 1) {
+        try small.record(.{ .pn = q, .sent_time_us = q, .bytes = 100, .ack_eliciting = true, .in_flight = true });
+    }
+    try std.testing.expectEqual(shrink_above, small.packets.len);
+    i = 0;
+    while (i < shrink_above) : (i += 1) _ = small.removeAt(i);
+    small.shrinkIdle();
+    try std.testing.expectEqual(shrink_above, small.packets.len);
 }
 
 test "a tracker over caller-managed storage never grows" {

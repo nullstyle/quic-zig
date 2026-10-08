@@ -125,19 +125,20 @@ pub fn rememberLocalCid(
 /// issued: drop events that are no longer needed and recompute remaining
 /// events' replenish targets.
 pub fn refreshConnectionIdEventsForPath(conn: *Connection, path_id: u32) void {
+    const queues = conn.events orelse return;
     var i: usize = 0;
-    while (i < conn.connection_id_events.len) {
-        const slice = conn.connection_id_events.slice();
+    while (i < queues.connection_ids.len) {
+        const slice = queues.connection_ids.slice();
         if (slice[i].path_id != path_id) {
             i += 1;
             continue;
         }
         if (!conn_cids.connectionIdEventStillNeeded(conn, path_id)) {
-            conn.connection_id_events.removeAt(i);
+            queues.connection_ids.removeAt(i);
             continue;
         }
         const event = slice[i];
-        conn.connection_id_events.slice()[i] = conn_cids.connectionIdReplenishInfoFor(
+        queues.connection_ids.slice()[i] = conn_cids.connectionIdReplenishInfoFor(
             conn,
             path_id,
             event.reason,

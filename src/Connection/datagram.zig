@@ -20,7 +20,8 @@ const max_pending_datagram_bytes = state_mod.max_pending_datagram_bytes;
 const max_recv_plaintext = state_mod.max_recv_plaintext;
 
 fn recordDatagramSendEvent(conn: *Connection, event: StoredDatagramSendEvent) void {
-    conn.datagram_send_events.push(event);
+    const queues = conn.eventQueues() orelse return;
+    queues.datagram_send.push(event);
 }
 
 pub fn recordDatagramAcked(conn: *Connection, packet: *const SentPacketTracker.SentPacket) void {

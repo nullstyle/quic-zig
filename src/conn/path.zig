@@ -522,6 +522,7 @@ pub const PathState = struct {
             .id = id,
             .path = Path.init(peer_addr, local_addr, local_cid, peer_cid, cc_cfg),
             .sent = try SentPacketTracker.init(allocator, SentPacketTracker.max_tracked),
+            .app_pn_space = .{ .received = .{ .allocator = allocator } },
         };
     }
 
@@ -530,6 +531,7 @@ pub const PathState = struct {
     /// itself is not freed.
     pub fn deinit(self: *PathState, allocator: std.mem.Allocator) void {
         self.sent.deinit(allocator);
+        self.app_pn_space.received.deinit();
     }
 
     /// Drop every tracked sent packet, clear the received-PN tracker,
@@ -537,7 +539,7 @@ pub const PathState = struct {
     /// migration where in-flight bookkeeping is no longer meaningful.
     pub fn clearRecovery(self: *PathState, allocator: std.mem.Allocator) void {
         self.sent.clear(allocator);
-        self.app_pn_space.received = .{};
+        self.app_pn_space.received.reset();
         self.pending_ping = false;
         self.pto_probe_count = 0;
         self.pto_count = 0;
@@ -913,7 +915,11 @@ pub const PathSet = struct {
         var p = try PathState.init(allocator, 0, .unspecified, .unspecified, .{}, .{}, cc_cfg);
         errdefer p.deinit(allocator);
         p.path.state = .active;
-        try self.paths.append(allocator, p);
+        // Room for this one path exactly: `PathState` is 1.5 KB, and
+        // most connections never open a second (a list that grows by
+        // doubling would hold two).
+        try self.paths.ensureTotalCapacityPrecise(allocator, 1);
+        self.paths.appendAssumeCapacity(p);
     }
 
     /// Free every contained `PathState` and the path list itself.

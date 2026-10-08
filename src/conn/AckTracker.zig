@@ -34,7 +34,22 @@ pub const Error = error{
 /// RFC 9000 §13.2 received-PN bookkeeping. Tracks disjoint inclusive
 /// PN ranges and the delayed-ACK scheduling state used by ACK frame
 /// emission.
-ranges: [max_ranges]Range = undefined,
+/// The ranges a tracker holds inline. A path in order has one range
+/// open at a time; a path that reorders or loses opens more, and the
+/// tracker moves to a heap block of `max_ranges` then (`allocator`
+/// permitting). MEASURED 2026-10-08 (the sprint "many connections"):
+/// 255 inline ranges were 4,080 of the 4,128 bytes of each of the
+/// three trackers a connection holds, 12 KB of an idle server
+/// connection's 44 KB on the Zig heap, for one range in use.
+pub const inline_ranges: u8 = 8;
+inline_slots: [inline_ranges]Range = undefined,
+/// The heap block of `max_ranges` ranges, once the inline ones ran
+/// out. Freed by `deinit`; `reset` keeps it.
+heap_slots: ?[]Range = null,
+/// Where the heap block comes from. Without one the tracker keeps
+/// `inline_ranges` ranges and drops the lowest beyond that, as it
+/// drops the lowest beyond `max_ranges` with one.
+allocator: ?std.mem.Allocator = null,
 range_count: u8 = 0,
 /// Highest PN ever `add`-ed. None until the first add.
 largest: ?u64 = null,
@@ -137,7 +152,7 @@ pub fn add(self: *AckTracker, pn: u64, now_ms: u64) void {
 pub fn contains(self: *const AckTracker, pn: u64) bool {
     var i: u8 = 0;
     while (i < self.range_count) : (i += 1) {
-        const r = self.ranges[i];
+        const r = self.slots()[i];
         if (pn < r.smallest) return false;
         if (pn <= r.largest) return true;
     }
@@ -273,7 +288,7 @@ pub fn toAckFrameLimitedRangesWithEcn(
 ) Error!frame_types.Ack {
     if (self.range_count == 0) return Error.Empty;
 
-    const top = self.ranges[self.range_count - 1];
+    const top = self.slots()[self.range_count - 1];
     const first_range = top.largest - top.smallest;
     const ranges_capacity = @min(ranges_bytes_buf.len, max_ranges_bytes);
 
@@ -284,7 +299,7 @@ pub fn toAckFrameLimitedRangesWithEcn(
     var i: u8 = self.range_count - 1;
     while (i > 0 and included_ranges < max_lower_ranges) {
         i -= 1;
-        const this = self.ranges[i];
+        const this = self.slots()[i];
         // RFC 9000 §19.3.1: gap = prev_smallest - this_largest - 2
         //                   length = this_largest - this_smallest
         const gap = prev.smallest - this.largest - 2;
@@ -307,45 +322,88 @@ pub fn toAckFrameLimitedRangesWithEcn(
     };
 }
 
+/// The ranges in use, lowest first.
+pub fn slots(self: *const AckTracker) []const Range {
+    const all: []const Range = if (self.heap_slots) |heap| heap else &self.inline_slots;
+    return all[0..self.range_count];
+}
+
+fn slotsMut(self: *AckTracker) []Range {
+    return if (self.heap_slots) |heap| heap else &self.inline_slots;
+}
+
+/// The ranges the storage holds before the lowest is dropped.
+pub fn capacity(self: *const AckTracker) u8 {
+    return if (self.heap_slots != null) max_ranges else inline_ranges;
+}
+
+/// Move the ranges to a heap block of `max_ranges`. False when there
+/// is no allocator, no memory, or the block already exists.
+fn growToHeap(self: *AckTracker) bool {
+    if (self.heap_slots != null) return false;
+    const allocator = self.allocator orelse return false;
+    const block = allocator.alloc(Range, max_ranges) catch return false;
+    @memcpy(block[0..self.range_count], self.inline_slots[0..self.range_count]);
+    self.heap_slots = block;
+    return true;
+}
+
+/// Free the heap block. The tracker must not be used afterwards.
+pub fn deinit(self: *AckTracker) void {
+    if (self.heap_slots) |heap| {
+        if (self.allocator) |allocator| allocator.free(heap);
+    }
+    self.* = undefined;
+}
+
+/// Forget every range and the scheduling state; the allocator and
+/// the heap block stay (a recovery reset, not the end of the space).
+pub fn reset(self: *AckTracker) void {
+    const allocator = self.allocator;
+    const heap = self.heap_slots;
+    self.* = .{ .allocator = allocator, .heap_slots = heap };
+}
+
 fn insert(self: *AckTracker, pn: u64) bool {
     // Find the lowest index `i` such that ranges[i].largest >= pn,
     // or `range_count` if no such index exists.
     var i: u8 = 0;
-    while (i < self.range_count and self.ranges[i].largest < pn) : (i += 1) {}
+    while (i < self.range_count and self.slotsMut()[i].largest < pn) : (i += 1) {}
 
     // Already covered by ranges[i]?
-    if (i < self.range_count and pn >= self.ranges[i].smallest) return false;
+    if (i < self.range_count and pn >= self.slotsMut()[i].smallest) return false;
 
-    const ext_below: bool = i > 0 and self.ranges[i - 1].largest + 1 == pn;
-    const ext_above: bool = i < self.range_count and self.ranges[i].smallest == pn + 1;
+    const ext_below: bool = i > 0 and self.slotsMut()[i - 1].largest + 1 == pn;
+    const ext_above: bool = i < self.range_count and self.slotsMut()[i].smallest == pn + 1;
 
     if (ext_below and ext_above) {
         // Bridge: merge ranges[i-1] and ranges[i].
-        self.ranges[i - 1].largest = self.ranges[i].largest;
+        self.slotsMut()[i - 1].largest = self.slotsMut()[i].largest;
         self.removeAt(i);
         return true;
     }
     if (ext_below) {
-        self.ranges[i - 1].largest = pn;
+        self.slotsMut()[i - 1].largest = pn;
         return true;
     }
     if (ext_above) {
-        self.ranges[i].smallest = pn;
+        self.slotsMut()[i].smallest = pn;
         return true;
     }
 
-    // Disjoint insert at position `i`. If we're at capacity,
-    // drop the lowest range to make room (we'll never re-ack
-    // those PNs but the peer's lost-recovery handles it).
-    if (self.range_count == max_ranges) {
+    // Disjoint insert at position `i`. When the inline ranges are
+    // used up the tracker moves to its heap block; at capacity it
+    // drops the lowest range to make room (we'll never re-ack those
+    // PNs but the peer's loss recovery handles it).
+    if (self.range_count == self.capacity() and !self.growToHeap()) {
         self.removeAt(0);
         if (i > 0) i -= 1;
     }
     var k: u8 = self.range_count;
     while (k > i) : (k -= 1) {
-        self.ranges[k] = self.ranges[k - 1];
+        self.slotsMut()[k] = self.slotsMut()[k - 1];
     }
-    self.ranges[i] = .{ .smallest = pn, .largest = pn };
+    self.slotsMut()[i] = .{ .smallest = pn, .largest = pn };
     self.range_count += 1;
     return true;
 }
@@ -353,7 +411,7 @@ fn insert(self: *AckTracker, pn: u64) bool {
 fn removeAt(self: *AckTracker, idx: u8) void {
     var k: u8 = idx;
     while (k + 1 < self.range_count) : (k += 1) {
-        self.ranges[k] = self.ranges[k + 1];
+        self.slotsMut()[k] = self.slotsMut()[k + 1];
     }
     self.range_count -= 1;
 }
@@ -364,8 +422,8 @@ test "single PN add" {
     var t: AckTracker = .{};
     t.add(7, 1000);
     try std.testing.expectEqual(@as(u8, 1), t.range_count);
-    try std.testing.expectEqual(@as(u64, 7), t.ranges[0].smallest);
-    try std.testing.expectEqual(@as(u64, 7), t.ranges[0].largest);
+    try std.testing.expectEqual(@as(u64, 7), t.slots()[0].smallest);
+    try std.testing.expectEqual(@as(u64, 7), t.slots()[0].largest);
     try std.testing.expectEqual(@as(?u64, 7), t.largest);
     try std.testing.expect(t.pending_ack);
 }
@@ -377,8 +435,8 @@ test "contiguous PNs collapse into one range" {
     t.add(2, 0);
     t.add(3, 0);
     try std.testing.expectEqual(@as(u8, 1), t.range_count);
-    try std.testing.expectEqual(@as(u64, 0), t.ranges[0].smallest);
-    try std.testing.expectEqual(@as(u64, 3), t.ranges[0].largest);
+    try std.testing.expectEqual(@as(u64, 0), t.slots()[0].smallest);
+    try std.testing.expectEqual(@as(u64, 3), t.slots()[0].largest);
 }
 
 test "out-of-order arrival builds disjoint ranges then merges" {
@@ -390,15 +448,15 @@ test "out-of-order arrival builds disjoint ranges then merges" {
     // Bridge with PN 1 -> ranges {0,0} and {2,2} merge.
     t.add(1, 0);
     try std.testing.expectEqual(@as(u8, 2), t.range_count);
-    try std.testing.expectEqual(@as(u64, 0), t.ranges[0].smallest);
-    try std.testing.expectEqual(@as(u64, 2), t.ranges[0].largest);
-    try std.testing.expectEqual(@as(u64, 4), t.ranges[1].smallest);
-    try std.testing.expectEqual(@as(u64, 4), t.ranges[1].largest);
+    try std.testing.expectEqual(@as(u64, 0), t.slots()[0].smallest);
+    try std.testing.expectEqual(@as(u64, 2), t.slots()[0].largest);
+    try std.testing.expectEqual(@as(u64, 4), t.slots()[1].smallest);
+    try std.testing.expectEqual(@as(u64, 4), t.slots()[1].largest);
     // Bridge with PN 3 -> all merge into {0..4}.
     t.add(3, 0);
     try std.testing.expectEqual(@as(u8, 1), t.range_count);
-    try std.testing.expectEqual(@as(u64, 0), t.ranges[0].smallest);
-    try std.testing.expectEqual(@as(u64, 4), t.ranges[0].largest);
+    try std.testing.expectEqual(@as(u64, 0), t.slots()[0].smallest);
+    try std.testing.expectEqual(@as(u64, 4), t.slots()[0].largest);
 }
 
 test "duplicate add is a no-op" {
@@ -545,18 +603,53 @@ test "markAckSent clears pending_ack but preserves intervals" {
 }
 
 test "overflow drops the lowest range" {
-    var t: AckTracker = .{};
+    var t: AckTracker = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
     var n: u64 = 0;
     // Fill with disjoint PNs: 0, 2, 4, ... so each is its own range.
     while (n < max_ranges) : (n += 1) {
         t.add(n * 2, 0);
     }
     try std.testing.expectEqual(max_ranges, t.range_count);
-    const old_lowest = t.ranges[0].smallest;
+    const old_lowest = t.slots()[0].smallest;
     // One more disjoint PN above the top — should drop the lowest.
     t.add(n * 2 + 100, 0);
     try std.testing.expectEqual(max_ranges, t.range_count);
-    try std.testing.expect(t.ranges[0].smallest != old_lowest);
+    try std.testing.expect(t.slots()[0].smallest != old_lowest);
+}
+
+test "the ninth disjoint range moves the tracker to its heap block; without an allocator the lowest is dropped" {
+    var t: AckTracker = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
+    var n: u64 = 0;
+    while (n < inline_ranges) : (n += 1) t.add(n * 2, 0);
+    try std.testing.expectEqual(inline_ranges, t.range_count);
+    try std.testing.expect(t.heap_slots == null);
+    try std.testing.expectEqual(inline_ranges, t.capacity());
+    t.add(n * 2, 0);
+    try std.testing.expect(t.heap_slots != null);
+    try std.testing.expectEqual(max_ranges, t.capacity());
+    try std.testing.expectEqual(inline_ranges + 1, t.range_count);
+    // Every range is still there, in order, the lowest first.
+    for (t.slots(), 0..) |r, i| {
+        try std.testing.expectEqual(@as(u64, i) * 2, r.smallest);
+        try std.testing.expectEqual(@as(u64, i) * 2, r.largest);
+    }
+    try std.testing.expect(t.contains(0));
+    // The reset keeps the block and forgets the ranges.
+    t.reset();
+    try std.testing.expectEqual(@as(u8, 0), t.range_count);
+    try std.testing.expect(t.heap_slots != null);
+    try std.testing.expect(t.largest == null);
+
+    var bare: AckTracker = .{};
+    n = 0;
+    while (n < inline_ranges) : (n += 1) bare.add(n * 2, 0);
+    bare.add(n * 2, 0);
+    try std.testing.expect(bare.heap_slots == null);
+    try std.testing.expectEqual(inline_ranges, bare.range_count);
+    try std.testing.expect(!bare.contains(0));
+    try std.testing.expect(bare.contains(n * 2));
 }
 
 // -- fuzz harness --------------------------------------------------------
@@ -580,7 +673,8 @@ test "fuzz: ack_tracker range-list invariants" {
 }
 
 fn fuzzAckTracker(_: void, smith: *std.testing.Smith) anyerror!void {
-    var t: AckTracker = .{};
+    var t: AckTracker = .{ .allocator = std.testing.allocator };
+    defer t.deinit();
 
     var steps: u32 = 0;
     while (steps < 256 and !smith.eos()) : (steps += 1) {
@@ -628,7 +722,7 @@ fn fuzzAckTracker(_: void, smith: *std.testing.Smith) anyerror!void {
                     // largest_acked must equal the top range's largest.
                     if (t.range_count > 0) {
                         try std.testing.expectEqual(
-                            t.ranges[t.range_count - 1].largest,
+                            t.slots()[t.range_count - 1].largest,
                             ack.largest_acked,
                         );
                     }
@@ -643,10 +737,10 @@ fn fuzzAckTracker(_: void, smith: *std.testing.Smith) anyerror!void {
         var max_largest: u64 = 0;
         var seen_any: bool = false;
         while (i < t.range_count) : (i += 1) {
-            const r = t.ranges[i];
+            const r = t.slots()[i];
             try std.testing.expect(r.smallest <= r.largest);
             if (i > 0) {
-                const prev = t.ranges[i - 1];
+                const prev = t.slots()[i - 1];
                 // Sorted ascending and disjoint with at least one PN gap.
                 try std.testing.expect(prev.largest < r.smallest);
                 try std.testing.expect(prev.largest + 1 < r.smallest);
@@ -664,7 +758,7 @@ fn fuzzAckTracker(_: void, smith: *std.testing.Smith) anyerror!void {
         // small sample of PNs drawn from the existing ranges.
         if (t.range_count > 0) {
             const sample_idx = smith.indexWithHash(t.range_count, 0xfeed);
-            const r = t.ranges[@intCast(sample_idx)];
+            const r = t.slots()[@intCast(sample_idx)];
             try std.testing.expect(t.contains(r.smallest));
             try std.testing.expect(t.contains(r.largest));
             // Just below the smallest: contains only if a lower range
@@ -674,7 +768,7 @@ fn fuzzAckTracker(_: void, smith: *std.testing.Smith) anyerror!void {
                 var hit = false;
                 var j: u8 = 0;
                 while (j < t.range_count) : (j += 1) {
-                    const rj = t.ranges[j];
+                    const rj = t.slots()[j];
                     if (below >= rj.smallest and below <= rj.largest) {
                         hit = true;
                         break;

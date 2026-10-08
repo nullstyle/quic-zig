@@ -852,21 +852,12 @@ handshake_done_queued_once: bool = false,
 /// in-flight streams complete. Independent of the RFC 9000 §10 close
 /// state — the connection stays open until the embedder calls `close`.
 graceful_shutdown: bool = false,
-flow_blocked_events: event_queue_mod.EventQueue(FlowBlockedInfo, max_flow_blocked_events) = .{},
-connection_id_events: event_queue_mod.EventQueue(ConnectionIdReplenishInfo, max_connection_id_events) = .{},
-datagram_send_events: event_queue_mod.EventQueue(StoredDatagramSendEvent, max_datagram_send_events) = .{},
-/// Received `ALTERNATIVE_V4/V6_ADDRESS` events
-/// (draft-munizaga-quic-alternative-server-address-00 §6) the
-/// embedder hasn't drained via `pollEvent` yet. Bounded at
-/// `max_alternative_address_events` (16) with drop-oldest
-/// eviction. Eviction is semantically safe under §6 ¶5
-/// monotonicity — the latest update always supersedes older
-/// ones — but a sluggish embedder polling on a chatty peer can
-/// miss intermediate state. The high-watermark is preserved on
-/// `highest_alternative_address_sequence_seen` so the embedder
-/// can detect that updates were dropped (sequence gap between
-/// the latest polled event and `highestAlternativeAddressSequenceSeen()`).
-alternative_server_address_events: event_queue_mod.EventQueue(AlternativeServerAddressEvent, max_alternative_address_events) = .{},
+/// The embedder-event queues (`pollEvent` drains them), made on the
+/// first event: most connections of a server never queue one.
+/// MEASURED 2026-10-08 (the sprint "many connections"): the four
+/// queues inline were 5,184 bytes of an idle server connection's
+/// 28,820 on the Zig heap.
+events: ?*EventQueues = null,
 /// Highest §6 ¶5 Status Sequence Number we've already observed.
 /// `null` until the first frame arrives. Drives the receive-side
 /// monotonicity gate: equal-or-lower numbers are absorbed silently
@@ -2235,6 +2226,7 @@ pub fn initClientAtWithPolicy(
         .sent = sent_trackers,
     };
     errdefer conn.inner.deinit();
+    for (&conn.pn_spaces) |*space| space.received.allocator = allocator;
     // `ensurePrimary` allocates the PathSet backing buffer before
     // `installTls` (the last fallible step) runs; the sent trackers
     // and the SSL context above are covered by their own errdefers,
@@ -2283,6 +2275,7 @@ pub fn initServerAt(
         .sent = sent_trackers,
     };
     errdefer conn.inner.deinit();
+    for (&conn.pn_spaces) |*space| space.received.allocator = allocator;
     try conn.paths.ensurePrimary(allocator, .{
         .max_datagram_size = default_mtu,
         .algorithm = conn.cc_algorithm,
@@ -2538,6 +2531,8 @@ pub fn deinit(self: *Connection) void {
     }
     self.pending_frames.deinit(self.allocator);
     for (&self.sent) |*tracker| tracker.deinit(self.allocator);
+    for (&self.pn_spaces) |*space| space.received.deinit();
+    if (self.events) |queues| self.allocator.destroy(queues);
     self.paths.deinit(self.allocator);
     for (&self.crypto_pending) |*list| {
         for (list.items) |chunk| self.allocator.free(chunk.data);
@@ -4781,22 +4776,54 @@ pub fn pollEvent(self: *Connection) ?ConnectionEvent {
         self.surfaced_peer_streams_uni += 1;
         return .{ .stream_opened = .{ .stream_id = id, .bidi = false } };
     }
-    if (self.flow_blocked_events.pop()) |out| {
+    const queues = self.events orelse return null;
+    if (queues.flow_blocked.pop()) |out| {
         return .{ .flow_blocked = out };
     }
-    if (self.connection_id_events.pop()) |out| {
+    if (queues.connection_ids.pop()) |out| {
         return .{ .connection_ids_needed = out };
     }
-    if (self.datagram_send_events.pop()) |out| {
+    if (queues.datagram_send.pop()) |out| {
         return switch (out) {
             .acked => |event| .{ .datagram_acked = event },
             .lost => |event| .{ .datagram_lost = event },
         };
     }
-    if (self.alternative_server_address_events.pop()) |out| {
+    if (queues.alternative_server_address.pop()) |out| {
         return .{ .alternative_server_address = out };
     }
     return null;
+}
+
+/// The four embedder-event queues behind `events`.
+pub const EventQueues = struct {
+    flow_blocked: event_queue_mod.EventQueue(FlowBlockedInfo, max_flow_blocked_events) = .{},
+    connection_ids: event_queue_mod.EventQueue(ConnectionIdReplenishInfo, max_connection_id_events) = .{},
+    datagram_send: event_queue_mod.EventQueue(StoredDatagramSendEvent, max_datagram_send_events) = .{},
+    /// Received `ALTERNATIVE_V4/V6_ADDRESS` events
+    /// (draft-munizaga-quic-alternative-server-address-00 §6) the
+    /// embedder hasn't drained via `pollEvent` yet. Bounded at
+    /// `max_alternative_address_events` (16) with drop-oldest
+    /// eviction. Eviction is semantically safe under §6 ¶5
+    /// monotonicity — the latest update always supersedes older
+    /// ones — but a sluggish embedder polling on a chatty peer can
+    /// miss intermediate state. The high-watermark is preserved on
+    /// `highest_alternative_address_sequence_seen` so the embedder
+    /// can detect that updates were dropped (sequence gap between
+    /// the latest polled event and `highestAlternativeAddressSequenceSeen()`).
+    alternative_server_address: event_queue_mod.EventQueue(AlternativeServerAddressEvent, max_alternative_address_events) = .{},
+};
+
+/// The event queues, made on the first call. Null when there is no
+/// memory for them: the event is dropped, as a full queue drops its
+/// oldest.
+// INTERNAL: pub for the Connection/ subsystem files; not part of the embedder API.
+pub fn eventQueues(self: *Connection) ?*EventQueues {
+    if (self.events) |queues| return queues;
+    const queues = self.allocator.create(EventQueues) catch return null;
+    queues.* = .{};
+    self.events = queues;
+    return queues;
 }
 
 /// Queue a CONNECTION_CLOSE frame (RFC 9000 §19.19) for the
@@ -5129,6 +5156,9 @@ pub fn tick(self: *Connection, now_us: u64) Error!void {
     for (self.paths.paths.items) |*path| {
         if (path.path.state == .failed) continue;
         try self.fireDuePtoOnApplicationPath(path, now_us);
+        // Between bursts: a tracker that grew for a bulk transfer and
+        // holds nothing now gives its storage back.
+        path.sent.shrinkIdle();
     }
 
     // Reclaim fully-terminated streams. Done at the tail of `tick`

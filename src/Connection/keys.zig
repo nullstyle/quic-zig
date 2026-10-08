@@ -559,7 +559,7 @@ pub fn wipeInitialKeys(conn: *Connection) void {
 fn dropSpaceRecoveryState(conn: *Connection, lvl: EncryptionLevel, pn_idx: usize) void {
     conn.clearSentTracker(&conn.sent[pn_idx]);
     // The space is done for good: its tracker's storage goes back
-    // (256 slots of 200 bytes for each of the two spaces).
+    // (`initial_slots` of 200 bytes for each of the two spaces).
     conn.sent[pn_idx].shrinkToMinimum(conn.allocator);
     conn.pto_count[pn_idx] = 0;
     conn.pending_ping[pn_idx] = false;

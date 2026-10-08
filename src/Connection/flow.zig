@@ -252,7 +252,8 @@ pub fn maybeAdvertiseStreamCredit(conn: *Connection, bidi: bool) void {
 }
 
 pub fn recordFlowBlockedEvent(conn: *Connection, info: FlowBlockedInfo) void {
-    for (conn.flow_blocked_events.slice()) |existing| {
+    const queues = conn.eventQueues() orelse return;
+    for (queues.flow_blocked.slice()) |existing| {
         if (existing.source == info.source and
             existing.kind == info.kind and
             existing.limit == info.limit and
@@ -262,7 +263,7 @@ pub fn recordFlowBlockedEvent(conn: *Connection, info: FlowBlockedInfo) void {
             return;
         }
     }
-    conn.flow_blocked_events.push(info);
+    queues.flow_blocked.push(info);
 }
 
 fn findStreamBlocked(
