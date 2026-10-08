@@ -1404,6 +1404,77 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.35.0: the reordering release
+
+v0.35.0 (tag `a6fa45f`, 2026-10-08) is sprint B ("CUBIC after a
+standing loss + the adaptive ACK policy"), the second of the three the
+owner ordered before any downstream move. On
+`impairment_reorder_gaps_1gbit_defaults` (8 MiB on 1 Gbit/s, 20 ms
+RTT, 10% of the packets 20 ms late, nothing dropped; 12 seeds) CUBIC
+took 511 ms median against BBR's 371. A trace showed 85 spurious loss
+episodes in one run, all undone, each cutting the window and holding
+slow start for a round trip; none of the three causes was CUBIC. The
+packet-threshold rule grew to the distance a late packet trailed by
+and chased the rate as it doubled: once reordering is seen the rule is
+off and the time rule alone declares losses (RFC 8985's shape); cubic
+524 -> 447 ms. The widest time threshold stopped at exactly twice the
+RTT, where a packet late by one round trip sits: it carries a jitter
+margin now (the larger of four variances and a quarter RTT), as does
+the reach the window settles by; 447 -> 422. The receive window tuned
+itself on the bytes read and stalled at 2 MiB under head-of-line
+blocking with the sender out of credit: when the reader has read
+everything deliverable, the pace is the bytes received, holes included;
+cubic 422 -> 378, bbr 367 -> 311. Then the ACK policy: every second
+packet of a burst (RFC 9000 13.2.2's threshold of two) with a quiet
+rule (`ack_quick_gap_us`, 1 ms) that acknowledges a lone packet at
+once: the in-process goodput bench 988 -> 1,088 MB/s (twice v0.33.0's),
+a quarter fewer datagrams in bulk, the strict ping-pong churn cells
+byte-identical, the single-stream 1 Gbit cells about 1% slower. One
+new knob, no API change, the same option map.
+
+Local before the tag (`tools/release.sh 0.35.0` on 4df6184): the full
+suite 2,026 of 2,042 (16 skipped), `just check-windows` 15/15, `just
+check-x86` 15/15, eleven mutants of the new rules (eight killed on the
+first run; the settle reach got a test and the quiet rule's
+first-packet clause was dropped as redundant, then ten killed, one
+removed), every bench cell against v0.34.0's (the bottleneck cells
+the same time with 22% fewer datagrams, the single-stream 1 Gbit cells
+220 -> 222 ms and 234 -> 235, loss1pct 28 -> 26, the light reorder
+cells 37 -> 33 and 26 -> 25, `impairment_reorder_gaps_1gbit` with a
+4 MiB window 294 -> 311 ms, the one cell slower: the packet rule's
+early spurious copies used to fill the holes before the originals; the
+fairness cells inside their noise; churn byte-identical).
+
+**The gates on `a6fa45f`**, each read at its evidence line.
+
+- `test` (run 37740389985): seven jobs; the sanitizer job 2,041 of
+  2,057 (16 skipped); macos-26, macos-15, ubuntu x86 and ubuntu arm
+  2,041 of 2,057 in Debug and 2,001 of 2,017 in ReleaseSafe;
+  windows-latest 1,978 of 2,017 (39 skipped) in both modes;
+  x86-linux-musl 2,041 of 2,057.
+- rc-fuzz (run 37740392653): `n_runs=2,903,363 unique_runs=9,259
+  pcs_len=45788`, `coverage verified: instrumented, 2,903,363
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37740389965): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37740389907): built and pushed from that commit.
+- pin-lint (run 37740389813): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The wide local interop matrix on the tag's image (an ACK-policy
+  change on the wire), after the tag: client role
+  `pairs=3 cells=45 succeeded=42 failed=1 unsupported=2` (the one
+  failed is the known quiche handshakeloss chance cell, 3 of 5 on a
+  rerun against 4 of 5 on the v0.33.0 image; the two ECN cells
+  unsupported); server role `pairs=3 cells=45 succeeded=39 failed=2
+  unsupported=4` (the known quiche chance cells, multiplexing 5 of 5
+  and handshakecorruption 5 of 5 on a rerun; unsupported: quiche
+  chacha20 and keyupdate, the two ECN cells). The same counts as
+  v0.33.0's matrix.
+
+- The package hash of the tag's archive:
+  `quic-0.35.0-DnSYvWTcPQAoe5kcHRRLjUyHrgz9-lgddJvdRj8kFflF`.
+- NOT a downstream move (owner decision 2026-10-08: three sprints
+  first); the draft note is in the handoff dir.
+
 ## v0.34.0: the CPU-per-packet release
 
 v0.34.0 (tag `76c9296`, 2026-10-08) is the "CPU per packet" sprint,
