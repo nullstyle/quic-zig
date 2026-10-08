@@ -279,12 +279,12 @@ pub fn dispatchAckedPacketToStreams(
         // matching budget when the ack advances the stream's
         // contiguous-acked floor (RFC 9000 §3.1: bytes ≤ floor are
         // dropped from the in-memory buffer).
-        const before = s.send.bytes.items.len;
+        const before = s.send.bytes.len();
         s.send.onPacketAcked(ref.stream_key) catch |e| switch (e) {
             send_stream_mod.Error.UnknownPacket => continue,
             else => return e,
         };
-        const after = s.send.bytes.items.len;
+        const after = s.send.bytes.len();
         if (after < before) conn.releaseResidentBytes(before - after);
     }
 }

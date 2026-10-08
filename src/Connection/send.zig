@@ -1369,7 +1369,7 @@ pub fn pollLevelOnPath(
                 raw_chunk,
                 planned_conn_new_bytes,
             )) orelse continue;
-            const data_slice = s.send.chunkBytes(chunk);
+            const data_slice = s.send.chunkBytesContiguous(chunk, &conn.scratch.chunk_buf);
             const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
                 .stream = .{
                     .stream_id = s.id,

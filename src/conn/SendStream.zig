@@ -97,23 +97,54 @@ pub const ResetInfo = struct {
 /// kicks in.
 pub const default_max_buffered_send: usize = 1 * 1024 * 1024;
 
-/// Byte buffer whose public `.items` slice is always the live stream
-/// data, while ACKed prefix bytes are discarded by sliding the slice
-/// start within the allocation. This preserves callers' existing
-/// `.items.len` accounting without memmoving the live tail on every
-/// ACK floor advance.
+/// The live stream data as a ring: the ACKed prefix is discarded by
+/// moving the head, a write lands at the tail, and no byte moves
+/// unless the ring grows. Through v0.33.0 the buffer slid a slice
+/// within its allocation and moved the live tail to the front
+/// whenever a write needed the room, which, with an application that
+/// keeps the buffer full, moved the live bytes about three times per
+/// byte written: 12% of the engine's CPU on the in-process goodput
+/// bench (the sprint "CPU per packet", 2026-10-08). Packetization is
+/// unchanged: a chunk that crosses the wrap is copied into a scratch
+/// buffer by `SendStream.chunkBytesContiguous`, once per turn of the
+/// ring and at most a packet's worth.
 const SendByteBuffer = struct {
     pub const empty: SendByteBuffer = .{};
 
-    items: []u8 = &.{},
-    capacity: usize = 0,
-
     allocation: []u8 = &.{},
-    start: usize = 0,
+    /// Index of the first live byte in `allocation`.
+    head: usize = 0,
+    /// Live bytes.
+    live: usize = 0,
 
     fn deinit(self: *SendByteBuffer, allocator: std.mem.Allocator) void {
         if (self.allocation.len > 0) allocator.free(self.allocation);
         self.* = .empty;
+    }
+
+    /// Live bytes: `write_offset - base_offset` of the stream.
+    pub fn len(self: *const SendByteBuffer) usize {
+        return self.live;
+    }
+
+    /// The live bytes from relative index `from`, contiguous: `n` at
+    /// most, fewer when the wrap comes first (`contiguousFrom`).
+    pub fn slice(self: *const SendByteBuffer, from: usize, n: usize) []const u8 {
+        std.debug.assert(from + n <= self.live);
+        if (n == 0) return &.{};
+        const cap = self.allocation.len;
+        const at = (self.head + from) % cap;
+        const run = @min(n, cap - at);
+        return self.allocation[at..][0..run];
+    }
+
+    /// How many live bytes from relative index `from` lie before the
+    /// wrap (0 past the end).
+    pub fn contiguousFrom(self: *const SendByteBuffer, from: usize) usize {
+        if (from >= self.live) return 0;
+        const cap = self.allocation.len;
+        const at = (self.head + from) % cap;
+        return @min(self.live - from, cap - at);
     }
 
     fn appendSlice(
@@ -123,11 +154,12 @@ const SendByteBuffer = struct {
     ) std.mem.Allocator.Error!void {
         if (data.len == 0) return;
         try self.ensureUnusedCapacity(allocator, data.len);
-
-        const old_len = self.items.len;
-        const new_len = old_len + data.len;
-        @memcpy(self.allocation[self.start + old_len .. self.start + new_len], data);
-        self.items = self.allocation[self.start .. self.start + new_len];
+        const cap = self.allocation.len;
+        const tail = (self.head + self.live) % cap;
+        const first = @min(data.len, cap - tail);
+        @memcpy(self.allocation[tail..][0..first], data[0..first]);
+        if (first < data.len) @memcpy(self.allocation[0 .. data.len - first], data[first..]);
+        self.live += data.len;
     }
 
     pub fn ensureTotalCapacity(
@@ -135,35 +167,20 @@ const SendByteBuffer = struct {
         allocator: std.mem.Allocator,
         new_capacity: usize,
     ) std.mem.Allocator.Error!void {
-        if (self.capacity >= new_capacity) return;
-
-        if (self.start > 0 and self.allocation.len >= new_capacity) {
-            self.compactLiveBytes();
-            return;
-        }
-
+        if (self.allocation.len >= new_capacity) return;
         try self.reallocate(allocator, growCapacity(self.allocation.len, new_capacity) catch return error.OutOfMemory);
     }
 
     pub fn clearRetainingCapacity(self: *SendByteBuffer) void {
-        self.start = 0;
-        self.items = self.allocation[0..0];
-        self.capacity = self.allocation.len;
+        self.head = 0;
+        self.live = 0;
     }
 
     fn discardPrefix(self: *SendByteBuffer, n: usize) void {
-        std.debug.assert(n <= self.items.len);
+        std.debug.assert(n <= self.live);
         if (n == 0) return;
-
-        const new_len = self.items.len - n;
-        if (new_len == 0) {
-            self.start = 0;
-            self.items = self.allocation[0..0];
-        } else {
-            self.start += n;
-            self.items = self.allocation[self.start .. self.start + new_len];
-        }
-        self.capacity = self.allocation.len - self.start;
+        self.live -= n;
+        self.head = if (self.live == 0) 0 else (self.head + n) % self.allocation.len;
     }
 
     fn ensureUnusedCapacity(
@@ -171,38 +188,28 @@ const SendByteBuffer = struct {
         allocator: std.mem.Allocator,
         extra: usize,
     ) std.mem.Allocator.Error!void {
-        const needed_len = std.math.add(usize, self.items.len, extra) catch return error.OutOfMemory;
-        if (self.capacity >= needed_len) return;
-
-        if (self.start > 0 and self.allocation.len >= needed_len) {
-            self.compactLiveBytes();
-            return;
-        }
-
+        const needed_len = std.math.add(usize, self.live, extra) catch return error.OutOfMemory;
+        if (self.allocation.len >= needed_len) return;
         const new_capacity = growCapacity(self.allocation.len, needed_len) catch return error.OutOfMemory;
         try self.reallocate(allocator, new_capacity);
     }
 
-    fn compactLiveBytes(self: *SendByteBuffer) void {
-        @memmove(self.allocation[0..self.items.len], self.items);
-        self.start = 0;
-        self.items = self.allocation[0..self.items.len];
-        self.capacity = self.allocation.len;
-    }
-
+    /// A bigger ring; the live bytes are laid out from its start.
     fn reallocate(
         self: *SendByteBuffer,
         allocator: std.mem.Allocator,
         new_capacity: usize,
     ) std.mem.Allocator.Error!void {
         const new_allocation = try allocator.alloc(u8, new_capacity);
-        const old_len = self.items.len;
-        @memcpy(new_allocation[0..old_len], self.items);
+        if (self.live > 0) {
+            const cap = self.allocation.len;
+            const first = @min(self.live, cap - self.head);
+            @memcpy(new_allocation[0..first], self.allocation[self.head..][0..first]);
+            if (first < self.live) @memcpy(new_allocation[first..self.live], self.allocation[0 .. self.live - first]);
+        }
         if (self.allocation.len > 0) allocator.free(self.allocation);
         self.allocation = new_allocation;
-        self.start = 0;
-        self.items = self.allocation[0..old_len];
-        self.capacity = self.allocation.len;
+        self.head = 0;
     }
 
     fn growCapacity(old_capacity: usize, minimum: usize) error{Overflow}!usize {
@@ -220,10 +227,10 @@ const SendByteBuffer = struct {
 allocator: std.mem.Allocator,
 
 /// Bytes the app has written but not yet had fully-prefix-acked.
-/// `bytes.items[0]` is at absolute offset `base_offset`.
+/// The byte at relative index 0 is at absolute offset `base_offset`.
 bytes: SendByteBuffer = .empty,
-/// Soft cap on `bytes.items.len`. `write` short-writes when
-/// `bytes.items.len + data.len` would exceed this. Set by
+/// Soft cap on `bytes.len()`. `write` short-writes when
+/// `bytes.len() + data.len` would exceed this. Set by
 /// `Connection` from `default_max_buffered_send` (or an embedder
 /// override at construction time). Tests using bare
 /// `SendStream.init` get the default. Set to `maxInt(usize)` to
@@ -232,7 +239,7 @@ max_buffered: usize = default_max_buffered_send,
 /// Absolute offset of the first byte still in `bytes`.
 base_offset: u64 = 0,
 /// One past the highest absolute offset the app has written.
-/// Invariant: `write_offset == base_offset + bytes.items.len`.
+/// Invariant: `write_offset == base_offset + bytes.len()`.
 write_offset: u64 = 0,
 
 /// Sorted disjoint ranges (subset of [base_offset, write_offset))
@@ -287,7 +294,7 @@ pub fn write(self: *SendStream, data: []const u8) Error!usize {
     // app-written bytes can sit in `bytes` waiting to be sent.
     // Without this an embedder calling `streamWrite` faster than
     // the peer ACKs grows the buffer unboundedly.
-    const headroom = self.max_buffered -| self.bytes.items.len;
+    const headroom = self.max_buffered -| self.bytes.len();
     const accept = @min(data.len, headroom);
     if (accept == 0) return 0;
 
@@ -378,12 +385,34 @@ pub fn peekChunk(self: *const SendStream, max_bytes: usize) ?Chunk {
 /// into a STREAM frame. The slice is valid until the next
 /// mutation of the buffer (write, ACK floor advance, or
 /// resetStream). 0-length chunks (pure FIN) return an empty
-/// slice.
+/// slice. The chunk must lie before the ring's wrap; the
+/// connection's send path uses `chunkBytesContiguous`, which
+/// handles the wrap.
 pub fn chunkBytes(self: *const SendStream, c: Chunk) []const u8 {
     if (c.length == 0) return &.{};
     const start: usize = @intCast(c.offset - self.base_offset);
-    const end: usize = start + @as(usize, @intCast(c.length));
-    return self.bytes.items[start..end];
+    const n: usize = @intCast(c.length);
+    const bytes = self.bytes.slice(start, n);
+    std.debug.assert(bytes.len == n);
+    return bytes;
+}
+
+/// `chunkBytes` for any chunk: the ring's own slice when the chunk
+/// lies before the wrap, else the chunk copied into `scratch` (which
+/// must hold `c.length` bytes). The copy happens once per turn of
+/// the ring, so packetization never depends on the ring.
+pub fn chunkBytesContiguous(self: *const SendStream, c: Chunk, scratch: []u8) []const u8 {
+    if (c.length == 0) return &.{};
+    const start: usize = @intCast(c.offset - self.base_offset);
+    const n: usize = @intCast(c.length);
+    const first = self.bytes.slice(start, n);
+    if (first.len == n) return first;
+    std.debug.assert(n <= scratch.len);
+    @memcpy(scratch[0..first.len], first);
+    const rest = self.bytes.slice(start + first.len, n - first.len);
+    std.debug.assert(rest.len == n - first.len);
+    @memcpy(scratch[first.len..n], rest);
+    return scratch[0..n];
 }
 
 /// Record that the given chunk has been packed into a packet
@@ -564,23 +593,89 @@ test "ack of in-order chunk advances base_offset and drops bytes" {
 
     try s.onPacketAcked(0);
     try testing.expectEqual(@as(u64, 5), s.ackedFloor());
-    try testing.expectEqual(@as(usize, 5), s.bytes.items.len);
-    try testing.expectEqualStrings("56789", s.bytes.items);
+    try testing.expectEqual(@as(usize, 5), s.bytes.len());
+    try testing.expectEqualStrings("56789", s.bytes.slice(0, 5));
 }
 
-test "ack floor advance slides the live byte slice" {
+test "ack floor advance moves the ring's head; no byte moves" {
     var s = SendStream.init(test_alloc);
     defer s.deinit();
     _ = try s.write("0123456789");
-    const before_ptr = @intFromPtr(s.bytes.items.ptr);
+    const before_ptr = @intFromPtr(s.bytes.slice(0, 10).ptr);
 
     try s.recordSent(0, .{ .offset = 0, .length = 4, .fin = false });
     try s.onPacketAcked(0);
 
     try testing.expectEqual(@as(u64, 4), s.ackedFloor());
-    try testing.expectEqual(@as(usize, 6), s.bytes.items.len);
-    try testing.expectEqual(before_ptr + 4, @intFromPtr(s.bytes.items.ptr));
-    try testing.expectEqualStrings("456789", s.bytes.items);
+    try testing.expectEqual(@as(usize, 6), s.bytes.len());
+    try testing.expectEqual(before_ptr + 4, @intFromPtr(s.bytes.slice(0, 6).ptr));
+    try testing.expectEqualStrings("456789", s.bytes.slice(0, 6));
+}
+
+test "the ring wraps: a write past the end lands at the front, a chunk stops at the wrap, nothing moves" {
+    var s = SendStream.init(test_alloc);
+    defer s.deinit();
+    // The ring's first size is 64 bytes; fill 50 of it.
+    var fill: [50]u8 = undefined;
+    for (&fill, 0..) |*b, i| b.* = @intCast('a' + i % 26);
+    try testing.expectEqual(@as(usize, 50), try s.write(&fill));
+    try testing.expectEqual(@as(usize, 64), s.bytes.allocation.len);
+    const alloc_ptr = @intFromPtr(s.bytes.allocation.ptr);
+    // Send and ACK the first 30 bytes: the head moves to 30, the
+    // live bytes are [30, 50) of the allocation.
+    try s.recordSent(0, .{ .offset = 0, .length = 30, .fin = false });
+    try s.onPacketAcked(0);
+    try testing.expectEqual(@as(usize, 30), s.bytes.head);
+    try testing.expectEqual(@as(usize, 20), s.bytes.len());
+    // 30 more bytes: 14 fit before the end, 16 wrap to the front; the
+    // allocation is the same (no growth, nothing moved).
+    try testing.expectEqual(@as(usize, 30), try s.write("0123456789012345678901234567AB"));
+    try testing.expectEqual(alloc_ptr, @intFromPtr(s.bytes.allocation.ptr));
+    try testing.expectEqual(@as(usize, 30), s.bytes.head);
+    try testing.expectEqual(@as(usize, 50), s.bytes.len());
+    try testing.expectEqual(@as(u64, 80), s.writtenBytes());
+    // The pending range is [30, 80): 34 bytes before the wrap (the 20
+    // old ones and 14 new), 16 after it. A chunk of the whole range is
+    // handed out contiguous through a scratch copy; chunks that lie
+    // before the wrap come straight from the ring.
+    try testing.expectEqual(@as(usize, 34), s.bytes.contiguousFrom(0));
+    var want: [50]u8 = undefined;
+    @memcpy(want[0..20], fill[30..50]);
+    @memcpy(want[20..50], "0123456789012345678901234567AB");
+    const whole = s.peekChunk(1000).?;
+    try testing.expectEqual(@as(u64, 30), whole.offset);
+    try testing.expectEqual(@as(u64, 50), whole.length);
+    var scratch: [64]u8 = undefined;
+    const got = s.chunkBytesContiguous(whole, &scratch);
+    try testing.expectEqualStrings(&want, got);
+    try testing.expectEqual(@intFromPtr(&scratch), @intFromPtr(got.ptr));
+    const c1 = s.peekChunk(34).?;
+    try testing.expectEqual(@as(u64, 34), c1.length);
+    try testing.expectEqualStrings(want[0..34], s.chunkBytes(c1));
+    try testing.expectEqual(@intFromPtr(s.chunkBytes(c1).ptr), @intFromPtr(s.chunkBytesContiguous(c1, &scratch).ptr));
+    try s.recordSent(1, c1);
+    const c2 = s.peekChunk(1000).?;
+    try testing.expectEqual(@as(u64, 64), c2.offset);
+    try testing.expectEqual(@as(u64, 16), c2.length);
+    try testing.expectEqualStrings("45678901234567AB", s.chunkBytes(c2));
+    try s.recordSent(2, c2);
+    // Every byte ACKed: the ring is empty and its head back at 0.
+    try s.onPacketAcked(1);
+    try s.onPacketAcked(2);
+    try testing.expectEqual(@as(usize, 0), s.bytes.len());
+    try testing.expectEqual(@as(usize, 0), s.bytes.head);
+    // Growth lays the live bytes out from the start of a bigger ring.
+    try testing.expectEqual(@as(usize, 10), try s.write("ABCDEFGHIJ"));
+    try s.recordSent(3, .{ .offset = 80, .length = 6, .fin = false });
+    try s.onPacketAcked(3);
+    try testing.expectEqual(@as(usize, 6), s.bytes.head);
+    var big: [100]u8 = undefined;
+    for (&big, 0..) |*b, i| b.* = @intCast('0' + i % 10);
+    try testing.expectEqual(@as(usize, 100), try s.write(&big));
+    try testing.expect(s.bytes.allocation.len >= 104);
+    try testing.expectEqual(@as(usize, 0), s.bytes.head);
+    try testing.expectEqualStrings("GHIJ", s.bytes.slice(0, 4));
+    try testing.expectEqualStrings(&big, s.bytes.slice(4, 100));
 }
 
 test "out-of-order ACK is held until the gap closes" {
@@ -602,12 +697,12 @@ test "out-of-order ACK is held until the gap closes" {
     try s.onPacketAcked(0);
     try testing.expectEqual(@as(u64, 8), s.ackedFloor());
     try testing.expectEqual(@as(usize, 0), s.acked_above.items.len);
-    try testing.expectEqualStrings("cccc", s.bytes.items);
+    try testing.expectEqualStrings("cccc", s.bytes.slice(0, 4));
 
     // Final ACK collapses everything.
     try s.onPacketAcked(2);
     try testing.expectEqual(@as(u64, 12), s.ackedFloor());
-    try testing.expectEqual(@as(usize, 0), s.bytes.items.len);
+    try testing.expectEqual(@as(usize, 0), s.bytes.len());
 }
 
 test "loss re-pends the chunk's bytes" {
@@ -815,7 +910,7 @@ test "stress: 256 KiB through a tiny chunk size with random ACK order" {
 
     try testing.expect(s.isTerminal());
     try testing.expectEqual(@as(u64, total), s.ackedFloor());
-    try testing.expectEqual(@as(usize, 0), s.bytes.items.len);
+    try testing.expectEqual(@as(usize, 0), s.bytes.len());
 }
 
 test "stress with simulated 10% loss until convergence" {
@@ -965,7 +1060,7 @@ fn fuzzSendStream(_: void, smith: *std.testing.Smith) anyerror!void {
 
         // Cross-cutting invariants. These hold regardless of how we got here.
         try testing.expect(s.base_offset <= s.write_offset);
-        const live_len: u64 = @intCast(s.bytes.items.len);
+        const live_len: u64 = @intCast(s.bytes.len());
         try testing.expectEqual(s.write_offset - s.base_offset, live_len);
         if (s.final_size) |fs| {
             try testing.expectEqual(fs, s.write_offset);

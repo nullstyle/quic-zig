@@ -1350,6 +1350,9 @@ pub const Scratch = struct {
     initial_payload: [max_recv_plaintext]u8,
     /// A padded plaintext staged for the 1-RTT seal.
     stage_buf: [short_packet_mod.staging_len]u8,
+    /// A stream chunk that crosses its ring's wrap, made contiguous
+    /// (`SendStream.chunkBytesContiguous`).
+    chunk_buf: [max_recv_plaintext]u8,
 };
 /// Largest UDP payload size we will advertise to the peer in transport params.
 pub const max_supported_udp_payload_size: usize = max_recv_plaintext;

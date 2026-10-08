@@ -648,7 +648,7 @@ pub fn gcClosedStreams(conn: *Connection) void {
                 }
             }
         }
-        const held = s.send.bytes.items.len + s.recv.bytes.items.len;
+        const held = s.send.bytes.len() + s.recv.bytes.items.len;
         if (held > 0) conn.releaseResidentBytes(held);
         conn_qlog.emitQlog(conn, .{
             .name = .stream_state_updated,
@@ -782,7 +782,7 @@ pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
     // shares one budget with CRYPTO / DATAGRAM / recv reassembly
     // so opening many streams each near their per-stream cap
     // can't bypass the connection-wide ceiling.
-    const before = s.send.bytes.items.len;
+    const before = s.send.bytes.len();
     // The buffer follows the peer's credit (since v0.33.0): what the
     // peer still accepts beyond the acknowledged floor is worth
     // holding, up to the cap; a limit once raised stays, since the

@@ -169,7 +169,7 @@ pub fn runStreamSendAckLossRequeue(
         }
 
         std.debug.assert(ctx.stream.ackedFloor() == stream_bench_total_bytes);
-        std.debug.assert(ctx.stream.bytes.items.len == 0);
+        std.debug.assert(ctx.stream.bytes.len() == 0);
         std.debug.assert(ctx.stream.pending.items.len == 0);
         std.debug.assert(ctx.stream.acked_above.items.len == 0);
         std.debug.assert(ctx.stream.in_flight.count() == 0);
@@ -272,7 +272,7 @@ test "send ack/loss/requeue helper drains all in-flight data" {
     const sum = runStreamSendAckLossRequeue(&ctx, 1);
     try std.testing.expect(sum != 0);
     try std.testing.expectEqual(@as(u64, stream_bench_total_bytes), ctx.stream.ackedFloor());
-    try std.testing.expectEqual(@as(usize, 0), ctx.stream.bytes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.stream.bytes.len());
     try std.testing.expectEqual(@as(usize, 0), ctx.stream.pending.items.len);
     try std.testing.expectEqual(@as(usize, 0), ctx.stream.acked_above.items.len);
     try std.testing.expectEqual(@as(usize, 0), ctx.stream.in_flight.count());
