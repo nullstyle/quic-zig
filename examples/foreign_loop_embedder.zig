@@ -477,8 +477,12 @@ pub const ServerPump = struct {
     /// sits there for a whole poll interval.
     pub fn service(self: *ServerPump, now_us: u64) !void {
         // Events first — they are what establishes per-connection
-        // state — then the application work.
-        for (self.server.iterator()) |slot| {
+        // state — then the application work. Only on the slots that
+        // saw a datagram or a timer since the last pass
+        // (`peekReady`: a look, not a take; the drain below takes),
+        // so a server with thousands of idle connections does not
+        // walk them all here.
+        for (self.server.peekReady()) |slot| {
             while (slot.conn.pollEvent()) |event| switch (event) {
                 .handshake_established => {
                     if (self.app.ensureState(slot) == null) {
@@ -528,17 +532,21 @@ pub const ServerPump = struct {
             echoDatagrams(slot, state) catch {};
         }
 
-        // Clock, then outbox. `pollDatagram` (not `Server.poll`) so
-        // VN/Retry peers, migration, and multipath all see the right
-        // destination address.
-        for (self.server.iterator()) |slot| {
+        // Clock, then outbox: the slots whose deadline passed get
+        // their tick and join the ready list (`tickDue`), then every
+        // ready slot is drained and its timer re-armed (`slotDrained`).
+        // `pollDatagram` (not `Server.poll`) so VN/Retry peers,
+        // migration, and multipath all see the right destination
+        // address.
+        self.server.tickDue(now_us) catch {};
+        for (self.server.takeReady()) |slot| {
             // Terminal `.closed` slots have nothing to do; closing /
-            // draining ones stay in the loop so their deadlines fire
-            // and the closing-state CONNECTION_CLOSE retransmits can
-            // still emit (RFC 9000 §10.2.1 ¶3).
+            // draining ones keep their deadlines so the closing-state
+            // CONNECTION_CLOSE retransmits can still emit (RFC 9000
+            // §10.2.1 ¶3).
             if (slot.conn.closeState() == .closed) continue;
-            slot.conn.tick(now_us) catch {};
             self.drainSlot(slot, now_us) catch {};
+            self.server.slotDrained(slot, now_us);
         }
 
         self.iteration +%= 1;
@@ -549,10 +557,10 @@ pub const ServerPump = struct {
     }
 
     /// Earliest pending timer across every live slot, or null when no
-    /// slot has one armed. This is what a foreign loop parks on
-    /// instead of a fixed tick.
-    pub fn nextDeadline(self: *const ServerPump, now_us: u64) ?quic.TimerDeadline {
-        return self.server.nextTimerDeadline(now_us);
+    /// slot has one armed: the server's timer heap's top, not a sweep.
+    /// This is what a foreign loop parks on instead of a fixed tick.
+    pub fn nextDeadline(self: *ServerPump, now_us: u64) ?quic.TimerDeadline {
+        return self.server.nextDeadline(now_us);
     }
 
     fn drainSlot(self: *ServerPump, slot: *quic.Server.Slot, now_us: u64) !void {

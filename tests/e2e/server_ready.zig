@@ -101,8 +101,10 @@ test "ready list: a new slot is ready once, a drained slot stays out until it is
     // finds (the idle timeout).
     try std.testing.expectEqual(@as(usize, 0), srv.takeReady().len);
     const sweep = srv.nextTimerDeadline(loop.now_us).?;
-    try std.testing.expectEqual(sweep.at_us, srv.nextDeadline(loop.now_us).?);
+    const top = srv.nextDeadline(loop.now_us).?;
+    try std.testing.expectEqual(sweep.at_us, top.at_us);
     try std.testing.expectEqual(quic.conn.state.TimerKind.idle, sweep.kind);
+    try std.testing.expectEqual(sweep.kind, top.kind);
 
     // `touch` by hand marks the slot ready, once.
     slot.conn.touch();
@@ -125,7 +127,7 @@ test "ready list: a new slot is ready once, a drained slot stays out until it is
     try std.testing.expect(got > 0);
     srv.slotDrained(slot, loop.now_us);
     // The packet in flight moved the deadline to its loss or probe timer.
-    try std.testing.expect(srv.nextDeadline(loop.now_us).? < sweep.at_us);
+    try std.testing.expect(srv.nextDeadline(loop.now_us).?.at_us < sweep.at_us);
     var buf: [64]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 5), try cli.conn.streamRead(s.id, &buf));
     try std.testing.expectEqualStrings("hello", buf[0..5]);
@@ -149,4 +151,8 @@ test "ready list: a new slot is ready once, a drained slot stays out until it is
     try std.testing.expectEqual(@as(usize, 1), srv.reap());
     try std.testing.expectEqual(@as(usize, 0), srv.takeReady().len);
     try std.testing.expect(srv.nextDeadline(loop.now_us) == null);
+    // Nothing of the slot is left anywhere (its entries held its pointer).
+    try std.testing.expectEqual(@as(usize, 0), srv.timers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), srv.ready.items.len);
+    try std.testing.expectEqual(@as(usize, 0), srv.ready_taken.items.len);
 }

@@ -614,7 +614,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
         // to 1 ms — never a busy spin, never a blocking overshoot.
         const iteration_timeout = clampTimeoutToDeadline(
             per_listener_timeout,
-            server.nextDeadline(now_us),
+            if (server.nextDeadline(now_us)) |td| td.at_us else null,
             now_us,
         );
 

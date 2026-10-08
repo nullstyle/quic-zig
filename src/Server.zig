@@ -1898,9 +1898,13 @@ pub fn tick(self: *Server, now_us: u64) ConnectionError!void {
 /// One slot's next deadline in the timer heap; `generation` tells a
 /// stale entry (the slot was re-armed since) from the current one.
 const TimerEntry = struct {
-    at_us: u64,
+    deadline: conn_mod.state.TimerDeadline,
     slot: *Slot,
     generation: u32,
+
+    fn atUs(self: TimerEntry) u64 {
+        return self.deadline.at_us;
+    }
 };
 
 /// The ready list and the timer heap: a loop that uses them touches
@@ -1985,7 +1989,7 @@ pub fn slotDrained(self: *Server, slot: *Slot, now_us: u64) void {
 pub fn armTimer(self: *Server, slot: *Slot, now_us: u64) void {
     slot.timer_generation +%= 1;
     const deadline = slot.conn.nextTimerDeadline(now_us) orelse return;
-    self.timerPush(.{ .at_us = deadline.at_us, .slot = slot, .generation = slot.timer_generation }) catch {
+    self.timerPush(.{ .deadline = deadline, .slot = slot, .generation = slot.timer_generation }) catch {
         self.timers_degraded = true;
     };
 }
@@ -2007,7 +2011,7 @@ pub fn tickDue(self: *Server, now_us: u64) ConnectionError!void {
     }
     while (self.timers.items.len > 0) {
         const top = self.timers.items[0];
-        if (top.at_us > now_us) break;
+        if (top.atUs() > now_us) break;
         _ = self.timerPop();
         if (top.generation != top.slot.timer_generation) continue;
         const slot = top.slot;
@@ -2025,22 +2029,21 @@ pub fn tickDue(self: *Server, now_us: u64) ConnectionError!void {
 /// `armTimer` with a floor on the deadline.
 fn armTimerAfter(self: *Server, slot: *Slot, now_us: u64, floor_us: u64) void {
     slot.timer_generation +%= 1;
-    const deadline = slot.conn.nextTimerDeadline(now_us) orelse return;
-    self.timerPush(.{ .at_us = @max(deadline.at_us, floor_us), .slot = slot, .generation = slot.timer_generation }) catch {
+    var deadline = slot.conn.nextTimerDeadline(now_us) orelse return;
+    deadline.at_us = @max(deadline.at_us, floor_us);
+    self.timerPush(.{ .deadline = deadline, .slot = slot, .generation = slot.timer_generation }) catch {
         self.timers_degraded = true;
     };
 }
 
 /// The earliest deadline of any slot, or null: the timer heap's top,
-/// stale entries skipped. The loop's wait ends here.
-pub fn nextDeadline(self: *Server, now_us: u64) ?u64 {
-    if (self.timers_degraded) {
-        const deadline = self.nextTimerDeadline(now_us) orelse return null;
-        return deadline.at_us;
-    }
+/// stale entries skipped. The loop's wait ends here. The same type as
+/// `nextTimerDeadline` gives, the kind included.
+pub fn nextDeadline(self: *Server, now_us: u64) ?conn_mod.state.TimerDeadline {
+    if (self.timers_degraded) return self.nextTimerDeadline(now_us);
     while (self.timers.items.len > 0) {
         const top = self.timers.items[0];
-        if (top.generation == top.slot.timer_generation) return top.at_us;
+        if (top.generation == top.slot.timer_generation) return top.deadline;
         _ = self.timerPop();
     }
     return null;
@@ -2051,7 +2054,7 @@ fn timerPush(self: *Server, entry: TimerEntry) !void {
     var i = self.timers.items.len - 1;
     while (i > 0) {
         const parent = (i - 1) / 2;
-        if (self.timers.items[parent].at_us <= self.timers.items[i].at_us) break;
+        if (self.timers.items[parent].atUs() <= self.timers.items[i].atUs()) break;
         std.mem.swap(TimerEntry, &self.timers.items[parent], &self.timers.items[i]);
         i = parent;
     }
@@ -2075,8 +2078,8 @@ fn timerSiftDown(self: *Server, start: usize) void {
         const left = 2 * i + 1;
         const right = left + 1;
         var smallest = i;
-        if (left < items.len and items[left].at_us < items[smallest].at_us) smallest = left;
-        if (right < items.len and items[right].at_us < items[smallest].at_us) smallest = right;
+        if (left < items.len and items[left].atUs() < items[smallest].atUs()) smallest = left;
+        if (right < items.len and items[right].atUs() < items[smallest].atUs()) smallest = right;
         if (smallest == i) return;
         std.mem.swap(TimerEntry, &items[i], &items[smallest]);
         i = smallest;
