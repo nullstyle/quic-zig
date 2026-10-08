@@ -794,11 +794,17 @@ pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
         if (limit > s.send.max_buffered) s.send.max_buffered = limit;
     }
     const headroom = s.send.max_buffered -| before;
-    const want = @min(data.len, headroom);
+    // The connection's memory budget bounds the application's own
+    // writes as back-pressure, not as a fault (since v0.33.0): a
+    // write takes what the budget leaves and returns short, as it
+    // does at the stream's limit. The budget's fault, ExcessiveLoad,
+    // is for what the peer puts in buffers.
+    const budget_left: usize = std.math.lossyCast(usize, conn.max_connection_memory -| conn.bytes_resident);
+    const want = @min(data.len, @min(headroom, budget_left));
     if (want > 0) {
         try conn.tryReserveResidentBytes(want);
     }
-    const accepted = s.send.write(data) catch |err| {
+    const accepted = s.send.write(data[0..want]) catch |err| {
         conn.releaseResidentBytes(want);
         return err;
     };
@@ -871,12 +877,13 @@ fn afterStreamConsume(
         // in flight, 361 ms; 285 ms with the announced window. And
         // since v0.33.0 the window tunes itself for a reader that
         // keeps up (`tuneWindow`).
-        const grew = tuneWindow(conn, &s.recv_window, &s.recv_epoch_start_offset, &s.recv_epoch_start_us, s.recv.read_offset, conn.max_stream_receive_window);
+        const conn_cap = connectionWindowCap(conn);
+        const grew = tuneWindow(conn, &s.recv_window, &s.recv_epoch_start_offset, &s.recv_epoch_start_us, s.recv.read_offset, @min(conn.max_stream_receive_window, conn_cap));
         if (grew) {
             // A connection window at least one and a half times any
             // stream's, so the stream's growth is not held back at the
             // connection level (quic-go's coupling).
-            const floor = @min(s.recv_window +| s.recv_window / 2, conn.max_connection_receive_window);
+            const floor = @min(s.recv_window +| s.recv_window / 2, conn_cap);
             if (conn.conn_recv_window < floor) conn.conn_recv_window = floor;
         }
         const window = s.recv_window;
@@ -885,6 +892,16 @@ fn afterStreamConsume(
         }
         creditConnectionRecvWindow(conn, n);
     }
+}
+
+/// The connection window's cap: `max_connection_receive_window`, and
+/// never more than half of `max_connection_memory`. The window bounds
+/// what the peer may send unread, and the receive buffer charges the
+/// budget up to twice the unread bytes until it compacts, so a cap
+/// above half the budget would let an honest peer trip ExcessiveLoad.
+/// Raise the budget with the cap on a fat link with many streams.
+fn connectionWindowCap(conn: *const Connection) u64 {
+    return @min(conn.max_connection_receive_window, conn.max_connection_memory / 2);
 }
 
 /// The receive windows' self-tuning (since v0.33.0), the rule quic-go
@@ -942,7 +959,7 @@ pub fn creditConnectionRecvWindow(conn: *Connection, n: u64) void {
     // The connection window: the announced one at the start, tuned
     // since v0.33.0 as a stream's is (`tuneWindow`), and never under
     // one and a half times a stream's that grew.
-    _ = tuneWindow(conn, &conn.conn_recv_window, &conn.conn_epoch_start_read, &conn.conn_epoch_start_us, conn.recv_stream_bytes_read, conn.max_connection_receive_window);
+    _ = tuneWindow(conn, &conn.conn_recv_window, &conn.conn_epoch_start_read, &conn.conn_epoch_start_us, conn.recv_stream_bytes_read, connectionWindowCap(conn));
     const window = conn.conn_recv_window;
     if (Connection.shouldQueueReceiveCredit(conn.recv_stream_bytes_read, conn.local_max_data, window)) {
         conn_flow.queueMaxData(conn, conn.recv_stream_bytes_read +| window);

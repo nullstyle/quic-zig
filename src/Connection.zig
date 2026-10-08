@@ -1455,9 +1455,11 @@ pub const default_stream_receive_window: u64 = 1024 * 1024;
 pub const default_connection_receive_window: u64 = 16 * 1024 * 1024;
 /// The caps of the receive windows' self-tuning (`max_stream_receive_window`,
 /// `max_connection_receive_window`): a window doubles for a reader
-/// that keeps up until it reaches these.
+/// that keeps up until it reaches these. The connection's cap is
+/// also never more than half of `max_connection_memory` (32 MiB by
+/// default, so 16 MiB): raise the budget with the cap.
 pub const default_max_stream_receive_window: u64 = 8 * 1024 * 1024;
-pub const default_max_connection_receive_window: u64 = 32 * 1024 * 1024;
+pub const default_max_connection_receive_window: u64 = 16 * 1024 * 1024;
 /// Hard ceiling on `initial_max_streams_*` we will ever advertise.
 pub const max_stream_count_limit: u64 = @as(u64, 1) << 60;
 

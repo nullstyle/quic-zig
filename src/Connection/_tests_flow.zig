@@ -727,6 +727,28 @@ test "receive credit: the connection window follows a stream's growth, one and a
     try std.testing.expectEqual(@as(?u64, 80 * 1024 + 192 * 1024), conn.pending_frames.max_data);
 }
 
+test "receive credit: the connection window's cap stays under half the memory budget" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    // A 4 MiB budget bounds the connection window at 2 MiB whatever
+    // the cap says; a 1 MiB stream that doubles would otherwise pull
+    // the connection window to 3 MiB.
+    try tuneTestConn(conn, 1024 * 1024, 1024 * 1024);
+    conn.max_connection_memory = 4 * 1024 * 1024;
+    conn.max_connection_receive_window = 32 * 1024 * 1024;
+    const chunk = try allocator.alloc(u8, 640 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+    try tuneFeedAndRead(conn, chunk, 0);
+    conn.clock_us += 5_000;
+    try tuneFeedAndRead(conn, chunk, 640 * 1024);
+    try std.testing.expectEqual(@as(u64, 2 * 1024 * 1024), conn.stream(0).?.recv_window);
+    try std.testing.expectEqual(@as(u64, 2 * 1024 * 1024), conn.conn_recv_window);
+}
+
 test "receive credit keeps the announced windows when they are larger than the defaults" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});

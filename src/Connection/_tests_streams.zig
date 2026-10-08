@@ -86,6 +86,23 @@ test "the send buffer follows the peer's credit, up to its cap, unless told not 
     }
 }
 
+test "a write past the connection's memory budget returns short, it is not a fault" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    conn.max_connection_memory = 1024;
+    _ = try conn.openBidi(0);
+    var data: [2048]u8 = undefined;
+    @memset(&data, 'x');
+    // The budget leaves 1024: the write takes that much.
+    try std.testing.expectEqual(@as(usize, 1024), try conn.streamWrite(0, &data));
+    // Nothing left: the write takes nothing, the stream stays open.
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamWrite(0, &data));
+    try std.testing.expectEqual(@as(u64, 1024), conn.bytes_resident);
+}
+
 test "streamReset publicly aborts the send half" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
