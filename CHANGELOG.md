@@ -5,6 +5,94 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.34.0] - 2026-10-08
+
+The CPU-per-packet release: the engine moves the same bytes in a
+little over half the CPU. No wire change, no knob, every bench cell
+byte-identical in virtual time (no decision moved). Two signature
+changes for embedders of the raw `Connection` (BREAKING, below).
+Verified toolchain: 0.17.0.
+
+MEASURED (`zig build bench-e2e -- --scenario goodput`: 64 MiB on one
+stream, both endpoints in one thread, no sockets, ReleaseSafe; the
+number that isolates the stack's CPU from syscalls):
+
+| step | goodput |
+| --- | --- |
+| v0.33.0 | 547.8 MB/s |
+| scratch buffers instead of 4 KB locals | 716.2 (+31%) |
+| the send buffer is a ring | 894.0 (+25%) |
+| keys by pointer | 968.4 (+8%) |
+| the pacer in 64 bits | +1.4% (back to back) |
+| the last two per-packet fills | +2.7% (back to back) |
+| v0.34.0 | 988.0 MB/s (+80%) |
+
+The loopback smoke (`zig build run-goodput-smoke --release=safe`,
+real UDP, one datagram per syscall on macOS) is syscall-bound and
+moves little: see the release record.
+
+### Changed
+
+- **No large `undefined` local on a per-packet path.** Zig 0.17 fills
+  an `undefined` local with 0xAA in ReleaseSafe as well as in Debug (the
+  disassembly: `memset(x, 0xaa, 4096)` at the top of
+  `pollLevelOnPath`, `handleShort`, `seal1Rtt`), and every downstream
+  builds ReleaseSafe. A `sample` profile of the goodput bench put 14%
+  of the engine's CPU in those fills and 4.5% more in a 4 KB template
+  copy (`var initial: InitialInDatagram = .{}` with the Initial
+  payload inline). The packet paths use `Connection.Scratch`, one per
+  thread (`Connection.scratch()`, about 21 KB, a `threadlocal`; nothing
+  in it lives past the engine call that fills it); `seal1Rtt` takes an
+  optional staging buffer and declares its own only for a padded
+  packet, in a function of its own.
+- **The send buffer is a ring** (`conn/SendStream.zig`). The buffer
+  slid a slice within its allocation and moved the live tail to the
+  front whenever a write needed room: an application that keeps the
+  buffer full moved its bytes about three times per byte written, 12%
+  of the engine's CPU. Now the ACKed prefix is discarded by moving the
+  head, a write lands at the tail, and the only copy left is into a
+  bigger ring when it grows. Packetization is unchanged: a chunk that
+  crosses the wrap is handed to the frame encoder through the scratch
+  (`chunkBytesContiguous`), once per turn of the ring.
+- **A packet's keys by pointer.** `packetKeys` returned the keys by
+  value (the AES key schedules and the AEAD context, about a
+  kilobyte) once per packet sent, and the open path copied each key
+  epoch, up to three per packet received: 2% of the CPU.
+- **The pacer computes in 64 bits** when the product fits, which is
+  every realistic rate, window and interval, and in 128 bits
+  otherwise; the result is the same (a 128-bit division per poll was
+  1.2%).
+- **The receive stream zeroes only a gap** before a frame's bytes
+  when it grows its buffer; it zeroed the whole grown region and then
+  copied the frame over it, writing every in-order byte twice.
+
+### Changed (BREAKING, raw `Connection` embedders only)
+
+- `Connection.packetKeys` returns `Error!?*const PacketKeys` (was
+  `Error!?PacketKeys`): pass the pointer on where `&keys` was passed.
+  The pointer is good until the next key event, which never happens
+  inside one packet's seal or open.
+- `SendStream.bytes` is a ring: the `items` slice is gone. `bytes.len()`
+  is the live byte count (what `bytes.items.len` was); `chunkBytes`
+  serves a chunk that lies before the wrap, `chunkBytesContiguous(c,
+  scratch)` any chunk.
+
+### Measured and not shipped
+
+- `application_ack_eliciting_threshold` 1 -> 2 (RFC 9000 13.2.2's
+  recommendation): goodput +10% and a quarter fewer datagrams in bulk,
+  but the single-stream 1 Gbit cells 2% slower (ACK clocking every
+  second packet), and strict ping-pong (churn window 1, 30 ms RTT)
+  sent 25% MORE datagrams: a lone packet is acknowledged by the
+  max_ack_delay timer instead of at once. The downstreams are
+  message-oriented, so the threshold stays at 1; an adaptive policy
+  (an immediate ACK after a quiet round trip, every second packet in a
+  burst) is a later sprint's, with these numbers as its baseline.
+- A cached sendable-stream list: nothing measurable with one stream,
+  and with several the round-robin cursor reorders the list every
+  packet. For many streams the per-packet insertion sort is O(n^2); a
+  priority structure kept across packets is a later sprint's.
+
 ## [0.33.0] - 2026-10-07
 
 The line-rate release: a single stream reaches the path's rate on the
