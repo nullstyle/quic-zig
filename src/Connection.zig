@@ -253,6 +253,23 @@ delayed_ack_packet_threshold: u8 = application_ack_eliciting_threshold,
 /// `Server.Config` and `Client.Config` thread the chosen value onto
 /// every Connection at construction time.
 ack_quick_gap_us: u64 = default_ack_quick_gap_us,
+/// The Acknowledgement Frequency extension (draft-ietf-quic-ack-
+/// frequency). The peer's ACK_FREQUENCY request in force, or null:
+/// RFC 9000's defaults then (`effectiveAckThreshold`,
+/// `effectiveMaxAckDelayUs`, `effectiveReorderThreshold`).
+peer_ack_frequency: ?PeerAckFrequency = null,
+/// Whether this end asks the peer for fewer acknowledgments
+/// (`maybeAutoAckFrequency`): `.auto` asks a peer that advertised
+/// `min_ack_delay` for one ACK per sixteenth of the congestion window
+/// (two packets at least, sixty-four at most), updated when the window
+/// doubles or halves, once per round trip at most; `.off` never asks.
+/// A `requestAckFrequency` call takes the policy over (`.off`).
+ack_frequency_policy: AckFrequencyPolicy = .auto,
+ack_frequency_next_seq: u64 = 0,
+/// The latest request sent (a lost copy is queued again while this is
+/// still it).
+ack_frequency_last: ?frame_types.AckFrequency = null,
+ack_frequency_last_sent_us: u64 = 0,
 
 /// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168). When
 /// `true` (the default), quic will:
@@ -1000,6 +1017,9 @@ pub const quic_version_1: u32 = 0x00000001;
 /// Aggregate error set returned from any Connection operation.
 pub const Error = error{
     OutOfMemory,
+    /// `requestAckFrequency` on a peer that did not advertise
+    /// `min_ack_delay` (the Acknowledgement Frequency extension).
+    AckFrequencyNotNegotiated,
     HandshakeFailed,
     InboxOverflow,
     PeerAlerted,
@@ -1465,6 +1485,31 @@ pub const max_crypto_reassembly_gap: u64 = 64 * 1024;
 /// packet is acknowledged, a lone packet at once. MEASURED (sprint B,
 /// 2026-10-08): see `default_ack_quick_gap_us`.
 pub const application_ack_eliciting_threshold: u8 = 2;
+/// The Acknowledgement Frequency extension's request in force from
+/// the peer (`Connection.peer_ack_frequency`).
+pub const PeerAckFrequency = struct {
+    sequence_number: u64,
+    ack_eliciting_threshold: u64,
+    max_ack_delay_us: u64,
+    reordering_threshold: u64,
+};
+
+/// See `Connection.ack_frequency_policy`.
+pub const AckFrequencyPolicy = enum { off, auto };
+
+/// The `min_ack_delay` a connection advertises when its transport
+/// parameters leave it null (the least it delays an acknowledgment;
+/// the floor on a peer's ACK_FREQUENCY request): one millisecond, the
+/// quiet rule's gap.
+pub const default_min_ack_delay_us: u64 = 1_000;
+
+/// The ACK-every-N the automatic policy asks for: one acknowledgment
+/// per `auto_ack_frequency_window_divisor` of the window's packets,
+/// between `auto_ack_frequency_min_packets` and `_max_packets`.
+pub const auto_ack_frequency_window_divisor: u64 = 16;
+pub const auto_ack_frequency_min_packets: u64 = 2;
+pub const auto_ack_frequency_max_packets: u64 = 64;
+
 /// The quiet gap of the ACK policy (`Connection.ack_quick_gap_us`), in
 /// microseconds: an ack-eliciting packet that arrives this long or
 /// more after the previous one is acknowledged at once. One
@@ -2473,6 +2518,8 @@ pub const Tunables = struct {
     delayed_ack_packet_threshold: u8,
     /// See `Connection.ack_quick_gap_us`.
     ack_quick_gap_us: u64,
+    /// See `Connection.ack_frequency_policy`.
+    ack_frequency_policy: AckFrequencyPolicy,
     /// See `Connection.ecn_enabled` (RFC 9000 §13.4).
     ecn_enabled: bool,
     /// RFC 8899 DPLPMTUD configuration; applied via
@@ -2514,6 +2561,7 @@ pub fn applyTunables(self: *Connection, t: Tunables) void {
     self.max_connection_receive_window = t.max_connection_receive_window;
     self.delayed_ack_packet_threshold = t.delayed_ack_packet_threshold;
     self.ack_quick_gap_us = t.ack_quick_gap_us;
+    self.ack_frequency_policy = t.ack_frequency_policy;
     self.ecn_enabled = t.ecn_enabled;
     // RFC 8899 DPLPMTUD: `setPmtudConfig` also re-initialises every
     // existing path (only the primary at this point), so the
@@ -2683,6 +2731,10 @@ pub fn localTransportParams(self: *const Connection) TransportParams {
 pub fn setTransportParams(self: *Connection, params: TransportParams) !void {
     self.touch();
     var local = try normalizeLocalTransportParams(params);
+    // The Acknowledgement Frequency extension is always offered: the
+    // least we delay an acknowledgment, no more than our max_ack_delay.
+    if (local.min_ack_delay_us == null) local.min_ack_delay_us = default_min_ack_delay_us;
+    local.min_ack_delay_us = @min(local.min_ack_delay_us.?, local.max_ack_delay_ms *| 1000);
     // RFC 9000 §7.3: every endpoint MUST advertise
     // `initial_source_connection_id`, set to the Source Connection ID it
     // put on its Initial packet. The connection already owns that value
@@ -3737,6 +3789,12 @@ pub fn validatePeerTransportLimits(self: *Connection) void {
         self.close(true, transport_error_transport_parameter, "peer stream count exceeds maximum");
         return;
     }
+    if (params.min_ack_delay_us) |min_ack_delay_us| {
+        if (min_ack_delay_us > params.max_ack_delay_ms *| 1000) {
+            self.close(true, transport_error_transport_parameter, "peer min_ack_delay above its max_ack_delay");
+            return;
+        }
+    }
     const peer_udp_limit: usize = @intCast(@min(params.max_udp_payload_size, max_supported_udp_payload_size));
     self.mtu = @min(self.mtu, peer_udp_limit);
     for (self.paths.paths.items) |*path| {
@@ -3890,14 +3948,143 @@ fn ackDelayDeadlineUs(
     tracker: *const AckTracker.AckTracker,
 ) ?u64 {
     const base_ms = tracker.ackDelayBaseMs() orelse return null;
-    return base_ms * RttEstimator.ms +| self.localMaxAckDelayUs();
+    return base_ms * RttEstimator.ms +| self.effectiveMaxAckDelayUs();
 }
 
 fn promoteDueAckDelay(self: *Connection, tracker: *AckTracker.AckTracker, now_us: u64) void {
     if (tracker.promoteDelayedAck(
         now_us / RttEstimator.ms,
-        self.local_transport_params.max_ack_delay_ms,
+        (self.effectiveMaxAckDelayUs() + RttEstimator.ms - 1) / RttEstimator.ms,
     )) self.touch();
+}
+
+/// The ack-eliciting packets an application packet's ACK waits for:
+/// the peer's ACK_FREQUENCY threshold plus one when a request is in
+/// force, `delayed_ack_packet_threshold` otherwise.
+// INTERNAL: pub for Connection/recv_packet_handlers.zig access; not part of the embedder API.
+pub fn effectiveAckThreshold(self: *const Connection) u8 {
+    if (self.peer_ack_frequency) |request| {
+        return @intCast(@min(request.ack_eliciting_threshold +| 1, std.math.maxInt(u8)));
+    }
+    return self.delayed_ack_packet_threshold;
+}
+
+/// The longest an application packet's ACK waits: the peer's request
+/// in force, our `max_ack_delay` otherwise.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
+pub fn effectiveMaxAckDelayUs(self: *const Connection) u64 {
+    if (self.peer_ack_frequency) |request| return request.max_ack_delay_us;
+    return self.localMaxAckDelayUs();
+}
+
+/// The reordering that asks for an immediate ACK: the peer's request
+/// in force, RFC 9000's one packet otherwise.
+// INTERNAL: pub for Connection/recv_packet_handlers.zig access; not part of the embedder API.
+pub fn effectiveReorderThreshold(self: *const Connection) u64 {
+    if (self.peer_ack_frequency) |request| return request.reordering_threshold;
+    return 1;
+}
+
+/// A peer's ACK_FREQUENCY frame. The request with the largest sequence
+/// number is in force; an older one is ignored. A requested delay
+/// below our `min_ack_delay` is a PROTOCOL_VIOLATION (the connection
+/// closes; false). The frame's validity for the level is checked by
+/// the dispatcher.
+// INTERNAL: pub for Connection/recv_dispatch.zig access; not part of the embedder API.
+pub fn handleAckFrequency(self: *Connection, af: frame_types.AckFrequency) bool {
+    const floor = self.local_transport_params.min_ack_delay_us orelse 0;
+    if (af.request_max_ack_delay_us < floor) {
+        self.close(true, transport_error_protocol_violation, "ACK_FREQUENCY below min_ack_delay");
+        return false;
+    }
+    if (self.peer_ack_frequency) |current| {
+        if (af.sequence_number <= current.sequence_number) return true;
+    }
+    self.peer_ack_frequency = .{
+        .sequence_number = af.sequence_number,
+        .ack_eliciting_threshold = af.ack_eliciting_threshold,
+        .max_ack_delay_us = af.request_max_ack_delay_us,
+        .reordering_threshold = af.reordering_threshold,
+    };
+    self.touch();
+    return true;
+}
+
+/// Ask the peer to acknowledge after `ack_eliciting_threshold` + 1
+/// ack-eliciting packets or `max_ack_delay_us` (raised to the peer's
+/// `min_ack_delay` if below it), and at once when a packet is reordered
+/// by `reordering_threshold` or more (0: never for reordering alone).
+/// The peer must have advertised `min_ack_delay`
+/// (`Error.AckFrequencyNotNegotiated` otherwise). The call takes the
+/// automatic policy over: the connection's `ack_frequency_policy`
+/// becomes `.off`.
+pub fn requestAckFrequency(
+    self: *Connection,
+    ack_eliciting_threshold: u64,
+    max_ack_delay_us: u64,
+    reordering_threshold: u64,
+) Error!void {
+    const params = self.cached_peer_transport_params orelse return Error.AckFrequencyNotNegotiated;
+    const peer_min = params.min_ack_delay_us orelse return Error.AckFrequencyNotNegotiated;
+    self.ack_frequency_policy = .off;
+    self.queueAckFrequency(ack_eliciting_threshold, @max(max_ack_delay_us, peer_min), reordering_threshold, self.clock_us);
+}
+
+/// Ask the peer to acknowledge the next packet at once (an
+/// IMMEDIATE_ACK frame rides it). The peer must have advertised
+/// `min_ack_delay`.
+pub fn requestImmediateAck(self: *Connection) Error!void {
+    const params = self.cached_peer_transport_params orelse return Error.AckFrequencyNotNegotiated;
+    if (params.min_ack_delay_us == null) return Error.AckFrequencyNotNegotiated;
+    self.pending_frames.immediate_ack = true;
+    self.touch();
+}
+
+fn queueAckFrequency(self: *Connection, threshold: u64, max_ack_delay_us: u64, reordering_threshold: u64, now_us: u64) void {
+    const request: frame_types.AckFrequency = .{
+        .sequence_number = self.ack_frequency_next_seq,
+        .ack_eliciting_threshold = threshold,
+        .request_max_ack_delay_us = max_ack_delay_us,
+        .reordering_threshold = reordering_threshold,
+    };
+    self.ack_frequency_next_seq +%= 1;
+    self.pending_frames.ack_frequency = request;
+    self.ack_frequency_last = request;
+    self.ack_frequency_last_sent_us = now_us;
+    self.touch();
+}
+
+/// The packets one acknowledgment should cover for a window of
+/// `cwnd_bytes`: one per `auto_ack_frequency_window_divisor` of the
+/// window, between the min and the max.
+pub fn autoAckFrequencyPackets(cwnd_bytes: u64, max_datagram_size: u64) u64 {
+    const packets = @max(cwnd_bytes / @max(max_datagram_size, 1), 1);
+    return @min(@max(packets / auto_ack_frequency_window_divisor, auto_ack_frequency_min_packets), auto_ack_frequency_max_packets);
+}
+
+/// The automatic policy (`ack_frequency_policy == .auto`): once the
+/// handshake is confirmed and the peer advertised `min_ack_delay`,
+/// ask for one ACK per `autoAckFrequencyPackets` packets; again when
+/// that count doubled or halved, once per round trip at most. The
+/// first request is skipped while the count is RFC 9000's two.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
+pub fn maybeAutoAckFrequency(self: *Connection, now_us: u64) void {
+    if (self.ack_frequency_policy != .auto) return;
+    if (!self.handshake_keys_discarded) return;
+    if (self.lifecycle.closed or self.lifecycle.pending_close != null) return;
+    const params = self.cached_peer_transport_params orelse return;
+    const peer_min = params.min_ack_delay_us orelse return;
+    const path = self.primaryPathConst();
+    const every = autoAckFrequencyPackets(path.path.cc.cwndBytes(), path.path.cc.config().max_datagram_size);
+    const threshold = every - 1;
+    if (self.ack_frequency_last) |last| {
+        if (threshold == last.ack_eliciting_threshold) return;
+        const doubled = threshold >= last.ack_eliciting_threshold *| 2;
+        const halved = last.ack_eliciting_threshold >= threshold *| 2;
+        if (!doubled and !halved) return;
+        if (now_us -| self.ack_frequency_last_sent_us < path.path.rtt.smoothed_rtt_us) return;
+    } else if (every <= auto_ack_frequency_min_packets) return;
+    self.queueAckFrequency(threshold, @max(self.localMaxAckDelayUs(), peer_min), 1, now_us);
 }
 
 // INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.

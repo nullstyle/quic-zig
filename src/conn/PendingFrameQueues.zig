@@ -155,6 +155,11 @@ alternative_addresses: std.ArrayList(PendingAlternativeAddress) = .empty,
 /// connection can `free` after sending.
 send_datagrams: std.ArrayList(PendingSendDatagram) = .empty,
 send_datagram_bytes: usize = 0,
+/// The Acknowledgement Frequency extension: an ACK_FREQUENCY request
+/// to send (the latest; a lost one is queued again while it is still
+/// the latest), and an IMMEDIATE_ACK to send once.
+ack_frequency: ?frame_types.AckFrequency = null,
+immediate_ack: bool = false,
 /// Inbound DATAGRAMs received but not yet pulled by the app.
 /// Each entry's `data` is allocator-owned.
 recv_datagrams: std.ArrayList(PendingRecvDatagram) = .empty,

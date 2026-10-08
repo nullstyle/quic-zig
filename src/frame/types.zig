@@ -308,6 +308,26 @@ pub const Datagram = struct {
 /// tag tells you the frame type; the payload carries its fields. Use
 /// `encode` / `decode` from this module to translate to and from wire
 /// bytes.
+/// ACK_FREQUENCY frame (the QUIC Acknowledgement Frequency
+/// extension, draft-ietf-quic-ack-frequency; type 0xaf). The peer's
+/// request: acknowledge after `ack_eliciting_threshold` + 1
+/// ack-eliciting packets or `request_max_ack_delay_us` microseconds,
+/// whichever comes first, and at once when a packet is reordered by
+/// `reordering_threshold` or more (0: reordering alone never asks for
+/// an immediate ACK). The request with the largest `sequence_number`
+/// is in force. Sent only to a peer that advertised `min_ack_delay`;
+/// only in 1-RTT packets.
+pub const AckFrequency = struct {
+    sequence_number: u64,
+    ack_eliciting_threshold: u64,
+    request_max_ack_delay_us: u64,
+    reordering_threshold: u64,
+};
+
+/// IMMEDIATE_ACK frame (the same extension; type 0x1f): the packet
+/// that carries it is acknowledged at once.
+pub const ImmediateAck = struct {};
+
 pub const Frame = union(enum) {
     padding: Padding,
     ping: Ping,
@@ -341,4 +361,6 @@ pub const Frame = union(enum) {
     path_cids_blocked: PathCidsBlocked,
     alternative_v4_address: AlternativeV4Address,
     alternative_v6_address: AlternativeV6Address,
+    ack_frequency: AckFrequency,
+    immediate_ack: ImmediateAck,
 };

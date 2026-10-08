@@ -44,6 +44,16 @@ refined before 1.0, but changes will be deliberate, called out in
 - **Lifecycle:** `beginGracefulShutdown` / `gracefulShutdownActive`,
   `close`, `ConnectionPhase`, `CloseState`, `CloseEvent`.
 - **Datagrams:** `sendDatagram` / `sendDatagramTracked`, `receiveDatagram`.
+- **Acknowledgement frequency** (since 0.37.0; draft-ietf-quic-ack-
+  frequency): `requestAckFrequency`, `requestImmediateAck`, the
+  `ack_frequency_policy` knob (`.auto` / `.off`, on `Client.Config`,
+  `Server.Config` and `Connection`) and the `min_ack_delay_us`
+  transport parameter (`TransportParams`; a connection advertises
+  `default_min_ack_delay_us` when it is left null). The receiving side
+  (honoring a peer's ACK_FREQUENCY and IMMEDIATE_ACK) is always on.
+  The draft's provisional codepoints are used (0xaf, 0x1f,
+  0xff04de1b); when the RFC assigns final ones a release moves to
+  them and says so here.
 - **0-RTT / early data:** `earlyDataStatus` (and the `EarlyDataStatus`
   enum), `earlyDataReason`, `setEarlyDataEnabled`,
   `streamArrivedInEarlyData`, `setEarlyDataContextForParams`, plus the

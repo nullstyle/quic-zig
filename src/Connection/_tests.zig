@@ -54,6 +54,7 @@ test {
     _ = @import("_tests_migration.zig");
     _ = @import("_tests_misc.zig");
     _ = @import("_tests_pacing.zig");
+    _ = @import("_tests_ack_frequency.zig");
     _ = @import("_tests_paths.zig");
     _ = @import("_tests_qlog.zig");
     _ = @import("_tests_recv.zig");

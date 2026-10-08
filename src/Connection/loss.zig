@@ -603,6 +603,16 @@ pub fn dispatchLostControlFramesOnPath(
                 conn.pending_handshake_done = true;
                 any = true;
             },
+            .ack_frequency => |af| {
+                // Only the latest request matters to the peer.
+                if (conn.ack_frequency_last) |last| {
+                    if (last.sequence_number == af.sequence_number and conn.pending_frames.ack_frequency == null) {
+                        conn.pending_frames.ack_frequency = af;
+                        conn.touch();
+                        any = true;
+                    }
+                }
+            },
             .stop_sending => |ss| {
                 try conn_streams.queueStopSending(conn, .{
                     .stream_id = ss.stream_id,

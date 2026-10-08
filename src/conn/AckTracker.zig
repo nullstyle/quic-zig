@@ -100,7 +100,10 @@ pub fn addPacket(self: *AckTracker, pn: u64, now_ms: u64, ack_eliciting: bool) v
 /// `quick_gap_us` is the quiet rule (`Connection.ack_quick_gap_us`):
 /// an ACK-eliciting packet that arrives that long or more after the
 /// previous one is acknowledged at once, whatever the threshold says;
-/// 0 turns the rule off.
+/// 0 turns the rule off. `reorder_threshold` is the Acknowledgement
+/// Frequency extension's: a packet that many or more behind the
+/// largest received, or a gap of that many above it, is acknowledged
+/// at once; 1 is RFC 9000's rule (any reordering), 0 none.
 pub fn addPacketDelayed(
     self: *AckTracker,
     pn: u64,
@@ -109,6 +112,7 @@ pub fn addPacketDelayed(
     packet_threshold: u8,
     now_us: u64,
     quick_gap_us: u64,
+    reorder_threshold: u64,
 ) void {
     const previous_largest = self.largest;
     const inserted = self.insert(pn);
@@ -135,7 +139,8 @@ pub fn addPacketDelayed(
     self.ack_eliciting_since_ack +|= 1;
 
     const reordered_or_gap = if (previous_largest) |largest|
-        pn < largest or pn > largest +| 1
+        reorder_threshold != 0 and
+            ((pn < largest and largest - pn >= reorder_threshold) or pn > largest +| reorder_threshold)
     else
         false;
     const threshold_reached = packet_threshold != 0 and
@@ -696,7 +701,7 @@ fn fuzzAckTracker(_: void, smith: *std.testing.Smith) anyerror!void {
                 const now = smith.value(u64);
                 const eliciting = smith.valueRangeAtMost(u8, 0, 1) == 1;
                 const threshold = smith.value(u8);
-                t.addPacketDelayed(pn, now, eliciting, threshold, now *% 1000, smith.valueRangeAtMost(u64, 0, 2_000));
+                t.addPacketDelayed(pn, now, eliciting, threshold, now *% 1000, smith.valueRangeAtMost(u64, 0, 2_000), 1);
             },
             3 => {
                 t.markAckSent();

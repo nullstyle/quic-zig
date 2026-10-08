@@ -758,6 +758,12 @@ delayed_ack_packet_threshold: u8 = conn_mod.state.application_ack_eliciting_thre
 /// Connection at slot-open time.
 ack_quick_gap_us: u64 = conn_mod.state.default_ack_quick_gap_us,
 
+/// See `Connection.ack_frequency_policy`: whether a connection asks a
+/// peer that supports the Acknowledgement Frequency extension for fewer
+/// acknowledgments in bulk (`.auto`, the default) or never (`.off`).
+/// The receiving side of the extension is always on.
+ack_frequency_policy: conn_mod.state.AckFrequencyPolicy = .auto,
+
 /// Handshake-liveness budget in milliseconds: a slot whose TLS
 /// handshake has not been confirmed within this long of opening is torn
 /// down (draining, then terminal `.closed`, so `reap` reclaims the

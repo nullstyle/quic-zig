@@ -70,6 +70,9 @@ pub const Id = struct {
     pub const max_datagram_frame_size: u64 = 0x20;
     /// RFC 9287 §3 — `grease_quic_bit` (zero-length flag).
     pub const grease_quic_bit: u64 = 0x2ab2;
+    /// draft-ietf-quic-ack-frequency — `min_ack_delay` (microseconds;
+    /// the provisional codepoint the draft registers).
+    pub const min_ack_delay: u64 = 0xff04de1b;
     /// draft-ietf-quic-multipath-21 §2.1
     pub const initial_max_path_id: u64 = 0x3e;
     /// draft-munizaga-quic-alternative-server-address-00 §4 / §10.1.
@@ -223,6 +226,16 @@ pub const Params = struct {
     /// 0x20 — RFC 9221: max datagram frame size accepted. 0 = no DATAGRAM support.
     max_datagram_frame_size: u64 = 0,
 
+    /// 0xff04de1b — the Acknowledgement Frequency extension's
+    /// `min_ack_delay`, in microseconds: the least the endpoint delays
+    /// an acknowledgment, and the floor on what the peer may ask for
+    /// with ACK_FREQUENCY. Null: absent, the extension not supported
+    /// (a peer's ACK_FREQUENCY would be a FRAME_ENCODING_ERROR). Must
+    /// not exceed `max_ack_delay_ms` in microseconds (a peer's that
+    /// does is a TRANSPORT_PARAMETER_ERROR). A connection advertises
+    /// `default_min_ack_delay_us` when this is left null.
+    min_ack_delay_us: ?u64 = null,
+
     /// 0x2ab2 — RFC 9287 §3 zero-length flag. When `true`, the
     /// endpoint advertises that it will accept long- or short-header
     /// packets whose QUIC Bit (bit 6 of the first byte) is 0. Once
@@ -340,6 +353,9 @@ pub const Params = struct {
         }
         if (self.max_datagram_frame_size != 0) {
             try sink.varintParam(Id.max_datagram_frame_size, self.max_datagram_frame_size);
+        }
+        if (self.min_ack_delay_us) |v| {
+            try sink.varintParam(Id.min_ack_delay, v);
         }
         if (self.grease_quic_bit) {
             try sink.flag(Id.grease_quic_bit);
@@ -743,6 +759,7 @@ fn setOne(p: *Params, id: u64, value: []const u8) Error!void {
         },
         Id.version_information => try setVersionInformation(p, value),
         Id.max_datagram_frame_size => p.max_datagram_frame_size = try decodeVarintValue(value),
+        Id.min_ack_delay => p.min_ack_delay_us = try decodeVarintValue(value),
         Id.grease_quic_bit => {
             // RFC 9287 §3: "An endpoint that includes this transport
             // parameter MUST send it with an empty value." A non-empty
@@ -807,6 +824,7 @@ test "round-trip with the parameters a typical client advertises" {
         .active_connection_id_limit = 4,
         .initial_source_connection_id = scid,
         .max_datagram_frame_size = 1200,
+        .min_ack_delay_us = 1_000,
         .initial_max_path_id = 2,
     };
 
@@ -825,6 +843,7 @@ test "round-trip with the parameters a typical client advertises" {
     try testing.expectEqual(sent.max_udp_payload_size, got.max_udp_payload_size);
     try testing.expectEqual(sent.active_connection_id_limit, got.active_connection_id_limit);
     try testing.expectEqual(sent.max_datagram_frame_size, got.max_datagram_frame_size);
+    try testing.expectEqual(sent.min_ack_delay_us, got.min_ack_delay_us);
     try testing.expectEqual(sent.initial_max_path_id, got.initial_max_path_id);
     try testing.expectEqualSlices(u8, scid.slice(), got.initial_source_connection_id.?.slice());
 }

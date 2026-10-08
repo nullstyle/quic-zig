@@ -245,6 +245,12 @@ pub const Config = struct {
     /// arrives this long (microseconds) or more after the previous one
     /// is acknowledged at once; 0 turns the rule off.
     ack_quick_gap_us: u64 = conn_mod.state.default_ack_quick_gap_us,
+    /// See `Connection.ack_frequency_policy`: whether the connection
+    /// asks a peer that supports the Acknowledgement Frequency
+    /// extension for fewer acknowledgments in bulk (`.auto`, the
+    /// default) or never (`.off`). The receiving side of the extension
+    /// is always on.
+    ack_frequency_policy: conn_mod.state.AckFrequencyPolicy = .auto,
 
     /// Handshake-liveness budget in milliseconds: if the TLS
     /// handshake has not been confirmed within this long of `connect`,
@@ -697,6 +703,7 @@ pub fn connect(config: Config) Error!Client {
         .max_connection_receive_window = config.max_connection_receive_window,
         .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
         .ack_quick_gap_us = config.ack_quick_gap_us,
+        .ack_frequency_policy = config.ack_frequency_policy,
         .ecn_enabled = config.enable_ecn,
         .pmtud = config.pmtud,
         .congestion_control = config.congestion_control,

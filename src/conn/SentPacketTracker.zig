@@ -55,6 +55,9 @@ pub const RetransmitFrame = union(enum) {
     alternative_v4_address: frame_types.AlternativeV4Address,
     /// ALTERNATIVE_V6_ADDRESS retransmit slot.
     alternative_v6_address: frame_types.AlternativeV6Address,
+    /// ACK_FREQUENCY retransmit slot (queued again while it is still
+    /// the latest request).
+    ack_frequency: frame_types.AckFrequency,
 };
 
 /// Inline NEW_TOKEN payload for `RetransmitFrame.new_token`. Mirrors

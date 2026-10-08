@@ -43,6 +43,10 @@ pub const frame_type_alternative_v4_address: u64 = 0x1d5845e2;
 /// Frame type for ALTERNATIVE_V6_ADDRESS
 /// (draft-munizaga-quic-alternative-server-address-00 §6).
 pub const frame_type_alternative_v6_address: u64 = 0x1d5845e3;
+/// Frame types of the Acknowledgement Frequency extension
+/// (draft-ietf-quic-ack-frequency): ACK_FREQUENCY and IMMEDIATE_ACK.
+pub const frame_type_ack_frequency: u64 = 0xaf;
+pub const frame_type_immediate_ack: u64 = 0x1f;
 
 /// Writes `frame` to the start of `dst` and returns the number of
 /// bytes written. Returns `error.BufferTooSmall` if `dst` doesn't have
@@ -58,6 +62,8 @@ pub fn encode(dst: []u8, frame: Frame) Error!usize {
         .new_token => |f| encodeNewToken(dst, f),
         .stream => |f| encodeStream(dst, f),
         .max_data => |f| encodeSingleVarint(dst, 0x10, f.maximum_data),
+        .ack_frequency => |f| encodeAckFrequency(dst, f),
+        .immediate_ack => writeFrameType(dst, frame_type_immediate_ack),
         .max_stream_data => |f| encodeMaxStreamData(dst, f),
         .max_streams => |f| encodeSingleVarint(dst, if (f.bidi) 0x12 else 0x13, f.maximum_streams),
         .data_blocked => |f| encodeSingleVarint(dst, 0x14, f.maximum_data),
@@ -102,6 +108,12 @@ pub fn encodedLen(frame: Frame) usize {
             varint.encodedLen(f.stream_id) +
             varint.encodedLen(f.application_error_code) +
             varint.encodedLen(f.final_size),
+        .ack_frequency => |f| varint.encodedLen(frame_type_ack_frequency) +
+            varint.encodedLen(f.sequence_number) +
+            varint.encodedLen(f.ack_eliciting_threshold) +
+            varint.encodedLen(f.request_max_ack_delay_us) +
+            varint.encodedLen(f.reordering_threshold),
+        .immediate_ack => varint.encodedLen(frame_type_immediate_ack),
         .stop_sending => |f| 1 +
             varint.encodedLen(f.stream_id) +
             varint.encodedLen(f.application_error_code),
@@ -215,6 +227,15 @@ fn encodeResetStream(dst: []u8, f: types.ResetStream) Error!usize {
     pos += try varint.encode(dst[pos..], f.stream_id);
     pos += try varint.encode(dst[pos..], f.application_error_code);
     pos += try varint.encode(dst[pos..], f.final_size);
+    return pos;
+}
+
+fn encodeAckFrequency(dst: []u8, f: types.AckFrequency) Error!usize {
+    var pos = try writeFrameType(dst, frame_type_ack_frequency);
+    pos += try varint.encode(dst[pos..], f.sequence_number);
+    pos += try varint.encode(dst[pos..], f.ack_eliciting_threshold);
+    pos += try varint.encode(dst[pos..], f.request_max_ack_delay_us);
+    pos += try varint.encode(dst[pos..], f.reordering_threshold);
     return pos;
 }
 
@@ -538,6 +559,13 @@ test "encodedLen agrees with bytes written for several frames" {
         } },
         .{ .crypto = .{ .offset = 0, .data = "hello world" } },
         .{ .handshake_done = .{} },
+        .{ .ack_frequency = .{
+            .sequence_number = 3,
+            .ack_eliciting_threshold = 31,
+            .request_max_ack_delay_us = 25_000,
+            .reordering_threshold = 1,
+        } },
+        .{ .immediate_ack = .{} },
     };
     for (cases) |f| {
         var buf: [256]u8 = undefined;
@@ -624,9 +652,16 @@ fn fuzzFrameRoundTrip(_: void, smith: *std.testing.Smith) anyerror!void {
     smith.bytes(&v6_addr);
     const flags_byte = smith.value(u8);
 
-    const frame: Frame = switch (smith.valueRangeAtMost(u8, 0, 34)) {
+    const frame: Frame = switch (smith.valueRangeAtMost(u8, 0, 36)) {
         0 => .{ .padding = .{ .count = smith.valueRangeAtMost(u8, 1, 16) } },
         1 => .{ .ping = .{} },
+        35 => .{ .ack_frequency = .{
+            .sequence_number = value % 4096,
+            .ack_eliciting_threshold = value % 256,
+            .request_max_ack_delay_us = value % 100_000,
+            .reordering_threshold = value % 8,
+        } },
+        36 => .{ .immediate_ack = .{} },
         2 => .{ .handshake_done = .{} },
         3 => .{ .reset_stream = .{
             .stream_id = value,

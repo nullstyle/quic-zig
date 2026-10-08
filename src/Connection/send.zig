@@ -76,6 +76,7 @@ pub fn canSend(conn: *const Connection) bool {
     if (conn.pending_frames.path_cids_blocked != null) return true;
     if (conn.pending_frames.alternative_addresses.items.len > 0) return true;
     if (conn.pending_frames.send_datagrams.items.len > 0) return true;
+    if (conn.pending_frames.ack_frequency != null or conn.pending_frames.immediate_ack) return true;
     var it = conn.streams.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.*.send.hasPendingChunk()) return true;
@@ -109,6 +110,7 @@ pub fn pollDatagram(
     conn.clock_us = @max(conn.clock_us, now_us);
     if (conn.lifecycle.closed and conn.lifecycle.pending_close == null) return null;
     conn.queueHandshakeDoneIfReady();
+    conn.maybeAutoAckFrequency(now_us);
     // A connection at rest has nothing to send: it answers here instead
     // of in the builder below. The first time, with one walk of its
     // queues (`atRest`), which also primes the rest deadline; from
@@ -1266,6 +1268,25 @@ pub fn pollLevelOnPath(
         if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .stop_sending = ss })) {
             try sent_packet.addRetransmitFrame(conn.allocator, .{ .stop_sending = ss });
             _ = conn.pending_frames.stop_sending.orderedRemove(0);
+            ack_eliciting = true;
+        }
+    }
+
+    // 2c2) ACK_FREQUENCY / IMMEDIATE_ACK (application only; the
+    //      Acknowledgement Frequency extension). ACK_FREQUENCY is
+    //      queued again when lost while it is still the latest
+    //      request; IMMEDIATE_ACK is not (its packet's loss is moot).
+    if (app_control and conn.pending_frames.ack_frequency != null) {
+        const af = conn.pending_frames.ack_frequency.?;
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .ack_frequency = af })) {
+            try sent_packet.addRetransmitFrame(conn.allocator, .{ .ack_frequency = af });
+            conn.pending_frames.ack_frequency = null;
+            ack_eliciting = true;
+        }
+    }
+    if (app_control and conn.pending_frames.immediate_ack) {
+        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .immediate_ack = .{} })) {
+            conn.pending_frames.immediate_ack = false;
             ack_eliciting = true;
         }
     }

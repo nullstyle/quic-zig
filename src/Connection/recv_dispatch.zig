@@ -375,6 +375,7 @@ fn isImmediateAckFrame(f: frame_types.Frame) bool {
         .stream => |s| s.fin,
         .reset_stream,
         .stop_sending,
+        .immediate_ack,
         => true,
         else => false,
     };
@@ -417,6 +418,7 @@ pub fn recordApplicationReceivedPacket(
     cls: PayloadClassification,
     delayed_ack_threshold: u8,
     quick_gap_us: u64,
+    reorder_threshold: u64,
 ) void {
     if (cls.ack_eliciting and cls.needs_immediate_ack) {
         app_pn_space.recordReceivedPacket(pn, now_us / RttEstimator.ms, true);
@@ -429,6 +431,7 @@ pub fn recordApplicationReceivedPacket(
         delayed_ack_threshold,
         now_us,
         quick_gap_us,
+        reorder_threshold,
     );
 }
 
@@ -614,6 +617,19 @@ pub fn dispatchFrames(
             conn.close(true, transport_error_protocol_violation, "multipath frame outside 1-RTT");
             return;
         }
+        // The Acknowledgement Frequency extension: its frames only in
+        // 1-RTT packets, and only from a peer we told about it (our
+        // `min_ack_delay`; a connection always advertises one).
+        if (f == .ack_frequency or f == .immediate_ack) {
+            if (lvl != .application) {
+                conn.close(true, transport_error_protocol_violation, "ACK_FREQUENCY frame outside 1-RTT");
+                return;
+            }
+            if (conn.local_transport_params.min_ack_delay_us == null) {
+                conn.close(true, transport_error_protocol_violation, "ACK_FREQUENCY frame without min_ack_delay");
+                return;
+            }
+        }
         if (lvl == .application and isMultipathFrame(f) and !conn.multipathNegotiated()) {
             conn.close(true, transport_error_protocol_violation, "multipath frame without negotiation");
             return;
@@ -644,6 +660,11 @@ pub fn dispatchFrames(
         }
         switch (f) {
             .padding, .ping => {},
+            // Applied by the packet's classification (an immediate ACK).
+            .immediate_ack => {},
+            .ack_frequency => |af| {
+                if (!conn.handleAckFrequency(af)) return;
+            },
             .handshake_done => {
                 // RFC 9001 §4.1.2 ¶2: client confirms the handshake
                 // on receipt of HANDSHAKE_DONE. The validity gate

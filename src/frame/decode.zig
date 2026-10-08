@@ -28,6 +28,8 @@ const frame_type_max_path_id: u64 = 0x3e7a;
 const frame_type_paths_blocked: u64 = 0x3e7b;
 const frame_type_path_cids_blocked: u64 = 0x3e7c;
 const frame_type_alternative_v4_address: u64 = 0x1d5845e2;
+const frame_type_ack_frequency: u64 = 0xaf;
+const frame_type_immediate_ack: u64 = 0x1f;
 const frame_type_alternative_v6_address: u64 = 0x1d5845e3;
 
 /// Errors `decode` can return. Wire-level varint/CID errors plus:
@@ -104,6 +106,8 @@ pub fn decode(src: []const u8) Error!Decoded {
         0x07 => decodeNewToken(src, start),
         0x08...0x0f => decodeStream(src, start, @intCast(frame_type)),
         0x10 => decodeMaxData(src, start),
+        frame_type_ack_frequency => decodeAckFrequency(src, start),
+        frame_type_immediate_ack => .{ .frame = .{ .immediate_ack = .{} }, .bytes_consumed = start },
         0x11 => decodeMaxStreamData(src, start),
         0x12 => decodeMaxStreams(src, start, true),
         0x13 => decodeMaxStreams(src, start, false),
@@ -401,6 +405,27 @@ fn decodeNewToken(src: []const u8, start: usize) Error!Decoded {
     pos += token.len;
     return .{
         .frame = .{ .new_token = .{ .token = token } },
+        .bytes_consumed = pos,
+    };
+}
+
+fn decodeAckFrequency(src: []const u8, start: usize) Error!Decoded {
+    var pos = start;
+    const seq = try varint.decode(src[pos..]);
+    pos += seq.bytes_read;
+    const threshold = try varint.decode(src[pos..]);
+    pos += threshold.bytes_read;
+    const delay = try varint.decode(src[pos..]);
+    pos += delay.bytes_read;
+    const reorder = try varint.decode(src[pos..]);
+    pos += reorder.bytes_read;
+    return .{
+        .frame = .{ .ack_frequency = .{
+            .sequence_number = seq.value,
+            .ack_eliciting_threshold = threshold.value,
+            .request_max_ack_delay_us = delay.value,
+            .reordering_threshold = reorder.value,
+        } },
         .bytes_consumed = pos,
     };
 }
@@ -746,6 +771,34 @@ fn decodeAlternativeV6Address(src: []const u8, start: usize) Error!Decoded {
 
 test "decode rejects empty input" {
     try std.testing.expectError(Error.InsufficientBytes, decode(""));
+}
+
+test "ACK_FREQUENCY and IMMEDIATE_ACK round-trip through encode and decode" {
+    const encode_mod = @import("encode.zig");
+    var buf: [64]u8 = undefined;
+    const af: Frame = .{ .ack_frequency = .{
+        .sequence_number = 7,
+        .ack_eliciting_threshold = 63,
+        .request_max_ack_delay_us = 25_000,
+        .reordering_threshold = 0,
+    } };
+    const n = try encode_mod.encode(&buf, af);
+    // 0xaf is a two-byte varint type (0x40 0xaf), then 1 + 1 + 4 + 1 bytes of fields.
+    try std.testing.expectEqual(@as(usize, 9), n);
+    try std.testing.expectEqualSlices(u8, &.{ 0x40, 0xaf }, buf[0..2]);
+    const d = try decode(buf[0..n]);
+    try std.testing.expectEqual(n, d.bytes_consumed);
+    try std.testing.expectEqual(@as(u64, 7), d.frame.ack_frequency.sequence_number);
+    try std.testing.expectEqual(@as(u64, 63), d.frame.ack_frequency.ack_eliciting_threshold);
+    try std.testing.expectEqual(@as(u64, 25_000), d.frame.ack_frequency.request_max_ack_delay_us);
+    try std.testing.expectEqual(@as(u64, 0), d.frame.ack_frequency.reordering_threshold);
+
+    const m = try encode_mod.encode(&buf, .{ .immediate_ack = .{} });
+    try std.testing.expectEqual(@as(usize, 1), m);
+    try std.testing.expectEqual(@as(u8, 0x1f), buf[0]);
+    const e = try decode(buf[0..m]);
+    try std.testing.expect(e.frame == .immediate_ack);
+    try std.testing.expectEqual(@as(usize, 1), e.bytes_consumed);
 }
 
 test "decode rejects unknown frame type" {
