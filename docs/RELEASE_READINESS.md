@@ -1404,6 +1404,63 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.34.0: the CPU-per-packet release
+
+v0.34.0 (tag `76c9296`, 2026-10-08) is the "CPU per packet" sprint,
+the first of three the owner ordered before any downstream move. The
+engine moves the same bytes in a little over half the CPU: the
+in-process goodput bench (64 MiB on one stream, both endpoints in one
+thread, no sockets, ReleaseSafe) went from 547.8 MB/s to 988.0 MB/s
+(+80%), the loopback smoke (real UDP on macOS, one datagram per
+syscall) from 122.8 to 133.4 MB/s. A `sample` profile found 35% of
+the CPU in copies and fills: Zig 0.17 fills an `undefined` local with
+0xAA in ReleaseSafe as well as in Debug, and three 4 KB locals on the
+packet paths were 13% of the CPU on their own; a struct with a 4 KB
+array inline made every `.{}` a template copy (4.5%); the send buffer
+moved its live bytes to the front of its allocation on nearly every
+write (12%); the keys were copied per packet (2%). The packet paths
+use a `threadlocal` scratch (about 21 KB per thread, nothing per
+connection), the send buffer is a ring with packetization unchanged,
+a packet's keys go by pointer, the pacer computes in 64 bits when the
+product fits, and the receive stream zeroes only a gap. No wire
+change, no knob; the 27 bench cells are byte-identical to v0.33.0.
+Two signature changes for raw-`Connection` embedders (`packetKeys`
+returns a pointer; `SendStream.bytes` is a ring). Measured and not
+shipped: acknowledging every second packet (+10% in bulk, 25% more
+datagrams in strict ping-pong) and a cached sendable-stream list
+(nothing measurable).
+
+Local before the tag (`tools/release.sh 0.34.0` on c02fe0b): the full
+suite 2,022 of 2,038 (16 skipped), `just check-windows` 15/15, `just
+check-x86` 15/15, eight mutants of the new rules (five killed on the
+first run; the ring's growth while its bytes wrap and the pacer's
+128-bit fallback survived and got tests, then killed; the receive
+gap's zeroing is unobservable by design: no read returns a gap byte),
+the 27 bench cells byte-identical to v0.33.0.
+
+**The gates on `76c9296`**, each read at its evidence line.
+
+- `test` (run 37734236463): seven jobs; the sanitizer job 2,037 of
+  2,053 (16 skipped); macos-26, macos-15, ubuntu x86 and ubuntu arm
+  2,037 of 2,053 in Debug and 1,997 of 2,013 in ReleaseSafe;
+  windows-latest 1,974 of 2,013 (39 skipped) in both modes;
+  x86-linux-musl 2,037 of 2,053.
+- rc-fuzz (run 37734238708): `n_runs=2,318,073 unique_runs=11,478
+  pcs_len=45732`, `coverage verified: instrumented, 2,318,073
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37734236536): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37734236442): built and pushed from that commit.
+- pin-lint (run 37734236443): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The wide interop matrix: not run for this tag (no wire or
+  flow-control change; the 27 bench cells are byte-identical to
+  v0.33.0, whose matrix stands).
+
+- The package hash of the tag's archive:
+  `quic-0.34.0-DnSYvV-RPQDWpFMKpVCpvBE9bvdzDxb-vwMLwRFWtdix`.
+- NOT a downstream move (owner decision 2026-10-08: three sprints
+  first); the draft note is in the handoff dir.
+
 ## v0.33.0: the line-rate release
 
 v0.33.0 (tag `712ac23`, 2026-10-08) is the "line rate by default"
