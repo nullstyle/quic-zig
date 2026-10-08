@@ -1404,6 +1404,89 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.36.0: the many-connections release
+
+v0.36.0 (tag `6e861e7`, 2026-10-08) is the third of the four sprints
+the owner ordered before any downstream move ("many connections": a
+server with thousands of connections, most of them idle). Three
+tracks, each measured on `bench-e2e --scenario connections` (new: N
+server connections in memory, 10 active) and the churn cells.
+
+Memory: one idle server connection held 91,889 bytes on the Zig heap
+after its handshake (196,568 at the handshake's peak), for nothing:
+51,200 were the application sent-packet tracker's 256 initial slots
+(0 to 3 packets in flight), 12,240 the three ACK trackers' 255 inline
+ranges each (one in use), 5,424 a second path slot never used, 5,184
+four event queues most connections never push to. The tracker starts
+at 16 slots and gives a storage above 64 back when empty (a
+connection idle after a bulk transfer no longer holds 3.2 MB); the
+ACK tracker keeps eight ranges inline and takes a heap block of 255
+when a path reorders or loses; the path list holds one path exactly;
+the event queues are one heap block at the first event: 22,132 bytes
+idle, 30,232 at the peak.
+
+The loop: every embedder sweeps every slot once per iteration
+(`Server.tick`, `nextTimerDeadline`, an empty `pollDatagram` each;
+qmsg's `drainOutbound` even scans from slot 0 per datagram): 429 us
+per pass for 1,000 idle connections, 3,488 at 4,000, where the state
+no longer fits a cache. First a connection at rest (handshake
+confirmed, nothing to send, no ACK owed or armed, no probe) keeps its
+next deadline until `touch` (28 frame-queue write sites, the stream
+transitions, inbound datagrams, sent packets, fired timers): 356 us,
+the rest two or three cache misses per slot and call. So the Server
+grew a ready list and a timer heap (`takeReady`, `peekReady`,
+`slotDrained`, `tickDue`, `nextDeadline`; `Connection.wake_hook` per
+slot; stale entries by generation; a reaped slot leaves the heap and
+the lists; OOM degrades to the sweep): an idle pass 0 us at 1,000
+and 4,000; one request among 1,000 idle 131 -> 15 us, among 4,000
+1,233 -> 69. The bundled `runUdpServer` and the foreign-loop example
+run on it.
+
+Many streams: the packet builder walked every stream of the
+connection for every packet and insertion-sorted into 32 slots; with
+4,096 requests open on one connection the engine's poll cost 16 us
+per stream against 4 at 256. The sendable streams are a list in RFC
+9218 order kept at the eleven transitions of a send half; the builder
+takes its first 32 with the round-robin rotation per urgency group:
+6.9 us at 4,096, 2.4 at 1,024 (was 5.6).
+
+Every shortcut is checked in a Debug build on every call (the full
+path runs too and asserts the shortcut: the rest state, the sendable
+list against the walk), and the cell gate caught what the suite did
+not: the time-threshold loss detection requeued stream data through a
+function the touch did not cover; two reorder cells came back two
+datagrams short (a retransmission one tick late) until the touch
+moved into it. Every one of the 28 cells is byte-identical to
+v0.35.0. Nothing on the wire changes.
+
+Local before the tag (`tools/release.sh 0.36.0`): on 9e84db8, the full suite 36/36 steps (2,030 of 2,046, 16 skipped), `just check-windows` 15/15, `just check-x86` 15/15; before it every one of the 28 bench cells byte-identical to v0.35.0 (cells-mc-loop2.txt against v0.35.0's cells-b-t2.txt; the three new churn cells beside them), seven mutants of the new rules (six killed: the ready flag kept on take, the sendable list never removing, rest during the handshake, a stale heap entry ticked, a reaped slot's entries kept; the one that survives, the lost-packet requeue without `touch`, is the rule the cell gate caught in ReleaseSafe, since the test's lost packet carries a control frame whose requeue touches by itself), the connections bench and the churn cells as in the tables above.
+
+**The gates on `6e861e7`**, each read at its evidence line.
+
+- `test` (run 37805135171): seven jobs green; macos-26, macos-15,
+  ubuntu x86 and ubuntu arm 2,045 of 2,061 (16 skipped) in Debug and
+  2,005 of 2,021 in ReleaseSafe; x86-linux-musl and the sanitizer job
+  2,045 of 2,061; windows-latest 1,982 of 2,021 (39 skipped) in both
+  modes; `consumer-smoke ok: quic-zig 0.36.0`, `check-modes: 6 of 6`.
+- rc-fuzz (run 37805140407): `n_runs=2,780,567 unique_runs=8,683
+  pcs_len=46693`, `coverage verified: instrumented, 2,780,567
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37805135321): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37805137907): built and pushed from that commit.
+- pin-lint (run 37805135229): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The wide local interop matrix on the tag's image (the server loop
+  changed: the bundled `runUdpServer` runs on the ready API), after
+  the tag: server role `pairs=3 cells=45 succeeded=41 failed=0
+  unsupported=4` (unsupported: quic-go ecn, quiche chacha20, keyupdate
+  and ecn, as on every release; the two quiche chance cells,
+  multiplexing and handshakecorruption, passed on the first run);
+  client role `pairs=3 cells=45 succeeded=42 failed=1 unsupported=2` (the one failed is the known quiche handshakeloss chance cell: 4 of 5 on a rerun, against 3 of 5 on the v0.35.0 image and 4 of 5 on v0.33.0; the two ECN cells unsupported). The same counts as the v0.33.0 and v0.35.0 matrices, the server role two better.
+
+- The package hash of the tag's archive: `quic-0.36.0-DnSYvWOFPgBbO4FU_YoLAzfWbeJXCtnjBkokNxUkdPzP`.
+- NOT a downstream move (owner decision 2026-10-08: four sprints
+  first); the draft note is in the handoff dir.
+
 ## v0.35.0: the reordering release
 
 v0.35.0 (tag `a6fa45f`, 2026-10-08) is sprint B ("CUBIC after a
