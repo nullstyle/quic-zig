@@ -128,6 +128,7 @@ fn materializeStream(conn: *Connection, id: u64, max_hole_ranges: usize) Error!*
         .send = SendStream.init(conn.allocator),
         .recv = RecvStream.init(conn.allocator),
         .recv_max_data = initialRecvStreamLimit(conn, id),
+        .recv_window = initialRecvStreamLimit(conn, id),
         .send_max_data = initialSendStreamLimit(conn, id),
     };
     // The connection's send buffer size at the open is the stream's
@@ -857,13 +858,61 @@ fn afterStreamConsume(
         // 4 MiB. MEASURED 2026-10-07 (`impairment_clean_1gbit_rtt20ms`,
         // 8 MiB, bbr, the harness announcing 4 MiB): with the credit
         // falling back to the default's 1 MiB the sender held 546 KB
-        // in flight, 361 ms; 285 ms with the announced window.
-        const window = initialRecvStreamLimit(conn, id);
+        // in flight, 361 ms; 285 ms with the announced window. And
+        // since v0.33.0 the window tunes itself for a reader that
+        // keeps up (`tuneWindow`).
+        const grew = tuneWindow(conn, &s.recv_window, &s.recv_epoch_start_offset, &s.recv_epoch_start_us, s.recv.read_offset, conn.max_stream_receive_window);
+        if (grew) {
+            // A connection window at least one and a half times any
+            // stream's, so the stream's growth is not held back at the
+            // connection level (quic-go's coupling).
+            const floor = @min(s.recv_window +| s.recv_window / 2, conn.max_connection_receive_window);
+            if (conn.conn_recv_window < floor) conn.conn_recv_window = floor;
+        }
+        const window = s.recv_window;
         if (Connection.shouldQueueReceiveCredit(s.recv.read_offset, s.recv_max_data, window)) {
             try conn_flow.queueMaxStreamData(conn, id, s.recv.read_offset +| window);
         }
         creditConnectionRecvWindow(conn, n);
     }
+}
+
+/// The receive windows' self-tuning (since v0.33.0), the rule quic-go
+/// and Chromium use: an epoch starts when the reader has consumed
+/// half the window; at the next half, if that took less than two
+/// round trips (four times the consumed fraction of the window, times
+/// the smoothed RTT, in general), the window doubles, up to `cap`.
+/// `window`, `epoch_start_offset` and `epoch_start_us` are the stream's
+/// or the connection's; `consumed` is its read offset or bytes read.
+/// The clock is `Connection.clock_us` (the last `handle`, `poll` or
+/// `tick`), since a read has no time of its own. Returns true when
+/// the window grew. Off (`auto_tune_receive_windows` false) nothing
+/// moves: the announced window stays, v0.32.0's behavior.
+fn tuneWindow(
+    conn: *const Connection,
+    window: *u64,
+    epoch_start_offset: *u64,
+    epoch_start_us: *u64,
+    consumed: u64,
+    cap: u64,
+) bool {
+    if (!conn.auto_tune_receive_windows) return false;
+    const consumed_in_epoch = consumed -| epoch_start_offset.*;
+    if (consumed_in_epoch < window.* / 2) return false;
+    const now = conn.clock_us;
+    defer {
+        epoch_start_offset.* = consumed;
+        epoch_start_us.* = now;
+    }
+    // The first half window only starts the clock.
+    if (epoch_start_us.* == 0) return false;
+    const srtt = conn.rttForLevelConst(.application).smoothed_rtt_us;
+    const elapsed = now -| epoch_start_us.*;
+    // Fast enough: elapsed < 4 * (consumed_in_epoch / window) * srtt.
+    const budget = std.math.lossyCast(u64, (@as(u128, 4) * consumed_in_epoch * srtt) / @max(window.*, 1));
+    if (elapsed >= budget or window.* >= cap) return false;
+    window.* = @min(window.* *| 2, cap);
+    return true;
 }
 
 /// `n` bytes of stream data are done with on the receive side: give
@@ -880,8 +929,11 @@ fn afterStreamConsume(
 pub fn creditConnectionRecvWindow(conn: *Connection, n: u64) void {
     if (n == 0) return;
     conn.recv_stream_bytes_read += n;
-    // The announced connection window, as for a stream above.
-    const window = conn.local_transport_params.initial_max_data;
+    // The connection window: the announced one at the start, tuned
+    // since v0.33.0 as a stream's is (`tuneWindow`), and never under
+    // one and a half times a stream's that grew.
+    _ = tuneWindow(conn, &conn.conn_recv_window, &conn.conn_epoch_start_read, &conn.conn_epoch_start_us, conn.recv_stream_bytes_read, conn.max_connection_receive_window);
+    const window = conn.conn_recv_window;
     if (Connection.shouldQueueReceiveCredit(conn.recv_stream_bytes_read, conn.local_max_data, window)) {
         conn_flow.queueMaxData(conn, conn.recv_stream_bytes_read +| window);
     }

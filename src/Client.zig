@@ -220,6 +220,13 @@ pub const Config = struct {
     /// has. Default `Connection.default_max_buffered_send` (1 MiB).
     max_buffered_send: usize = Connection.default_max_buffered_send,
 
+    /// The receive windows tune themselves (`Connection.auto_tune_receive_windows`):
+    /// a window doubles for a reader that keeps up, up to these caps;
+    /// off keeps the announced windows.
+    auto_tune_receive_windows: bool = true,
+    max_stream_receive_window: u64 = Connection.default_max_stream_receive_window,
+    max_connection_receive_window: u64 = Connection.default_max_connection_receive_window,
+
     /// Number of ack-eliciting application packets the client requires
     /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
     /// matches `quic.conn.state.application_ack_eliciting_threshold`.
@@ -672,6 +679,9 @@ pub fn connect(config: Config) Error!Client {
         .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
         .max_connection_memory = config.max_connection_memory,
         .max_buffered_send = config.max_buffered_send,
+        .auto_tune_receive_windows = config.auto_tune_receive_windows,
+        .max_stream_receive_window = config.max_stream_receive_window,
+        .max_connection_receive_window = config.max_connection_receive_window,
         .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
         .ecn_enabled = config.enable_ecn,
         .pmtud = config.pmtud,

@@ -198,6 +198,24 @@ max_connection_memory: u64 = default_max_connection_memory,
 /// before a change keeps its own `send.max_buffered`.
 max_buffered_send: usize = default_max_buffered_send,
 
+/// The receive windows tune themselves (since v0.33.0, the rule
+/// quic-go and Chromium use): when a credit is due and the application
+/// read the last half window in less than two round trips, the window
+/// doubles, up to `max_stream_receive_window` for a stream and
+/// `max_connection_receive_window` for the connection; a connection
+/// window stays at least one and a half times any stream's. A reader
+/// that keeps up on a fat path gets the path's rate with no
+/// configuration; a slow reader's window never grows. Off, the window
+/// an endpoint announced is the one it keeps (v0.32.0's behavior).
+/// The caps are the memory safety: a peer may fill a window the
+/// application has not read, bounded in all by `max_connection_memory`.
+/// MEASURED 2026-10-07 (bench cell `impairment_clean_1gbit_rtt20ms_defaults`,
+/// 8 MiB on one stream over 1 Gbit with a 20 ms round trip, bbr, the
+/// defaults announced): see the cell's comment for the numbers.
+auto_tune_receive_windows: bool = true,
+max_stream_receive_window: u64 = default_max_stream_receive_window,
+max_connection_receive_window: u64 = default_max_connection_receive_window,
+
 /// Number of ack-eliciting application packets received before
 /// forcing an immediate ACK (RFC 9000 §13.2.1 ¶2: "An endpoint
 /// MUST acknowledge ack-eliciting packets within its advertised
@@ -745,6 +763,11 @@ early_data_rejection_processed: bool = false,
 /// (`Server.Config.stateless_reset_key`) still end a dead instance's
 /// orphans on their first probe, sooner than that.
 last_activity_us: u64 = 0,
+/// The latest time this connection was given (`handle`, `poll`,
+/// `tick`): the clock the application-side paths (a stream read, a
+/// credit decision) use when they have no time of their own.
+/// Monotonic: a smaller time does not move it back.
+clock_us: u64 = 0,
 /// RFC 9000 §10.1 ¶3: a send restarts the idle timer only "if no
 /// other ack-eliciting packets have been sent since last receiving
 /// and processing a packet". Set by that first send, cleared by a
@@ -838,6 +861,12 @@ peer_streams_blocked_bidi: ?u64 = null,
 peer_streams_blocked_uni: ?u64 = null,
 /// Bytes the application has drained from all receive streams.
 recv_stream_bytes_read: u64 = 0,
+/// The connection-level receive window kept open (`initial_max_data`
+/// at the start, then tuned: see `auto_tune_receive_windows`), and the
+/// tune's epoch: the bytes read and the clock when it started.
+conn_recv_window: u64 = 0,
+conn_epoch_start_read: u64 = 0,
+conn_epoch_start_us: u64 = 0,
 
 /// All control-frame backlog the connection owes the peer at the
 /// application encryption level — flow-control window updates,
@@ -1137,6 +1166,12 @@ pub const Stream = struct {
     /// Current stream-level receive limit we have advertised for this
     /// stream via transport params / MAX_STREAM_DATA.
     recv_max_data: u64 = 0,
+    /// The window kept open for this stream (the announced one at the
+    /// open, then tuned: `Connection.auto_tune_receive_windows`), and
+    /// the tune's epoch: the read offset and the clock when it started.
+    recv_window: u64 = 0,
+    recv_epoch_start_offset: u64 = 0,
+    recv_epoch_start_us: u64 = 0,
     /// Current stream-level send limit the peer has advertised via
     /// transport params / MAX_STREAM_DATA.
     send_max_data: u64 = std.math.maxInt(u64),
@@ -1404,6 +1439,11 @@ pub const default_stream_receive_window: u64 = 1024 * 1024;
 /// Default connection-level receive credit advertised in transport
 /// params, kept open the same way.
 pub const default_connection_receive_window: u64 = 16 * 1024 * 1024;
+/// The caps of the receive windows' self-tuning (`max_stream_receive_window`,
+/// `max_connection_receive_window`): a window doubles for a reader
+/// that keeps up until it reaches these.
+pub const default_max_stream_receive_window: u64 = 8 * 1024 * 1024;
+pub const default_max_connection_receive_window: u64 = 32 * 1024 * 1024;
 /// Hard ceiling on `initial_max_streams_*` we will ever advertise.
 pub const max_stream_count_limit: u64 = @as(u64, 1) << 60;
 
@@ -2296,6 +2336,10 @@ pub const Tunables = struct {
     /// See `Connection.max_buffered_send` (the send buffer of every
     /// stream).
     max_buffered_send: usize,
+    /// See `Connection.auto_tune_receive_windows` and its two caps.
+    auto_tune_receive_windows: bool,
+    max_stream_receive_window: u64,
+    max_connection_receive_window: u64,
     /// See `Connection.delayed_ack_packet_threshold` (RFC 9000
     /// §13.2.1).
     delayed_ack_packet_threshold: u8,
@@ -2332,6 +2376,9 @@ pub fn applyTunables(self: *Connection, t: Tunables) void {
     self.reveal_close_reason_on_wire = t.reveal_close_reason_on_wire;
     self.max_connection_memory = t.max_connection_memory;
     self.max_buffered_send = t.max_buffered_send;
+    self.auto_tune_receive_windows = t.auto_tune_receive_windows;
+    self.max_stream_receive_window = t.max_stream_receive_window;
+    self.max_connection_receive_window = t.max_connection_receive_window;
     self.delayed_ack_packet_threshold = t.delayed_ack_packet_threshold;
     self.ecn_enabled = t.ecn_enabled;
     // RFC 8899 DPLPMTUD: `setPmtudConfig` also re-initialises every
@@ -2572,6 +2619,7 @@ fn normalizeLocalTransportParams(params: TransportParams) transport_params_mod.E
 fn applyLocalFlowTransportParams(self: *Connection) void {
     const params = self.local_transport_params;
     self.local_max_data = params.initial_max_data;
+    self.conn_recv_window = params.initial_max_data;
     self.peer_bidi_ids.limit = params.initial_max_streams_bidi;
     self.peer_bidi_ids.window = params.initial_max_streams_bidi;
     self.peer_uni_ids.limit = params.initial_max_streams_uni;
@@ -4875,6 +4923,7 @@ const fireDuePtoOnApplicationPath = conn_loss.fireDuePtoOnApplicationPath;
 /// idle timeout, and draining deadlines. The caller passes the
 /// current monotonic time in microseconds. Safe to call any time.
 pub fn tick(self: *Connection, now_us: u64) Error!void {
+    self.clock_us = @max(self.clock_us, now_us);
     for (self.paths.paths.items) |*p| {
         p.path.validator.tick(now_us);
         if (p.path.validator.status == .failed) {

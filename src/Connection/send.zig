@@ -105,6 +105,7 @@ pub fn pollDatagram(
     // frame; otherwise nothing is emitted (no streams, no ACKs)
     // because every other branch is gated on stream/ACK state
     // that's empty in closing.
+    conn.clock_us = @max(conn.clock_us, now_us);
     if (conn.lifecycle.closed and conn.lifecycle.pending_close == null) return null;
     conn.queueHandshakeDoneIfReady();
     try conn.refreshEarlyDataStatus();

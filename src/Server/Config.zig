@@ -727,6 +727,15 @@ max_connection_memory: u64 = conn_mod.state.default_max_connection_memory,
 /// side of the contract (the peer's `initial_max_stream_data_*`).
 max_buffered_send: usize = conn_mod.state.default_max_buffered_send,
 
+/// The receive windows tune themselves on every accepted connection
+/// (`Connection.auto_tune_receive_windows`): a window doubles for a
+/// reader that keeps up, up to these caps; off keeps the announced
+/// windows. The caps are the memory safety per stream and per
+/// connection, under `max_connection_memory` in all.
+auto_tune_receive_windows: bool = true,
+max_stream_receive_window: u64 = conn_mod.state.default_max_stream_receive_window,
+max_connection_receive_window: u64 = conn_mod.state.default_max_connection_receive_window,
+
 /// Number of ack-eliciting application packets the server requires
 /// before forcing an immediate ACK (RFC 9000 §13.2.1 ¶2). Default
 /// matches `quic.conn.state.application_ack_eliciting_threshold`.

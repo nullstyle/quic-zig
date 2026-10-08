@@ -69,6 +69,7 @@ pub fn handleWithEcn(
     // reuse stale state — the cmsg is per-datagram.
     conn.last_recv_ecn = if (conn.ecn_enabled) ecn else .not_ect;
     defer conn.last_recv_ecn = .not_ect;
+    conn.clock_us = @max(conn.clock_us, now_us);
     const entry_state = conn.lifecycle.state();
     if (entry_state == .draining or entry_state == .closed) return;
     if (entry_state == .closing and conn.lifecycle.pending_close != null) return;

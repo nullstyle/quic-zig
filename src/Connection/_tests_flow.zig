@@ -587,6 +587,146 @@ test "receive credit keeps the announced windows when they are smaller than the 
     );
 }
 
+fn tuneTestConn(conn: *Connection, stream_window: u64, conn_window: u64) !void {
+    try conn.setTransportParams(.{
+        .initial_max_data = conn_window,
+        .initial_max_stream_data_bidi_remote = stream_window,
+        .initial_max_streams_bidi = 1,
+    });
+    conn.rttForLevel(.application).smoothed_rtt_us = 10_000;
+    conn.rttForLevel(.application).latest_rtt_us = 10_000;
+    conn.rttForLevel(.application).first_sample_taken = true;
+    conn.clock_us = 1_000_000;
+}
+
+/// Feed `chunk` at `offset` on stream 0 and read it all.
+fn tuneFeedAndRead(conn: *Connection, chunk: []const u8, offset: u64) !void {
+    try conn.handleStream(.application, .{
+        .stream_id = 0,
+        .offset = offset,
+        .data = chunk,
+        .has_length = true,
+    });
+    var buf: [64 * 1024]u8 = undefined;
+    var read: usize = 0;
+    while (read < chunk.len) read += try conn.streamRead(0, &buf);
+}
+
+test "receive credit: a stream window doubles for a reader that keeps up" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try tuneTestConn(conn, 64 * 1024, default_connection_receive_window);
+    const chunk = try allocator.alloc(u8, 40 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+
+    // The first half window read starts the tune's epoch: the credit
+    // is one announced window ahead, as before.
+    try tuneFeedAndRead(conn, chunk, 0);
+    try std.testing.expectEqual(
+        @as(u64, 40 * 1024 + 64 * 1024),
+        conn.pending_frames.max_stream_data.items[0].maximum_stream_data,
+    );
+    // Another half window read 5 ms later, under two round trips of
+    // 10 ms: the window doubles to 128 KiB and the credit says so.
+    conn.clock_us += 5_000;
+    try tuneFeedAndRead(conn, chunk, 40 * 1024);
+    try std.testing.expectEqual(@as(u64, 128 * 1024), conn.stream(0).?.recv_window);
+    try std.testing.expectEqual(
+        @as(u64, 80 * 1024 + 128 * 1024),
+        conn.pending_frames.max_stream_data.items[0].maximum_stream_data,
+    );
+}
+
+test "receive credit: a slow reader's stream window stays" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    try tuneTestConn(conn, 64 * 1024, default_connection_receive_window);
+    const chunk = try allocator.alloc(u8, 40 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+    try tuneFeedAndRead(conn, chunk, 0);
+    // 100 ms for the next half window: ten round trips, more than the
+    // rule's two. The window stays 64 KiB.
+    conn.clock_us += 100_000;
+    try tuneFeedAndRead(conn, chunk, 40 * 1024);
+    try std.testing.expectEqual(@as(u64, 64 * 1024), conn.stream(0).?.recv_window);
+    try std.testing.expectEqual(
+        @as(u64, 80 * 1024 + 64 * 1024),
+        conn.pending_frames.max_stream_data.items[0].maximum_stream_data,
+    );
+}
+
+test "receive credit: the stream window's cap holds, and the switch off keeps the announced window" {
+    const allocator = std.testing.allocator;
+    const chunk = try allocator.alloc(u8, 40 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        try tuneTestConn(conn, 64 * 1024, default_connection_receive_window);
+        conn.max_stream_receive_window = 96 * 1024;
+        try tuneFeedAndRead(conn, chunk, 0);
+        conn.clock_us += 5_000;
+        try tuneFeedAndRead(conn, chunk, 40 * 1024);
+        // Doubled would be 128 KiB; the cap is 96.
+        try std.testing.expectEqual(@as(u64, 96 * 1024), conn.stream(0).?.recv_window);
+        try std.testing.expectEqual(
+            @as(u64, 80 * 1024 + 96 * 1024),
+            conn.pending_frames.max_stream_data.items[0].maximum_stream_data,
+        );
+    }
+    {
+        var ctx = try boringssl.tls.Context.initServer(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createServer(allocator, ctx);
+        defer conn.destroy();
+        try tuneTestConn(conn, 64 * 1024, default_connection_receive_window);
+        conn.auto_tune_receive_windows = false;
+        try tuneFeedAndRead(conn, chunk, 0);
+        conn.clock_us += 5_000;
+        try tuneFeedAndRead(conn, chunk, 40 * 1024);
+        try std.testing.expectEqual(@as(u64, 64 * 1024), conn.stream(0).?.recv_window);
+        try std.testing.expectEqual(
+            @as(u64, 80 * 1024 + 64 * 1024),
+            conn.pending_frames.max_stream_data.items[0].maximum_stream_data,
+        );
+    }
+}
+
+test "receive credit: the connection window follows a stream's growth, one and a half times it" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(allocator, ctx);
+    defer conn.destroy();
+    // A connection window of 128 KiB, a stream window of 64 KiB.
+    try tuneTestConn(conn, 64 * 1024, 128 * 1024);
+    const chunk = try allocator.alloc(u8, 40 * 1024);
+    defer allocator.free(chunk);
+    @memset(chunk, 'x');
+    try tuneFeedAndRead(conn, chunk, 0);
+    // 88 KiB of the connection window left, more than half: no
+    // connection credit yet.
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.max_data);
+    conn.clock_us += 5_000;
+    try tuneFeedAndRead(conn, chunk, 40 * 1024);
+    // The stream doubled to 128 KiB, so the connection window is at
+    // least 192 KiB, and 48 KiB of 128 left is under half: the
+    // connection credit is one such window ahead.
+    try std.testing.expectEqual(@as(u64, 192 * 1024), conn.conn_recv_window);
+    try std.testing.expectEqual(@as(?u64, 80 * 1024 + 192 * 1024), conn.pending_frames.max_data);
+}
+
 test "receive credit keeps the announced windows when they are larger than the defaults" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initServer(.{});
