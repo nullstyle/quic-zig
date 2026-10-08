@@ -97,6 +97,17 @@ test "ack frequency: a peer's ACK_FREQUENCY sets the threshold, the delay and th
     try conn.dispatchFrames(.application, huge, 1_002_000);
     try std.testing.expectEqual(@as(u8, 255), conn.effectiveAckThreshold());
 
+    // The same sequence number again, with other values (a peer must
+    // not do this; a repeated copy carries the same values): ignored.
+    const same = try encodedFrame(&buf, .{ .ack_frequency = .{
+        .sequence_number = 2,
+        .ack_eliciting_threshold = 4,
+        .request_max_ack_delay_us = 20_000,
+        .reordering_threshold = 1,
+    } });
+    try conn.dispatchFrames(.application, same, 1_002_500);
+    try std.testing.expectEqual(@as(u8, 255), conn.effectiveAckThreshold());
+
     // A delay below our min_ack_delay is a PROTOCOL_VIOLATION.
     const below = try encodedFrame(&buf, .{ .ack_frequency = .{
         .sequence_number = 3,

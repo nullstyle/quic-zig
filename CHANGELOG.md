@@ -5,6 +5,70 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.37.0] - 2026-10-08
+
+The protocol-polish release: an ACK frame describes every gap the
+receiver knows, and the Acknowledgement Frequency extension is in.
+Two changes on the wire, one new knob, two new calls, one new
+transport-parameter field, the same option map. Verified toolchain:
+0.17.0.
+
+MEASURED (`impairment_reorder_gaps_1gbit_defaults`: 8 MiB on
+1 Gbit/s, 20 ms RTT, 10% of the packets 20 ms late, nothing dropped;
+12 seeds, median / min):
+
+| | v0.36.0 | v0.37.0 |
+| --- | --- | --- |
+| cubic | 374 / 334 ms | 346 / 314 ms |
+| bbr | 311 / 309 ms | 314 / 291 ms |
+| the same transfer with nothing reordered | cubic 242, bbr 222 ms | the same |
+| `impairment_reorder_gaps_1gbit` (4 MiB window, bbr) | 311 ms | 272 ms |
+| `impairment_clean_1gbit_rtt20ms` (bbr) | 222 ms, 8,449 datagrams | 222 ms, 7,607 datagrams |
+| `impairment_loss5pct` / `impairment_reorder10pct` (bbr) | 31 / 33 ms, 9,106 / 11,012 datagrams | 32 / 33 ms, 7,854 / 8,338 datagrams |
+
+### Added
+
+- **The Acknowledgement Frequency extension**
+  (draft-ietf-quic-ack-frequency, the draft's provisional codepoints:
+  ACK_FREQUENCY 0xaf, IMMEDIATE_ACK 0x1f, `min_ack_delay`
+  0xff04de1b). A connection advertises `min_ack_delay` (1 ms unless
+  `TransportParams.min_ack_delay_us` says otherwise; never above its
+  max_ack_delay), honors a peer's ACK_FREQUENCY (the largest sequence
+  number wins; the threshold, the delay and the reordering rule feed
+  the ACK policy; a requested delay below our min_ack_delay is a
+  PROTOCOL_VIOLATION; the frames only in 1-RTT) and IMMEDIATE_ACK (an
+  acknowledgment at once). It asks a peer that advertised the
+  parameter for fewer ACKs when its window is large
+  (`ack_frequency_policy = .auto`, the default on `Client.Config`,
+  `Server.Config` and `Connection`; `.off` never asks): one ACK per
+  sixteenth of the window, 2 packets at least and 64 at most, again
+  when that doubled or halved, once per round trip at most.
+  `Connection.requestAckFrequency(threshold, max_ack_delay_us,
+  reordering_threshold)` and `requestImmediateAck()` for an embedder
+  with its own policy (`error.AckFrequencyNotNegotiated` without the
+  peer's parameter; a manual request takes the policy over). A lost
+  ACK_FREQUENCY is sent again while it is still the latest. The caps
+  16, 32 and 64 were measured on the reorder cells over 12 seeds
+  (bbr 314 / 316 / 314 ms against 315 without): the cap costs
+  nothing there; a 1 Gbit bulk transfer sends 10% fewer datagrams.
+
+### Fixed
+
+- **An application ACK frame carries up to 255 lower ranges**, the
+  receiver's own cap (was 64, raised from 16 on 2026-10-07 and
+  measured then while the sender's buffer and the receiver's window
+  still bound the transfer). With 10% of the packets 20 ms late the
+  receiver holds 72 to 90 ranges at once and every frame carried 64,
+  so a late packet that filled a LOW gap stayed unacknowledged until
+  the gaps above it closed, past any threshold: the sender declared
+  it lost and cut its window (312 truncated frames in one run; three
+  to six loss episodes per run, one now, the first reorder event).
+  The byte budget stays 512 (255 small ranges fit; no frame truncated
+  on that cell now). The alternatives measured first (a wider time
+  threshold, a re-grown or an earlier undo, a reaction deferred one
+  round trip on a reordering path) gained nothing on top; the sprint
+  log in the handoff dir has the table.
+
 ## [0.36.0] - 2026-10-08
 
 The many-connections release: a server with thousands of mostly idle
