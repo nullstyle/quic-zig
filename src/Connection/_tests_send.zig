@@ -151,10 +151,13 @@ test "a full sent-packet tracker stops the sender; the connection stays open and
     defer conn.destroy();
     try prepareUnboundSender(conn);
 
-    // A 100-byte datagram carries 46 bytes of stream data, so this is
-    // 10,000 packets: more than twice what the tracker holds.
+    // A 100-byte datagram carries 46 bytes of stream data; send more
+    // than twice what the tracker holds (16384 packets since v0.33.0).
+    // The peer's credit is 4 MiB, so the send buffer, which follows
+    // it, takes the whole of it.
     const per_packet: usize = 46;
-    const packets: usize = 10_000;
+    const cap: usize = conn.sentForLevel(.application).capacity();
+    const packets: usize = 2 * cap + 1000;
     const s = try conn.openBidi(0);
     var data: [4096]u8 = undefined;
     for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
@@ -167,7 +170,6 @@ test "a full sent-packet tracker stops the sender; the connection stays open and
     }
 
     const tracker = conn.sentForLevel(.application);
-    const cap = tracker.capacity();
     var small: [100]u8 = undefined;
     var now_us: u64 = 1_000_000;
     var emitted: usize = 0;
@@ -211,7 +213,8 @@ test "a full sent-packet tracker does not stop an ACK or a CONNECTION_CLOSE" {
     var data: [4096]u8 = undefined;
     for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
     var written: usize = 0;
-    while (written < 300_000) written += try conn.streamWrite(s.id, &data);
+    const need = trackerFillBytes(conn);
+    while (written < need) written += try conn.streamWrite(s.id, &data);
 
     const tracker = conn.sentForLevel(.application);
     var small: [100]u8 = undefined;
@@ -267,7 +270,7 @@ test "a full sent-packet tracker gives no pacing deadline: only an ACK or a loss
     const open = conn.nextTimerDeadline(now_us).?;
     try std.testing.expectEqual(state.TimerKind.pacing, open.kind);
 
-    // Fill the tracker by hand (the pacer would take long to let 4096
+    // Fill the tracker by hand (the pacer would take long to let 16384
     // packets out). Nothing else changes.
     var pn = conn.pnSpaceForLevel(.application).next_pn;
     while (!tracker.isFull()) : (pn += 1) {
@@ -289,6 +292,12 @@ test "a full sent-packet tracker gives no pacing deadline: only an ACK or a loss
     try std.testing.expect((try conn.pollDatagram(&pkt, open.at_us)) == null);
 }
 
+/// Stream bytes that fill the 1-RTT tracker with 100-byte datagrams
+/// (46 bytes of stream data each), and leave data waiting.
+fn trackerFillBytes(conn: *const Connection) usize {
+    return @as(usize, conn.sentForLevelConst(.application).capacity()) * 46 + 100_000;
+}
+
 /// Fill the 1-RTT tracker of an `prepareUnboundSender` client with
 /// small stream packets, and leave stream data waiting.
 fn fillTrackerWithStreamData(conn: *Connection, now_us: u64) !void {
@@ -296,7 +305,8 @@ fn fillTrackerWithStreamData(conn: *Connection, now_us: u64) !void {
     var data: [4096]u8 = undefined;
     for (&data, 0..) |*b, i| b.* = @intCast(i & 0xff);
     var written: usize = 0;
-    while (written < 300_000) written += try conn.streamWrite(s.id, &data);
+    const need = trackerFillBytes(conn);
+    while (written < need) written += try conn.streamWrite(s.id, &data);
     var small: [100]u8 = undefined;
     while (try conn.pollDatagram(&small, now_us)) |_| {}
     try std.testing.expect(conn.sentForLevel(.application).isFull());

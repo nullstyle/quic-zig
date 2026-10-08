@@ -5,6 +5,129 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.33.0] - 2026-10-07
+
+The line-rate release: a single stream reaches the path's rate on the
+engine's defaults, with no configuration. The receive windows tune
+themselves, the send buffer follows the peer's credit, the sent-packet
+tracker holds four times as many packets, a packet number is never one
+byte, and a spurious loss is taken back even when its last packet
+comes after the next episode. Five new knobs, all on by default, and
+one behavior change for an application that writes past the
+connection's memory budget. On the wire, a packet number is one byte
+longer while fewer than 128 packets are out; every peer decodes it.
+The same option map. Verified toolchain: 0.17.0.
+
+MEASURED, 1 Gbit/s with a 20 ms round trip, 8 MiB on one stream, the
+engine's defaults, 12 seeds (bbr unless said; v0.32.0 -> v0.33.0):
+
+| cell | v0.32.0 | v0.33.0 |
+| --- | --- | --- |
+| `impairment_clean_1gbit_rtt20ms_defaults` | 410 ms | 234 ms |
+| `impairment_reorder_gaps_1gbit_defaults` (min / median / max) | 790 / 924 / 1045 ms | 359 / 371 / 414 ms |
+| the same, cubic (median) | ~1540 ms | 511 ms |
+| `impairment_clean_1gbit_rtt20ms` (the harness announces 4 MiB) | 285 ms | 220 ms |
+| `impairment_fat_window_1gbit_rtt100ms` (16 streams x 256 MiB, 100 ms) | 7334 ms | 4138 ms |
+
+The clean link's floor for 8 MiB at 1 Gbit/s with a 20 ms handshake
+is ~220 ms; the defaults are now within 7% of it.
+
+### Fixed
+
+- **A packet number is never one byte** (`wire/packet_number.zig`,
+  `chooseLength` returns 2..4). The receiver recovers a packet number
+  against the largest it has decrypted (RFC 9000 A.3): a packet that
+  arrives after more than half a window of newer packets decodes to
+  the wrong number, fails to open, and is dropped without a trace.
+  One byte is a window of 256, so 128 newer packets (150 KB) are
+  enough. The sender's rule (room for twice the unacknowledged range,
+  17.1) covers reordering by about one RTT; a reorder of 20 ms at
+  1 Gbit/s is ~2000 packets, which a sender with 100 packets in
+  flight met with one byte. Found by the reorder bench cell with the
+  new episode instrument: about 7 of every 100 late packets in a run
+  were never in the receiver's ACK tracker although the simulated
+  network dropped nothing, so their loss episodes were never taken
+  back; CUBIC, which regrows one packet per RTT after a reduction
+  that stands, ran the cell at ~1.5 s. quic-go made the same choice.
+  MEASURED (`impairment_reorder_gaps_1gbit_defaults`, median / max):
+  cubic 1544 / 2100 ms -> 523 / 626 ms; bbr 438 / 716 ms -> 371 /
+  414 ms. Two tests: a packet sealed with 10 out opens after 2000
+  newer ones (it failed the tag with one byte), and the decode
+  arithmetic.
+- **A spurious loss whose last packet arrives after the next episode
+  opened is still taken back** (`conn/congestion.zig`,
+  `LossEpisodes`). The controllers kept one undo slot, and only the
+  current episode's packets counted. They keep the previous episode
+  too, with its own pending count and saved state (NewReno, CUBIC);
+  a complete previous episode restores its state in full when the
+  current one was already taken back, and otherwise only up to what
+  the current reduction was taken from. BBR keeps no window to
+  restore, so it only extends the current episode, as before.
+  MEASURED (the same cell, median): cubic 523 ms -> 511 ms; bbr
+  unchanged.
+
+### Added
+
+- **The receive windows tune themselves**
+  (`Connection.auto_tune_receive_windows`, default on;
+  `max_stream_receive_window`, 8 MiB; `max_connection_receive_window`,
+  16 MiB; the same three on `Client.Config` and `Server.Config`). The
+  rule quic-go and Chromium use: when a credit is due and the
+  application read the last half window in less than two round trips
+  (4 x the fraction read x srtt), the window doubles, up to the cap;
+  the connection's window stays at least one and a half times any
+  stream's. A reader that keeps up on a fat path gets the path's rate
+  with no configuration; a slow reader's window never grows. Off, the
+  window an endpoint announced is the one it keeps (v0.32.0's
+  behavior). The caps are the memory safety: a peer may fill a window
+  the endpoint opened, so the connection's cap is never more than
+  half of `max_connection_memory` (32 MiB by default) whatever the
+  knob says. MEASURED (bbr): `impairment_clean_1gbit_rtt20ms_defaults`
+  410 ms -> 290 ms; `impairment_fat_window_1gbit_rtt100ms` 4775 ms ->
+  3203 ms with the windows unbounded.
+- **The send buffer follows the peer's credit**
+  (`Connection.send_buffer_follows_credit`, default on;
+  `max_buffered_send_cap`, 16 MiB; the same on `Client.Config` and
+  `Server.Config`). A stream's send buffer (`max_buffered_send`, 1 MiB,
+  now the floor) grows to what the peer still accepts beyond the
+  acknowledged floor, up to the cap, at the application's writes; a
+  limit once raised stays. With the receive windows above, one stream
+  on a fat path has the buffer the path needs, from both ends, with no
+  configuration. Off, `max_buffered_send` is the limit exactly
+  (v0.32.0's behavior). MEASURED (bbr):
+  `impairment_clean_1gbit_rtt20ms_defaults` 290 ms -> 234 ms;
+  `impairment_reorder_gaps_1gbit_defaults` 750 ms -> 438 ms (median);
+  `impairment_clean_1gbit_rtt20ms` 285 ms -> 220 ms.
+- **Two bench cells on the engine's defaults**
+  (`impairment_clean_1gbit_rtt20ms_defaults`,
+  `impairment_reorder_gaps_1gbit_defaults`): the harness announces
+  nothing and sets no buffer, so they measure what an embedder gets.
+  The impairment cells take `--cc cubic` as well as `bbr`, and their
+  loss line prints the loss episodes and how many were taken back.
+  The cell comment of the reorder cell records the finding that
+  neither controller was the brake under reordering until the packet
+  number fix above.
+
+### Changed
+
+- **The sent-packet tracker holds 16384 packets**
+  (`conn/SentPacketTracker.max_tracked`, was 4096): ~19 MB in flight
+  at 1200 bytes, enough for 1 Gbit/s at 150 ms. The slab grows on
+  demand, so only a connection that fills the slots pays for them
+  (40 bytes a slot). The reorder window's packet threshold keeps its
+  own cap of 4096. MEASURED (bbr): `impairment_fat_window_1gbit_rtt100ms`
+  7334 ms -> 4775 ms.
+- **A write past the connection's memory budget returns short.** An
+  application whose own writes reach `max_connection_memory` got
+  `error.ExcessiveLoad`, the fault meant for what a peer puts in
+  buffers; now `streamWrite` takes what the budget leaves and returns
+  the count, as it does at the stream's limit (zero when nothing
+  fits). With the windows and buffers above, a writer with many
+  streams on a fat path reached the budget where it never could
+  before; the budget is back-pressure for the application and a
+  fault for the peer. Embedders that treated `ExcessiveLoad` from
+  `streamWrite` as the signal to stop writing should read the count.
+
 ## [0.32.0] - 2026-10-07
 
 The single-stream limits release: a stream can now go as fast as the

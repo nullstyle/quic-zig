@@ -1288,7 +1288,13 @@ const BorrowedApp = struct {
         app.handshakes += 1;
     }
     fn opened(app: *BorrowedApp, d: *C, e: *C.StreamEntry, _: bool) anyerror!void {
-        if (app.echo) d.conn.stream(e.id).?.send.max_buffered = 3;
+        // A 3-byte send buffer forces partial writes. The buffer
+        // follows the peer's credit by default (since v0.33.0), which
+        // would lift the limit at the first write; this test pins it.
+        if (app.echo) {
+            d.conn.send_buffer_follows_credit = false;
+            d.conn.stream(e.id).?.send.max_buffered = 3;
+        }
     }
     fn data(app: *BorrowedApp, d: *C, e: *C.StreamEntry, bytes: []const u8) anyerror!usize {
         const n = @min(app.read_limit, bytes.len);
