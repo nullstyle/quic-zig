@@ -308,6 +308,11 @@ pub const Slot = struct {
     /// The timer entry that is current for this slot; older entries
     /// in the heap are stale and skipped.
     timer_generation: u32 = 0,
+    /// The deadline of the current entry, or null when the slot has
+    /// none: a re-arm to the same deadline pushes nothing (a slot
+    /// drained on every iteration would otherwise add one stale entry
+    /// per iteration until its deadline passes).
+    timer_at_us: ?u64 = null,
 
     /// Attach a W3C tracecontext to this slot. Embedders typically
     /// call this after `Server.feed` returns `.accepted` and the
@@ -1987,11 +1992,7 @@ pub fn slotDrained(self: *Server, slot: *Slot, now_us: u64) void {
 
 // INTERNAL: pub for Server/accept.zig access; not part of the embedder API.
 pub fn armTimer(self: *Server, slot: *Slot, now_us: u64) void {
-    slot.timer_generation +%= 1;
-    const deadline = slot.conn.nextTimerDeadline(now_us) orelse return;
-    self.timerPush(.{ .deadline = deadline, .slot = slot, .generation = slot.timer_generation }) catch {
-        self.timers_degraded = true;
-    };
+    self.armTimerAfter(slot, now_us, 0);
 }
 
 /// Tick the slots whose deadline passed, and mark each ready (a fired
@@ -2026,12 +2027,25 @@ pub fn tickDue(self: *Server, now_us: u64) ConnectionError!void {
     }
 }
 
-/// `armTimer` with a floor on the deadline.
+/// `armTimer` with a floor on the deadline. The current entry stays
+/// when the deadline did not move; otherwise it becomes stale and a
+/// new one is pushed.
 fn armTimerAfter(self: *Server, slot: *Slot, now_us: u64, floor_us: u64) void {
-    slot.timer_generation +%= 1;
-    var deadline = slot.conn.nextTimerDeadline(now_us) orelse return;
+    const maybe = slot.conn.nextTimerDeadline(now_us);
+    if (maybe == null) {
+        if (slot.timer_at_us != null) slot.timer_generation +%= 1;
+        slot.timer_at_us = null;
+        return;
+    }
+    var deadline = maybe.?;
     deadline.at_us = @max(deadline.at_us, floor_us);
+    if (slot.timer_at_us) |current| {
+        if (current == deadline.at_us) return;
+    }
+    slot.timer_generation +%= 1;
+    slot.timer_at_us = deadline.at_us;
     self.timerPush(.{ .deadline = deadline, .slot = slot, .generation = slot.timer_generation }) catch {
+        slot.timer_at_us = null;
         self.timers_degraded = true;
     };
 }
@@ -2097,6 +2111,7 @@ fn forgetSlot(self: *Server, slot: *Slot) void {
             removed = true;
         } else i += 1;
     }
+    slot.timer_at_us = null;
     if (removed and self.timers.items.len > 1) {
         var k = self.timers.items.len / 2;
         while (k > 0) {
