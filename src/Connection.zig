@@ -243,6 +243,16 @@ max_connection_receive_window: u64 = default_max_connection_receive_window,
 /// onto every Connection at construction time.
 delayed_ack_packet_threshold: u8 = application_ack_eliciting_threshold,
 
+/// The quiet rule of the ACK policy: an ack-eliciting packet that
+/// arrives this long (microseconds) or more after the previous one is
+/// acknowledged at once, whatever `delayed_ack_packet_threshold`
+/// says. A lone packet (a request, a reply, a keepalive) gets its ACK
+/// now instead of after the max_ack_delay timer, and a burst still
+/// shares one ACK between two packets. 0 turns the rule off.
+/// `Server.Config` and `Client.Config` thread the chosen value onto
+/// every Connection at construction time.
+ack_quick_gap_us: u64 = default_ack_quick_gap_us,
+
 /// Enable IETF ECN signaling (RFC 9000 §13.4 / RFC 3168). When
 /// `true` (the default), quic will:
 ///   * count incoming `EcnCodepoint` markings into per-PN-space
@@ -1426,8 +1436,20 @@ pub const max_held_handshake_packets: usize = 2;
 /// future fragment before treating the peer's stream as malicious.
 pub const max_crypto_reassembly_gap: u64 = 64 * 1024;
 /// Number of ack-eliciting application packets we accept before forcing an
-/// ACK frame (RFC 9000 §13.2.2).
-pub const application_ack_eliciting_threshold: u8 = 1;
+/// ACK frame: RFC 9000 §13.2.2's two, since v0.35.0 (one through
+/// v0.34.0: every packet acknowledged at once). Together with the quiet
+/// rule (`default_ack_quick_gap_us`): inside a burst every second
+/// packet is acknowledged, a lone packet at once. MEASURED (sprint B,
+/// 2026-10-08): see `default_ack_quick_gap_us`.
+pub const application_ack_eliciting_threshold: u8 = 2;
+/// The quiet gap of the ACK policy (`Connection.ack_quick_gap_us`), in
+/// microseconds: an ack-eliciting packet that arrives this long or
+/// more after the previous one is acknowledged at once. One
+/// millisecond tells a burst (packets microseconds apart on any path
+/// faster than ~10 Mbit/s) from a lone packet (a request, a reply, a
+/// keepalive: a round trip apart). MEASURED (sprint B, 2026-10-08):
+/// see the CHANGELOG for 0.35.0.
+pub const default_ack_quick_gap_us: u64 = 1_000;
 /// Hard cap on total bytes spent on ACK ranges in any single application packet.
 ///
 /// These caps are deliberately SINGLE-TIER. A two-tier variant — keep
@@ -2404,6 +2426,8 @@ pub const Tunables = struct {
     /// See `Connection.delayed_ack_packet_threshold` (RFC 9000
     /// §13.2.1).
     delayed_ack_packet_threshold: u8,
+    /// See `Connection.ack_quick_gap_us`.
+    ack_quick_gap_us: u64,
     /// See `Connection.ecn_enabled` (RFC 9000 §13.4).
     ecn_enabled: bool,
     /// RFC 8899 DPLPMTUD configuration; applied via
@@ -2443,6 +2467,7 @@ pub fn applyTunables(self: *Connection, t: Tunables) void {
     self.max_stream_receive_window = t.max_stream_receive_window;
     self.max_connection_receive_window = t.max_connection_receive_window;
     self.delayed_ack_packet_threshold = t.delayed_ack_packet_threshold;
+    self.ack_quick_gap_us = t.ack_quick_gap_us;
     self.ecn_enabled = t.ecn_enabled;
     // RFC 8899 DPLPMTUD: `setPmtudConfig` also re-initialises every
     // existing path (only the primary at this point), so the

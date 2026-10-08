@@ -110,8 +110,10 @@ pub fn recordReceivedPacketDelayed(
     now_ms: u64,
     ack_eliciting: bool,
     packet_threshold: u8,
+    now_us: u64,
+    quick_gap_us: u64,
 ) void {
-    self.received.addPacketDelayed(pn, now_ms, ack_eliciting, packet_threshold);
+    self.received.addPacketDelayed(pn, now_ms, ack_eliciting, packet_threshold, now_us, quick_gap_us);
 }
 
 /// Update `largest_acked_sent` from an incoming ACK. Out-of-order
@@ -182,12 +184,12 @@ test "recordReceivedPacket can avoid arming an ACK" {
 
 test "recordReceivedPacketDelayed arms then promotes application ACKs" {
     var s: PnSpace = .{};
-    s.recordReceivedPacketDelayed(0, 100, true, 2);
+    s.recordReceivedPacketDelayed(0, 100, true, 2, 100 * 1000, 0);
     try std.testing.expect(!s.received.pending_ack);
     try std.testing.expect(s.received.delayed_ack_armed);
     try std.testing.expectEqual(@as(?u64, 100), s.received.ackDelayBaseMs());
 
-    s.recordReceivedPacketDelayed(1, 101, true, 2);
+    s.recordReceivedPacketDelayed(1, 101, true, 2, 101 * 1000, 0);
     try std.testing.expect(s.received.pending_ack);
     try std.testing.expect(s.received.delayed_ack_armed);
 
@@ -196,12 +198,36 @@ test "recordReceivedPacketDelayed arms then promotes application ACKs" {
     try std.testing.expect(!s.received.delayed_ack_armed);
 }
 
+test "recordReceivedPacketDelayed: a packet after a quiet gap is acknowledged at once; inside a burst every second one" {
+    var s: PnSpace = .{};
+    // The first packet ever: nothing before it, acknowledged at once.
+    s.recordReceivedPacketDelayed(0, 100, true, 2, 100_000, 1_000);
+    try std.testing.expect(s.received.pending_ack);
+    s.received.markAckSent();
+    // A burst: packets 1 and 2 arrive 10 us apart; the first waits,
+    // the second (the threshold) forces the ACK.
+    s.recordReceivedPacketDelayed(1, 100, true, 2, 100_010, 1_000);
+    try std.testing.expect(!s.received.pending_ack);
+    s.recordReceivedPacketDelayed(2, 100, true, 2, 100_020, 1_000);
+    try std.testing.expect(s.received.pending_ack);
+    s.received.markAckSent();
+    // Quiet for 2 ms, then one packet: at once, the threshold not
+    // reached.
+    s.recordReceivedPacketDelayed(3, 102, true, 2, 102_020, 1_000);
+    try std.testing.expect(s.received.pending_ack);
+    s.received.markAckSent();
+    // The rule off (a gap of 0): the lone packet waits for the timer.
+    s.recordReceivedPacketDelayed(4, 105, true, 2, 105_000, 0);
+    try std.testing.expect(!s.received.pending_ack);
+    try std.testing.expect(s.received.delayed_ack_armed);
+}
+
 test "recordReceivedPacketDelayed promotes on gaps" {
     var s: PnSpace = .{};
-    s.recordReceivedPacketDelayed(0, 100, true, 8);
+    s.recordReceivedPacketDelayed(0, 100, true, 8, 100 * 1000, 0);
     try std.testing.expect(!s.received.pending_ack);
 
-    s.recordReceivedPacketDelayed(2, 101, true, 8);
+    s.recordReceivedPacketDelayed(2, 101, true, 8, 101 * 1000, 0);
     try std.testing.expect(s.received.pending_ack);
 }
 

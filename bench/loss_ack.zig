@@ -72,6 +72,8 @@ pub fn runPnSpaceRecordAckRanges(ctx: *const PnSpaceRecordAckRangesCtx, iters: u
                 now_ms,
                 true,
                 ctx.delayed_ack_packet_threshold,
+                now_ms * 1000,
+                0,
             );
         }
 
@@ -391,6 +393,8 @@ test "pn_space_record_ack_ranges fixture emits the expected range shape" {
             ctx.now_start_ms + @as(u64, @intCast(idx)),
             true,
             ctx.delayed_ack_packet_threshold,
+            (ctx.now_start_ms + @as(u64, @intCast(idx))) * 1000,
+            0,
         );
     }
     try std.testing.expectEqual(@as(u8, 4), space.received.range_count);

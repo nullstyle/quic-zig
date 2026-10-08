@@ -414,11 +414,10 @@ test "server handles accepted 0-RTT STREAM frames" {
 
     const consumed = try conn.handleOnePacket(packet[0..packet_len], 1_000);
     try std.testing.expectEqual(packet_len, consumed);
-    if (application_ack_eliciting_threshold == 1) {
-        try std.testing.expect(conn.pnSpaceForLevel(.early_data).received.pending_ack);
-    } else {
-        try std.testing.expect(!conn.pnSpaceForLevel(.early_data).received.pending_ack);
-    }
+    // The first ack-eliciting packet of the space is a lone one: the
+    // quiet rule acknowledges it at once, whatever the threshold
+    // (`Connection.ack_quick_gap_us`, since v0.35.0).
+    try std.testing.expect(conn.pnSpaceForLevel(.early_data).received.pending_ack);
     try std.testing.expect(conn.pnSpaceForLevel(.early_data).received.delayed_ack_armed);
 
     var buf: [8]u8 = undefined;

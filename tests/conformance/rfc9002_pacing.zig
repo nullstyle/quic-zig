@@ -85,7 +85,7 @@ test "MUST NOT delay ACK-only packets for pacing [RFC9002 §7.7]" {
     // Queue a pending ACK by recording an ack-eliciting receipt with
     // an immediate-ACK threshold of 1.
     const path = pair.clientConn().primaryPath();
-    path.app_pn_space.recordReceivedPacketDelayed(1_000, pair.now_us / 1000, true, 1);
+    path.app_pn_space.recordReceivedPacketDelayed(1_000, pair.now_us / 1000, true, 1, pair.now_us, 0);
     try std.testing.expect(path.app_pn_space.received.pending_ack);
     var pkt: [2048]u8 = undefined;
     const out = try pair.clientConn().pollDatagram(&pkt, pair.now_us);

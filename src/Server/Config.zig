@@ -752,6 +752,12 @@ max_connection_receive_window: u64 = conn_mod.state.default_max_connection_recei
 /// peer PTOs. Threaded onto every Connection at slot-open time.
 delayed_ack_packet_threshold: u8 = conn_mod.state.application_ack_eliciting_threshold,
 
+/// See `Connection.ack_quick_gap_us`: an ack-eliciting packet that
+/// arrives this long (microseconds) or more after the previous one is
+/// acknowledged at once; 0 turns the rule off. Threaded onto every
+/// Connection at slot-open time.
+ack_quick_gap_us: u64 = conn_mod.state.default_ack_quick_gap_us,
+
 /// Handshake-liveness budget in milliseconds: a slot whose TLS
 /// handshake has not been confirmed within this long of opening is torn
 /// down (draining, then terminal `.closed`, so `reap` reclaims the

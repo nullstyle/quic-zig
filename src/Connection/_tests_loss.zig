@@ -109,7 +109,7 @@ test "delayed_ack_packet_threshold tunes the immediate-ACK gate" {
 
     // Threshold = 1: every ack-eliciting packet forces an immediate
     // ACK with no delayed-ACK arming.
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(0, 1_000, true, 1);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(0, 1_000, true, 1, 1_000 * 1000, 0);
     var tracker = &conn.primaryPath().app_pn_space.received;
     try std.testing.expect(tracker.pending_ack);
 
@@ -117,19 +117,24 @@ test "delayed_ack_packet_threshold tunes the immediate-ACK gate" {
     // packets arm but don't promote; the fourth promotes.
     conn.primaryPath().app_pn_space.received = .{};
     tracker = &conn.primaryPath().app_pn_space.received;
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(10, 1_000, true, 4);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(10, 1_000, true, 4, 1_000 * 1000, 0);
     try std.testing.expect(!tracker.pending_ack);
     try std.testing.expect(tracker.delayed_ack_armed);
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(11, 1_001, true, 4);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(11, 1_001, true, 4, 1_001 * 1000, 0);
     try std.testing.expect(!tracker.pending_ack);
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(12, 1_002, true, 4);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(12, 1_002, true, 4, 1_002 * 1000, 0);
     try std.testing.expect(!tracker.pending_ack);
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(13, 1_003, true, 4);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(13, 1_003, true, 4, 1_003 * 1000, 0);
     try std.testing.expect(tracker.pending_ack);
 
     // The Connection-level field defaults to
     // `application_ack_eliciting_threshold`.
     try std.testing.expectEqual(application_ack_eliciting_threshold, conn.delayed_ack_packet_threshold);
+    // The numbers themselves (the release notes state them): every
+    // second packet inside a burst, a lone packet after a millisecond.
+    try std.testing.expectEqual(@as(u8, 2), application_ack_eliciting_threshold);
+    try std.testing.expectEqual(@as(u64, 1_000), Connection.default_ack_quick_gap_us);
+    try std.testing.expectEqual(Connection.default_ack_quick_gap_us, conn.ack_quick_gap_us);
     conn.delayed_ack_packet_threshold = 4;
     try std.testing.expectEqual(@as(u8, 4), conn.delayed_ack_packet_threshold);
 }
@@ -144,7 +149,7 @@ test "application delayed ACK waits for configured threshold or timer" {
     try conn.setTransportParams(.{ .max_ack_delay_ms = 10 });
     const tracker = &conn.primaryPath().app_pn_space.received;
     const delayed_ack_threshold = 2;
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(7, 1000, true, delayed_ack_threshold);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(7, 1000, true, delayed_ack_threshold, 1000 * 1000, 0);
 
     try std.testing.expect(!tracker.pending_ack);
     try std.testing.expect(tracker.delayed_ack_armed);
@@ -158,8 +163,8 @@ test "application delayed ACK waits for configured threshold or timer" {
     try std.testing.expect(tracker.pending_ack);
 
     tracker.markAckSent();
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(8, 1011, true, delayed_ack_threshold);
-    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(9, 1012, true, delayed_ack_threshold);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(8, 1011, true, delayed_ack_threshold, 1011 * 1000, 0);
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(9, 1012, true, delayed_ack_threshold, 1012 * 1000, 0);
     try std.testing.expect(tracker.pending_ack);
 }
 

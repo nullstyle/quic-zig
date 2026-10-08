@@ -241,6 +241,11 @@ pub const Config = struct {
     /// peer PTOs.
     delayed_ack_packet_threshold: u8 = conn_mod.state.application_ack_eliciting_threshold,
 
+    /// See `Connection.ack_quick_gap_us`: an ack-eliciting packet that
+    /// arrives this long (microseconds) or more after the previous one
+    /// is acknowledged at once; 0 turns the rule off.
+    ack_quick_gap_us: u64 = conn_mod.state.default_ack_quick_gap_us,
+
     /// Handshake-liveness budget in milliseconds: if the TLS
     /// handshake has not been confirmed within this long of `connect`,
     /// the connection is torn down and `pollEvent` surfaces a close
@@ -691,6 +696,7 @@ pub fn connect(config: Config) Error!Client {
         .max_stream_receive_window = config.max_stream_receive_window,
         .max_connection_receive_window = config.max_connection_receive_window,
         .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
+        .ack_quick_gap_us = config.ack_quick_gap_us,
         .ecn_enabled = config.enable_ecn,
         .pmtud = config.pmtud,
         .congestion_control = config.congestion_control,

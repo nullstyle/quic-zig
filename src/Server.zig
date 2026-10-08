@@ -1023,6 +1023,7 @@ pub fn init(config: Config) Error!Server {
             .max_stream_receive_window = config.max_stream_receive_window,
             .max_connection_receive_window = config.max_connection_receive_window,
             .delayed_ack_packet_threshold = config.delayed_ack_packet_threshold,
+            .ack_quick_gap_us = config.ack_quick_gap_us,
             .ecn_enabled = config.enable_ecn,
             .pmtud = config.pmtud,
             .congestion_control = config.congestion_control,

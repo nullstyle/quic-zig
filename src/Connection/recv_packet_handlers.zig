@@ -616,6 +616,7 @@ fn finishOpenedPacket(
             now_us,
             cls,
             conn.delayed_ack_packet_threshold,
+            conn.ack_quick_gap_us,
         ),
         // RFC 9000 §13.2.1: Initial and Handshake packets MUST NOT
         // have their acknowledgements delayed.

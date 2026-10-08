@@ -132,7 +132,7 @@ suite.
   connection (`ecn_enabled`, `reveal_close_reason_on_wire`,
   `delayed_ack_packet_threshold`, `max_buffered_send`, `send_buffer_follows_credit`,
   `max_buffered_send_cap`, `auto_tune_receive_windows`, `max_stream_receive_window`,
-  `max_connection_receive_window`), which `Server`/`Client` set from
+  `max_connection_receive_window`, `ack_quick_gap_us`), which `Server`/`Client` set from
   `Config` and a raw-`Connection` embedder sets directly.
 - The low-level `frame` and `wire` codecs are exported for tests and
   advanced use, but are **not** covered by the stability guarantee.

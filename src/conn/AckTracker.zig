@@ -53,6 +53,9 @@ delayed_ack_armed: bool = false,
 delayed_ack_start_ms: u64 = 0,
 /// Number of ACK-eliciting packets received since the last sent ACK.
 ack_eliciting_since_ack: u8 = 0,
+/// Receive time (us) of the last ACK-eliciting packet: the quiet
+/// rule of `addPacketDelayed` measures the gap to it.
+last_ack_eliciting_us: u64 = 0,
 
 /// Add a successfully-decrypted PN. Idempotent (re-adding a PN
 /// that's already in the set is a no-op). `ack_eliciting`
@@ -79,12 +82,18 @@ pub fn addPacket(self: *AckTracker, pn: u64, now_ms: u64, ack_eliciting: bool) v
 /// an ACK. ACK-eliciting packets arm a deadline, and force an
 /// immediate ACK when they cross `packet_threshold` or reveal
 /// reordering/loss.
+/// `quick_gap_us` is the quiet rule (`Connection.ack_quick_gap_us`):
+/// an ACK-eliciting packet that arrives that long or more after the
+/// previous one is acknowledged at once, whatever the threshold says;
+/// 0 turns the rule off.
 pub fn addPacketDelayed(
     self: *AckTracker,
     pn: u64,
     now_ms: u64,
     ack_eliciting: bool,
     packet_threshold: u8,
+    now_us: u64,
+    quick_gap_us: u64,
 ) void {
     const previous_largest = self.largest;
     const inserted = self.insert(pn);
@@ -93,7 +102,14 @@ pub fn addPacketDelayed(
         self.largest = pn;
         self.largest_at_ms = now_ms;
     }
-    if (!ack_eliciting or self.pending_ack) return;
+    if (!ack_eliciting) return;
+    // The quiet rule: a lone packet (a request, a reply, a keepalive)
+    // gets its ACK now instead of after the max_ack_delay timer; a
+    // burst still shares one ACK between two packets.
+    const quiet = quick_gap_us != 0 and
+        (self.last_ack_eliciting_us == 0 or now_us -| self.last_ack_eliciting_us >= quick_gap_us);
+    self.last_ack_eliciting_us = now_us;
+    if (self.pending_ack) return;
 
     if (!self.delayed_ack_armed) {
         self.delayed_ack_armed = true;
@@ -108,7 +124,7 @@ pub fn addPacketDelayed(
         false;
     const threshold_reached = packet_threshold != 0 and
         self.ack_eliciting_since_ack >= packet_threshold;
-    if (reordered_or_gap or threshold_reached) self.pending_ack = true;
+    if (reordered_or_gap or threshold_reached or quiet) self.pending_ack = true;
 }
 
 /// Add an ACK-eliciting packet number.
@@ -585,7 +601,7 @@ fn fuzzAckTracker(_: void, smith: *std.testing.Smith) anyerror!void {
                 const now = smith.value(u64);
                 const eliciting = smith.valueRangeAtMost(u8, 0, 1) == 1;
                 const threshold = smith.value(u8);
-                t.addPacketDelayed(pn, now, eliciting, threshold);
+                t.addPacketDelayed(pn, now, eliciting, threshold, now *% 1000, smith.valueRangeAtMost(u64, 0, 2_000));
             },
             3 => {
                 t.markAckSent();

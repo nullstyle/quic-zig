@@ -415,6 +415,7 @@ pub fn recordApplicationReceivedPacket(
     now_us: u64,
     cls: PayloadClassification,
     delayed_ack_threshold: u8,
+    quick_gap_us: u64,
 ) void {
     if (cls.ack_eliciting and cls.needs_immediate_ack) {
         app_pn_space.recordReceivedPacket(pn, now_us / RttEstimator.ms, true);
@@ -425,6 +426,8 @@ pub fn recordApplicationReceivedPacket(
         now_us / RttEstimator.ms,
         cls.ack_eliciting,
         delayed_ack_threshold,
+        now_us,
+        quick_gap_us,
     );
 }
 
