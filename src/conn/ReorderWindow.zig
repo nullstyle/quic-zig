@@ -528,6 +528,25 @@ test "settled real losses count once per round trip, and sixteen clean rounds pu
     try testing.expectEqual(@as(u32, 0), w.clean_rounds);
 }
 
+test "the settle reach is the widest threshold: a record inside the margin is not settled yet" {
+    var w: ReorderWindow = .{};
+    defer w.release(testing.allocator);
+    var rtt: RttEstimator = .{};
+    rtt.latest_rtt_us = 2_000;
+    rtt.smoothed_rtt_us = 2_000;
+    rtt.rtt_var_us = 100;
+    // The widest threshold is 4,500 us (twice the RTT plus a quarter
+    // RTT): a record 4,300 us old is still inside the reach, one
+    // 4,600 us old is past it.
+    w.remember(testing.allocator, 1, 10_000);
+    w.settle(14_300, &rtt);
+    try testing.expectEqual(@as(u32, 0), w.clean_rounds);
+    try testing.expect(!w.records[w.head].settled);
+    w.settle(14_600, &rtt);
+    try testing.expectEqual(@as(u32, 1), w.clean_rounds);
+    try testing.expect(w.records[w.head].settled);
+}
+
 test "a spurious hit restarts the decay's count, and its own round counts for nothing" {
     var w: ReorderWindow = .{};
     defer w.release(testing.allocator);

@@ -106,8 +106,9 @@ pub fn addPacketDelayed(
     // The quiet rule: a lone packet (a request, a reply, a keepalive)
     // gets its ACK now instead of after the max_ack_delay timer; a
     // burst still shares one ACK between two packets.
-    const quiet = quick_gap_us != 0 and
-        (self.last_ack_eliciting_us == 0 or now_us -| self.last_ack_eliciting_us >= quick_gap_us);
+    // (The first packet of the space is quiet too: the gap to a last
+    // time of zero is the clock itself.)
+    const quiet = quick_gap_us != 0 and now_us -| self.last_ack_eliciting_us >= quick_gap_us;
     self.last_ack_eliciting_us = now_us;
     if (self.pending_ack) return;
 
