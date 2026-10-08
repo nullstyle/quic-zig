@@ -104,7 +104,7 @@ pub fn handleShort(
         return bytes.len;
     }
 
-    const pt_buf: *[max_recv_plaintext]u8 = &conn.scratch.pt_buf;
+    const pt_buf: *[max_recv_plaintext]u8 = &Connection.scratch().pt_buf;
     const open_result = (try conn_recv_dispatch.openApplicationPacket(
         conn,
         pt_buf,

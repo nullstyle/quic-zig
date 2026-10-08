@@ -127,7 +127,7 @@ pub fn pollDatagram(
     // Initial + Handshake + 1-RTT 1453, Handshake + a PMTUD probe
     // 2427. A path that carries 1232 bytes dropped each of them.
     const long_dst = dst[0..@min(dst.len, conn.mtu)];
-    var initial: InitialInDatagram = .{ .payload = &conn.scratch.initial_payload };
+    var initial: InitialInDatagram = .{ .payload = &Connection.scratch().initial_payload };
     conn.poll_initial = &initial;
     defer conn.poll_initial = null;
     conn.poll_datagram_used = 0;
@@ -440,7 +440,7 @@ pub fn pollLevelOnPath(
     // is the AEAD-supported ceiling on either direction; sizing
     // `pl_buf` to that gives headroom for any probe size we'd
     // accept on receive.
-    const pl_buf: *[max_recv_plaintext]u8 = &conn.scratch.pl_buf;
+    const pl_buf: *[max_recv_plaintext]u8 = &Connection.scratch().pl_buf;
     var pl_pos: usize = 0;
     var ack_eliciting = false;
     var sent_packet: SentPacketTracker.SentPacket = .{
@@ -802,7 +802,7 @@ pub fn pollLevelOnPath(
                 .largest_acked = largest_acked_close,
                 .payload = pl_buf[0..pl_pos],
                 .keys = keys,
-                .staging = &conn.scratch.stage_buf,
+                .staging = &Connection.scratch().stage_buf,
                 .key_phase = conn_keys.applicationWriteKeyPhase(
                     conn,
                 ),
@@ -887,7 +887,7 @@ pub fn pollLevelOnPath(
     // 1) ACK frame (if pending in this level's space).
     const recv_tracker = &pn_space.received;
     if (lvl != .early_data and recv_tracker.pending_ack) {
-        const ranges_buf: *[default_mtu]u8 = &conn.scratch.ranges_buf;
+        const ranges_buf: *[default_mtu]u8 = &Connection.scratch().ranges_buf;
         const available = max_payload - pl_pos;
         var ranges_budget: usize = @min(ranges_buf.len, available);
         if (lvl == .application) {
@@ -1351,7 +1351,7 @@ pub fn pollLevelOnPath(
     // connection-local key so ACK/loss can still route precisely.
     // The array lives in the connection's scratch: as a local it was
     // a 1,280-byte 0xAA fill per packet (2% of the engine's CPU).
-    const sent_chunks: *[SentPacketTracker.max_stream_keys_per_packet]SentStreamChunk = &conn.scratch.sent_chunks;
+    const sent_chunks: *[SentPacketTracker.max_stream_keys_per_packet]SentStreamChunk = &Connection.scratch().sent_chunks;
     var sent_chunk_count: usize = 0;
     var planned_conn_new_bytes: u64 = 0;
     if (!path_response_used_addr_override and !congestion_blocked and (lvl == .application or lvl == .early_data)) {
@@ -1360,7 +1360,7 @@ pub fn pollLevelOnPath(
         // lead each packet. Bounded to the per-packet chunk cap; excess
         // ready streams are served on later packets. With no explicit
         // priorities every stream is urgency 3, so this is stream-id order.
-        const ready_streams = conn.collectSendableStreamsByPriority(&conn.scratch.pri_buf);
+        const ready_streams = conn.collectSendableStreamsByPriority(&Connection.scratch().pri_buf);
         for (ready_streams) |s| {
             if (sent_chunk_count >= sent_chunks.len) break;
             const stream_overhead: usize = 25;
@@ -1373,7 +1373,7 @@ pub fn pollLevelOnPath(
                 raw_chunk,
                 planned_conn_new_bytes,
             )) orelse continue;
-            const data_slice = s.send.chunkBytesContiguous(chunk, &conn.scratch.chunk_buf);
+            const data_slice = s.send.chunkBytesContiguous(chunk, &Connection.scratch().chunk_buf);
             const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
                 .stream = .{
                     .stream_id = s.id,
@@ -1459,7 +1459,7 @@ pub fn pollLevelOnPath(
             .largest_acked = largest_acked,
             .payload = pl_buf[0..pl_pos],
             .keys = keys,
-            .staging = &conn.scratch.stage_buf,
+            .staging = &Connection.scratch().stage_buf,
             .key_phase = conn_keys.applicationWriteKeyPhase(
                 conn,
             ),

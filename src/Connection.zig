@@ -398,9 +398,6 @@ streams: std.AutoHashMapUnmanaged(u64, *Stream) = .empty,
 /// retried at the next such reclaim; meanwhile the answer for the
 /// streams it missed degrades to "outcome unknown".
 recv_end_ring: ?*RecvEndRing = null,
-/// Scratch buffers for the per-packet paths (`Scratch`); one
-/// allocation per connection, freed in `deinit`.
-scratch: *Scratch,
 /// Monotonic connection-local key for STREAM send bookkeeping.
 /// Wire packet numbers are scoped by packet-number space/path;
 /// SendStream needs one global key to avoid multipath PN collisions.
@@ -1328,15 +1325,19 @@ pub const default_handshake_timeout_us: u64 = 30 * 1_000 * 1_000;
 /// UDP payload budget so packet protection can stay stack-backed.
 pub const max_recv_plaintext: usize = 4096;
 
-/// Scratch buffers for the per-packet paths, one allocation per
-/// connection (`scratch`, freed in `deinit`). Why not locals: Zig fills
-/// an `undefined` local with 0xAA in ReleaseSafe as well as in Debug,
+/// Scratch buffers for the per-packet paths, one per THREAD
+/// (`scratch()`), about 21 KB. Why not locals: Zig fills an
+/// `undefined` local with 0xAA in ReleaseSafe as well as in Debug,
 /// and the 4 KB fills per packet were 13% of the engine's CPU (the
 /// sprint "CPU per packet", 2026-10-08: `pollLevelOnPath` 6%,
 /// `handleShort` 3%, the seal's padding stage 2%, the ACK ranges
 /// 1%; and `InitialInDatagram` with its payload inline was a 4 KB
-/// template copy per poll, 4.5%). Nothing here lives past the call
-/// that fills it; a connection is used from one thread at a time.
+/// template copy per poll, 4.5%). Why not per connection: a server
+/// with ten thousand connections would hold 200 MB of it. Nothing
+/// here lives past the engine call that fills it, and the engine
+/// never works on two connections inside one call, so one per thread
+/// is enough; a connection used from several threads in turn is fine
+/// (each call fills what it reads).
 pub const Scratch = struct {
     /// The plaintext a packet is built in (`send.pollLevelOnPath`).
     pl_buf: [max_recv_plaintext]u8,
@@ -1358,6 +1359,13 @@ pub const Scratch = struct {
     /// The stream chunks packed into the packet being built.
     sent_chunks: [SentPacketTracker.max_stream_keys_per_packet]conn_send.SentStreamChunk,
 };
+
+threadlocal var thread_scratch: Scratch = undefined;
+
+/// This thread's `Scratch`.
+pub fn scratch() *Scratch {
+    return &thread_scratch;
+}
 /// Largest UDP payload size we will advertise to the peer in transport params.
 pub const max_supported_udp_payload_size: usize = max_recv_plaintext;
 /// Wire-mandated minimum UDP payload size for Initial packets (RFC 9000 §14).
@@ -2198,14 +2206,11 @@ pub fn initClientAtWithPolicy(
     errdefer sent_trackers[0].deinit(allocator);
     sent_trackers[1] = try SentPacketTracker.init(allocator, SentPacketTracker.initial_handshake_max_tracked);
     errdefer sent_trackers[1].deinit(allocator);
-    const scratch = try allocator.create(Scratch);
-    errdefer allocator.destroy(scratch);
     conn.* = .{
         .allocator = allocator,
         .role = .client,
         .inner = try tls_ctx.newQuicClient(),
         .sent = sent_trackers,
-        .scratch = scratch,
     };
     errdefer conn.inner.deinit();
     // `ensurePrimary` allocates the PathSet backing buffer before
@@ -2249,14 +2254,11 @@ pub fn initServerAt(
     errdefer sent_trackers[0].deinit(allocator);
     sent_trackers[1] = try SentPacketTracker.init(allocator, SentPacketTracker.initial_handshake_max_tracked);
     errdefer sent_trackers[1].deinit(allocator);
-    const scratch = try allocator.create(Scratch);
-    errdefer allocator.destroy(scratch);
     conn.* = .{
         .allocator = allocator,
         .role = .server,
         .inner = try tls_ctx.newQuicServer(),
         .sent = sent_trackers,
-        .scratch = scratch,
     };
     errdefer conn.inner.deinit();
     try conn.paths.ensurePrimary(allocator, .{
@@ -2506,7 +2508,6 @@ pub fn deinit(self: *Connection) void {
     for (&self.inbox) |*b| b.release(self.allocator);
     for (&self.outbox) |*b| b.release(self.allocator);
     if (self.recv_end_ring) |ring| self.allocator.destroy(ring);
-    self.allocator.destroy(self.scratch);
     for ([_]*StreamIdSpace{ &self.peer_bidi_ids, &self.peer_uni_ids, &self.local_bidi_ids, &self.local_uni_ids }) |ids| {
         ids.deinit(self.allocator);
     }
