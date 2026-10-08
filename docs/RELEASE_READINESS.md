@@ -1404,6 +1404,148 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.37.1: the protocol-polish release (v0.37.0 and its patch)
+
+v0.37.0 (tag `1eccae1`, 2026-10-08) is the fourth of the four sprints
+the owner ordered before any downstream move; v0.37.1 (tag
+`b89270b`, the same day) is its patch, and the tag the whole set
+moves to. Two tracks in v0.37.0, one fix in v0.37.1.
+
+CUBIC on the reorder cell (`impairment_reorder_gaps_1gbit_defaults`:
+8 MiB on 1 Gbit/s, 20 ms RTT, 10% of the packets 20 ms late, nothing
+dropped; 12 seeds): 374 ms median against BBR's 311 on v0.36.0, and
+242 against 222 with nothing reordered. A trace showed three to six
+loss episodes per run, a 0.7x cut held for about 35 ms each in late
+slow start; the undo bookkeeping held (no ring eviction, no arrival
+too old for the two episode slots). Six experiments, each measured
+on the 12 seeds: a wider time threshold (E1, E2) declared fewer and
+changed nothing (the residual evidence arrives 61 ms after the send:
+one packet in ten is late in each direction, so the ACK of a late
+packet is itself late one time in ten); a re-grown window on undo
+(E3) overshot (the slowest seed 363 -> 502); an undo at the first
+late arrival (E4) split one episode into several; a reaction
+deferred one round trip on a path known to reorder (E5) removed most
+episodes and two or three stood. The receiver instrumented: the ACK
+tracker never dropped a range, but 312 ACK frames in one run were
+truncated, the tracker holding 72 to 90 ranges and every frame
+carrying 64 (`max_application_ack_lower_ranges`, raised 16 -> 64 on
+2026-10-07 and measured then while the sender's buffer and the
+receiver's window still bound the transfer): a late packet that
+filled a low gap stayed unacknowledged until the gaps above it
+closed, past any threshold. At 255 (the tracker's own cap; E6): cubic
+374 -> 349 ms median, min 334 -> 311, one episode per run (the first
+reorder event, before the path is known to reorder); bbr's 4 MiB-
+window twin 311 -> 272; the 5% loss and 10% reorder cells the same
+time with 13% and 24% fewer datagrams; everything else byte-
+identical; no frame truncated at the 512-byte budget. E5 on top of
+E6 gained nothing and is not shipped (its patch is in the handoff
+dir). After E6 the reorder tax is cubic 107 ms (349 - 242) against
+bbr's 93: the CUBIC-specific gap is closed.
+
+The Acknowledgement Frequency extension (draft-ietf-quic-ack-
+frequency, the draft's provisional codepoints): `min_ack_delay`
+advertised (1 ms by default, never above max_ack_delay; a peer's
+above its own max is a TRANSPORT_PARAMETER_ERROR); a peer's
+ACK_FREQUENCY honored (the largest sequence wins; the threshold, the
+delay and the reordering rule feed the ACK policy; a delay below our
+min is a PROTOCOL_VIOLATION; 1-RTT only) and IMMEDIATE_ACK; the sender
+asks (`requestAckFrequency`, `requestImmediateAck`; a lost request
+sent again while it is the latest) and the automatic policy
+(`ack_frequency_policy = .auto`) asks a peer that advertised the
+parameter for one ACK per sixteenth of the window, 2 to 64 packets,
+again at a doubling or halving, once per round trip. MEASURED: the
+clean 1 Gbit cell the same 222 ms with 10% fewer datagrams; the caps
+16, 32 and 64 on the reorder cells over 12 seeds (bbr 314 / 316 / 314
+ms against 315 without): no cost; the in-process goodput bench's
+window is a handful of packets and the policy correctly asks nothing
+there. Ten tests; 6 of 6 mutants of the new rules killed.
+
+Local before the v0.37.0 tag (`tools/release.sh 0.37.0` on be1e237):
+the full suite 36/36 steps (2,040 of 2,056, 16 skipped), `just
+check-windows` 15/15, `just check-x86` 15/15; every cell measured
+(the reference moves: cells-pp-b4.txt).
+
+**The gates on `1eccae1` (v0.37.0)**, each read at the evidence line:
+four green, one red.
+
+- `test` (run 37830994251): RED at its `zig fmt --check` step
+  (`bench/loss_ack.zig`, a bench file: the two `addPacketDelayed`
+  calls gained their `reorder_threshold` argument with the wrong
+  indentation); every test passed on every job. The rule: a red gate
+  on a tag is a patch tag.
+- rc-fuzz (run 37830997988): green, `2,574,691 executions across 43
+  sites`, no failing site.
+- `quic-go-interop` (run 37830994162): `pairs=1 cells=2 succeeded=2`.
+- QNS image (run 37830994223): built and pushed. pin-lint (run
+  37830994164): `pin-lint: OK`.
+- The wide local interop matrix on the v0.37.0 image, both roles:
+  server `pairs=3 cells=45 succeeded=40 failed=1 unsupported=4` (the
+  one failed is quiche x multiplexing, the known chance cell since
+  v0.24.0: 4 of 5 on a rerun, 18 s each pass against the 60 s limit);
+  client `succeeded=42 failed=1 unsupported=2`: quic-go x
+  handshakecorruption RED, new (v0.36.0's two wide runs had it
+  green). Read to the bottom (the sim's pcap decrypted with the
+  client's keys, quic-go's server qlog): one of the 50 connections
+  ended at the idle timeout with its request never received. The
+  request's packet was corrupted; the first probe's copy
+  (NEW_CONNECTION_ID + STREAM) corrupted; then every probe for 30 s
+  carried the NEW_CONNECTION_ID alone, and every ACK the server sent
+  was corrupted too. The bug is 0.30.0's, below; not a regression of
+  this tag, but found by its matrix and fixed in its patch.
+
+**v0.37.1**: the fmt, and the fix. A probe timeout to a silent peer
+carries previously sent stream data every time. Since 0.30.0 a probe
+re-sends the frames of the oldest ack-eliciting packet in flight, and
+the packet stays in flight (RFC 9002 section 6.2.4); a stream chunk
+sent again moves to the copy's packet (the key goes with the copy),
+so the SECOND probe found the oldest packet's data gone and re-sent
+its control frames alone, or a PING; the copy's packet, never the
+oldest, was never probed, and only an ACK (the thresholds) could get
+the data out again. The probe now walks on to the oldest packet that
+still owns stream or CRYPTO data (`requeueDataForProbe`). One test
+(three probe timeouts in a row with a silent peer; red before the fix
+at the second, green after; nothing declared lost, every packet in
+flight). Local before the tag: the full suite 36/36 steps (1,389 tests in the two steps that ran, eight test steps cached from the same tree), `just check-windows` 15/15, `just check-x86` 15/15.
+
+**The gates on `b89270b` (v0.37.1)**, each read at the evidence line.
+
+- `test` (run 37837746007): seven jobs green; macos-26, macos-15,
+  ubuntu x86 and ubuntu arm 2,056 of 2,072 (16 skipped) in Debug and
+  2,016 of 2,032 in ReleaseSafe; x86-linux-musl and the sanitizer job
+  2,056 of 2,072; windows-latest 1,993 of 2,032 (39 skipped) in both
+  modes; `consumer-smoke ok: quic-zig 0.37.1`, `check-modes: 6 of 6`.
+- rc-fuzz (run 37837750268): `n_runs=2,204,589 unique_runs=12,339
+  pcs_len=47165`, `coverage verified: instrumented, 2,204,589
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37837746124): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37837746047): built and pushed from that commit.
+- pin-lint (run 37837745992): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The handshake-corruption cell with quic-zig as the client against
+  quic-go on the tag's image, five runs: 4 of 5 (55 to 65 s each);
+  the one failure a handshake timeout on one of its 50 connections
+  (every server first flight that reached the client corrupted; the
+  mirror of the 2026-10-03 finding on our own server, chance at 30%
+  corruption), and no run showed the stuck-request shape.
+- The wide local interop matrix on the tag's image, both roles:
+  client `pairs=3 cells=45 succeeded=42 failed=1 unsupported=2` (the
+  one failed is quiche x handshakecorruption, a known chance cell: 5
+  of 5 on a rerun; quic-go x handshakecorruption green; the two ECN
+  cells unsupported); server `succeeded=40 failed=1 unsupported=4`
+  (the one failed is quiche x multiplexing, the known chance cell
+  since v0.24.0: 2 of 5 on a rerun, against 4 of 5 on the v0.37.0
+  image the same day; unsupported: quic-go ecn, quiche chacha20,
+  keyupdate and ecn, as on every release). The same counts as the
+  v0.35.0 and v0.37.0 matrices.
+- The same-day control of that chance cell, six runs on each image
+  one after the other: the v0.36.0 image 2 of 6 (the failures at the
+  60 s limit, the passes 28 s), the v0.37.1 image 5 of 6 (the passes
+  18 s). The cell swings on both; this tag is no worse.
+
+- The package hash of the tag's archive: `quic-0.37.1-DnSYvTlfPwChWkn-M8TGtX81DkFobQDQQat0GMff1YRe`.
+- THE MOVE TAG: the combined note (v0.34.0 to v0.37.1) and the
+  cluster A move follow this record.
+
 ## v0.36.0: the many-connections release
 
 v0.36.0 (tag `6e861e7`, 2026-10-08) is the third of the four sprints
