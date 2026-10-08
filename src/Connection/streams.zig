@@ -783,6 +783,16 @@ pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
     // so opening many streams each near their per-stream cap
     // can't bypass the connection-wide ceiling.
     const before = s.send.bytes.items.len;
+    // The buffer follows the peer's credit (since v0.33.0): what the
+    // peer still accepts beyond the acknowledged floor is worth
+    // holding, up to the cap; a limit once raised stays, since the
+    // peer's credit only grows and the buffer holds only what the
+    // application wrote. `Connection.send_buffer_follows_credit`.
+    if (conn.send_buffer_follows_credit) {
+        const by_credit = s.send_max_data -| s.send.base_offset;
+        const limit: usize = @intCast(@min(by_credit, @as(u64, conn.max_buffered_send_cap)));
+        if (limit > s.send.max_buffered) s.send.max_buffered = limit;
+    }
     const headroom = s.send.max_buffered -| before;
     const want = @min(data.len, headroom);
     if (want > 0) {

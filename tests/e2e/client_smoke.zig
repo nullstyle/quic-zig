@@ -183,7 +183,7 @@ test "Client.Config.max_buffered_send threads onto the Connection" {
     );
 }
 
-test "Client.Config's receive-window caps thread onto the Connection" {
+test "Client.Config's window and buffer caps thread onto the Connection" {
     const protos = [_][]const u8{"hq-test"};
     var tuned = try quic.Client.connect(.{
         .insecure_skip_verify = true, // self-signed test cert
@@ -194,8 +194,12 @@ test "Client.Config's receive-window caps thread onto the Connection" {
         .auto_tune_receive_windows = false,
         .max_stream_receive_window = 2 * 1024 * 1024,
         .max_connection_receive_window = 6 * 1024 * 1024,
+        .send_buffer_follows_credit = false,
+        .max_buffered_send_cap = 3 * 1024 * 1024,
     });
     defer tuned.deinit();
+    try std.testing.expect(!tuned.conn.send_buffer_follows_credit);
+    try std.testing.expectEqual(@as(usize, 3 * 1024 * 1024), tuned.conn.max_buffered_send_cap);
     try std.testing.expect(!tuned.conn.auto_tune_receive_windows);
     try std.testing.expectEqual(@as(u64, 2 * 1024 * 1024), tuned.conn.max_stream_receive_window);
     try std.testing.expectEqual(@as(u64, 6 * 1024 * 1024), tuned.conn.max_connection_receive_window);

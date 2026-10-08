@@ -727,6 +727,14 @@ max_connection_memory: u64 = conn_mod.state.default_max_connection_memory,
 /// side of the contract (the peer's `initial_max_stream_data_*`).
 max_buffered_send: usize = conn_mod.state.default_max_buffered_send,
 
+/// The send buffer follows the peer's credit on every accepted
+/// connection (`Connection.send_buffer_follows_credit`): a stream's
+/// buffer limit rises to what the peer accepts, up to
+/// `max_buffered_send_cap`, never below `max_buffered_send`; off,
+/// `max_buffered_send` is the limit exactly.
+send_buffer_follows_credit: bool = true,
+max_buffered_send_cap: usize = conn_mod.state.default_max_buffered_send_cap,
+
 /// The receive windows tune themselves on every accepted connection
 /// (`Connection.auto_tune_receive_windows`): a window doubles for a
 /// reader that keeps up, up to these caps; off keeps the announced

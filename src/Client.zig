@@ -220,6 +220,12 @@ pub const Config = struct {
     /// has. Default `Connection.default_max_buffered_send` (1 MiB).
     max_buffered_send: usize = Connection.default_max_buffered_send,
 
+    /// The send buffer follows the peer's credit
+    /// (`Connection.send_buffer_follows_credit`), up to
+    /// `max_buffered_send_cap`; off, `max_buffered_send` is the limit.
+    send_buffer_follows_credit: bool = true,
+    max_buffered_send_cap: usize = Connection.default_max_buffered_send_cap,
+
     /// The receive windows tune themselves (`Connection.auto_tune_receive_windows`):
     /// a window doubles for a reader that keeps up, up to these caps;
     /// off keeps the announced windows.
@@ -679,6 +685,8 @@ pub fn connect(config: Config) Error!Client {
         .reveal_close_reason_on_wire = config.reveal_close_reason_on_wire,
         .max_connection_memory = config.max_connection_memory,
         .max_buffered_send = config.max_buffered_send,
+        .send_buffer_follows_credit = config.send_buffer_follows_credit,
+        .max_buffered_send_cap = config.max_buffered_send_cap,
         .auto_tune_receive_windows = config.auto_tune_receive_windows,
         .max_stream_receive_window = config.max_stream_receive_window,
         .max_connection_receive_window = config.max_connection_receive_window,

@@ -48,6 +48,44 @@ test "max_buffered_send is the send buffer of every stream the connection opens"
     try std.testing.expectEqual(@as(usize, 64), conn.stream(4).?.send.max_buffered);
 }
 
+test "the send buffer follows the peer's credit, up to its cap, unless told not to" {
+    const allocator = std.testing.allocator;
+    const big = try allocator.alloc(u8, 2 * 1024 * 1024);
+    defer allocator.free(big);
+    @memset(big, 'x');
+    {
+        var ctx = try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
+        _ = try conn.openBidi(0);
+        // The peer accepts 4 MiB on the stream: a 2 MiB write fits,
+        // where the 1 MiB default alone took half.
+        try conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 4 * 1024 * 1024 });
+        try std.testing.expectEqual(big.len, try conn.streamWrite(0, big));
+    }
+    {
+        var ctx = try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
+        conn.max_buffered_send_cap = 1536 * 1024;
+        _ = try conn.openBidi(0);
+        try conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 4 * 1024 * 1024 });
+        try std.testing.expectEqual(@as(usize, 1536 * 1024), try conn.streamWrite(0, big));
+    }
+    {
+        var ctx = try boringssl.tls.Context.initClient(.{});
+        defer ctx.deinit();
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
+        conn.send_buffer_follows_credit = false;
+        _ = try conn.openBidi(0);
+        try conn.handleMaxStreamData(.{ .stream_id = 0, .maximum_stream_data = 4 * 1024 * 1024 });
+        try std.testing.expectEqual(@as(usize, 1024 * 1024), try conn.streamWrite(0, big));
+    }
+}
+
 test "streamReset publicly aborts the send half" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

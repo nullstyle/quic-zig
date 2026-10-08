@@ -198,6 +198,17 @@ max_connection_memory: u64 = default_max_connection_memory,
 /// before a change keeps its own `send.max_buffered`.
 max_buffered_send: usize = default_max_buffered_send,
 
+/// The send buffer follows the peer's credit (since v0.33.0): at a
+/// write, a stream's buffer limit rises to what the peer still
+/// accepts beyond the acknowledged floor (its MAX_STREAM_DATA less
+/// `base_offset`), up to `max_buffered_send_cap`, never below
+/// `max_buffered_send`. So a receiver whose window tuned itself to
+/// 8 MiB pulls the sender's buffer along, and a 1 MiB peer costs
+/// 1 MiB. Off, `max_buffered_send` is the limit exactly (v0.32.0's
+/// behavior); set it to pin a stream's memory.
+send_buffer_follows_credit: bool = true,
+max_buffered_send_cap: usize = default_max_buffered_send_cap,
+
 /// The receive windows tune themselves (since v0.33.0, the rule
 /// quic-go and Chromium use): when a credit is due and the application
 /// read the last half window in less than two round trips, the window
@@ -910,6 +921,9 @@ pub const Suite = short_packet_mod.Suite;
 pub const SendStream = send_stream_mod.SendStream;
 /// The default `max_buffered_send` (1 MiB).
 pub const default_max_buffered_send = send_stream_mod.default_max_buffered_send;
+/// The default `max_buffered_send_cap` (16 MiB): how far a stream's
+/// send buffer may follow the peer's credit.
+pub const default_max_buffered_send_cap: usize = 16 * 1024 * 1024;
 /// Receive half of a QUIC stream — owns reassembly buffer and flow-control window.
 pub const RecvStream = recv_stream_mod.RecvStream;
 /// One network path (4-tuple plus DCID/SCID) — RFC 9000 §9 / multipath draft-21.
@@ -2336,6 +2350,9 @@ pub const Tunables = struct {
     /// See `Connection.max_buffered_send` (the send buffer of every
     /// stream).
     max_buffered_send: usize,
+    /// See `Connection.send_buffer_follows_credit` and its cap.
+    send_buffer_follows_credit: bool,
+    max_buffered_send_cap: usize,
     /// See `Connection.auto_tune_receive_windows` and its two caps.
     auto_tune_receive_windows: bool,
     max_stream_receive_window: u64,
@@ -2376,6 +2393,8 @@ pub fn applyTunables(self: *Connection, t: Tunables) void {
     self.reveal_close_reason_on_wire = t.reveal_close_reason_on_wire;
     self.max_connection_memory = t.max_connection_memory;
     self.max_buffered_send = t.max_buffered_send;
+    self.send_buffer_follows_credit = t.send_buffer_follows_credit;
+    self.max_buffered_send_cap = t.max_buffered_send_cap;
     self.auto_tune_receive_windows = t.auto_tune_receive_windows;
     self.max_stream_receive_window = t.max_stream_receive_window;
     self.max_connection_receive_window = t.max_connection_receive_window;
