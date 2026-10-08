@@ -346,8 +346,19 @@ test "application ACK ranges use bounded emission budget" {
     try std.testing.expect(conn.markPathValidated(0));
 
     const tracker = &conn.primaryPath().app_pn_space.received;
-    var pn: u64 = 0;
-    while (pn < 400) : (pn += 2) tracker.add(pn, 1_000);
+    // 200 ranges of 70 packets with gaps of 70: four bytes each on the
+    // wire (two varints of two bytes), 796 bytes for the 199 lower
+    // ones, past the 512-byte budget. (Ranges of one packet cost two
+    // bytes each, and 254 of them fit: the count cap is the tracker's
+    // own 255 since 0.37.0, so only the byte budget bounds the frame.)
+    var base: u64 = 0;
+    var r: u32 = 0;
+    while (r < 200) : (r += 1) {
+        var k: u64 = 0;
+        while (k < 70) : (k += 1) tracker.add(base + k, 1_000);
+        base += 140;
+    }
+    try std.testing.expectEqual(@as(u8, 200), tracker.range_count);
 
     var packet_buf: [default_mtu]u8 = undefined;
     const n = (try conn.pollLevel(.application, &packet_buf, 1_001_000)).?;

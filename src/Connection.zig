@@ -1513,9 +1513,29 @@ pub const default_ack_quick_gap_us: u64 = 1_000;
 ///     seed, 8 MiB buffer and 4 MiB window). Cost: an ACK frame of up
 ///     to 512 bytes of ranges when that many gaps are open, nothing
 ///     otherwise; the receiver's tracker already held 255 ranges.
+///   * 2026-10-08: the count RAISED to 255, the tracker's own cap (the
+///     sprint "protocol polish"). With the sender's buffer and the
+///     receiver's window no longer the limit, the same cell with cubic
+///     (12 seeds) had three to six loss episodes per run, most of them
+///     late packets whose acknowledgment never showed: the receiver
+///     held 72 to 90 ranges at once and every ACK frame carried 64,
+///     so a late packet that filled a LOW gap stayed unacknowledged
+///     until the gaps above it closed (312 truncated frames in one
+///     run), and the sender declared it lost and cut its window.
+///     MEASURED at 255: cubic 374 -> 349 ms median (min 334 -> 311),
+///     one episode per run (the first reorder event, before the path
+///     is known to reorder); bbr `impairment_reorder_gaps_1gbit` 311
+///     -> 272 ms; `impairment_loss5pct` and `impairment_reorder10pct`
+///     the same time with 13% and 24% fewer datagrams; no frame
+///     truncated at the 512-byte budget (255 small ranges fit). The
+///     alternative measured first, a reaction deferred one round trip
+///     on a reordering path, gained nothing on top of this.
 pub const max_application_ack_ranges_bytes: usize = 512;
-/// Hard cap on the number of additional (non-largest) ACK ranges per application packet.
-pub const max_application_ack_lower_ranges: u64 = 64;
+/// Hard cap on the number of additional (non-largest) ACK ranges per
+/// application packet: the receiver's tracker holds that many
+/// (`AckTracker.max_ranges`), so the frame can describe every gap it
+/// knows within the byte budget above.
+pub const max_application_ack_lower_ranges: u64 = 255;
 /// Per-`handle`-cycle ceiling on cumulative ACK ranges drained from
 /// inbound ACK / PATH_ACK frames. Sized at 4× the per-frame decoder
 /// cap (`frame.decode.max_incoming_ack_ranges = 256`) so well-behaved
