@@ -5,6 +5,13 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.37.1] - 2026-10-08
+
+The v0.37.0 tag's `test` gate was red on its `zig fmt --check` step
+(`bench/loss_ack.zig`, a bench file, was not formatted; every test
+passed on every job). This tag formats the file; no code changes.
+The move goes to this tag.
+
 ## [0.37.0] - 2026-10-08
 
 The protocol-polish release: an ACK frame describes every gap the
