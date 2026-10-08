@@ -460,6 +460,9 @@ pub const ImpairmentResult = struct {
     /// thresholds went back, and the clean rounds counted at the end.
     reorder_decays: u64 = 0,
     reorder_clean_rounds: u32 = 0,
+    /// The controller's loss episodes opened and taken back.
+    loss_episodes: u32 = 0,
+    loss_undos: u64 = 0,
 };
 
 /// Bulk transfer through the seeded impairment net, measured in
@@ -606,6 +609,8 @@ pub fn runImpairmentOnce(allocator: std.mem.Allocator, opts: ImpairmentOptions) 
         .loss_detection_delays = pair.client.qlog_loss_delays,
         .reorder_decays = pair.client.paths.primaryConst().sent.reorder.decays,
         .reorder_clean_rounds = pair.client.paths.primaryConst().sent.reorder.clean_rounds,
+        .loss_episodes = pair.client.paths.primaryConst().path.cc.lossEpisode(),
+        .loss_undos = pair.client.paths.primaryConst().path.cc.lossUndos(),
     };
 }
 

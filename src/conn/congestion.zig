@@ -94,6 +94,9 @@ pub const LossEpisodes = struct {
     /// The reaction of the current episode is saved and not yet taken
     /// back.
     undoable: bool = false,
+    /// Episodes taken back, for the life of the controller (a bench
+    /// and qlog instrument).
+    undos: u64 = 0,
 
     /// The controller reacts: a new episode, nothing pending yet.
     pub fn open(self: *LossEpisodes) void {
@@ -114,6 +117,7 @@ pub const LossEpisodes = struct {
         self.pending -= 1;
         if (self.pending != 0 or !self.undoable) return false;
         self.undoable = false;
+        self.undos += 1;
         return true;
     }
 };
@@ -273,6 +277,13 @@ pub const CongestionController = union(Algorithm) {
     pub fn lossEpisode(self: *const CongestionController) u32 {
         return switch (self.*) {
             inline else => |*impl| impl.lossEpisode(),
+        };
+    }
+
+    /// Episodes the controller took back as spurious, for its life.
+    pub fn lossUndos(self: *const CongestionController) u64 {
+        return switch (self.*) {
+            inline else => |*impl| impl.episodes.undos,
         };
     }
 

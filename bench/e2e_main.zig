@@ -546,8 +546,8 @@ fn runImpairment(
 fn printLossLine(result: harness.ImpairmentResult) void {
     if (result.packets_lost == 0) return;
     const mean_delay_us = if (result.loss_detection_delays == 0) 0 else result.loss_detection_delay_sum_us / result.loss_detection_delays;
-    std.debug.print("  loss: {d} declared, {d} arrived late; thresholds {d} packets, shift {d}; detection delay mean {d} us over {d}; decays {d}, clean rounds {d}\n", .{
-        result.packets_lost, result.packets_spuriously_lost, result.packet_threshold, result.time_shift, mean_delay_us, result.loss_detection_delays, result.reorder_decays, result.reorder_clean_rounds,
+    std.debug.print("  loss: {d} declared, {d} arrived late; thresholds {d} packets, shift {d}; detection delay mean {d} us over {d}; decays {d}, clean rounds {d}; episodes {d}, undone {d}\n", .{
+        result.packets_lost, result.packets_spuriously_lost, result.packet_threshold, result.time_shift, mean_delay_us, result.loss_detection_delays, result.reorder_decays, result.reorder_clean_rounds, result.loss_episodes, result.loss_undos,
     });
 }
 
