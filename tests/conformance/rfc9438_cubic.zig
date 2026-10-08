@@ -154,6 +154,61 @@ test "the reduction, W_max and the threshold are restored when every packet it w
     try std.testing.expectEqual(@as(?u64, null), cubic.epoch_start_us);
 }
 
+test "a spurious reduction whose last packet arrives after the next episode opened is still taken back [RFC9002 §6.1 ¶?]" {
+    // The CUBIC twin of the NewReno test in rfc9002_loss_recovery.zig
+    // (since v0.33.0; through v0.32.0 the reduction stuck for good).
+    // Episode 1 at 100k: 70k, W_max 85k (fast convergence), threshold
+    // 70k. Episode 2 at 70k: 49k, W_max 59.5k.
+    var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
+    cubic.cwnd = 100_000;
+    cubic.w_max = 110_000;
+    cubic.ssthresh = 90_000;
+    cubic.onPacketLost(1200, 1_000_000, 1_020_000);
+    cubic.noteDeclaredLost(2);
+    try std.testing.expectEqual(@as(u64, 70_000), cubic.cwnd);
+    cubic.onPacketLost(1200, 1_030_000, 1_050_000);
+    cubic.noteDeclaredLost(1);
+    try std.testing.expectEqual(@as(u32, 2), cubic.lossEpisode());
+    try std.testing.expectEqual(@as(u64, 49_000), cubic.cwnd);
+    // Episode 1's packets arrive while episode 2's reduction stands:
+    // the window goes to what that reduction was taken from, and
+    // W_max is at least that.
+    cubic.onSpuriousLoss(1);
+    try std.testing.expectEqual(@as(u64, 49_000), cubic.cwnd);
+    cubic.onSpuriousLoss(1);
+    try std.testing.expectEqual(@as(u64, 70_000), cubic.cwnd);
+    try std.testing.expectEqual(@as(?u64, 70_000), cubic.ssthresh);
+    try std.testing.expect(cubic.w_max >= 70_000);
+    try std.testing.expect(cubic.recovery_start_time_us != null);
+    // Episode 2's packet arrives: everything before both is back.
+    cubic.onSpuriousLoss(2);
+    try std.testing.expectEqual(@as(u64, 100_000), cubic.cwnd);
+    try std.testing.expectEqual(@as(u64, 110_000), cubic.w_max);
+    try std.testing.expectEqual(@as(?u64, 90_000), cubic.ssthresh);
+    try std.testing.expectEqual(@as(?u64, null), cubic.recovery_start_time_us);
+
+    // The other order: the current episode first, then the previous
+    // one in full.
+    var c2 = Cubic.init(.{ .max_datagram_size = 1200 });
+    c2.cwnd = 100_000;
+    c2.w_max = 110_000;
+    c2.ssthresh = 90_000;
+    c2.onPacketLost(1200, 1_000_000, 1_020_000);
+    c2.noteDeclaredLost(2);
+    c2.onPacketLost(1200, 1_030_000, 1_050_000);
+    c2.noteDeclaredLost(1);
+    c2.onSpuriousLoss(2);
+    try std.testing.expectEqual(@as(u64, 70_000), c2.cwnd);
+    try std.testing.expectEqual(@as(u64, 85_000), c2.w_max);
+    c2.onSpuriousLoss(1);
+    try std.testing.expectEqual(@as(u64, 70_000), c2.cwnd);
+    c2.onSpuriousLoss(1);
+    try std.testing.expectEqual(@as(u64, 100_000), c2.cwnd);
+    try std.testing.expectEqual(@as(u64, 110_000), c2.w_max);
+    try std.testing.expectEqual(@as(?u64, 90_000), c2.ssthresh);
+    try std.testing.expectEqual(@as(?u64, null), c2.recovery_start_time_us);
+}
+
 test "MUST collapse to the minimum window on persistent congestion [RFC9002 §7.6 ¶2]" {
     var cubic = Cubic.init(.{ .max_datagram_size = 1200 });
     cubic.cwnd = 90_000;

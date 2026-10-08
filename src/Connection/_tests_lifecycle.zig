@@ -105,6 +105,9 @@ test "per-space tracker capacities: 256 for Initial/Handshake, 16384 for Applica
         @as(u32, sent_packets.initial_handshake_max_tracked),
         conn.sentForLevel(.handshake).capacity(),
     );
+    // The number itself, not the constant: the release notes and the
+    // bench records state it (16384 since v0.33.0, 4096 before).
+    try std.testing.expectEqual(@as(u32, 16384), sent_packets.max_tracked);
     try std.testing.expectEqual(
         @as(u32, sent_packets.max_tracked),
         conn.sentForLevel(.application).capacity(),
