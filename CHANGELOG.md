@@ -5,6 +5,77 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.35.0] - 2026-10-08
+
+The reordering release: a path that reorders by a round trip no longer
+holds CUBIC back, and the receiver acknowledges every second packet
+of a burst while a lone packet still gets its ACK at once. One new
+knob (`ack_quick_gap_us`), one ACK-policy change on the wire (fewer
+ACK datagrams in bulk, none fewer in ping-pong), no API change. The
+same option map. Verified toolchain: 0.17.0.
+
+MEASURED (12 seeds, median / max; `impairment_reorder_gaps_1gbit_defaults`:
+8 MiB on 1 Gbit/s, 20 ms RTT, 10% of the packets 20 ms late, nothing
+dropped):
+
+| | v0.34.0 | v0.35.0 |
+| --- | --- | --- |
+| cubic | 511 / 626 ms | 378 / 405 ms |
+| bbr | 371 / 414 ms | 311 / 380 ms |
+| in-process goodput (64 MiB, no sockets) | 988 MB/s, 117,120 datagrams | 1,088 MB/s, 87,852 datagrams |
+| churn, strict ping-pong (2,000 streams) | 8,000 datagrams | 8,000 datagrams |
+
+### Fixed
+
+- **The packet-threshold rule is off once reordering is seen**
+  (`conn/ReorderWindow.zig`). The threshold grew to the distance a
+  late packet trailed by, one spurious loss at a time; on a path
+  whose rate doubles every round trip the distance doubles too, and
+  every doubling opened loss episodes until the threshold caught up:
+  85 spurious episodes in one 8 MiB transfer, each cutting CUBIC's
+  window and holding slow start for a round trip. Now a spurious loss
+  puts the packet threshold at its maximum and the time rule alone
+  declares losses, as RFC 8985 (RACK) stops using DupThresh once
+  reordering is observed. MEASURED: cubic 524 -> 447 ms.
+- **The widest time threshold carries a jitter margin.** It stopped
+  at exactly twice the RTT, and a packet late by one round trip sat
+  on that cliff: its queueing delay decided whether it was declared
+  lost. The widest threshold, and the reach the window settles by, is
+  twice the RTT plus the larger of four times the RTT variance (the
+  probe timeout's margin) and a quarter of the RTT. MEASURED: cubic
+  447 -> 422 ms, bbr 371 -> 367.
+- **The receive window grows on the bytes received when the reader
+  keeps up** (`Connection/streams.zig`). The tune counted only the
+  bytes the application read; under reordering the application is
+  held by the network, not slow, and the window stalled at 2 MiB for
+  a 2.5 MB bandwidth-delay product plus a 20 ms hole, with the sender
+  out of credit half the time. When the application has read
+  everything deliverable, the pace is the bytes received, holes
+  included; a reader that leaves deliverable bytes is slow, hole or
+  not, and keeps the old rule. MEASURED: cubic 422 -> 378 ms, bbr
+  367 -> 311.
+
+### Changed
+
+- **The receiver acknowledges every second packet of a burst, and a
+  lone packet at once.** `application_ack_eliciting_threshold` is
+  RFC 9000 13.2.2's two (one through v0.34.0), with a quiet rule: an
+  ack-eliciting packet that arrives `ack_quick_gap_us` (1 ms by
+  default; `Connection`, `Client.Config`, `Server.Config`; 0 turns it
+  off) or more after the previous one is acknowledged at once. A
+  burst on any path faster than ~10 Mbit/s shares one ACK between two
+  packets; a request, a reply or a keepalive, a round trip apart, gets
+  its ACK now instead of after the max_ack_delay timer. Initial and
+  Handshake packets, and packets with a FIN, a RESET_STREAM or a
+  STOP_SENDING, are acknowledged at once as before. MEASURED: the
+  in-process goodput bench 988 -> 1,088 MB/s (+10%, twice v0.33.0's),
+  a quarter fewer datagrams in bulk; the churn cells (strict
+  ping-pong) byte-identical to v0.34.0's. The cost: ACK clocking every
+  second packet makes the single-stream 1 Gbit cells about 2% slower
+  (the release record has every cell).
+- **The reorder ring stays at 256 records**: 1,024 was measured and
+  changed no reorder cell by a millisecond.
+
 ## [0.34.0] - 2026-10-08
 
 The CPU-per-packet release: the engine moves the same bytes in a
