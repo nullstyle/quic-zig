@@ -1178,7 +1178,7 @@ test "a spurious loss that is not the whole episode widens the thresholds and ta
     try std.testing.expectEqual(@as(?u64, null), conn.ccForApplication().ssthreshBytes());
 }
 
-test "a spurious loss from an older episode widens the thresholds and takes nothing back" {
+test "a spurious loss from an older episode widens the thresholds, and takes that episode's reduction back under the newer one" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
     defer ctx.deinit();
@@ -1213,12 +1213,16 @@ test "a spurious loss from an older episode widens the thresholds and takes noth
 
     // Packets 0 to 4 arrive now (a gap of 4 packets, 8 to 5, coded as
     // 3; a range of 5, coded as 4): 0 and 1 are episode 1's, 2 and 3
-    // episode 2's. All four are spurious and the thresholds widen;
-    // episode 2's reduction stays, since 5 and 6 are still out.
+    // episode 2's. All four are spurious and the thresholds widen.
+    // Episode 1 is complete, so its reduction is taken back under
+    // episode 2's, which stays since 5 and 6 are still out: the window
+    // is what episode 2's reduction was taken from (since v0.33.0;
+    // before, an older episode's packets took nothing back).
     try conn.handleAckAtLevel(.application, ackOf(9, 0, &.{ 3, 4 }), 86_000);
     try std.testing.expectEqual(@as(u64, 4), conn.qlog_packets_spuriously_lost);
     try std.testing.expectEqual(@as(u64, 10), sent.reorder.packet_threshold); // 0 trailed 9 by 9
-    try std.testing.expectEqual(reduced_twice, conn.congestionWindow());
+    try std.testing.expect(conn.congestionWindow() >= reduced);
+    try std.testing.expect(conn.congestionWindow() < initial_cwnd);
     try std.testing.expectEqual(@as(u32, 2), sent.reorder.live);
 }
 

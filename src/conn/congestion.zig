@@ -94,12 +94,26 @@ pub const LossEpisodes = struct {
     /// The reaction of the current episode is saved and not yet taken
     /// back.
     undoable: bool = false,
+    /// The previous episode (since v0.33.0): it stays undoable while
+    /// its late packets arrive after the next episode opened, which
+    /// under steady reordering is how most spurious reductions used
+    /// to stick. MEASURED 2026-10-07 (the gaps cell, cubic): 47
+    /// episodes, 45 taken back; the two that were not held the window
+    /// at 130 KB for the run.
+    prev_episode: u32 = 0,
+    prev_pending: u32 = 0,
+    prev_undoable: bool = false,
     /// Episodes taken back, for the life of the controller (a bench
     /// and qlog instrument).
     undos: u64 = 0,
 
-    /// The controller reacts: a new episode, nothing pending yet.
+    /// The controller reacts: a new episode, nothing pending yet. The
+    /// current one moves to the previous slot if it still has packets
+    /// to arrive (a previous one still waiting is abandoned).
     pub fn open(self: *LossEpisodes) void {
+        self.prev_episode = self.episode;
+        self.prev_pending = self.pending;
+        self.prev_undoable = self.undoable and self.pending != 0;
         self.episode +%= 1;
         self.pending = 0;
         self.undoable = true;
@@ -109,16 +123,35 @@ pub const LossEpisodes = struct {
         self.pending +|= count;
     }
 
-    /// A packet counted in the current episode arrived. True once
-    /// every one of them has, while the reaction is still there to
-    /// take back; the caller then restores its saved state.
-    pub fn arrived(self: *LossEpisodes) bool {
-        if (self.pending == 0) return false;
-        self.pending -= 1;
-        if (self.pending != 0 or !self.undoable) return false;
-        self.undoable = false;
-        self.undos += 1;
-        return true;
+    pub const Arrived = enum { none, current, previous };
+
+    /// A packet counted in `episode` arrived. `.current` or
+    /// `.previous` once every packet of that episode has, while its
+    /// reaction is still there to take back; the caller then restores
+    /// its saved state.
+    pub fn arrived(self: *LossEpisodes, episode: u32) Arrived {
+        if (episode == self.episode) {
+            if (self.pending == 0) return .none;
+            self.pending -= 1;
+            if (self.pending != 0 or !self.undoable) return .none;
+            self.undoable = false;
+            self.undos += 1;
+            return .current;
+        }
+        if (episode == self.prev_episode and self.prev_undoable) {
+            if (self.prev_pending == 0) return .none;
+            self.prev_pending -= 1;
+            if (self.prev_pending != 0) return .none;
+            self.prev_undoable = false;
+            self.undos += 1;
+            return .previous;
+        }
+        return .none;
+    }
+
+    /// The current episode's reaction is saved and not taken back.
+    pub fn currentStands(self: *const LossEpisodes) bool {
+        return self.undoable;
     }
 };
 
@@ -295,12 +328,14 @@ pub const CongestionController = union(Algorithm) {
         }
     }
 
-    /// A packet declared lost in the current episode arrived (an ACK
-    /// covered it). When every packet of the episode has, the
-    /// controller takes its reaction back.
-    pub fn onSpuriousLoss(self: *CongestionController) void {
+    /// A packet declared lost in `episode` arrived (an ACK covered
+    /// it). When every packet of the episode has, the controller
+    /// takes its reaction back: the current episode's, or the
+    /// previous one's, whose late packets may arrive after the next
+    /// opened.
+    pub fn onSpuriousLoss(self: *CongestionController, episode: u32) void {
         switch (self.*) {
-            inline else => |*impl| impl.onSpuriousLoss(),
+            inline else => |*impl| impl.onSpuriousLoss(episode),
         }
     }
 
@@ -477,10 +512,13 @@ pub const NewReno = struct {
     /// RFC 9406 HyStart++ slow-start exit state.
     hystart: HyStart = .{},
     /// The loss episodes, and the window before the current one's
-    /// reduction, for `onSpuriousLoss`.
+    /// reduction, for `onSpuriousLoss`; `prev_undo_*` is the window
+    /// before the previous episode's.
     episodes: LossEpisodes = .{},
     undo_cwnd: u64 = 0,
     undo_ssthresh: ?u64 = null,
+    prev_undo_cwnd: u64 = 0,
+    prev_undo_ssthresh: ?u64 = null,
 
     /// Build a fresh controller with `cfg` and `cwnd = initialWindow()`.
     pub fn init(cfg: Config) NewReno {
@@ -596,6 +634,8 @@ pub const NewReno = struct {
     /// procedure invoked from both).
     fn reduce(self: *NewReno) void {
         self.episodes.open();
+        self.prev_undo_cwnd = self.undo_cwnd;
+        self.prev_undo_ssthresh = self.undo_ssthresh;
         self.undo_cwnd = self.cwnd;
         self.undo_ssthresh = self.ssthresh;
         // ssthresh = cwnd * 0.5
@@ -618,17 +658,39 @@ pub const NewReno = struct {
         self.episodes.noteDeclaredLost(count);
     }
 
-    /// A packet declared lost in the current episode arrived. When
-    /// every one of them has, the reduction was for nothing: the
-    /// window goes back to what it was before it (never below where
-    /// it is now), and the recovery period ends. The analog of
-    /// Linux's `tcp_undo_cwnd_reduction`.
-    pub fn onSpuriousLoss(self: *NewReno) void {
-        if (!self.episodes.arrived()) return;
-        self.cwnd = @max(self.cwnd, self.undo_cwnd);
-        self.ssthresh = self.undo_ssthresh;
-        self.recovery_start_time_us = null;
-        self.bytes_acked_in_ca = 0;
+    /// A packet declared lost in `episode` arrived. When every one of
+    /// them has, the reduction was for nothing: the window goes back
+    /// to what it was before it (never below where it is now), and the
+    /// recovery period ends. The analog of Linux's
+    /// `tcp_undo_cwnd_reduction`. The previous episode's packets may
+    /// arrive after the next opened: then, with the current reduction
+    /// standing, the window goes to what the current reduction was
+    /// taken from (the current reduction applied to the earlier
+    /// window, near enough), and a later undo of the current one goes
+    /// back to the window before both.
+    pub fn onSpuriousLoss(self: *NewReno, episode: u32) void {
+        switch (self.episodes.arrived(episode)) {
+            .none => {},
+            .current => {
+                self.cwnd = @max(self.cwnd, self.undo_cwnd);
+                self.ssthresh = self.undo_ssthresh;
+                self.recovery_start_time_us = null;
+                self.bytes_acked_in_ca = 0;
+            },
+            .previous => {
+                if (self.episodes.currentStands()) {
+                    self.cwnd = @max(self.cwnd, self.undo_cwnd);
+                    self.ssthresh = self.cwnd;
+                    self.undo_cwnd = self.prev_undo_cwnd;
+                    self.undo_ssthresh = self.prev_undo_ssthresh;
+                } else {
+                    self.cwnd = @max(self.cwnd, self.prev_undo_cwnd);
+                    self.ssthresh = self.prev_undo_ssthresh;
+                    self.recovery_start_time_us = null;
+                }
+                self.bytes_acked_in_ca = 0;
+            },
+        }
     }
 
     /// Post-ACK hook driving RFC 9406 HyStart++ (see `hystart.zig`).

@@ -435,7 +435,7 @@ test "NORMATIVE a spurious loss episode restores the model bounds saved before i
     // The packet arrived after all (RestoreStateUponSpuriousLoss):
     // the bounds are what they were BEFORE the cut, the loss round is
     // clean, and recovery is over.
-    bbr.onSpuriousLoss();
+    bbr.onSpuriousLoss(bbr.lossEpisode());
     try std.testing.expectEqual(longterm_before, bbr.inflight_longterm);
     try std.testing.expectEqual(shortterm_before, bbr.inflight_shortterm);
     try std.testing.expectEqual(bw_shortterm_before, bbr.bw_shortterm);

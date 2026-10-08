@@ -146,7 +146,7 @@ test "the reduction, W_max and the threshold are restored when every packet it w
     cubic.noteDeclaredLost(1);
     try std.testing.expectEqual(@as(u64, 70_000), cubic.cwnd);
     try std.testing.expectEqual(@as(u64, 85_000), cubic.w_max); // fast convergence: cwnd * (1 + 0.7) / 2
-    cubic.onSpuriousLoss();
+    cubic.onSpuriousLoss(cubic.lossEpisode());
     try std.testing.expectEqual(@as(u64, 100_000), cubic.cwnd);
     try std.testing.expectEqual(@as(u64, 110_000), cubic.w_max);
     try std.testing.expectEqual(@as(?u64, 90_000), cubic.ssthresh);

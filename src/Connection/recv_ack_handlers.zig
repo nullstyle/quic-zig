@@ -216,7 +216,7 @@ fn onSpuriousLoss(sctx: *SpuriousLossCtx, rec: ReorderWindow.LostRecord) void {
     sctx.conn.qlog_packets_spuriously_lost +|= 1;
     target.sent.reorder.widen(rec, sctx.previous_largest_acked, sctx.now_us, &target.path.path.rtt);
     const cc = &target.path.path.cc;
-    if (rec.episode == cc.lossEpisode()) cc.onSpuriousLoss();
+    cc.onSpuriousLoss(rec.episode);
 }
 
 /// Apply one inbound ACK to `target`: validate, walk the ranges,

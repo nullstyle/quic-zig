@@ -647,17 +647,64 @@ test "the reduction is taken back when every packet it was for arrives [RFC9002 
     try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
     try std.testing.expectEqual(@as(u32, 1), nr.lossEpisode());
     // One of the two arrived: not yet.
-    nr.onSpuriousLoss();
+    nr.onSpuriousLoss(1);
     try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
     // Both arrived: the window and the threshold are back, and the
     // recovery period is over.
-    nr.onSpuriousLoss();
+    nr.onSpuriousLoss(1);
     try std.testing.expectEqual(@as(u64, 12000), nr.cwnd);
     try std.testing.expectEqual(@as(?u64, 20000), nr.ssthresh);
     try std.testing.expectEqual(@as(?u64, null), nr.recovery_start_time_us);
     // A third report is nothing (the episode has no pending packet).
-    nr.onSpuriousLoss();
+    nr.onSpuriousLoss(1);
     try std.testing.expectEqual(@as(u64, 12000), nr.cwnd);
+}
+
+test "a spurious reduction whose last packet arrives after the next episode opened is still taken back [RFC9002 §6.1 ¶?]" {
+    // Under steady reordering the next episode opens before the
+    // previous one's late packets have all arrived; through v0.32.0
+    // that reduction stuck for good. Now the previous episode stays
+    // undoable: with the current reduction standing, the window goes
+    // to what that reduction was taken from; when the current one is
+    // taken back too, to the window before both.
+    var nr = NewReno.init(.{ .max_datagram_size = 1200 });
+    nr.cwnd = 12000;
+    nr.ssthresh = 20000;
+    nr.onPacketLost(2400, 1_000_000, 1_020_000);
+    nr.noteDeclaredLost(2);
+    try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
+    // A loss of a packet sent after the period began: episode 2.
+    nr.onPacketLost(1200, 1_030_000, 1_050_000);
+    nr.noteDeclaredLost(1);
+    try std.testing.expectEqual(@as(u32, 2), nr.lossEpisode());
+    try std.testing.expectEqual(@as(u64, 3000), nr.cwnd);
+    // Episode 1's packets arrive, one, then the other.
+    nr.onSpuriousLoss(1);
+    try std.testing.expectEqual(@as(u64, 3000), nr.cwnd);
+    nr.onSpuriousLoss(1);
+    try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
+    try std.testing.expectEqual(@as(?u64, 6000), nr.ssthresh);
+    try std.testing.expect(nr.recovery_start_time_us != null);
+    // Episode 2's packet arrives: back to the window before both.
+    nr.onSpuriousLoss(2);
+    try std.testing.expectEqual(@as(u64, 12000), nr.cwnd);
+    try std.testing.expectEqual(@as(?u64, 20000), nr.ssthresh);
+    try std.testing.expectEqual(@as(?u64, null), nr.recovery_start_time_us);
+
+    // The other order: the current one first, then the previous.
+    var nr2 = NewReno.init(.{ .max_datagram_size = 1200 });
+    nr2.cwnd = 12000;
+    nr2.ssthresh = 20000;
+    nr2.onPacketLost(2400, 1_000_000, 1_020_000);
+    nr2.noteDeclaredLost(2);
+    nr2.onPacketLost(1200, 1_030_000, 1_050_000);
+    nr2.noteDeclaredLost(1);
+    nr2.onSpuriousLoss(2);
+    try std.testing.expectEqual(@as(u64, 6000), nr2.cwnd);
+    nr2.onSpuriousLoss(1);
+    nr2.onSpuriousLoss(1);
+    try std.testing.expectEqual(@as(u64, 12000), nr2.cwnd);
+    try std.testing.expectEqual(@as(?u64, 20000), nr2.ssthresh);
 }
 
 test "a reduction with a real loss in it is never taken back [RFC9002 §6.1 ¶?]" {
@@ -665,16 +712,22 @@ test "a reduction with a real loss in it is never taken back [RFC9002 §6.1 ¶?]
     nr.cwnd = 12000;
     nr.onPacketLost(2400, 1_000_000, 1_020_000);
     nr.noteDeclaredLost(2);
-    nr.onSpuriousLoss(); // one arrived; the other never will
+    nr.onSpuriousLoss(1); // one arrived; the other never will
     try std.testing.expectEqual(@as(u64, 6000), nr.cwnd);
-    // A later, real event opens a new episode; the old one's second
-    // packet arriving now changes nothing (the caller checks the
-    // episode before it reports; the count was reset either way).
+    // A later, real event opens a new episode. A packet of the NEW
+    // episode arriving is nothing for the old one, whose second
+    // packet never comes: the old reduction stands under the new.
     nr.onPacketLost(1200, 1_030_000, 1_050_000);
+    nr.noteDeclaredLost(2);
     try std.testing.expectEqual(@as(u32, 2), nr.lossEpisode());
     try std.testing.expectEqual(@as(u64, 3000), nr.cwnd);
-    nr.onSpuriousLoss();
+    nr.onSpuriousLoss(2);
     try std.testing.expectEqual(@as(u64, 3000), nr.cwnd);
+    // A third episode: the first, still short of a packet, is
+    // forgotten for good (the window is at its floor by now).
+    nr.onPacketLost(1200, 1_060_000, 1_080_000);
+    nr.onSpuriousLoss(1);
+    try std.testing.expectEqual(nr.cfg.minWindow(), nr.cwnd);
 }
 
 test "MUST NOT shrink cwnd below min_window on loss [RFC9002 §B.6 ¶?]" {

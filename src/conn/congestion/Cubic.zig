@@ -66,6 +66,11 @@ episodes: congestion.LossEpisodes = .{},
 undo_cwnd: u64 = 0,
 undo_ssthresh: ?u64 = null,
 undo_w_max: u64 = 0,
+/// The state before the previous episode's reduction (see
+/// `LossEpisodes.prev_episode`).
+prev_undo_cwnd: u64 = 0,
+prev_undo_ssthresh: ?u64 = null,
+prev_undo_w_max: u64 = 0,
 
 pub fn init(cfg: congestion.Config) Cubic {
     return .{
@@ -206,6 +211,9 @@ pub fn onCongestionEvent(self: *Cubic, ce_packet_sent_time_us: u64, now_us: u64)
 
 fn reduce(self: *Cubic) void {
     self.episodes.open();
+    self.prev_undo_cwnd = self.undo_cwnd;
+    self.prev_undo_ssthresh = self.undo_ssthresh;
+    self.prev_undo_w_max = self.undo_w_max;
     self.undo_cwnd = self.cwnd;
     self.undo_ssthresh = self.ssthresh;
     self.undo_w_max = self.w_max;
@@ -239,18 +247,42 @@ pub fn noteDeclaredLost(self: *Cubic, count: u32) void {
     self.episodes.noteDeclaredLost(count);
 }
 
-/// A packet declared lost in the current episode arrived. When every
-/// one of them has, the reduction was for nothing: the window, the
-/// threshold and W_max go back to what they were before it (the window
-/// never below where it is now), the recovery period ends, and the
-/// next ACK anchors a fresh epoch. Linux's `bictcp_undo_cwnd` restores
-/// the window to W_max the same way.
-pub fn onSpuriousLoss(self: *Cubic) void {
-    if (!self.episodes.arrived()) return;
-    self.cwnd = @max(self.cwnd, self.undo_cwnd);
-    self.ssthresh = self.undo_ssthresh;
-    self.w_max = self.undo_w_max;
-    self.recovery_start_time_us = null;
+/// A packet declared lost in `episode` arrived. When every one of
+/// them has, the reduction was for nothing: the window, the threshold
+/// and W_max go back to what they were before it (the window never
+/// below where it is now), the recovery period ends, and the next ACK
+/// anchors a fresh epoch. Linux's `bictcp_undo_cwnd` restores the
+/// window to W_max the same way. The previous episode's packets may
+/// arrive after the next opened (since v0.33.0): then, with the
+/// current reduction standing, the window goes to what the current
+/// reduction was taken from (the current reduction applied to the
+/// earlier window, near enough), W_max no lower than that, and a
+/// later undo of the current one goes back to the state before both.
+pub fn onSpuriousLoss(self: *Cubic, episode: u32) void {
+    switch (self.episodes.arrived(episode)) {
+        .none => return,
+        .current => {
+            self.cwnd = @max(self.cwnd, self.undo_cwnd);
+            self.ssthresh = self.undo_ssthresh;
+            self.w_max = self.undo_w_max;
+            self.recovery_start_time_us = null;
+        },
+        .previous => {
+            if (self.episodes.currentStands()) {
+                self.cwnd = @max(self.cwnd, self.undo_cwnd);
+                self.ssthresh = self.cwnd;
+                self.w_max = @max(self.w_max, self.undo_cwnd);
+                self.undo_cwnd = self.prev_undo_cwnd;
+                self.undo_ssthresh = self.prev_undo_ssthresh;
+                self.undo_w_max = self.prev_undo_w_max;
+            } else {
+                self.cwnd = @max(self.cwnd, self.prev_undo_cwnd);
+                self.ssthresh = self.prev_undo_ssthresh;
+                self.w_max = self.prev_undo_w_max;
+                self.recovery_start_time_us = null;
+            }
+        },
+    }
     self.epoch_start_us = null;
 }
 

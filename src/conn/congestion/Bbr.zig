@@ -546,8 +546,11 @@ pub fn noteDeclaredLost(self: *Bbr, count: u32) void {
 /// over (a spurious slow-down, as Linux's `bbr_undo_cwnd` treats it),
 /// and the recovery period ends with the window restored. A Startup
 /// exit the losses caused is not taken back (Linux does not either).
-pub fn onSpuriousLoss(self: *Bbr) void {
-    if (!self.episodes.arrived()) return;
+pub fn onSpuriousLoss(self: *Bbr, episode: u32) void {
+    // BBR extends one recovery period at every later loss, so a
+    // previous episode's late packet is rare; its model bounds are
+    // saved once, for the current one.
+    if (self.episodes.arrived(episode) != .current) return;
     self.bw_shortterm = self.undo_bw_shortterm;
     self.inflight_shortterm = self.undo_inflight_shortterm;
     self.inflight_longterm = self.undo_inflight_longterm;
