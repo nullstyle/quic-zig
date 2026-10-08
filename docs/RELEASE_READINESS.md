@@ -1404,6 +1404,69 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.33.0: the line-rate release
+
+v0.33.0 (tag `712ac23`, 2026-10-08) is the "line rate by default"
+sprint: a single stream reaches the path's rate on the engine's
+defaults. The receive windows tune themselves (quic-go's and
+Chromium's rule: a reader that consumed the last half window in under
+two round trips gets a window twice as big, up to 8 MiB per stream and
+16 MiB per connection, the connection's cap never more than half of
+`max_connection_memory`), the send buffer follows the peer's credit
+(`max_buffered_send` is the floor, `max_buffered_send_cap` 16 MiB the
+cap), the sent-packet tracker holds 16384 packets (the slab grows on
+demand), a write past the memory budget returns short instead of
+`ExcessiveLoad`, and the previous loss episode stays undoable. The
+sprint's finding was not on its plan: CUBIC stayed at ~1.5 s on the
+reorder cell whatever the windows because the sender wrote packet
+numbers in one byte while fewer than 128 packets were out, and a
+packet 20 ms late at 1 Gbit/s arrives after ~2000 newer ones; the
+receiver recovered the wrong number (RFC 9000 A.3), the tag failed,
+the packet was dropped without a trace, and the loss it had been
+declared was never taken back. A packet number is never one byte now
+(quic-go's choice). Measured on the defaults, 8 MiB at 1 Gbit/s with
+a 20 ms round trip, bbr, 12 seeds: clean 410 -> 234 ms (the floor
+~220), 10% of the packets 20 ms late 924 -> 371 ms median (cubic
+~1540 -> 511), 16 streams x 256 MiB at 100 ms 7334 -> 4138 ms. Five
+knobs, all on by default; the same option map.
+
+Local before the tag (`tools/release.sh 0.33.0` on c833970): the full
+suite 2,019 of 2,035 (16 skipped; four tests adapted: three tracker
+tests had the 4096 count written in, one borrowed-driver test pins a
+3-byte buffer that the follow rule would lift), `just check-windows`
+15/15, `just check-x86` 15/15, fifteen mutants of the new rules (14
+killed, 1 equivalent: the window's cap is enforced in the doubling as
+well as in the guard; two survived a first run and were closed by
+tests, CUBIC's full restore of a previous episode and the tracker
+number stated as a number), the bench cells against main (the four
+bottleneck cells within one queue microsecond, the packet-number
+byte; the three churn cells byte-identical; every window-bound cell
+faster, the light impairment cells among them; the six fairness
+cells inside noise or better, 2f mixed Jain 0.80 -> 0.86).
+
+**The gates on `712ac23`**, each read at its evidence line.
+
+- `test` (run 37715271918): seven jobs; the sanitizer job 2,034 of
+  2,050 (16 skipped); macos-26, macos-15, ubuntu x86 and ubuntu arm
+  2,034 of 2,050 in Debug and 1,994 of 2,010 in ReleaseSafe;
+  windows-latest 1,971 of 2,010 (39 skipped) in both modes;
+  x86-linux-musl 2,034 of 2,050.
+- rc-fuzz (run 37715273154): `n_runs=2,220,035 unique_runs=11,859
+  pcs_len=45627`, `coverage verified: instrumented, 2,220,035
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37715271900): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37715271932): built and pushed from that commit.
+- pin-lint (run 37715271906): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The wide local interop matrix on the tag's image (a flow-control
+  change), after the tag: client role `pairs=3 cells=45 succeeded=43
+  failed=0 unsupported=2` (the two ECN cells; v0.32.0 had 42 with the
+  quiche handshakeloss chance cell failing once); server role
+  `pairs=3 cells=45 succeeded=39 failed=2 unsupported=4` (unsupported: quiche chacha20 and keyupdate, the two ECN cells; the two failed are the known quiche chance cells: multiplexing, which failed in the v0.27-era and v0.30-era matrices too and passed in v0.32.0's, 2 of 5 on a rerun against 13 of 20 historically, and handshakeloss, 5 of 5 on a rerun; v0.32.0's server role was 41 with none failed).
+
+- The package hash of the tag's archive:
+  `quic-0.33.0-DnSYvfk6PQAwBH4pHnhv97zhZeAoJ_0JZRjDIPu_jG8u`.
+
 ## v0.32.0: the single-stream limits release
 
 v0.32.0 (tag `ffdb251`, 2026-10-07) is the "reorder follow-ups" sprint:
