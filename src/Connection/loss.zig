@@ -1282,7 +1282,10 @@ fn firePtoAtLevel(
 /// alone: a stream chunk sent again gets a new key, so the old
 /// packet's ACK or loss later finds nothing for it (`UnknownPacket`,
 /// skipped), CRYPTO data moves to the retransmit queue once, and a
-/// control frame queued twice carries the same current value.
+/// control frame queued twice carries the same current value. The
+/// next probe, then, finds the oldest packet's data gone and walks on
+/// to the oldest packet that still owns stream or CRYPTO data (the
+/// copy, as a rule): every probe to a silent peer carries data.
 ///
 /// The one exception is a full tracker: a probe needs a slot, and
 /// nothing frees one while the peer is silent, so the old expiry
@@ -1312,9 +1315,29 @@ fn firePtoOnApplicationPath(
     while (i < path.sent.count) : (i += 1) {
         const p = &path.sent.packets[i];
         if (p.dead or !p.ack_eliciting) continue;
-        found = true;
-        requeued = try requeueFramesForProbe(conn, p, path.id);
-        break;
+        if (!found) {
+            found = true;
+            const r = try requeueFramesForProbe(conn, p, path.id);
+            requeued = r.any;
+            if (r.data) break;
+            continue;
+        }
+        // The oldest packet owns no data any more: its stream chunks
+        // and CRYPTO bytes moved to a copy with an earlier probe (the
+        // key goes with the copy), and it keeps control frames at
+        // most. The probe still carries previously sent data, from
+        // the oldest packet that owns some (the copy, as a rule).
+        // Without this walk the second and every later probe to a
+        // silent peer carried the control frames alone, or a PING:
+        // found 2026-10-08 in the handshake-corruption interop cell
+        // (a quic-go server, 30% of the bytes corrupted): the
+        // request's packet and the first probe's copy lost, every
+        // ACK the server sent corrupted, and one NEW_CONNECTION_ID
+        // went out per probe for 30 s, until the idle timeout.
+        if (try requeueDataForProbe(conn, p)) {
+            requeued = true;
+            break;
+        }
     }
     if (!found) return false;
     path.pending_ping = !requeued;
@@ -1327,6 +1350,13 @@ fn firePtoOnApplicationPath(
     return true;
 }
 
+const ProbeRequeue = struct {
+    /// Anything went into a queue again.
+    any: bool,
+    /// Stream chunks or CRYPTO bytes did ("previously sent data").
+    data: bool,
+};
+
 /// The retransmittable frames of `packet` go into their queues again,
 /// for a probe; the packet stays as it is. See
 /// `firePtoOnApplicationPath` for what is left out and why the record
@@ -1335,12 +1365,22 @@ fn requeueFramesForProbe(
     conn: *Connection,
     packet: *const SentPacketTracker.SentPacket,
     path_id: u32,
-) Error!bool {
+) Error!ProbeRequeue {
     conn.touch();
+    const data = try requeueDataForProbe(conn, packet);
+    const control = try dispatchLostControlFramesOnPath(conn, packet, path_id);
+    return .{ .any = data or control, .data = data };
+}
+
+/// The stream chunks and CRYPTO bytes `packet` still owns go again;
+/// its control frames stay where they are. `true` when it owned any.
+fn requeueDataForProbe(
+    conn: *Connection,
+    packet: *const SentPacketTracker.SentPacket,
+) Error!bool {
     var any = false;
     any = (try dispatchLostPacketToStreams(conn, packet)) or any;
     any = (try requeueSentCryptoForPacket(conn, .application, packet.pn)) or any;
-    any = (try dispatchLostControlFramesOnPath(conn, packet, path_id)) or any;
     return any;
 }
 

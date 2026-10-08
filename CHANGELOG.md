@@ -9,8 +9,26 @@ changes.
 
 The v0.37.0 tag's `test` gate was red on its `zig fmt --check` step
 (`bench/loss_ack.zig`, a bench file, was not formatted; every test
-passed on every job). This tag formats the file; no code changes.
-The move goes to this tag.
+passed on every job). This tag formats the file, and carries one fix
+the tag's wide interop matrix found. The move goes to this tag.
+
+### Fixed
+
+- A probe timeout to a silent peer carries previously sent stream
+  data every time. Since 0.30.0 a probe re-sends the frames of the
+  oldest ack-eliciting packet in flight, and the packet stays in
+  flight (RFC 9002 section 6.2.4). A stream chunk sent again moves to
+  the copy's packet (the key goes with the copy), so the SECOND probe
+  found the oldest packet's data gone and re-sent its control frames
+  alone, or a PING; the copy's packet, never the oldest, was never
+  probed. The probe now walks on to the oldest packet that still owns
+  stream or CRYPTO data. Found in the handshake-corruption interop
+  cell (a quic-zig client, a quic-go server, 30% of the bytes
+  corrupted): the request's packet and the first probe's copy lost,
+  every ACK the server sent corrupted, and one NEW_CONNECTION_ID went
+  out per probe for 30 s, until the idle timeout. Any ACK that
+  arrives ends it in either version (the thresholds find the loss);
+  a peer silent through several probes is the case. One test.
 
 ## [0.37.0] - 2026-10-08
 

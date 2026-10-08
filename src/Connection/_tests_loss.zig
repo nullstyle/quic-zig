@@ -219,6 +219,99 @@ test "PTO requeues application stream data and arms a probe" {
     try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
 }
 
+test "every probe timeout carries previously sent stream data: once the first packet's chunk moved with a probe, the copy's packet is the one probed" {
+    // Found 2026-10-08 in the handshake-corruption interop cell (a
+    // quic-zig client, a quic-go server, 30% of the bytes corrupted):
+    // the request's packet lost, the first probe's copy lost, and
+    // every ACK the server sent corrupted. The second and every later
+    // probe carried one NEW_CONNECTION_ID and no stream data for
+    // 30 s: the probe re-queued the OLDEST packet's frames, its stream
+    // chunk had moved to the copy's packet with the first probe (the
+    // key goes with the copy), so the stream found nothing for it,
+    // and the copy's packet, never the oldest, was never probed.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    const s = try conn.openBidi(0);
+    _ = try s.send.write("hello");
+    conn.noteSendable(s);
+    const chunk = s.send.peekChunk(100).?;
+    try s.send.recordSent(4, chunk);
+    const app_sent = conn.sentForLevel(.application);
+    // The request's packet: the chunk and a control frame, as in the
+    // field (a NEW_CONNECTION_ID there, MAX_DATA here; either is
+    // queued again with its current value, so the oldest packet
+    // always yields SOMETHING).
+    var first: SentPacketTracker.SentPacket = .{
+        .pn = 4,
+        .sent_time_us = 0,
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .stream_ref = .{ .stream_id = s.id, .stream_key = 4 },
+    };
+    try first.addRetransmitFrame(allocator, .{ .max_data = .{ .maximum_data = 4096 } });
+    try app_sent.record(first);
+    conn.pnSpaceForLevel(.application).next_pn = 5;
+
+    // The first probe timeout: the chunk goes again (its key moves to
+    // the copy's packet, 5) and the control frame is queued again.
+    const pto = conn.ptoDurationForLevel(.application);
+    try conn.tick(pto);
+    const resent = s.send.peekChunk(100).?;
+    try std.testing.expectEqual(@as(u64, 0), resent.offset);
+    try std.testing.expectEqual(@as(u64, 5), resent.length);
+    try std.testing.expectEqual(@as(?u64, 4096), conn.pending_frames.max_data);
+    try s.send.recordSent(5, resent);
+    try app_sent.record(.{
+        .pn = 5,
+        .sent_time_us = pto,
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .stream_ref = .{ .stream_id = s.id, .stream_key = 5 },
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 6;
+    conn.pending_frames.max_data = null;
+    try std.testing.expect(s.send.peekChunk(100) == null);
+
+    // The second probe timeout (backed off: twice the first, from the
+    // copy's send time), the peer still silent: the data MUST go
+    // again. Packet 4 owns the control frame and nothing else now;
+    // packet 5 owns the chunk.
+    try conn.tick(pto + 2 * pto);
+    try std.testing.expectEqual(@as(u32, 2), conn.ptoCountForLevel(.application).*);
+    const again = s.send.peekChunk(100) orelse return error.ProbeCarriedNoStreamData;
+    try std.testing.expectEqual(@as(u64, 0), again.offset);
+    try std.testing.expectEqual(@as(u64, 5), again.length);
+    try std.testing.expectEqual(@as(?u64, 4096), conn.pending_frames.max_data);
+    try std.testing.expect(!conn.pendingPingForLevel(.application).*);
+    // Both packets stay in flight; nothing is lost (RFC 9002 6.2.4).
+    try std.testing.expectEqual(@as(u32, 2), app_sent.liveCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
+
+    // The third, the same: the chunk owned by packet 6 by then.
+    try s.send.recordSent(6, again);
+    try app_sent.record(.{
+        .pn = 6,
+        .sent_time_us = 3 * pto,
+        .bytes = 100,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .stream_ref = .{ .stream_id = s.id, .stream_key = 6 },
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 7;
+    conn.pending_frames.max_data = null;
+    try conn.tick(3 * pto + 4 * pto);
+    try std.testing.expectEqual(@as(u32, 3), conn.ptoCountForLevel(.application).*);
+    const third = s.send.peekChunk(100) orelse return error.ProbeCarriedNoStreamData;
+    try std.testing.expectEqual(@as(u64, 5), third.length);
+    try std.testing.expectEqual(@as(u32, 3), app_sent.liveCount());
+}
+
 test "PTO requeues retransmittable control frames" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
