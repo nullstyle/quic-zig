@@ -34,7 +34,7 @@
 //!                stream window from (docs/EMBEDDING.md).
 //!
 //! Run with `zig build bench-e2e` (`-- --scenario goodput|handshakes|
-//! impairment|fairness|churn|all`, `--samples N`, `--json path` /
+//! impairment|fairness|churn|connections|all`, `--samples N`, `--json path` /
 //! `--json-dir dir`).
 //!
 //! One seed is one draw. A virtual-time cell is exact for its seed, and
@@ -58,6 +58,7 @@ const quic = @import("quic");
 const report_mod = @import("report.zig");
 const harness = @import("e2e/harness.zig");
 const fairness = @import("e2e/fairness.zig");
+const connections = @import("e2e/connections.zig");
 
 const default_samples: usize = 5;
 const max_samples: usize = 32;
@@ -84,6 +85,7 @@ const Entries = struct {
     impairment: std.ArrayList(harness.ImpairmentResult) = .empty,
     fairness: std.ArrayList(fairness.FairnessResult) = .empty,
     churn: std.ArrayList(harness.ChurnResult) = .empty,
+    connections: std.ArrayList(connections.ConnectionsResult) = .empty,
 };
 
 fn stats(samples: []const f64) struct { median: f64, mad: f64 } {
@@ -451,6 +453,14 @@ const churn_cells = [_]harness.ChurnOptions{
     .{ .name = "churn_window16_rtt30ms", .window = 16 },
 };
 
+/// Many connections on one server (see e2e/connections.zig): the idle
+/// cost per connection of a loop pass, the heap per connection, and a
+/// request's cost while the rest idle, in the two embedder loop shapes.
+const connections_cells = [_]connections.ConnectionsOptions{
+    .{ .name = "connections_1000_active10", .connections = 1_000, .active = 10 },
+    .{ .name = "connections_4000_active10", .connections = 4_000, .active = 10 },
+};
+
 /// Which cells run, and with which seeds (`--cell`, `--seed`, `--sweep`).
 const Selection = struct {
     cell: ?[]const u8 = null,
@@ -482,6 +492,32 @@ fn runChurn(allocator: std.mem.Allocator, out: *Entries, cc: quic.CongestionAlgo
                 result.peak_live_streams,
                 result.final_limit,
                 result.enqueued,
+            },
+        );
+    }
+}
+
+fn runConnections(allocator: std.mem.Allocator, out: *Entries, sel: Selection) !void {
+    for (connections_cells) |cell| {
+        if (!sel.wants(cell.name)) continue;
+        const result = try connections.runConnectionsOnce(allocator, cell);
+        try out.connections.append(allocator, result);
+        std.debug.print(
+            "{s}: {d} connections, {d:.1} us/handshake, {d} B/conn (peak {d}); idle pass {d} us = tick {d:.0} + deadline {d:.0} + poll {d:.0} ns/conn (strays {d}); {d} active: {d:.1} us/request one-pass, {d:.1} from-zero\n",
+            .{
+                result.name,
+                result.connections,
+                result.handshake_us_per_connection,
+                result.bytes_per_connection,
+                result.peak_bytes_per_connection,
+                result.idle_pass_ns / 1000,
+                result.tick_ns_per_connection,
+                result.deadline_ns_per_connection,
+                result.poll_ns_per_connection,
+                result.idle_strays,
+                result.active,
+                result.us_per_request_one_pass,
+                result.us_per_request_from_zero,
             },
         );
     }
@@ -694,9 +730,31 @@ fn writeE2eEntries(out: *std.ArrayList(u8), allocator: std.mem.Allocator, entrie
         try out.print(allocator, "      \"final_limit\": {d}\n", .{cell.final_limit});
         try out.appendSlice(allocator, "    }\n");
     }
+    for (entries.connections.items) |cell| {
+        try writeEntrySeparator(out, allocator, &first);
+        try out.appendSlice(allocator, "    {\n      \"name\": ");
+        try report_mod.appendJsonString(out, allocator, cell.name);
+        try out.appendSlice(allocator, ",\n      \"kind\": \"connections\",\n");
+        try out.print(allocator, "      \"connections\": {d},\n", .{cell.connections});
+        try out.print(allocator, "      \"active\": {d},\n", .{cell.active});
+        try out.print(allocator, "      \"handshake_wall_ns\": {d},\n", .{cell.handshake_wall_ns});
+        try out.print(allocator, "      \"handshake_us_per_connection\": {d:.3},\n", .{cell.handshake_us_per_connection});
+        try out.print(allocator, "      \"bytes_per_connection\": {d},\n", .{cell.bytes_per_connection});
+        try out.print(allocator, "      \"peak_bytes_per_connection\": {d},\n", .{cell.peak_bytes_per_connection});
+        try out.print(allocator, "      \"tick_ns_per_connection\": {d:.2},\n", .{cell.tick_ns_per_connection});
+        try out.print(allocator, "      \"deadline_ns_per_connection\": {d:.2},\n", .{cell.deadline_ns_per_connection});
+        try out.print(allocator, "      \"poll_ns_per_connection\": {d:.2},\n", .{cell.poll_ns_per_connection});
+        try out.print(allocator, "      \"idle_pass_ns\": {d},\n", .{cell.idle_pass_ns});
+        try out.print(allocator, "      \"idle_strays\": {d},\n", .{cell.idle_strays});
+        try out.print(allocator, "      \"cycle_ns_one_pass\": {d},\n", .{cell.cycle_ns_one_pass});
+        try out.print(allocator, "      \"cycle_ns_from_zero\": {d},\n", .{cell.cycle_ns_from_zero});
+        try out.print(allocator, "      \"us_per_request_one_pass\": {d:.3},\n", .{cell.us_per_request_one_pass});
+        try out.print(allocator, "      \"us_per_request_from_zero\": {d:.3}\n", .{cell.us_per_request_from_zero});
+        try out.appendSlice(allocator, "    }\n");
+    }
 }
 
-const Scenario = enum { all, goodput, handshakes, impairment, fairness, churn };
+const Scenario = enum { all, goodput, handshakes, impairment, fairness, churn, connections };
 
 /// True if `--cell NAME` names a cell that exists. A name with a typing
 /// error must not look like a run with nothing to report.
@@ -704,6 +762,7 @@ fn knownCell(name: []const u8) bool {
     for (impairment_cells) |cell| if (std.mem.eql(u8, cell.name, name)) return true;
     for (fairness_cells) |cell| if (std.mem.eql(u8, cell.name, name)) return true;
     for (churn_cells) |cell| if (std.mem.eql(u8, cell.name, name)) return true;
+    for (connections_cells) |cell| if (std.mem.eql(u8, cell.name, name)) return true;
     return false;
 }
 
@@ -795,6 +854,7 @@ pub fn main(init: std.process.Init) !void {
     defer entries.impairment.deinit(allocator);
     defer entries.fairness.deinit(allocator);
     defer entries.churn.deinit(allocator);
+    defer entries.connections.deinit(allocator);
 
     if (scenario == .all or scenario == .goodput) {
         entries.goodput = try runGoodput(allocator, samples, cc);
@@ -810,6 +870,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (scenario == .all or scenario == .churn) {
         try runChurn(allocator, &entries, cc, sel);
+    }
+    if (scenario == .all or scenario == .connections) {
+        try runConnections(allocator, &entries, sel);
     }
 
     std.debug.print("---------------------------------------------------------------\n", .{});
