@@ -70,6 +70,23 @@ fn mulDiv(a: u64, b: u64, d: u64) u64 {
     return std.math.lossyCast(u64, (@as(u128, a) * b) / d);
 }
 
+test "mulDiv: the 64-bit path and the 128-bit fallback agree, and the fallback does not wrap" {
+    // Fits: an ordinary rate times an interval.
+    try std.testing.expectEqual(@as(u64, 125_000), mulDiv(125_000_000, 1000, std.time.us_per_s));
+    // Does not fit in 64 bits: the product is 2^70; wrapping would
+    // give a small wrong number.
+    const a: u64 = 1 << 50;
+    const b: u64 = 1 << 20;
+    try std.testing.expectEqual(@as(u64, 1 << 60), mulDiv(a, b, 1 << 10));
+    try std.testing.expectEqual(std.math.maxInt(u64), mulDiv(a, b, 1));
+    // A zero multiplier or divisor-sized inputs never divide by zero.
+    try std.testing.expectEqual(@as(u64, 0), mulDiv(a, 0, 7));
+    // The rate function uses it: a window of 1 GB over a 1 ms round
+    // trip is 2 TB/s in slow start's gain, exact.
+    const r = rateBytesPerSecond(1 << 30, 1000, true);
+    try std.testing.expectEqual((@as(u64, 1 << 30) * gain_num_ss * std.time.us_per_s) / (gain_den_ss * 1000), r);
+}
+
 /// Bucket capacity in bytes: the §7.7 initial-window burst floor, or
 /// one `granularity_us` quantum of line rate, whichever is larger.
 pub fn bucketCapacity(rate_bytes_per_s: u64, mds: u64) u64 {

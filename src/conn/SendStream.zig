@@ -678,6 +678,40 @@ test "the ring wraps: a write past the end lands at the front, a chunk stops at 
     try testing.expectEqualStrings(&big, s.bytes.slice(4, 100));
 }
 
+test "the ring grows while its live bytes wrap: both parts land in order in the bigger ring" {
+    var s = SendStream.init(test_alloc);
+    defer s.deinit();
+    // Fill the 64-byte ring, ACK the first 50: the head is at 50 with
+    // 14 live bytes before the end; 40 more wrap: 14 at [50, 64), 26
+    // at [0, 26). Then a write that does not fit grows the ring, and
+    // the live bytes must come out in order: the 14, the 40.
+    var fill: [64]u8 = undefined;
+    for (&fill, 0..) |*b, i| b.* = @intCast('a' + i % 26);
+    try testing.expectEqual(@as(usize, 64), try s.write(&fill));
+    try s.recordSent(0, .{ .offset = 0, .length = 50, .fin = false });
+    try s.onPacketAcked(0);
+    try testing.expectEqual(@as(usize, 50), s.bytes.head);
+    var more: [40]u8 = undefined;
+    for (&more, 0..) |*b, i| b.* = @intCast('0' + i % 10);
+    try testing.expectEqual(@as(usize, 40), try s.write(&more));
+    try testing.expectEqual(@as(usize, 64), s.bytes.allocation.len);
+    try testing.expectEqual(@as(usize, 14), s.bytes.contiguousFrom(0));
+    var tail: [30]u8 = undefined;
+    for (&tail, 0..) |*b, i| b.* = @intCast('A' + i % 26);
+    try testing.expectEqual(@as(usize, 30), try s.write(&tail));
+    try testing.expect(s.bytes.allocation.len >= 84);
+    try testing.expectEqual(@as(usize, 0), s.bytes.head);
+    try testing.expectEqual(@as(usize, 84), s.bytes.len());
+    try testing.expectEqualStrings(fill[50..64], s.bytes.slice(0, 14));
+    try testing.expectEqualStrings(&more, s.bytes.slice(14, 40));
+    try testing.expectEqualStrings(&tail, s.bytes.slice(54, 30));
+    // The whole live range is one contiguous chunk now.
+    const c = s.peekChunk(1000).?;
+    try testing.expectEqual(@as(u64, 50), c.offset);
+    try testing.expectEqual(@as(u64, 84), c.length);
+    try testing.expectEqual(@as(usize, 84), s.chunkBytes(c).len);
+}
+
 test "out-of-order ACK is held until the gap closes" {
     var s = SendStream.init(test_alloc);
     defer s.deinit();
