@@ -256,10 +256,14 @@ pub const SentPacket = struct {
 };
 
 /// Application-space tracker capacity. Real connections rarely hold
-/// more than a few hundred live packets; 4096 gives high-BDP headroom
-/// (the highest observed across this repo's full test + impairment +
-/// smoke corpus is 915). Capacity is a per-tracker choice made at
-/// `init`, so a PN space that provably needs less pays for less.
+/// more than a few hundred live packets (the highest observed across
+/// this repo's full test + impairment + smoke corpus is 915); the
+/// storage starts at `initial_slots` and doubles toward this cap only
+/// as packets are in flight, so an ordinary connection pays nothing
+/// for the headroom (16384 slots x 184 bytes = 3 MB, for a connection
+/// that keeps that many in flight: a 20 MB window of full packets).
+/// Capacity is a per-tracker choice made at `init`, so a PN space that
+/// provably needs less pays for less.
 ///
 /// A full tracker is back-pressure, not an error. The send path asks
 /// `isFull` before it builds an ack-eliciting packet and builds none
@@ -275,9 +279,13 @@ pub const SentPacket = struct {
 /// and on a fast, long path it is what limits the rate. MEASURED
 /// 2026-10-03, bench cell `impairment_fat_window_1gbit_rtt100ms`
 /// (1 Gbit/s, 100 ms round trip): 272 vMbps with 4096 slots, 448 with
-/// 8192, 479 with 16384, 157 with 2048. More slots is a decision with
-/// a memory cost for every connection; it is not made here.
-pub const max_tracked: usize = 4096;
+/// 8192, 479 with 16384, 157 with 2048. RAISED 2026-10-07 from 4096 to
+/// 16384 (the sprint "line rate by default"): the memory cost is paid
+/// only by a connection that fills the slots, since the slab grows on
+/// demand. The reorder window's packet threshold keeps its own cap
+/// (`ReorderWindow.max_packet_threshold`, 4096): a threshold wider
+/// than that is no better than the time threshold.
+pub const max_tracked: usize = 16384;
 
 /// Initial/Handshake-space tracker capacity. Those spaces carry the
 /// handshake flights and then sit idle for the connection's remaining

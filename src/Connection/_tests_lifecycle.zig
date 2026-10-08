@@ -84,7 +84,7 @@ test "phase() reports initial before keys and closing after close()" {
     try std.testing.expectEqual(ConnectionPhase.closing, conn.phase());
 }
 
-test "per-space tracker capacities: 256 for Initial/Handshake, 4096 for Application" {
+test "per-space tracker capacities: 256 for Initial/Handshake, 16384 for Application" {
     // Wiring pin for the right-sizing decision recorded at
     // `sent_packets.initial_handshake_max_tracked`: the two
     // connection-level spaces must get the small capacity, the

@@ -65,7 +65,8 @@ const granularity_us = @import("RttEstimator.zig").granularity_us;
 /// kPacketThreshold from RFC 9002 §6.1.1: 3. The starting point.
 pub const initial_packet_threshold: u64 = 3;
 /// The widest packet threshold: the most packets a space holds in
-/// flight (`SentPacketTracker.max_tracked`), so no distance a tracked
+/// flight through v0.32.0 (`SentPacketTracker.max_tracked`, 16384
+/// since; a wider threshold is no better than the time rule), so no distance a tracked
 /// packet can trail by is out of reach. Chromium has no cap either. A
 /// wide packet threshold costs nothing on a path without reordering
 /// (nothing trails), and on one with it the time threshold still finds
