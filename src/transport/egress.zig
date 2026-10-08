@@ -255,6 +255,7 @@ fn queueStreamBytes(conn: *Connection, total: usize) !void {
     while (queued < total) {
         queued += try s.send.write(data[0..@min(data.len, total - queued)]);
     }
+    conn.noteSendable(s);
 }
 
 test "drainGso ships super-datagrams and leaves offload active" {

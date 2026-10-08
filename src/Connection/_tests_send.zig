@@ -63,6 +63,7 @@ test "0-RTT poll emits long-header packet in Application PN space" {
 
     const s = try conn.openBidi(0);
     _ = try s.send.write("hello");
+    conn.noteSendable(s);
 
     var out: [256]u8 = undefined;
     const n = (try conn.pollLevel(.early_data, &out, 1_000)).?;

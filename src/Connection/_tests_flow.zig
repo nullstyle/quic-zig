@@ -461,6 +461,7 @@ test "send-side STREAM emission is capped by flow-control allowance" {
     const s = try conn.openBidi(0);
     s.send_max_data = 8;
     _ = try s.send.write("abcdefgh");
+    conn.noteSendable(s);
 
     const raw = s.send.peekChunk(64).?;
     const limited = (try conn.limitChunkToSendFlow(s, raw)).?;
@@ -852,6 +853,7 @@ test "stream flow block queues STREAM_DATA_BLOCKED and clears on MAX_STREAM_DATA
     const s = try conn.openBidi(0);
     s.send_max_data = 4;
     _ = try s.send.write("abcdefgh");
+    conn.noteSendable(s);
 
     const raw = s.send.peekChunk(64).?;
     const limited = (try conn.limitChunkToSendFlow(s, raw)).?;

@@ -490,6 +490,7 @@ pub fn discardExpiredApplicationReadKeys(conn: *Connection, now_us: u64) void {
     if (conn.app_read_previous) |epoch| {
         if (epoch.discard_deadline_us) |deadline| {
             if (now_us >= deadline) {
+                conn.touch();
                 conn_qlog.emitQlog(conn, .{
                     .name = .application_read_key_discarded,
                     .at_us = now_us,

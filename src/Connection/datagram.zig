@@ -63,6 +63,7 @@ pub fn sendDatagramTracked(conn: *Connection, payload: []const u8) Error!u64 {
         .id = id,
         .data = copy,
     });
+    conn.touch();
     conn.pending_frames.send_datagram_bytes += payload.len;
     return id;
 }

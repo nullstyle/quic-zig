@@ -81,6 +81,7 @@ pub fn queueMaxStreamData(
         .stream_id = stream_id,
         .maximum_stream_data = maximum_stream_data,
     });
+    conn.touch();
 }
 
 // INTERNAL: pub for Connection/streams.zig access; not part of the embedder API.
@@ -91,6 +92,7 @@ pub fn queueMaxData(conn: *Connection, maximum_data: u64) void {
     }
     if (conn.pending_frames.max_data == null or maximum_data > conn.pending_frames.max_data.?) {
         conn.pending_frames.max_data = maximum_data;
+        conn.touch();
     }
 }
 
@@ -307,6 +309,7 @@ pub fn noteDataBlocked(conn: *Connection, maximum_data: u64) void {
     conn.local_data_blocked_at = maximum_data;
     if (changed) {
         conn.pending_frames.data_blocked = maximum_data;
+        conn.touch();
         recordFlowBlockedEvent(conn, .{
             .source = .local,
             .kind = .data,
@@ -322,6 +325,7 @@ pub fn requeueDataBlocked(conn: *Connection, maximum_data: u64) bool {
         return false;
     }
     conn.pending_frames.data_blocked = maximum_data;
+    conn.touch();
     return true;
 }
 

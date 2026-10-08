@@ -71,8 +71,10 @@ pub const default_rx_buffer_bytes: usize = 64 * 1024;
 
 // Bounded per-iteration ingress budget: the loop receives at most
 // `RunUdpOptions.max_datagrams_per_iteration` datagrams per listener
-// (one batched `receiveManyTimeout` call), then drains every slot's
-// outbox and ticks before looping back. The bound keeps PTO /
+// (one batched `receiveManyTimeout` call), then ticks the slots whose
+// deadline passed and drains the ready slots' outboxes (the slots
+// with work: `Server.takeReady`, since 0.36.0; before that every slot,
+// every iteration) before looping back. The bound keeps PTO /
 // loss-detection tick-driven work from being starved by a hot ingress
 // queue while amortizing per-wake loop overhead across the batch.
 // (This replaced the historical hard-wired 1-per-iteration cap,
@@ -240,9 +242,13 @@ pub const RunUdpOptions = struct {
     /// writes reach the wire in the same iteration. `Server` and
     /// `Connection` have no internal locking; all application access
     /// must be serialized with the loop, and this callback *is* that
-    /// serialization: walk `server.iterator()`, drain
+    /// serialization: walk `server.iterator()` (or, with thousands of
+    /// connections, only `server.peekReady()`: the slots that saw a
+    /// datagram or a timer since the last drain, left for the loop's
+    /// own `takeReady` right after the hook), drain
     /// `slot.conn.pollEvent()`, read/write streams, send datagrams —
-    /// but only from inside the hook. It keeps firing during the
+    /// but only from inside the hook. A write makes its slot ready, so
+    /// the drain that follows the hook ships it this iteration. It keeps firing during the
     /// shutdown grace window (peers are draining; the app can observe
     /// closes). An error return stops the loop and propagates out of
     /// `runUdpServer` verbatim. Pair with
@@ -608,7 +614,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
         // to 1 ms — never a busy spin, never a blocking overshoot.
         const iteration_timeout = clampTimeoutToDeadline(
             per_listener_timeout,
-            if (server.nextTimerDeadline(now_us)) |td| td.at_us else null,
+            server.nextDeadline(now_us),
             now_us,
         );
 
@@ -715,22 +721,27 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
             try hook(options.on_iteration_ctx, server, now_us);
         }
 
-        // Drain every slot's outbox and tick its recovery clock in
-        // one pass. We use `Connection.pollDatagram` (path-aware)
-        // rather than `Server.poll` so VN/Retry peers, migration,
-        // and multipath all see the right destination address.
-        // Slots without a current peer address (synthetic fixtures,
-        // disconnected peers) are skipped silently.
+        // The slots whose deadline passed get their tick (and join
+        // the ready list); then every ready slot's outbox is drained.
+        // Only the slots with work are touched: not one pass over
+        // every slot per iteration (see `Server.wakeSlot`). We use
+        // `Connection.pollDatagram` (path-aware) rather than
+        // `Server.poll` so VN/Retry peers, migration, and multipath
+        // all see the right destination address. Slots without a
+        // current peer address (synthetic fixtures, disconnected
+        // peers) are skipped silently.
         //
         // Per-connection errors are swallowed: a malformed peer must
         // not tear down the whole server. The connection itself
         // transitions to `.closed` and gets reaped on the next pass.
-        for (server.iterator()) |slot| {
+        server.tickDue(now_us) catch |err| {
+            if (classifySendError(err) == .canceled) return;
+            countEgressFault(server, err);
+        };
+        for (server.takeReady()) |slot| {
             // Terminal closed → nothing to do. Closing/draining slots
-            // stay in the loop so their deadlines fire and the
-            // closing-state CC retransmits can still emit (RFC 9000
-            // §10.2.1 ¶3). `drainSlot`/`tick` are both idempotent on
-            // those states.
+            // keep their deadlines in the heap so the closing-state
+            // CC retransmits can still emit (RFC 9000 §10.2.1 ¶3).
             if (slot.conn.closeState() == .closed) continue;
             const idx: usize = @min(@as(usize, slot.last_recv_socket_idx), listeners.len - 1);
             drainSlot(
@@ -745,10 +756,7 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 if (classifySendError(err) == .canceled) return;
                 countEgressFault(server, err);
             };
-            slot.conn.tick(now_us) catch |err| {
-                if (classifySendError(err) == .canceled) return;
-                countEgressFault(server, err);
-            };
+            server.slotDrained(slot, now_us);
         }
         // Ship whatever the drain pass accumulated — one syscall per
         // listener for up to max_send_batch_datagrams datagrams across

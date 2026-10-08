@@ -29,6 +29,7 @@ pub fn queuePathAbandon(
         .path_id = path_id,
         .error_code = error_code,
     });
+    conn.touch();
 }
 
 /// Queue a PATH_AVAILABLE / PATH_BACKUP frame announcing a status
@@ -55,6 +56,7 @@ pub fn queuePathStatus(
         .sequence_number = sequence_number,
         .available = available,
     });
+    conn.touch();
 }
 
 /// Queue a PATH_NEW_CONNECTION_ID frame for the multipath path-scoped
@@ -90,6 +92,7 @@ pub fn queuePathRetireConnectionId(
         .path_id = path_id,
         .sequence_number = sequence_number,
     });
+    conn.touch();
 }
 
 /// Queue a MAX_PATH_ID frame raising our advertised path-id ceiling.
@@ -102,6 +105,7 @@ pub fn queueMaxPathId(conn: *Connection, maximum_path_id: u32) void {
     }
     if (conn.pending_frames.max_path_id == null or bounded_maximum_path_id > conn.pending_frames.max_path_id.?) {
         conn.pending_frames.max_path_id = bounded_maximum_path_id;
+        conn.touch();
     }
 }
 
@@ -111,6 +115,7 @@ pub fn queueMaxPathId(conn: *Connection, maximum_path_id: u32) void {
 pub fn queuePathsBlocked(conn: *Connection, maximum_path_id: u32) void {
     if (conn.pending_frames.paths_blocked == null or maximum_path_id > conn.pending_frames.paths_blocked.?) {
         conn.pending_frames.paths_blocked = maximum_path_id;
+        conn.touch();
     }
 }
 
@@ -126,6 +131,7 @@ pub fn queuePathCidsBlocked(
         .path_id = path_id,
         .next_sequence_number = next_sequence_number,
     };
+    conn.touch();
 }
 
 /// Returns the pending peer-side PATH_CIDS_BLOCKED report we have

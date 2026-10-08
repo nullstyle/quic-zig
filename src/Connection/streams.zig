@@ -7,6 +7,7 @@
 //! delegate here.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const state_mod = @import("../Connection.zig");
 const conn_flow = @import("flow.zig");
 const conn_qlog = @import("qlog.zig");
@@ -627,9 +628,11 @@ pub fn gcClosedStreams(conn: *Connection) void {
             break;
         }
     }
+    if (n > 0) conn.touch();
     for (batch[0..n]) |id| {
         const removed = conn.streams.fetchRemove(id) orelse continue;
         const s = removed.value;
+        if (s.in_sendable) sendableRemove(conn, s);
         // The id stays `used` in its id space, with no live stream: that
         // is the tombstone. A late STREAM/RESET_STREAM for it is
         // post-terminal, whichever endpoint initiated the stream.
@@ -704,7 +707,70 @@ pub fn streamSendStats(conn: *const Connection, id: u64) ?StreamSendStats {
 // Doc comment lives on the `Connection.streamSetPriority` thunk in Connection.zig.
 pub fn streamSetPriority(conn: *Connection, id: u64, p: StreamPriority) Error!void {
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
+    // The sendable list is ordered by the priority: out under the old
+    // one, in under the new.
+    const was_sendable = s.in_sendable;
+    if (was_sendable) sendableRemove(conn, s);
     s.priority = p;
+    if (was_sendable) sendableInsert(conn, s);
+}
+
+/// The order of `Connection.sendable`: urgency, non-incremental
+/// before incremental, then the id. `streamPriorityLess` without the
+/// round-robin rotation, which `collectSendableStreamsByPriority`
+/// applies when it reads the list.
+fn sendableLess(a: *const Stream, b: *const Stream) bool {
+    if (a.priority.urgency != b.priority.urgency) return a.priority.urgency < b.priority.urgency;
+    if (a.priority.incremental != b.priority.incremental) return !a.priority.incremental;
+    return a.id < b.id;
+}
+
+/// The position of `s` in the sendable list, or where it would go.
+fn sendablePosition(conn: *const Connection, s: *const Stream) usize {
+    const items = conn.sendable.items;
+    var lo: usize = 0;
+    var hi: usize = items.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (sendableLess(items[mid], s)) lo = mid + 1 else hi = mid;
+    }
+    return lo;
+}
+
+fn sendableInsert(conn: *Connection, s: *Stream) void {
+    const at = sendablePosition(conn, s);
+    conn.sendable.insert(conn.allocator, at, s) catch {
+        conn.sendable_degraded = true;
+        return;
+    };
+    s.in_sendable = true;
+}
+
+fn sendableRemove(conn: *Connection, s: *Stream) void {
+    const at = sendablePosition(conn, s);
+    if (at < conn.sendable.items.len and conn.sendable.items[at] == s) {
+        _ = conn.sendable.orderedRemove(at);
+    } else {
+        // Not where its order says (a degraded list): find it.
+        for (conn.sendable.items, 0..) |item, i| {
+            if (item == s) {
+                _ = conn.sendable.orderedRemove(i);
+                break;
+            }
+        }
+    }
+    s.in_sendable = false;
+}
+
+/// Keep `Connection.sendable` in step with the stream: in the list
+/// while it has a chunk, a FIN or a reset to send, out otherwise.
+/// Called after every transition of the send half (a write, a finish,
+/// a reset, a chunk sent, acknowledged or lost).
+// INTERNAL: pub for the Connection/ subsystem files; not part of the embedder API.
+pub fn noteSendable(conn: *Connection, s: *Stream) void {
+    const want = s.send.hasPendingChunk();
+    if (want == s.in_sendable) return;
+    if (want) sendableInsert(conn, s) else sendableRemove(conn, s);
 }
 
 // Doc comment lives on the `Connection.streamPriority` thunk in Connection.zig.
@@ -733,11 +799,17 @@ pub fn streamPriority(conn: *const Connection, id: u64) ?StreamPriority {
 /// API (the scheduling it drives is observed through `pollDatagram`).
 pub fn collectSendableStreamsByPriority(conn: *Connection, buf: []*Stream) []*Stream {
     var n: usize = 0;
-    var it = conn.streams.iterator();
-    while (it.next()) |entry| {
-        const s = entry.value_ptr.*;
-        if (!s.send.hasPendingChunk()) continue;
-        insertStreamByPriority(buf, &n, s, conn.priority_rr_cursor);
+    if (conn.sendable_degraded) {
+        n = collectByWalk(conn, buf);
+    } else {
+        n = collectFromSendable(conn, buf);
+        if (builtin.mode == .debug) {
+            // The list and the walk agree, stream for stream.
+            var check: [32]*Stream = undefined;
+            const m = collectByWalk(conn, check[0..@min(check.len, buf.len)]);
+            std.debug.assert(m == n);
+            for (buf[0..n], check[0..m]) |a, b| std.debug.assert(a == b);
+        }
     }
     const result = buf[0..n];
     // Advance the round-robin cursor past the incremental stream that
@@ -776,6 +848,7 @@ pub fn streamRecvState(conn: *const Connection, id: u64) ?StreamRecvState {
 pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
     if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
+    conn.touch();
     // Per-connection memory DoS cap: pre-flight the resident-bytes
     // budget against the bytes we'd accept. The per-stream
     // `max_buffered` cap already gates a single stream; this
@@ -808,6 +881,7 @@ pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
         conn.releaseResidentBytes(want);
         return err;
     };
+    noteSendable(conn, s);
     // `write` may accept fewer bytes than `want` if it short-writes
     // (e.g. on its own internal cap); reconcile so we only hold
     // budget for what actually landed in the buffer.
@@ -1035,6 +1109,8 @@ pub fn streamFinish(conn: *Connection, id: u64) Error!void {
     if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     try s.send.finish();
+    noteSendable(conn, s);
+    conn.touch();
 }
 
 // Doc comment lives on the `Connection.streamReset` thunk in Connection.zig.
@@ -1046,6 +1122,8 @@ pub fn streamReset(
     if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
     const s = conn.streams.get(id) orelse return Error.StreamNotFound;
     try s.send.resetStream(application_error_code);
+    noteSendable(conn, s);
+    conn.touch();
 }
 
 // Doc comment lives on the `Connection.streamStopSending` thunk in Connection.zig.
@@ -1088,6 +1166,7 @@ pub fn queueStopSending(
         .stream_id = item.stream_id,
         .application_error_code = item.application_error_code,
     });
+    conn.touch();
 }
 
 /// Ordering for the RFC 9218 send scheduler. Lower urgency first (more
@@ -1102,6 +1181,54 @@ fn streamPriorityLess(a: *const Stream, b: *const Stream, rr_cursor: u64) bool {
     if (a.priority.incremental != b.priority.incremental) return !a.priority.incremental;
     if (!a.priority.incremental) return a.id < b.id;
     return (a.id -% rr_cursor) < (b.id -% rr_cursor);
+}
+
+/// The first `buf.len` streams of `Connection.sendable` in the order
+/// `streamPriorityLess` gives: each urgency's non-incremental streams
+/// by id, then its incremental ones from the first id at or past the
+/// round-robin cursor, wrapping.
+fn collectFromSendable(conn: *const Connection, buf: []*Stream) usize {
+    const items = conn.sendable.items;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < items.len and n < buf.len) {
+        const urgency = items[i].priority.urgency;
+        while (i < items.len and items[i].priority.urgency == urgency and !items[i].priority.incremental) : (i += 1) {
+            if (n < buf.len) {
+                buf[n] = items[i];
+                n += 1;
+            }
+        }
+        const start = i;
+        while (i < items.len and items[i].priority.urgency == urgency) i += 1;
+        const end = i;
+        if (start == end or n == buf.len) continue;
+        var k = start;
+        while (k < end and items[k].id < conn.priority_rr_cursor) k += 1;
+        var j = if (k < end) k else start;
+        var taken: usize = 0;
+        while (taken < end - start and n < buf.len) : (taken += 1) {
+            buf[n] = items[j];
+            n += 1;
+            j += 1;
+            if (j == end) j = start;
+        }
+    }
+    return n;
+}
+
+/// Every stream of the connection with something to send, insertion-
+/// sorted into `buf` (the top `buf.len` by priority): the fallback
+/// after a failed list insertion, and the Debug check of the list.
+fn collectByWalk(conn: *Connection, buf: []*Stream) usize {
+    var n: usize = 0;
+    var it = conn.streams.iterator();
+    while (it.next()) |entry| {
+        const s = entry.value_ptr.*;
+        if (!s.send.hasPendingChunk()) continue;
+        insertStreamByPriority(buf, &n, s, conn.priority_rr_cursor);
+    }
+    return n;
 }
 
 /// Insert `s` into the priority-sorted (best first) bounded buffer

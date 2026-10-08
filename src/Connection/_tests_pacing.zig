@@ -49,6 +49,8 @@ fn queueBulkStream(conn: *Connection, bytes: usize) !void {
         if (n == 0) break;
         written += n;
     }
+    // A direct write into the send half: tell the connection.
+    conn.noteSendable(s);
 }
 
 test "paced sender emits the burst then blocks; deadline surfaces as TimerKind.pacing" {

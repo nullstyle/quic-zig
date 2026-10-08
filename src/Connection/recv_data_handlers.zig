@@ -93,6 +93,7 @@ pub fn handleDatagram(
         .data = copy,
         .arrived_in_early_data = lvl == .early_data,
     });
+    conn.touch();
     conn.pending_frames.recv_datagram_bytes += dg.data.len;
 }
 

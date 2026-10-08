@@ -56,6 +56,7 @@
 pub const Connection = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const boringssl = @import("boringssl");
 const c = boringssl.raw;
 
@@ -402,6 +403,17 @@ sent_crypto: [4]std.ArrayList(SentCryptoChunk) = .{ .empty, .empty, .empty, .emp
 
 /// Per-stream state, keyed by stream id.
 streams: std.AutoHashMapUnmanaged(u64, *Stream) = .empty,
+/// The streams with something to send, in RFC 9218 priority order
+/// (urgency, then non-incremental before incremental, then id), kept
+/// across packets by `noteSendable` at every transition. The packet
+/// builder takes the first ones instead of walking every stream of
+/// the connection for every packet. MEASURED 2026-10-08 (the sprint
+/// "many connections", churn cells): with 4,096 requests open at once
+/// the engine's poll cost per stream was 16 us against 4 at 256.
+/// After a failed insertion (`sendable_degraded`) the builder walks
+/// the streams as before.
+sendable: std.ArrayList(*Stream) = .empty,
+sendable_degraded: bool = false,
 /// How recently reclaimed streams' receive halves ended
 /// (`streamRecvEnd`). Allocated by `gcClosedStreams` on the first
 /// reclaim that needs it; null until then. A failed allocation is
@@ -737,6 +749,23 @@ early_data_surfaced: bool = false,
 /// packet (non-incremental streams are unaffected — they keep strict
 /// stream-id order). See `collectSendableStreamsByPriority`.
 priority_rr_cursor: u64 = 0,
+
+/// The next timer deadline of a connection at rest (`atRest`), kept
+/// until the state changes (`touch`). With it `tick` and
+/// `nextTimerDeadline` cost one comparison each for an idle connection
+/// and `pollDatagram` answers at once; a Debug build runs the full
+/// path as well and checks the shortcut. MEASURED 2026-10-08 (the
+/// sprint "many connections", `bench-e2e --scenario connections`):
+/// before it one idle connection cost a loop pass 146 + 112 + 171 ns
+/// at 1,000 connections, twice that at 4,000.
+rest_deadline: ?TimerDeadline = null,
+rest_deadline_valid: bool = false,
+/// Called by `touch` with `wake_ctx`: the owner of the connection
+/// (a `Server` slot) learns that this connection may have something
+/// to send or a timer to re-arm, without a sweep. Set by the Server
+/// at the slot's birth; a bare `Connection` has none.
+wake_hook: ?*const fn (*anyopaque) void = null,
+wake_ctx: ?*anyopaque = null,
 /// Decoded peer parameters once BoringSSL exposes them.
 cached_peer_transport_params: ?TransportParams = null,
 /// The peer's transport parameters as REMEMBERED from a prior
@@ -1205,6 +1234,9 @@ pub const Stream = struct {
     /// connection with no explicit priorities schedules ready streams in
     /// stream-id order (unchanged from the pre-priority behavior).
     priority: StreamPriority = .{},
+    /// In `Connection.sendable` (the stream has a chunk, a FIN or a
+    /// reset to send).
+    in_sendable: bool = false,
 
     /// True if the recv side has reached one of the four "no further
     /// peer bytes will land" states: FIN-with-bytes-drained
@@ -2451,6 +2483,7 @@ pub const Tunables = struct {
 /// the historical wrapper order (plain field writes and setters
 /// first, qlog hook last).
 pub fn applyTunables(self: *Connection, t: Tunables) void {
+    self.touch();
     self.reveal_close_reason_on_wire = t.reveal_close_reason_on_wire;
     self.max_connection_memory = t.max_connection_memory;
     self.max_buffered_send = t.max_buffered_send;
@@ -2523,6 +2556,7 @@ pub fn deinit(self: *Connection) void {
         self.allocator.destroy(s);
     }
     self.streams.deinit(self.allocator);
+    self.sendable.deinit(self.allocator);
     for (&self.inbox) |*b| b.release(self.allocator);
     for (&self.outbox) |*b| b.release(self.allocator);
     if (self.recv_end_ring) |ring| self.allocator.destroy(ring);
@@ -2627,6 +2661,7 @@ pub fn localTransportParams(self: *const Connection) TransportParams {
 /// with a Retry must set it itself, with `retry_source_connection_id`: the
 /// connection never saw the Initial packet from before the Retry.
 pub fn setTransportParams(self: *Connection, params: TransportParams) !void {
+    self.touch();
     var local = try normalizeLocalTransportParams(params);
     // RFC 9000 §7.3: every endpoint MUST advertise
     // `initial_source_connection_id`, set to the Source Connection ID it
@@ -2797,6 +2832,7 @@ pub fn queueNewToken(self: *Connection, token: []const u8) Error!void {
     @memcpy(item.bytes[0..token.len], token);
     item.len = @intCast(token.len);
     self.pending_frames.new_token = item;
+    self.touch();
 }
 
 /// Per-connection 0-RTT toggle. This deliberately gates quic's
@@ -2908,11 +2944,13 @@ pub fn peerCertSpkiDigest(self: *const Connection) ?[32]u8 {
 
 // INTERNAL: pub for Connection/recv_data_handlers.zig access; not part of the embedder API.
 pub fn queueHandshakeDoneIfReady(self: *Connection) void {
+    if (self.handshake_done_queued_once) return;
     if (self.role != .server) return;
     if (!self.inner.handshakeDone()) return;
-    if (self.handshake_done_queued_once) return;
     self.pending_handshake_done = true;
+    self.touch();
     self.handshake_done_queued_once = true;
+    self.touch();
 }
 
 /// True if BoringSSL is in QUIC mode (i.e. `tls.quic.Method`
@@ -3236,6 +3274,8 @@ pub const streamSetPriority = conn_streams.streamSetPriority;
 pub const streamPriority = conn_streams.streamPriority;
 
 pub const collectSendableStreamsByPriority = conn_streams.collectSendableStreamsByPriority;
+// INTERNAL: pub for the test fixtures that write into a send half directly; not part of the embedder API.
+pub const noteSendable = conn_streams.noteSendable;
 
 /// Read-only recv-half status of stream `id`: whether the peer's FIN or
 /// RESET_STREAM has been seen, and whether the receive side has reached a
@@ -3834,10 +3874,10 @@ fn ackDelayDeadlineUs(
 }
 
 fn promoteDueAckDelay(self: *Connection, tracker: *AckTracker.AckTracker, now_us: u64) void {
-    _ = tracker.promoteDelayedAck(
+    if (tracker.promoteDelayedAck(
         now_us / RttEstimator.ms,
         self.local_transport_params.max_ack_delay_ms,
-    );
+    )) self.touch();
 }
 
 // INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
@@ -4384,7 +4424,60 @@ pub fn pacingBlockedOnPath(
 /// idle, draining, path retirement, and key-discard. Embedders
 /// can park their event loop on this until `tick` should fire.
 /// Returns null when no timer is currently armed.
+/// Something happened that can change what the connection sends or
+/// when its next timer is due: an inbound datagram, a packet sent, a
+/// timer that fired, a close, a parameter change. The rest deadline is
+/// computed afresh at the next `nextTimerDeadline`.
+pub fn touch(self: *Connection) void {
+    self.rest_deadline_valid = false;
+    if (self.wake_hook) |hook| hook(self.wake_ctx.?);
+}
+
+/// True when the connection has nothing to send and no probe or
+/// validation in progress, so that only a timer or an inbound datagram
+/// can change it: the handshake is confirmed, the connection is open,
+/// no ACK is owed or armed, no path is validating, retiring or probing
+/// its MTU, no read key is waiting to be discarded, and `canSend` is
+/// false. Packets in flight are fine: their loss and probe timers are
+/// in the rest deadline.
+// INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
+pub fn atRest(self: *const Connection) bool {
+    if (!self.handshake_keys_discarded) return false;
+    if (self.lifecycle.closed or self.lifecycle.pending_close != null) return false;
+    if (self.lifecycle.draining_deadline_us != null or self.lifecycle.closing_deadline_us != null) return false;
+    if (self.app_read_previous != null) return false;
+    for (self.paths.paths.items) |*path| {
+        if (path.path.state != .active) return false;
+        if (path.path.validator.status == .pending) return false;
+        if (path.pmtudIsSearching()) return false;
+        const received = &path.app_pn_space.received;
+        if (received.pending_ack or received.delayed_ack_armed) return false;
+    }
+    return !self.canSend();
+}
+
+/// The earliest timer deadline, or null when none is armed. For a
+/// connection at rest the answer is kept until `touch`: the cache
+/// sits behind this stable `*const` signature (a live connection is
+/// never in read-only memory).
 pub fn nextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline {
+    if (self.rest_deadline_valid) {
+        if (builtin.mode == .debug) {
+            const fresh = self.computeNextTimerDeadline(now_us);
+            std.debug.assert(std.meta.eql(fresh, self.rest_deadline));
+        }
+        return self.rest_deadline;
+    }
+    const deadline = self.computeNextTimerDeadline(now_us);
+    if (self.atRest()) {
+        const mutable: *Connection = @constCast(self);
+        mutable.rest_deadline = deadline;
+        mutable.rest_deadline_valid = true;
+    }
+    return deadline;
+}
+
+fn computeNextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline {
     var best: ?TimerDeadline = null;
 
     if (self.lifecycle.draining_deadline_us) |at_us| {
@@ -4657,6 +4750,7 @@ pub fn enterDraining(
     reason: []const u8,
     now_us: u64,
 ) void {
+    self.touch();
     const draining_deadline = now_us +| self.drainingDurationUs();
     self.lifecycle.enterDraining(
         source,
@@ -4672,6 +4766,7 @@ pub fn enterDraining(
 }
 
 fn finishDraining(self: *Connection) void {
+    self.touch();
     self.lifecycle.finishDraining();
     self.clearRecoveryState();
     self.emitConnectionStateIfChanged();
@@ -4686,6 +4781,7 @@ pub fn enterClosed(
     reason: []const u8,
     now_us: u64,
 ) void {
+    self.touch();
     self.lifecycle.enterClosed(
         source,
         error_space,
@@ -4835,6 +4931,7 @@ pub fn close(
     error_code: u64,
     reason: []const u8,
 ) void {
+    self.touch();
     if (self.lifecycle.pending_close != null or self.lifecycle.closed) return;
     self.lifecycle.record(
         .local,
@@ -5039,6 +5136,21 @@ const fireDuePtoOnApplicationPath = conn_loss.fireDuePtoOnApplicationPath;
 /// current monotonic time in microseconds. Safe to call any time.
 pub fn tick(self: *Connection, now_us: u64) Error!void {
     self.clock_us = @max(self.clock_us, now_us);
+    if (self.rest_deadline_valid) {
+        const due = if (self.rest_deadline) |deadline| now_us >= deadline.at_us else false;
+        if (!due) {
+            if (builtin.mode == .debug) {
+                // The shortcut is checked: the full tick fires nothing.
+                try self.tickFull(now_us);
+                std.debug.assert(self.rest_deadline_valid);
+            }
+            return;
+        }
+    }
+    try self.tickFull(now_us);
+}
+
+fn tickFull(self: *Connection, now_us: u64) Error!void {
     for (self.paths.paths.items) |*p| {
         p.path.validator.tick(now_us);
         if (p.path.validator.status == .failed) {
@@ -5183,6 +5295,7 @@ pub fn tick(self: *Connection, now_us: u64) Error!void {
 ///    are pending (post-handshake messages such as
 ///    NewSessionTicket), call `processQuicPostHandshake`.
 pub fn advance(self: *Connection) Error!void {
+    self.touch();
     try conn_recv_data_handlers.pumpTlsInbox(self);
     try self.refreshEarlyDataStatus();
     // In-process test shim: shuttle outbox→peer.inbox so mock-

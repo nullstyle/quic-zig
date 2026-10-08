@@ -83,6 +83,7 @@ pub fn advertiseAlternativeV4Address(
             .port = port,
         },
     });
+    conn.touch();
     return seq;
 }
 
@@ -113,6 +114,7 @@ pub fn advertiseAlternativeV6Address(
             .port = port,
         },
     });
+    conn.touch();
     return seq;
 }
 

@@ -650,6 +650,12 @@ pub const ChurnResult = struct {
     peak_live_streams: u64,
     /// The answering side's stream limit at the end.
     final_limit: u64,
+    /// Wall time inside the two connections' `poll` calls, and inside
+    /// their `tick` calls: the engine's share of `wall_ns` (the rest is
+    /// the harness: the simulated path, the reads, the sort of the
+    /// live stream ids once per pass).
+    poll_wall_ns: u64,
+    tick_wall_ns: u64,
 };
 
 /// The ids of the client-initiated bidirectional streams that are live
@@ -703,8 +709,10 @@ pub fn runChurnOnce(allocator: std.mem.Allocator, opts: ChurnOptions) !ChurnResu
 
     var rbuf: [4096]u8 = undefined;
     var pkt: [2048]u8 = undefined;
-    var id_buf: [256]u64 = undefined;
-    std.debug.assert(opts.window <= id_buf.len);
+    const id_buf = try allocator.alloc(u64, @intCast(opts.window));
+    defer allocator.free(id_buf);
+    var poll_wall_ns: u64 = 0;
+    var tick_wall_ns: u64 = 0;
 
     const virtual_start: u64 = 1_000_000;
     var now_us: u64 = virtual_start;
@@ -729,11 +737,17 @@ pub fn runChurnOnce(allocator: std.mem.Allocator, opts: ChurnOptions) !ChurnResu
         var progressed = true;
         while (progressed) {
             progressed = false;
-            if (try pair.client.poll(&pkt, now_us)) |n| {
+            const poll_start = nowNanos();
+            const client_out = try pair.client.poll(&pkt, now_us);
+            poll_wall_ns += nowNanos() - poll_start;
+            if (client_out) |n| {
                 try net.enqueue(true, pkt[0..n], now_us);
                 progressed = true;
             }
-            if (try pair.server.poll(&pkt, now_us)) |n| {
+            const server_poll_start = nowNanos();
+            const server_out = try pair.server.poll(&pkt, now_us);
+            poll_wall_ns += nowNanos() - server_poll_start;
+            if (server_out) |n| {
                 try net.enqueue(false, pkt[0..n], now_us);
                 progressed = true;
             }
@@ -742,7 +756,7 @@ pub fn runChurnOnce(allocator: std.mem.Allocator, opts: ChurnOptions) !ChurnResu
         try net.deliverDue(&pair.client, &pair.server, now_us);
 
         // The answering side: read each request to its end, then reply.
-        const requests = liveRequestStreams(&pair.server, &id_buf);
+        const requests = liveRequestStreams(&pair.server, id_buf);
         peak_live = @max(peak_live, requests.len);
         for (requests) |id| {
             while (try pair.server.streamRead(id, &rbuf) != 0) {}
@@ -752,13 +766,15 @@ pub fn runChurnOnce(allocator: std.mem.Allocator, opts: ChurnOptions) !ChurnResu
             try pair.server.streamFinish(id);
         }
         // The asking side reads the replies.
-        for (liveRequestStreams(&pair.client, &id_buf)) |id| {
+        for (liveRequestStreams(&pair.client, id_buf)) |id| {
             while (try pair.client.streamRead(id, &rbuf) != 0) {}
         }
 
         now_us += opts.tick_us;
+        const tick_start = nowNanos();
         try pair.client.tick(now_us);
         try pair.server.tick(now_us);
+        tick_wall_ns += nowNanos() - tick_start;
     }
     const wall_ns = nowNanos() - wall_start;
     const virtual_us = now_us - virtual_start;
@@ -774,6 +790,8 @@ pub fn runChurnOnce(allocator: std.mem.Allocator, opts: ChurnOptions) !ChurnResu
         .enqueued = net.enqueued,
         .peak_live_streams = peak_live,
         .final_limit = pair.server.peer_bidi_ids.limit,
+        .poll_wall_ns = poll_wall_ns,
+        .tick_wall_ns = tick_wall_ns,
     };
 }
 

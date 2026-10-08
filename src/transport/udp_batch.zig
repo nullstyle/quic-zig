@@ -315,6 +315,7 @@ test "fillGsoBatch packs equal-size segments and stops on the short tail" {
     while (queued < 7 * 1200) {
         queued += try s.send.write(data[0..@min(data.len, 7 * 1200 - queued)]);
     }
+    conn.noteSendable(s);
 
     var buf: [64 * 1500]u8 = undefined;
     const batch = try fillGsoBatch(conn, &buf, socket_opts.default_gso_max_segments, 1_000_000);
@@ -351,6 +352,7 @@ test "fillGsoBatch respects max_segments" {
     while (queued < 10 * 1200) {
         queued += try s.send.write(data[0..@min(data.len, 10 * 1200 - queued)]);
     }
+    conn.noteSendable(s);
 
     var buf: [64 * 1500]u8 = undefined;
     const batch = try fillGsoBatch(conn, &buf, 3, 1_000_000);

@@ -451,6 +451,12 @@ const churn_cells = [_]harness.ChurnOptions{
     .{ .name = "churn_window1_rtt30ms", .window = 1 },
     .{ .name = "churn_window4_rtt30ms", .window = 4 },
     .{ .name = "churn_window16_rtt30ms", .window = 16 },
+    // Many streams on one connection: the window is the number of
+    // requests open at once, so the answering side has that many
+    // sendable streams per packet (the sprint "many connections").
+    .{ .name = "churn_window256_rtt30ms", .window = 256, .streams = 2_048 },
+    .{ .name = "churn_window1024_rtt30ms", .window = 1_024, .streams = 4_096 },
+    .{ .name = "churn_window4096_rtt30ms", .window = 4_096, .streams = 8_192 },
 };
 
 /// Many connections on one server (see e2e/connections.zig): the idle
@@ -494,6 +500,12 @@ fn runChurn(allocator: std.mem.Allocator, out: *Entries, cc: quic.CongestionAlgo
                 result.enqueued,
             },
         );
+        std.debug.print("  engine: poll {d} ms, tick {d} ms of {d} ms wall ({d:.2} us poll per stream)\n", .{
+            result.poll_wall_ns / std.time.ns_per_ms,
+            result.tick_wall_ns / std.time.ns_per_ms,
+            result.wall_ns / std.time.ns_per_ms,
+            @as(f64, @floatFromInt(result.poll_wall_ns)) / @as(f64, @floatFromInt(result.streams)) / 1000.0,
+        });
     }
 }
 
@@ -503,7 +515,7 @@ fn runConnections(allocator: std.mem.Allocator, out: *Entries, sel: Selection) !
         const result = try connections.runConnectionsOnce(allocator, cell);
         try out.connections.append(allocator, result);
         std.debug.print(
-            "{s}: {d} connections, {d:.1} us/handshake, {d} B/conn (peak {d}); idle pass {d} us = tick {d:.0} + deadline {d:.0} + poll {d:.0} ns/conn (strays {d}); {d} active: {d:.1} us/request one-pass, {d:.1} from-zero\n",
+            "{s}: {d} connections, {d:.1} us/handshake, {d} B/conn (peak {d}); idle pass {d} us = tick {d:.0} + deadline {d:.0} + poll {d:.0} ns/conn (strays {d}), ready API {d} us; {d} active: {d:.1} us/request one-pass, {d:.1} from-zero, {d:.1} ready API\n",
             .{
                 result.name,
                 result.connections,
@@ -515,9 +527,11 @@ fn runConnections(allocator: std.mem.Allocator, out: *Entries, sel: Selection) !
                 result.deadline_ns_per_connection,
                 result.poll_ns_per_connection,
                 result.idle_strays,
+                result.idle_pass_ready_ns / 1000,
                 result.active,
                 result.us_per_request_one_pass,
                 result.us_per_request_from_zero,
+                result.us_per_request_ready,
             },
         );
     }
@@ -727,7 +741,9 @@ fn writeE2eEntries(out: *std.ArrayList(u8), allocator: std.mem.Allocator, entrie
         try out.print(allocator, "      \"wall_ns\": {d},\n", .{cell.wall_ns});
         try out.print(allocator, "      \"enqueued\": {d},\n", .{cell.enqueued});
         try out.print(allocator, "      \"peak_live_streams\": {d},\n", .{cell.peak_live_streams});
-        try out.print(allocator, "      \"final_limit\": {d}\n", .{cell.final_limit});
+        try out.print(allocator, "      \"final_limit\": {d},\n", .{cell.final_limit});
+        try out.print(allocator, "      \"poll_wall_ns\": {d},\n", .{cell.poll_wall_ns});
+        try out.print(allocator, "      \"tick_wall_ns\": {d}\n", .{cell.tick_wall_ns});
         try out.appendSlice(allocator, "    }\n");
     }
     for (entries.connections.items) |cell| {
@@ -745,11 +761,14 @@ fn writeE2eEntries(out: *std.ArrayList(u8), allocator: std.mem.Allocator, entrie
         try out.print(allocator, "      \"deadline_ns_per_connection\": {d:.2},\n", .{cell.deadline_ns_per_connection});
         try out.print(allocator, "      \"poll_ns_per_connection\": {d:.2},\n", .{cell.poll_ns_per_connection});
         try out.print(allocator, "      \"idle_pass_ns\": {d},\n", .{cell.idle_pass_ns});
+        try out.print(allocator, "      \"idle_pass_ready_ns\": {d},\n", .{cell.idle_pass_ready_ns});
         try out.print(allocator, "      \"idle_strays\": {d},\n", .{cell.idle_strays});
         try out.print(allocator, "      \"cycle_ns_one_pass\": {d},\n", .{cell.cycle_ns_one_pass});
         try out.print(allocator, "      \"cycle_ns_from_zero\": {d},\n", .{cell.cycle_ns_from_zero});
+        try out.print(allocator, "      \"cycle_ns_ready\": {d},\n", .{cell.cycle_ns_ready});
         try out.print(allocator, "      \"us_per_request_one_pass\": {d:.3},\n", .{cell.us_per_request_one_pass});
-        try out.print(allocator, "      \"us_per_request_from_zero\": {d:.3}\n", .{cell.us_per_request_from_zero});
+        try out.print(allocator, "      \"us_per_request_from_zero\": {d:.3},\n", .{cell.us_per_request_from_zero});
+        try out.print(allocator, "      \"us_per_request_ready\": {d:.3}\n", .{cell.us_per_request_ready});
         try out.appendSlice(allocator, "    }\n");
     }
 }

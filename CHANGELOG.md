@@ -5,6 +5,89 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.36.0] - 2026-10-08
+
+The many-connections release: a server with thousands of mostly idle
+connections pays for the ones that have work, not for all of them,
+on every loop pass and in memory. One new Server API (the ready list
+and the timer heap, which the bundled `runUdpServer` now runs on),
+one new Connection function (`touch`), no change on the wire: every
+bench cell is byte-identical to v0.35.0. The same option map.
+Verified toolchain: 0.17.0.
+
+MEASURED (`zig build bench-e2e -- --scenario connections`, N server
+connections in memory, 10 of them active; ReleaseSafe; one run each,
+about 10% noise between runs):
+
+| | v0.35.0 | v0.36.0, the sweep | v0.36.0, the ready API |
+| --- | --- | --- | --- |
+| Zig heap per idle server connection | 91,186 B | 20,974 B | 20,974 B |
+| the handshake's peak, one connection | 196,568 B | 30,232 B | 30,232 B |
+| one idle loop pass, 1,000 connections | 429 us | 356 us | 0 us |
+| one idle loop pass, 4,000 connections | 3,488 us | 2,221 us | 0 us |
+| one request among 1,000 idle connections | 131 us | 125 us | 15 us |
+| one request among 4,000 idle connections | 1,233 us | 671 us | 69 us |
+| churn, 4,096 requests open on one connection: engine poll per stream | 16.2 us | 6.9 us | |
+| churn, 1,024 open | 5.6 us | 2.4 us | |
+
+### Added
+
+- **The ready list and the timer heap** (`Server.takeReady`,
+  `peekReady`, `slotDrained`, `tickDue`, `nextDeadline`;
+  `Connection.touch`). A slot joins the ready list when its
+  connection is touched: a datagram fed to it, a timer that fired, an
+  application call that queued output, a close. `tickDue` ticks the
+  slots whose deadline passed (a heap of deadlines, stale entries by
+  generation) and marks them ready; `nextDeadline` is the heap's top.
+  Each is O(what has work). `tick` and `nextTimerDeadline` (the
+  sweeps) stay and may be mixed in. The bundled `runUdpServer` uses
+  the ready API; an embedder with its own loop (qmsg's
+  `drainOutbound` scans from slot 0 for every datagram) can adopt it
+  at its own pace. A test (`tests/e2e/server_ready.zig`) runs a
+  handshake, a write, the idle timeout and a reap through it.
+- **The `connections` bench scenario** (`bench/e2e/connections.zig`):
+  N connections on one Server, an idle pass split into tick / timer
+  scan / empty poll per connection, the heap per connection, and a
+  request's cost among the idle ones in the three loop shapes (one
+  sweep per pass, a scan from slot 0 per datagram, the ready API).
+  Three churn cells with 256, 1,024 and 4,096 requests open at once,
+  with the engine's own poll and tick time on a second line.
+
+### Changed
+
+- **Memory per idle server connection: 92,468 -> 22,132 bytes on
+  the Zig heap** (`tests/e2e/memory_per_connection.zig`'s stage
+  print; BoringSSL's heap apart), the handshake's peak 196,568 ->
+  30,232. The sent-packet tracker starts at 16 slots, not 256 (51 KB
+  of the 92 were slots for 0 to 3 packets in flight), and gives a
+  storage above 64 slots back when nothing is tracked
+  (`SentPacketTracker.shrinkIdle`, from the connection's tick): a
+  connection that idles after a bulk transfer no longer holds 3.2 MB.
+  The ACK tracker holds eight ranges inline and moves to a heap block
+  of 255 only when a path reorders or loses (12 KB across the three
+  trackers, for one range in use; the drop-the-lowest rule beyond 255
+  is unchanged). The path list holds exactly one path until a second
+  opens (5.4 KB). The four embedder-event queues are one heap block
+  made at the first event (5.2 KB).
+- **A connection at rest answers from a cache.** With the handshake
+  confirmed, nothing to send, no ACK owed or armed, no path
+  validating, retiring or probing its MTU, the connection keeps its
+  next deadline until something changes (`touch`): `tick` and
+  `nextTimerDeadline` cost a comparison, `pollDatagram` returns at
+  once. A Debug build runs the full path as well and asserts the
+  shortcut, on every call. `nextTimerDeadline` keeps its `*const
+  Connection` signature (the cache is written through it). The
+  server's handshake-done check runs behind its latch now, not before
+  it: one BoringSSL call fewer per empty poll.
+- **The sendable streams are a list kept in priority order**
+  (`Connection.sendable`, by urgency, non-incremental first, then id),
+  maintained at every transition of a send half; the packet builder
+  takes its first 32 with the round-robin rotation applied per
+  urgency group instead of walking every stream of the connection for
+  every packet. A Debug build runs the old walk too and asserts the
+  same streams in the same order. A test fixture that writes into a
+  send half directly calls `Connection.noteSendable`.
+
 ## [0.35.0] - 2026-10-08
 
 The reordering release: a path that reorders by a round trip no longer

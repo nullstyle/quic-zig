@@ -670,10 +670,12 @@ test "STREAM send tracking survives duplicate application PNs across paths" {
     const stream = try conn.openBidi(0);
 
     _ = try stream.send.write("hello");
+    conn.noteSendable(stream);
     var packet_buf: [default_mtu]u8 = undefined;
     _ = (try conn.pollLevelOnPath(.application, 0, &packet_buf, 1_000_000)).?;
 
     _ = try stream.send.write("world");
+    conn.noteSendable(stream);
     _ = (try conn.pollLevelOnPath(.application, path_id, &packet_buf, 1_001_000)).?;
 
     try std.testing.expectEqual(@as(u64, 0), conn.primaryPath().sent.packets[0].pn);

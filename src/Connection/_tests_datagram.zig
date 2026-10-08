@@ -304,6 +304,7 @@ test "0-RTT rejection requeues STREAM data but not DATAGRAM payloads" {
     const datagram_id = try conn.sendDatagramTracked("early-datagram");
     const s = try conn.openBidi(0);
     _ = try s.send.write("early-stream");
+    conn.noteSendable(s);
 
     var out: [512]u8 = undefined;
     const n = (try conn.pollLevel(.early_data, &out, 1_000)).?;

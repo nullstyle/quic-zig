@@ -283,8 +283,11 @@ pub fn queuePathResponseOnPath(
     addr: ?Address,
 ) void {
     conn.pending_frames.path_response = token;
+    conn.touch();
     conn.pending_frames.path_response_path_id = path_id;
+    conn.touch();
     conn.pending_frames.path_response_addr = addr;
+    conn.touch();
 }
 
 pub fn queuePathChallengeOnPath(
@@ -293,7 +296,9 @@ pub fn queuePathChallengeOnPath(
     token: [8]u8,
 ) void {
     conn.pending_frames.path_challenge = token;
+    conn.touch();
     conn.pending_frames.path_challenge_path_id = path_id;
+    conn.touch();
 }
 
 pub fn newPathChallengeToken(conn: *Connection) Error![8]u8 {
@@ -346,6 +351,7 @@ pub fn handlePathValidationFailure(
     path: *PathState,
 ) void {
     const path_id = path.id;
+    conn.touch();
     if (path.pending_migration_reset and path.rollbackFailedMigration()) {
         clearQueuedPathChallengeForPath(conn, path_id);
         conn_qlog.emitQlog(conn, .{
@@ -413,6 +419,7 @@ pub fn expireRetiringPaths(conn: *Connection, now_us: u64) void {
         if (path.path.state != .retiring) continue;
         const deadline = path.retire_deadline_us orelse continue;
         if (now_us < deadline) continue;
+        conn.touch();
         path.clearRecovery(conn.allocator);
         conn_cids.retirePeerCidsForPath(conn, path.id);
         path.path.fail();

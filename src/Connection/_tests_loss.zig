@@ -177,6 +177,7 @@ test "PTO requeues application stream data and arms a probe" {
 
     const s = try conn.openBidi(0);
     _ = try s.send.write("hello");
+    conn.noteSendable(s);
     const chunk = s.send.peekChunk(100).?;
     try s.send.recordSent(4, chunk);
     const app_sent = conn.sentForLevel(.application);
@@ -752,6 +753,7 @@ test "0-RTT STREAM packet-threshold loss requeues early bytes" {
 
     const s = try conn.openBidi(0);
     _ = try s.send.write("early-loss");
+    conn.noteSendable(s);
 
     var out: [256]u8 = undefined;
     _ = (try conn.pollLevel(.early_data, &out, 1_000)).?;
@@ -804,8 +806,11 @@ test "pollLevel coalesces multiple STREAM frames with distinct loss keys" {
     const s1 = try conn.openBidi(4);
     const s2 = try conn.openBidi(8);
     _ = try s0.send.write("alpha");
+    conn.noteSendable(s0);
     _ = try s1.send.write("bravo");
+    conn.noteSendable(s1);
     _ = try s2.send.write("charlie");
+    conn.noteSendable(s2);
 
     var packet_buf: [default_mtu]u8 = undefined;
     _ = (try conn.pollLevelOnPath(.application, 0, &packet_buf, 1_000_000)).?;

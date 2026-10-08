@@ -24,6 +24,7 @@ pub fn handleStopSending(
 ) Error!void {
     const ptr = (try conn_streams.sendPartForPeerFrame(conn, ss.stream_id, .stop_sending)) orelse return;
     try ptr.send.resetStream(ss.application_error_code);
+    conn_streams.noteSendable(conn, ptr);
 }
 
 pub fn handleResetStream(conn: *Connection, rs: frame_types.ResetStream) Error!void {

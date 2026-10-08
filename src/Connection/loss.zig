@@ -286,6 +286,7 @@ pub fn dispatchAckedPacketToStreams(
         };
         const after = s.send.bytes.len();
         if (after < before) conn.releaseResidentBytes(before - after);
+        conn_streams.noteSendable(conn, s);
     }
 }
 
@@ -301,6 +302,7 @@ pub fn dispatchLostPacketToStreams(
             send_stream_mod.Error.UnknownPacket => continue,
             else => return e,
         };
+        conn_streams.noteSendable(conn, s);
         any = true;
     }
     return any;
@@ -532,6 +534,7 @@ pub fn dispatchAckedControlFrames(
                         r.final_size == rs.final_size)
                     {
                         s.send.onResetAcked();
+                        conn_streams.noteSendable(conn, s);
                     }
                 }
             },
@@ -628,6 +631,7 @@ pub fn dispatchLostControlFramesOnPath(
                         r.final_size == rs.final_size)
                     {
                         s.send.onResetLost();
+                        conn_streams.noteSendable(conn, s);
                     }
                 }
                 any = true;
@@ -683,6 +687,7 @@ pub fn dispatchLostControlFramesOnPath(
                     @memcpy(stage.bytes[0..item.len], item.slice());
                     stage.len = item.len;
                     conn.pending_frames.new_token = stage;
+                    conn.touch();
                     any = true;
                 }
             },
@@ -701,6 +706,7 @@ pub fn dispatchLostControlFramesOnPath(
                     conn.allocator,
                     .{ .v4 = a },
                 );
+                conn.touch();
                 any = true;
             },
             .alternative_v6_address => |a| {
@@ -708,6 +714,7 @@ pub fn dispatchLostControlFramesOnPath(
                     conn.allocator,
                     .{ .v6 = a },
                 );
+                conn.touch();
                 any = true;
             },
         }
@@ -729,6 +736,7 @@ fn requeueLostPacketOnPath(
     packet: *const SentPacketTracker.SentPacket,
     path_id: u32,
 ) Error!bool {
+    conn.touch();
     var any = false;
     conn_datagram.recordDatagramLost(conn, packet);
     if (lvl == .application or lvl == .early_data or packet.is_early_data) {
@@ -1318,6 +1326,7 @@ fn requeueFramesForProbe(
     packet: *const SentPacketTracker.SentPacket,
     path_id: u32,
 ) Error!bool {
+    conn.touch();
     var any = false;
     any = (try dispatchLostPacketToStreams(conn, packet)) or any;
     any = (try requeueSentCryptoForPacket(conn, .application, packet.pn)) or any;
@@ -1332,6 +1341,7 @@ pub fn fireDuePtoAtLevel(
 ) Error!void {
     const deadline = ptoDeadlineForLevel(conn, lvl) orelse return;
     if (now_us < deadline) return;
+    conn.touch();
     _ = try firePtoAtLevel(conn, lvl, now_us);
 }
 
@@ -1342,5 +1352,6 @@ pub fn fireDuePtoOnApplicationPath(
 ) Error!void {
     const deadline = ptoDeadlineForApplicationPath(conn, path) orelse return;
     if (now_us < deadline) return;
+    conn.touch();
     _ = try firePtoOnApplicationPath(conn, path, now_us);
 }

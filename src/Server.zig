@@ -295,6 +295,20 @@ pub const Slot = struct {
     /// field; nothing in the core transport reads it.
     last_recv_socket_idx: u8 = 0,
 
+    /// The server that owns the slot, for the connection's wake hook
+    /// (`Connection.touch` -> `Server.wakeSlot`). Refreshed by every
+    /// `feed`, `takeReady` and `tickDue`, so a Server that moved after
+    /// `init` (it is returned by value) is found again by the next
+    /// call on it; a Server must not move between one call and the
+    /// hook's next firing (a slot's own connection fires it, from a
+    /// call on that Server or on that connection).
+    server: ?*Server = null,
+    /// In the server's ready list (`takeReady` takes it out).
+    ready: bool = false,
+    /// The timer entry that is current for this slot; older entries
+    /// in the heap are stale and skipped.
+    timer_generation: u32 = 0,
+
     /// Attach a W3C tracecontext to this slot. Embedders typically
     /// call this after `Server.feed` returns `.accepted` and the
     /// upstream service has assigned trace identifiers. quic does
@@ -442,6 +456,13 @@ max_auto_replenish_cids: u8,
 /// Live connection slots. Embedders may iterate this between
 /// `feed` / `poll` calls to inspect or mutate connections.
 slots: std.ArrayList(*Slot) = .empty,
+/// The ready list (`takeReady`), its double, and the timer heap
+/// (`tickDue`, `nextDeadline`); see `wakeSlot`.
+ready: std.ArrayList(*Slot) = .empty,
+ready_taken: std.ArrayList(*Slot) = .empty,
+timers: std.ArrayList(TimerEntry) = .empty,
+ready_degraded: bool = false,
+timers_degraded: bool = false,
 
 /// Routing table: every CID currently valid as a DCID for some
 /// slot maps to that slot. Updated on `openSlotFromInitial`,
@@ -1173,6 +1194,9 @@ pub fn deinit(self: *Server) void {
         self.allocator.destroy(slot);
     }
     self.slots.deinit(self.allocator);
+    self.ready.deinit(self.allocator);
+    self.ready_taken.deinit(self.allocator);
+    self.timers.deinit(self.allocator);
     self.cid_table.deinit(self.allocator);
     self.source_rate_table.deinit(self.allocator);
     self.retry_state_table.deinit(self.allocator);
@@ -1871,6 +1895,223 @@ pub fn tick(self: *Server, now_us: u64) ConnectionError!void {
     }
 }
 
+/// One slot's next deadline in the timer heap; `generation` tells a
+/// stale entry (the slot was re-armed since) from the current one.
+const TimerEntry = struct {
+    at_us: u64,
+    slot: *Slot,
+    generation: u32,
+};
+
+/// The ready list and the timer heap: a loop that uses them touches
+/// only the slots that have work, not every slot on every pass.
+/// MEASURED 2026-10-08 (the sprint "many connections",
+/// `bench-e2e --scenario connections`): a sweep of 1,000 idle slots
+/// (`tick`, `nextTimerDeadline`, one empty poll each) cost 330 to
+/// 490 us even with every connection at rest, two or three cache
+/// misses per slot and per call, and at 4,000 slots 2.9 ms; the
+/// server's whole state no longer fits a cache.
+///
+/// - `takeReady` gives the slots whose connection was touched since
+///   the last call (a datagram fed to it, a timer that fired, an
+///   application call that queued output, a close): the embedder
+///   drains each (`pollDatagram` until null, or `pollEvent`), then
+///   calls `slotDrained` so the slot's timer is re-armed.
+/// - `tickDue` ticks the slots whose deadline passed and marks them
+///   ready; `nextDeadline` is the heap's top. Both are O(due), not
+///   O(slots).
+/// A new slot is ready and armed at birth. Memory exhaustion on the
+/// lists degrades to the sweep (every slot is ready once, every slot
+/// is ticked) and recovers by itself.
+///
+/// `tick` and `nextTimerDeadline` (the sweeps) still work and may be
+/// mixed in; the bundled `runUdpServer` uses the ready API.
+// INTERNAL: pub for Server/accept.zig access; not part of the embedder API.
+pub fn wakeSlot(self: *Server, slot: *Slot) void {
+    slot.server = self;
+    if (slot.ready) return;
+    slot.ready = true;
+    self.ready.append(self.allocator, slot) catch {
+        slot.ready = false;
+        self.ready_degraded = true;
+    };
+}
+
+/// `Connection.wake_hook` of a slot's connection.
+// INTERNAL: pub for Server/accept.zig access; not part of the embedder API.
+pub fn wakeSlotHook(ctx: *anyopaque) void {
+    const slot: *Slot = @ptrCast(@alignCast(ctx));
+    if (slot.server) |server| server.wakeSlot(slot);
+}
+
+/// The slots touched since the last call: drain each, then call
+/// `slotDrained` on it. The slice is valid until the next call;
+/// `reap` must not run while it is in use. After memory exhaustion
+/// on the ready list this is every live slot, once.
+pub fn takeReady(self: *Server) []*Slot {
+    self.checkLoopThread();
+    if (self.ready_degraded) {
+        self.ready_degraded = false;
+        for (self.ready.items) |slot| slot.ready = false;
+        self.ready.clearRetainingCapacity();
+        for (self.slots.items) |slot| slot.server = self;
+        return self.slots.items;
+    }
+    std.mem.swap(std.ArrayList(*Slot), &self.ready, &self.ready_taken);
+    self.ready.clearRetainingCapacity();
+    for (self.ready_taken.items) |slot| {
+        slot.ready = false;
+        slot.server = self;
+    }
+    return self.ready_taken.items;
+}
+
+/// The slots `takeReady` would give now, without taking them: for an
+/// application hook that runs between the feeds and the loop's drain
+/// (`runUdpServer`'s `on_iteration`) and wants to look only at the
+/// connections that saw a datagram or a timer.
+pub fn peekReady(self: *const Server) []*Slot {
+    if (self.ready_degraded) return self.slots.items;
+    return self.ready.items;
+}
+
+/// The embedder drained `slot` (polled it until null): its timer is
+/// re-armed from `Connection.nextTimerDeadline`.
+pub fn slotDrained(self: *Server, slot: *Slot, now_us: u64) void {
+    self.armTimer(slot, now_us);
+}
+
+// INTERNAL: pub for Server/accept.zig access; not part of the embedder API.
+pub fn armTimer(self: *Server, slot: *Slot, now_us: u64) void {
+    slot.timer_generation +%= 1;
+    const deadline = slot.conn.nextTimerDeadline(now_us) orelse return;
+    self.timerPush(.{ .at_us = deadline.at_us, .slot = slot, .generation = slot.timer_generation }) catch {
+        self.timers_degraded = true;
+    };
+}
+
+/// Tick the slots whose deadline passed, and mark each ready (a fired
+/// timer usually has something to send). O(due).
+pub fn tickDue(self: *Server, now_us: u64) ConnectionError!void {
+    self.checkLoopThread();
+    self.expireTicketKeys(now_us);
+    if (self.timers_degraded) {
+        // The heap could not take an entry: one sweep, every slot
+        // ready once, the heap rebuilt.
+        try self.tick(now_us);
+        self.timers.clearRetainingCapacity();
+        self.timers_degraded = false;
+        self.ready_degraded = true;
+        for (self.slots.items) |slot| self.armTimer(slot, now_us);
+        return;
+    }
+    while (self.timers.items.len > 0) {
+        const top = self.timers.items[0];
+        if (top.at_us > now_us) break;
+        _ = self.timerPop();
+        if (top.generation != top.slot.timer_generation) continue;
+        const slot = top.slot;
+        slot.server = self;
+        if (slot.conn.closeState() != .closed) try slot.conn.tick(now_us);
+        self.wakeSlot(slot);
+        // A deadline that the tick leaves in the past (the pacer says
+        // "send now"; the drain the slot is now ready for clears it)
+        // goes back one microsecond ahead: otherwise this loop would
+        // pop it again at once, forever.
+        self.armTimerAfter(slot, now_us, now_us + 1);
+    }
+}
+
+/// `armTimer` with a floor on the deadline.
+fn armTimerAfter(self: *Server, slot: *Slot, now_us: u64, floor_us: u64) void {
+    slot.timer_generation +%= 1;
+    const deadline = slot.conn.nextTimerDeadline(now_us) orelse return;
+    self.timerPush(.{ .at_us = @max(deadline.at_us, floor_us), .slot = slot, .generation = slot.timer_generation }) catch {
+        self.timers_degraded = true;
+    };
+}
+
+/// The earliest deadline of any slot, or null: the timer heap's top,
+/// stale entries skipped. The loop's wait ends here.
+pub fn nextDeadline(self: *Server, now_us: u64) ?u64 {
+    if (self.timers_degraded) {
+        const deadline = self.nextTimerDeadline(now_us) orelse return null;
+        return deadline.at_us;
+    }
+    while (self.timers.items.len > 0) {
+        const top = self.timers.items[0];
+        if (top.generation == top.slot.timer_generation) return top.at_us;
+        _ = self.timerPop();
+    }
+    return null;
+}
+
+fn timerPush(self: *Server, entry: TimerEntry) !void {
+    try self.timers.append(self.allocator, entry);
+    var i = self.timers.items.len - 1;
+    while (i > 0) {
+        const parent = (i - 1) / 2;
+        if (self.timers.items[parent].at_us <= self.timers.items[i].at_us) break;
+        std.mem.swap(TimerEntry, &self.timers.items[parent], &self.timers.items[i]);
+        i = parent;
+    }
+}
+
+fn timerPop(self: *Server) TimerEntry {
+    const items = self.timers.items;
+    const top = items[0];
+    const last = self.timers.pop().?;
+    if (self.timers.items.len > 0) {
+        self.timers.items[0] = last;
+        self.timerSiftDown(0);
+    }
+    return top;
+}
+
+fn timerSiftDown(self: *Server, start: usize) void {
+    const items = self.timers.items;
+    var i = start;
+    while (true) {
+        const left = 2 * i + 1;
+        const right = left + 1;
+        var smallest = i;
+        if (left < items.len and items[left].at_us < items[smallest].at_us) smallest = left;
+        if (right < items.len and items[right].at_us < items[smallest].at_us) smallest = right;
+        if (smallest == i) return;
+        std.mem.swap(TimerEntry, &items[i], &items[smallest]);
+        i = smallest;
+    }
+}
+
+/// A slot leaves: its entries go out of the heap (they hold its
+/// pointer) and the ready lists.
+fn forgetSlot(self: *Server, slot: *Slot) void {
+    var i: usize = 0;
+    var removed = false;
+    while (i < self.timers.items.len) {
+        if (self.timers.items[i].slot == slot) {
+            _ = self.timers.swapRemove(i);
+            removed = true;
+        } else i += 1;
+    }
+    if (removed and self.timers.items.len > 1) {
+        var k = self.timers.items.len / 2;
+        while (k > 0) {
+            k -= 1;
+            self.timerSiftDown(k);
+        }
+    }
+    for ([_]*std.ArrayList(*Slot){ &self.ready, &self.ready_taken }) |list| {
+        var j: usize = 0;
+        while (j < list.items.len) {
+            if (list.items[j] == slot) {
+                _ = list.swapRemove(j);
+            } else j += 1;
+        }
+    }
+    slot.ready = false;
+}
+
 /// Earliest pending timer deadline across every live slot, or null
 /// when no slot has one armed. Event loops size their socket
 /// receive timeout with this instead of a fixed tick: sleep until
@@ -1920,6 +2161,7 @@ pub fn reap(self: *Server) usize {
             if (slot.conn.closeEvent()) |ev| ev.source else null;
         const close_peer: ?Address = slot.peer_addr;
         self.dropAllCidsFromTable(slot);
+        self.forgetSlot(slot);
         const generation = slot.tls_generation;
         slot.conn.destroy();
         if (slot.pending_upgrade) |pu| self.allocator.destroy(pu);
@@ -1945,6 +2187,7 @@ const releaseGeneration = server_tls.releaseGeneration;
 fn discardStillbornSlot(self: *Server, slot: *Slot) void {
     std.debug.assert(self.slots.items.len > 0 and self.slots.items[self.slots.items.len - 1] == slot);
     self.dropAllCidsFromTable(slot);
+    self.forgetSlot(slot);
     const generation = slot.tls_generation;
     slot.conn.destroy();
     if (slot.pending_upgrade) |pu| self.allocator.destroy(pu);

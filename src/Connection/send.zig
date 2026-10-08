@@ -9,6 +9,7 @@
 //! here.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const state_mod = @import("../Connection.zig");
 const conn_recv_dispatch = @import("recv_dispatch.zig");
 const conn_flow = @import("flow.zig");
@@ -108,6 +109,27 @@ pub fn pollDatagram(
     conn.clock_us = @max(conn.clock_us, now_us);
     if (conn.lifecycle.closed and conn.lifecycle.pending_close == null) return null;
     conn.queueHandshakeDoneIfReady();
+    // A connection at rest has nothing to send: it answers here instead
+    // of in the builder below. The first time, with one walk of its
+    // queues (`atRest`), which also primes the rest deadline; from
+    // then on from that one field, until `touch`. A Debug build runs
+    // the builder as well and checks that it agrees.
+    if (conn.rest_deadline_valid or conn.atRest()) {
+        if (!conn.rest_deadline_valid) _ = conn.nextTimerDeadline(now_us);
+        if (builtin.mode == .debug) {
+            const built = try pollDatagramFull(conn, dst, now_us);
+            std.debug.assert(built == null);
+        }
+        return null;
+    }
+    return pollDatagramFull(conn, dst, now_us);
+}
+
+fn pollDatagramFull(
+    conn: *Connection,
+    dst: []u8,
+    now_us: u64,
+) Error!?OutgoingDatagram {
     try conn.refreshEarlyDataStatus();
     conn.poll_addr_override = null;
     conn.poll_sent_ack_eliciting = false;
@@ -181,6 +203,11 @@ pub fn pollDatagram(
         conn_qlog.emitConnectionStateIfChanged(conn);
     }
     if (pos == 0) return null;
+    // A packet leaves: the loss and probe timers move with it. Not
+    // `touch`: the owner is draining this connection right now and
+    // re-arms its timer when the drain ends (`Server.slotDrained`),
+    // so no wake is owed.
+    conn.rest_deadline_valid = false;
 
     // RFC 9000 section 14.1: the datagram is complete, so the padding
     // that an Initial packet in it needs is known now.
@@ -1317,6 +1344,8 @@ pub fn pollLevelOnPath(
                 if (!try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .reset_stream = rs })) break;
                 try sent_packet.addRetransmitFrame(conn.allocator, .{ .reset_stream = rs });
                 ri.queued = true;
+                // The reset is on its way: nothing more to send here.
+                conn_streams.noteSendable(conn, s);
                 ack_eliciting = true;
                 break;
             }
@@ -1540,6 +1569,7 @@ pub fn pollLevelOnPath(
     for (sent_chunks[0..sent_chunk_count]) |sc| {
         try sc.stream.send.recordSent(sc.stream_key, sc.chunk);
         conn.recordStreamFlowSent(sc.stream, sc.chunk);
+        conn_streams.noteSendable(conn, sc.stream);
     }
     if (sent_crypto_chunk) |sc| {
         try conn.sent_crypto[sc.level_idx].append(conn.allocator, .{

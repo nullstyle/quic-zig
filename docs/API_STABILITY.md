@@ -22,10 +22,22 @@ refined before 1.0, but changes will be deliberate, called out in
   `transport.runUdpServer` / `transport.runUdpClient` — including the
   loops' `on_iteration` application hooks, `Server.Slot.user_data`,
   `Server.Config.on_connection_will_close` (pre-reap ordered-teardown
-  hook), and the `Server.nextTimerDeadline` aggregate.
+  hook), the `Server.nextTimerDeadline` aggregate, and (since 0.36.0)
+  the ready API a loop with thousands of connections is built on:
+  `Server.takeReady` / `slotDrained` / `tickDue` / `nextDeadline`
+  (the slots with work, the due timers, the earliest deadline: each
+  O(what has work), never a sweep of every slot). `Server.tick` and
+  `Server.nextTimerDeadline` (the sweeps) stay and may be mixed in.
 - **Raw connection cycle:** `Connection.handle` / `handleWithEcn`,
   `pollDatagram`, `tick`, `pollEvent`, `nextTimerDeadline`, `isClosed`,
-  `closeState`, `phase`.
+  `closeState`, `phase`. Since 0.36.0 a connection at rest (handshake
+  confirmed, nothing to send, no ACK owed, no probe in flight) answers
+  `tick`, `nextTimerDeadline` and `pollDatagram` from a cached
+  deadline until something changes; `nextTimerDeadline` keeps its
+  `*const Connection` signature and writes that cache through it (a
+  live connection is never in read-only memory). `Connection.touch`
+  (also 0.36.0) drops the cache by hand; the library calls it itself
+  at every state change, an embedder never needs to.
 - **Streams:** `openBidi` / `openUni`, `openNextBidi` / `openNextUni`,
   `localStreamType`, `streamRead`, `streamWrite`, `streamFinish`,
   `streamStopSending`, `streamIterator`, and the `StreamType` classifier.

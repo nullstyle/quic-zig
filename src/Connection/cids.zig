@@ -265,6 +265,7 @@ pub fn queueLocalConnectionId(
             .connection_id = connection_id,
             .stateless_reset_token = stateless_reset_token,
         });
+        conn.touch();
     } else {
         try conn.pending_frames.path_new_connection_ids.append(conn.allocator, .{
             .path_id = path_id,
@@ -273,6 +274,7 @@ pub fn queueLocalConnectionId(
             .connection_id = connection_id,
             .stateless_reset_token = stateless_reset_token,
         });
+        conn.touch();
     }
     _internal.refreshConnectionIdEventsForPath(conn, path_id);
 }
@@ -542,6 +544,7 @@ pub fn queueRetireConnectionId(
     try conn.pending_frames.retire_connection_ids.append(conn.allocator, .{
         .sequence_number = sequence_number,
     });
+    conn.touch();
 }
 
 /// Bulk-issue local CIDs on the default path (path_id 0) by emitting

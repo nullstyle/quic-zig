@@ -257,6 +257,12 @@ pub fn openSlotFromInitial(
     errdefer _ = server.cid_table.remove(cidKeyFromConnectionId(initial_dcid));
 
     try server.slots.append(server.allocator, slot);
+    // Born ready and armed: the loop drains it and learns its first
+    // deadline without a sweep.
+    conn_ptr.wake_hook = Server.wakeSlotHook;
+    conn_ptr.wake_ctx = slot;
+    server.wakeSlot(slot);
+    server.armTimer(slot, now_us);
     return slot;
 }
 

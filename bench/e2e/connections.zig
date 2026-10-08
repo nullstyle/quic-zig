@@ -8,6 +8,8 @@
 //!   once per iteration.
 //! - `from_zero`: qmsg's `drainOutbound` shape (nest runs it). For every
 //!   outgoing datagram a scan from slot 0 until one slot yields.
+//! - `ready`: the ready list and the timer heap (`Server.takeReady`,
+//!   `tickDue`, `nextDeadline`): only the slots with work are touched.
 
 const std = @import("std");
 const quic = @import("quic");
@@ -50,14 +52,19 @@ pub const ConnectionsResult = struct {
     deadline_ns_per_connection: f64,
     poll_ns_per_connection: f64,
     idle_pass_ns: u64,
+    /// One idle pass through the ready API: `tickDue`, `nextDeadline`,
+    /// `takeReady` (empty).
+    idle_pass_ready_ns: u64,
     /// Datagrams a slot produced during the idle passes (0 = idle).
     idle_strays: u64,
     /// One active cycle: `active` requests sent, answered and read,
     /// with every slot swept each pass. Medians.
     cycle_ns_one_pass: u64,
     cycle_ns_from_zero: u64,
+    cycle_ns_ready: u64,
     us_per_request_one_pass: f64,
     us_per_request_from_zero: f64,
+    us_per_request_ready: f64,
 };
 
 const Peer = struct {
@@ -68,7 +75,7 @@ const Peer = struct {
     replied: bool = false,
 };
 
-const Sweep = enum { one_pass, from_zero };
+const Sweep = enum { one_pass, from_zero, ready };
 
 /// The virtual clock's step during the handshakes and the settle
 /// passes. Small, so that thousands of handshakes in a row stay far
@@ -196,6 +203,20 @@ const Run = struct {
         return k * (self.peers.len / active);
     }
 
+    fn idlePassReady(self: *Run) !u64 {
+        const t0 = nowNanos();
+        try self.srv.tickDue(self.now_us);
+        _ = self.srv.nextDeadline(self.now_us);
+        for (self.srv.takeReady()) |slot| {
+            const i: usize = @intCast(slot.slot_id);
+            _ = try self.deliverSlotToClient(i);
+            self.srv.slotDrained(slot, self.now_us);
+        }
+        const t1 = nowNanos();
+        self.now_us += 1;
+        return t1 - t0;
+    }
+
     /// The server application: read a request to its end, answer it.
     fn serveActive(self: *Run, active: usize) !void {
         var buf: [1024]u8 = undefined;
@@ -250,6 +271,16 @@ const Run = struct {
                     if (!yielded) break;
                 }
             },
+            .ready => {
+                try self.srv.tickDue(self.now_us);
+                for (self.srv.takeReady()) |slot| {
+                    const i: usize = @intCast(slot.slot_id);
+                    _ = try self.deliverSlotToClient(i);
+                    self.srv.slotDrained(slot, self.now_us);
+                }
+                _ = self.srv.nextDeadline(self.now_us);
+                return;
+            },
         }
         try self.srv.tick(self.now_us);
     }
@@ -283,7 +314,7 @@ const Run = struct {
         var k: u32 = 0;
         while (k < 3) : (k += 1) {
             for (0..active) |a| try self.feedClientToServer(self.activeIndex(a, active));
-            try self.sweep(.one_pass);
+            try self.sweep(if (shape == .ready) .ready else .one_pass);
             for (0..active) |a| try self.peers[self.activeIndex(a, active)].client.conn.tick(self.now_us);
             self.now_us += 100;
         }
@@ -384,6 +415,9 @@ pub fn runConnectionsOnce(allocator: std.mem.Allocator, opts: ConnectionsOptions
     const tick_ns = median(ticks[0..idle_n]);
     const deadline_ns = median(deadlines[0..idle_n]);
     const poll_ns = median(polls[0..idle_n]);
+    var ready_passes: [64]u64 = undefined;
+    for (0..idle_n) |k| ready_passes[k] = try run.idlePassReady();
+    const idle_ready_ns = median(ready_passes[0..idle_n]);
     const nf: f64 = @floatFromInt(n);
 
     // Active cycles, both loop shapes.
@@ -394,6 +428,8 @@ pub fn runConnectionsOnce(allocator: std.mem.Allocator, opts: ConnectionsOptions
     const cycle_one_pass = median(cycles[0..cycle_n]);
     for (0..cycle_n) |k| cycles[k] = try run.activeCycle(active, .from_zero);
     const cycle_from_zero = median(cycles[0..cycle_n]);
+    for (0..cycle_n) |k| cycles[k] = try run.activeCycle(active, .ready);
+    const cycle_ready = median(cycles[0..cycle_n]);
     const af: f64 = @floatFromInt(active);
 
     return .{
@@ -408,10 +444,13 @@ pub fn runConnectionsOnce(allocator: std.mem.Allocator, opts: ConnectionsOptions
         .deadline_ns_per_connection = @as(f64, @floatFromInt(deadline_ns)) / nf,
         .poll_ns_per_connection = @as(f64, @floatFromInt(poll_ns)) / nf,
         .idle_pass_ns = tick_ns + deadline_ns + poll_ns,
+        .idle_pass_ready_ns = idle_ready_ns,
         .idle_strays = strays,
         .cycle_ns_one_pass = cycle_one_pass,
         .cycle_ns_from_zero = cycle_from_zero,
+        .cycle_ns_ready = cycle_ready,
         .us_per_request_one_pass = @as(f64, @floatFromInt(cycle_one_pass)) / af / 1000.0,
         .us_per_request_from_zero = @as(f64, @floatFromInt(cycle_from_zero)) / af / 1000.0,
+        .us_per_request_ready = @as(f64, @floatFromInt(cycle_ready)) / af / 1000.0,
     };
 }
