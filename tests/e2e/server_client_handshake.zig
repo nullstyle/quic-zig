@@ -602,7 +602,10 @@ test "Server <-> Client: peer-side rebind after handshake arms PATH_CHALLENGE on
     // the server has something authenticated to record against the
     // new tuple. A queued PING via `pendingPing` is the minimum
     // authenticated-frame footprint.
-    cli.conn.primaryPath().pending_ping = true;
+    // Through the API (0.37.2): a fixture that set `pending_ping` by
+    // hand left the client's cached rest deadline standing, and the
+    // Debug self-check in `pollDatagram` saw the builder emit the PING.
+    cli.conn.requestPing();
 
     var rebound_inbound: u32 = 0;
     var path_challenge_observed = false;

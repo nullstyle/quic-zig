@@ -589,6 +589,21 @@ pub fn streamCount(conn: *const Connection) usize {
 /// `items.len` before destruction and release that count back
 /// to the budget so a long-lived connection that GCs many
 /// streams does not leak budget headroom.
+/// The GC's rule: a stream is reclaimable when every half that
+/// exists has ended (a stopped receive half ends once the GC has
+/// read it away, so a stopped stream counts as work too).
+pub fn streamReclaimable(conn: *const Connection, s: *const Stream) bool {
+    if (s.recv_stopped) return true;
+    const send_done = s.send.isTerminal();
+    const recv_done = s.recvFullyTerminated();
+    return if (streamIsBidi(s.id))
+        send_done and recv_done
+    else if (streamInitiatedByLocal(conn, s.id))
+        send_done
+    else
+        recv_done;
+}
+
 pub fn gcClosedStreams(conn: *Connection) void {
     // The batch size is owned by `RecvEndRing` so its survival guarantee
     // ("a note outlives the next tick") cannot drift from the GC.
@@ -935,7 +950,7 @@ fn afterStreamConsume(
 ) Error!void {
     // The read that reached the FIN (or consumed a reset): the stream
     // may be reclaimable now; the next tick's GC decides.
-    if (s.recvFullyTerminated()) conn.markStreamsGc();
+    if (streamReclaimable(conn, s)) conn.markStreamsGc();
     // Per-connection memory DoS cap: the budget keys on the PHYSICAL
     // `bytes.items.len`. The sliding window advances without
     // shrinking most of the time (consumed bytes keep their budget

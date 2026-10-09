@@ -345,7 +345,7 @@ pub fn handleStream(
     // The frame that completed the receive half (the FIN, or the last
     // gap before a FIN already seen): the stream may be reclaimable
     // now, with nothing read; the next tick's GC decides.
-    if (ptr.recvFullyTerminated()) conn.markStreamsGc();
+    if (conn_streams.streamReclaimable(conn, ptr)) conn.markStreamsGc();
 }
 
 /// Best-effort reconciliation of the resident-bytes counter when
