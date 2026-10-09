@@ -422,6 +422,24 @@ pub fn resetStream(
 /// /`recv` after final-size lock) and releases the difference will
 /// keep the budget honest. This method does NOT call back into the
 /// connection — `RecvStream` has no knowledge of it.
+/// Compact the consumed prefix now: the memmove `consume` does once
+/// the prefix reaches half the buffer, done early. The live tail moves
+/// to the front and `bytes.items.len` drops by the prefix; the ranges
+/// are stream offsets and need no change. The connection calls this
+/// under memory pressure and releases the difference from its budget
+/// (`Connection.compactReceivePrefixes`). A no-op without a prefix.
+pub fn compactPrefix(self: *RecvStream) void {
+    if (self.buf_start == 0) return;
+    if (self.buf_start >= self.bytes.items.len) {
+        self.bytes.clearRetainingCapacity();
+    } else {
+        const live_len = self.bytes.items.len - self.buf_start;
+        @memmove(self.bytes.items[0..live_len], self.bytes.items[self.buf_start..]);
+        self.bytes.shrinkRetainingCapacity(live_len);
+    }
+    self.buf_start = 0;
+}
+
 pub fn compact(self: *RecvStream) void {
     if (self.bytes.items.len > 0) {
         self.bytes.clearRetainingCapacity();

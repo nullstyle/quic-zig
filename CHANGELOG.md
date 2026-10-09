@@ -5,6 +5,41 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.38.0] - 2026-10-09
+
+### Changed
+
+- The memory budget (`max_connection_memory`) keeps a receive reserve.
+  One budget holds what the application writes (send buffers), what
+  the peer sends (receive reassembly), CRYPTO and DATAGRAM queues.
+  Since 0.33.0 `streamWrite` took what the budget left and returned
+  short, but it could take ALL of it; then a STREAM byte from the peer,
+  inside the window it was given, failed the budget and the connection
+  closed with "excessive resource use" (`transport_error_excessive_load`),
+  a fault the peer did not cause and the application never saw at its
+  own write (found by capnp-zig: a 256 KiB budget, a 1 MiB reply, a
+  client frame every millisecond, closed within 7 ms). Now:
+  - `streamWrite` stops short of the receive side's share, the
+    connection window (as announced, never below the window cap: half
+    the budget by default), so a frame inside the window always has
+    room. With the defaults the writes stop at 16 MiB of resident bytes
+    instead of 32. A slow reader whose unread bytes sit in the budget
+    leaves the writer less, until the application reads: a short write,
+    not a fault. Announce a window larger than half the budget and the
+    writer gets nothing; raise the budget with the window.
+  - Under pressure the receive buffers give back the charge of their
+    consumed prefixes (bytes the application read that the sliding
+    window keeps until the prefix reaches half the buffer) before a
+    frame or a DATAGRAM is refused. After that the receive side holds
+    its unread bytes and nothing more, so with the writer at its share
+    the sum fits the budget: an honest peer never meets the fault.
+  - Nothing else changes: a DATAGRAM over the budget is still shed (RFC
+    9221), CRYPTO over its 64 KiB caps still closes, the window cap
+    stays half the budget.
+  Three tests (capnp-zig's shape; a slow reader; the pressure with two
+  streams); every bench cell measured. An embedder that capped its own
+  writes at half the budget to work around this can stop.
+
 ## [0.37.2] - 2026-10-08
 
 ### Fixed

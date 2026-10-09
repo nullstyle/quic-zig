@@ -180,6 +180,17 @@ reveal_close_reason_on_wire: bool = false,
 /// guard that prevents a peer from opening many streams at once
 /// and inflating the connection's host RSS even when each
 /// individual buffer stays under its own cap.
+///
+/// The budget has two sides (since 0.38.0). The receive side's share
+/// is the connection window (`conn_recv_window`, never below
+/// `connectionWindowCap`: half the budget by default), what the peer
+/// may have unread; `streamWrite` stops short of it (`writerBudget`),
+/// so a peer's bytes inside the window it was given always have room,
+/// and under pressure the receive buffers give back the charge of
+/// their consumed prefixes before a frame is refused. An honest peer
+/// never meets the fault; a slow reader leaves the writer less. Announce
+/// a window larger than half the budget and the writer gets nothing:
+/// raise the budget with the window.
 max_connection_memory: u64 = default_max_connection_memory,
 
 /// The send buffer of every stream this connection opens from now on
@@ -3407,8 +3418,11 @@ pub const streamRecvEnd = conn_streams.streamRecvEnd;
 ///
 /// Returns the number of bytes accepted — which may be fewer than
 /// `data.len` (including 0): `streamWrite` short-writes by design when
-/// the send buffer or flow-control windows are full, and the unwritten
-/// tail must be retried on a later iteration. Returns
+/// the send buffer or flow-control windows are full, or when the
+/// connection's memory budget has only the receive side's share left
+/// (`max_connection_memory`: half of it by default; a slow reader's
+/// unread bytes count), and the unwritten tail must be retried on a
+/// later iteration. Returns
 /// `Error.StreamNotWritable` for a peer-initiated unidirectional
 /// stream (no send half exists on this side), and `StreamNotFound`
 /// once the stream has been reaped after reaching a terminal state.

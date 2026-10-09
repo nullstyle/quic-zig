@@ -77,8 +77,13 @@ pub fn handleDatagram(
     // buffers close on an over-cap reservation; datagrams are
     // sheddable (RFC 9221 §5.3), so shed instead.
     conn.tryReserveResidentBytes(dg.data.len) catch {
-        conn.datagrams_dropped_recv += 1;
-        return;
+        // The receive buffers' consumed prefixes first (0.38.0), then
+        // the shed.
+        _ = conn_streams.compactReceivePrefixes(conn);
+        conn.tryReserveResidentBytes(dg.data.len) catch {
+            conn.datagrams_dropped_recv += 1;
+            return;
+        };
     };
     const copy = conn.allocator.alloc(u8, dg.data.len) catch |err| {
         conn.releaseResidentBytes(dg.data.len);
@@ -332,8 +337,16 @@ pub fn handleStream(
     if (ptr.recv.bytes.items.len > recv_before) {
         const grew = ptr.recv.bytes.items.len - recv_before;
         conn.tryReserveResidentBytes(grew) catch {
-            conn.close(true, transport_error_excessive_load, "excessive resource use");
-            return;
+            // Under pressure (since 0.38.0): the receive buffers give
+            // back their consumed prefixes first (this stream's too:
+            // its charge on record is `recv_before`, the prefix is
+            // part of it), then once more. A frame inside the window
+            // fits then; only a peer past it meets the fault.
+            _ = conn_streams.compactReceivePrefixes(conn);
+            conn.tryReserveResidentBytes(grew) catch {
+                conn.close(true, transport_error_excessive_load, "excessive resource use");
+                return;
+            };
         };
     } else if (ptr.recv.bytes.items.len < recv_before) {
         conn.releaseResidentBytes(recv_before - ptr.recv.bytes.items.len);

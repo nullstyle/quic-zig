@@ -96,11 +96,137 @@ test "a write past the connection's memory budget returns short, it is not a fau
     _ = try conn.openBidi(0);
     var data: [2048]u8 = undefined;
     @memset(&data, 'x');
-    // The budget leaves 1024: the write takes that much.
-    try std.testing.expectEqual(@as(usize, 1024), try conn.streamWrite(0, &data));
-    // Nothing left: the write takes nothing, the stream stays open.
+    // The budget leaves 1024, half of it the receive side's share
+    // (since 0.38.0): the write takes 512.
+    try std.testing.expectEqual(@as(usize, 512), try conn.streamWrite(0, &data));
+    // Nothing left for writes: the write takes nothing, the stream
+    // stays open.
     try std.testing.expectEqual(@as(usize, 0), try conn.streamWrite(0, &data));
-    try std.testing.expectEqual(@as(u64, 1024), conn.bytes_resident);
+    try std.testing.expectEqual(@as(u64, 512), conn.bytes_resident);
+}
+
+/// A connection with a small memory budget and explicit windows: the
+/// connection window is the receive side's share (half the budget),
+/// the stream window is wide, one bidi stream open.
+fn budgetConn(allocator: std.mem.Allocator, ctx: boringssl.tls.Context, budget: u64) !*Connection {
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    errdefer conn.destroy();
+    conn.max_connection_memory = budget;
+    try conn.setTransportParams(.{
+        .initial_max_data = budget / 2,
+        .initial_max_stream_data_bidi_local = 1024 * 1024,
+        .initial_max_stream_data_bidi_remote = 1024 * 1024,
+        .initial_max_streams_bidi = 4,
+    });
+    _ = try conn.openBidi(0);
+    return conn;
+}
+
+test "a write leaves the receive side its share of the memory budget: the peer's in-window bytes still land" {
+    // capnp-zig's shape (2026-10-08): a 256 KiB budget, a 1 MiB reply,
+    // the client's small frames every millisecond. Through v0.37.x the
+    // write took the whole budget and the first peer byte closed the
+    // connection with "excessive resource use", a fault the peer did
+    // not cause.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try budgetConn(allocator, ctx, 256 * 1024);
+    defer conn.destroy();
+    const data = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(data);
+    @memset(data, 'x');
+    // The writer's share: the budget less the receive side's.
+    try std.testing.expectEqual(@as(usize, 128 * 1024), try conn.streamWrite(0, data));
+    try std.testing.expectEqual(@as(u64, 128 * 1024), conn.bytes_resident);
+    // The peer's bytes, well inside the window it was given: they land.
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = "abc", .has_length = true, .fin = false });
+    try std.testing.expectEqual(Connection.CloseState.open, conn.closeState());
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try conn.streamRead(0, &buf));
+    try std.testing.expectEqualStrings("abc", buf[0..3]);
+}
+
+test "a slow reader's buffers leave the writer nothing: a short write, not a fault; a read gives it back" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try budgetConn(allocator, ctx, 256 * 1024);
+    defer conn.destroy();
+    // The peer fills most of its window; nobody reads yet.
+    const inbound = try allocator.alloc(u8, 120 * 1024);
+    defer allocator.free(inbound);
+    @memset(inbound, 'p');
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = inbound, .has_length = true, .fin = false });
+    try std.testing.expectEqual(Connection.CloseState.open, conn.closeState());
+    try std.testing.expectEqual(@as(u64, 120 * 1024), conn.bytes_resident);
+    // The writer's share is 128 KiB of resident bytes in all: 8 KiB left.
+    const data = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(data);
+    @memset(data, 'x');
+    try std.testing.expectEqual(@as(usize, 8 * 1024), try conn.streamWrite(0, data));
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamWrite(0, data));
+    try std.testing.expectEqual(Connection.CloseState.open, conn.closeState());
+    // The application reads everything: the buffer drains and gives
+    // its charge back; the writer has its share again.
+    var buf: [64 * 1024]u8 = undefined;
+    var read: usize = 0;
+    while (read < inbound.len) read += try conn.streamRead(0, &buf);
+    try std.testing.expectEqual(@as(u64, 8 * 1024), conn.bytes_resident);
+    try std.testing.expectEqual(@as(usize, 120 * 1024), try conn.streamWrite(0, data));
+}
+
+test "under pressure the receive buffers compact their consumed prefix before a peer's in-window bytes are refused" {
+    // The receive buffer charges the budget for its consumed prefix
+    // until the prefix reaches half the buffer, while the connection
+    // window slides on once half of it was read in all: with two
+    // streams, one read short of its half and one drained, the peer's
+    // credit grows and the first stream's prefix stays charged. With
+    // the writer at its share, that slack is what stands between the
+    // peer's next in-window frame and "excessive resource use". It is
+    // given back first.
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try budgetConn(allocator, ctx, 256 * 1024);
+    defer conn.destroy();
+    _ = try conn.openBidi(4);
+    const data = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(data);
+    @memset(data, 'x');
+    // The writer takes its whole share.
+    try std.testing.expectEqual(@as(usize, 128 * 1024), try conn.streamWrite(0, data));
+    // The peer fills its window: 100 KiB on stream 0, 28 KiB on stream 4.
+    const a = try allocator.alloc(u8, 100 * 1024);
+    defer allocator.free(a);
+    @memset(a, 'p');
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 0, .data = a, .has_length = true, .fin = false });
+    try conn.handleStream(.application, .{ .stream_id = 4, .offset = 0, .data = a[0 .. 28 * 1024], .has_length = true, .fin = false });
+    try std.testing.expectEqual(Connection.CloseState.open, conn.closeState());
+    try std.testing.expectEqual(@as(u64, 256 * 1024), conn.bytes_resident);
+    // The application reads 49 KiB of stream 0 (short of its half: the
+    // prefix stays, charged) and all of stream 4 (drained, its charge
+    // given back). 77 KiB read in all: the connection window slides,
+    // the peer may send 77 KiB more.
+    var buf: [49 * 1024]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 49 * 1024), try conn.streamRead(0, &buf));
+    try std.testing.expectEqual(@as(usize, 28 * 1024), try conn.streamRead(4, &buf));
+    try std.testing.expectEqual(@as(u64, 228 * 1024), conn.bytes_resident);
+    try std.testing.expect(conn.local_max_data >= 200 * 1024);
+    // 69 KiB more on stream 0, inside the window: 41 KiB over the budget
+    // as charged, 8 KiB under it once the prefix is compacted. It lands.
+    const b = try allocator.alloc(u8, 69 * 1024);
+    defer allocator.free(b);
+    @memset(b, 'q');
+    try conn.handleStream(.application, .{ .stream_id = 0, .offset = 100 * 1024, .data = b, .has_length = true, .fin = false });
+    try std.testing.expectEqual(Connection.CloseState.open, conn.closeState());
+    try std.testing.expectEqual(@as(u64, (128 + 51 + 69) * 1024), conn.bytes_resident);
+    const rs = conn.streamRecvState(0).?;
+    try std.testing.expectEqual(@as(u64, 49 * 1024), rs.read_offset);
+    // Everything the peer sent is still readable, in order.
+    var tail: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 8), try conn.streamRead(0, &tail));
+    try std.testing.expectEqualStrings("pppppppp", &tail);
 }
 
 test "streamReset publicly aborts the send half" {

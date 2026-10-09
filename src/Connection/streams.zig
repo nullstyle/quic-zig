@@ -891,7 +891,11 @@ pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
     // write takes what the budget leaves and returns short, as it
     // does at the stream's limit. The budget's fault, ExcessiveLoad,
     // is for what the peer puts in buffers.
-    const budget_left: usize = std.math.lossyCast(usize, conn.max_connection_memory -| conn.bytes_resident);
+    // The writes stop short of the receive side's share (since 0.38.0:
+    // `writerBudget`), so a peer's bytes inside the window it was given
+    // always have room. A slow reader whose buffers sit in the budget
+    // leaves the writer less, until the application reads.
+    const budget_left: usize = std.math.lossyCast(usize, writerBudget(conn) -| conn.bytes_resident);
     const want = @min(data.len, @min(headroom, budget_left));
     if (want > 0) {
         try conn.tryReserveResidentBytes(want);
@@ -1010,6 +1014,48 @@ fn afterStreamConsume(
 /// Raise the budget with the cap on a fat link with many streams.
 fn connectionWindowCap(conn: *const Connection) u64 {
     return @min(conn.max_connection_receive_window, conn.max_connection_memory / 2);
+}
+
+/// The receive side's share of the memory budget: what the peer may
+/// have unread, the connection window (as announced, or as tuned up to
+/// `connectionWindowCap`; the cap when no window is announced yet).
+/// `streamWrite` keeps out of it, so that a frame inside the window
+/// never meets a full budget (since 0.38.0; found by capnp-zig: one
+/// large reply and the peer's next small frame closed the connection
+/// with "excessive resource use", a fault the peer did not cause).
+pub fn receiveShare(conn: *const Connection) u64 {
+    return @max(conn.conn_recv_window, connectionWindowCap(conn));
+}
+
+/// The resident bytes `streamWrite` may bring the connection to: the
+/// budget less the receive side's share. Zero when a window larger
+/// than the budget is announced (an embedder's misconfiguration: raise
+/// the budget with the window).
+pub fn writerBudget(conn: *const Connection) u64 {
+    return conn.max_connection_memory -| receiveShare(conn);
+}
+
+/// Under memory pressure: every receive buffer gives back the charge of
+/// its consumed prefix (bytes the application read that `consume`
+/// keeps until the prefix reaches half the buffer). After this the
+/// receive side holds its unread bytes and nothing more, so a frame
+/// inside the window fits beside the writer's budget. Returns the
+/// bytes released.
+pub fn compactReceivePrefixes(conn: *Connection) u64 {
+    var released: u64 = 0;
+    var it = conn.streams.iterator();
+    while (it.next()) |entry| {
+        const s = entry.value_ptr.*;
+        if (!peerMaySendOnStream(conn, s.id)) continue;
+        const before = s.recv.bytes.items.len;
+        s.recv.compactPrefix();
+        const after = s.recv.bytes.items.len;
+        if (after < before) {
+            conn.releaseResidentBytes(before - after);
+            released += before - after;
+        }
+    }
+    return released;
 }
 
 /// The receive windows' self-tuning (since v0.33.0), the rule quic-go
