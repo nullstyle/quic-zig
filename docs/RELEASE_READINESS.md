@@ -1404,6 +1404,81 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.39.0: the tail of the many-connections work, and its guards
+
+v0.39.0 (tag `1a4919d`, 2026-10-09) is the sprint the owner picked
+("A") after v0.38.0: three loose ends of v0.36.0 and the guards that
+two downstream-found defects of 2026-10-08 asked for; plus one small
+accessor a downstream asked for.
+
+1. `canSend` answered "a stream has something to send" by walking every
+   stream on every poll of a connection not at rest. The sendable list
+   (0.36.0, kept in step by `noteSendable`) answers in O(1); the walk
+   stays for a degraded list, and a Debug build checks the two agree
+   (the full suite held it). MEASURED on an archive export of the base
+   commit against the sprint's tree, nothing else running: the churn
+   cell with 3,750 live streams 6.82 -> 5.73 us of poll per stream
+   (poll 55 -> 46 ms), 928 live 2.37 -> 2.08, the small windows and the
+   tick column within noise, the connections cells unchanged within
+   their noise (the 4,000-connection idle pass swings by a fifth between
+   runs of the same code), every virtual-time result byte-identical.
+2. The allocations per connection since 0.36.0, named (http3-zig
+   measured +2 per side): a counting allocator at the public wrappers
+   on the v0.35.0, v0.36.0 and HEAD trees, a handshake then a reply of
+   1 KiB, 64 KiB and 1 MiB. The +1 on every connection that sends
+   stream data is the sendable list's first insert; the server's +1 at
+   the handshake is its ready list and timer heap (per server, paid by
+   the first connection) less the CRYPTO buffers now allocated on
+   demand (the client's -1); larger transfers grow the sent-packet
+   tracker from 16 slots, a `realloc` per doubling, and `shrinkIdle`
+   gives it back. Each kept: the shape the idle-memory win needs (92
+   -> 22 KB). The instrument (alloc-count-block.zig, run by mem-run.sh
+   or alloc-count-at-tag.sh) is in the handoff tools.
+3. Guards, Debug builds. `tests/e2e/rest_cache_table.zig`: a pair at
+   rest with the cache primed, one public call (19 of them), then every
+   reader of the cache on both sides; a call that forgot to drop the
+   cache asserts. One case was wrong and dropped (retiring a connection
+   id the server never issued; the server closed, rightly).
+   `Connection.residentBytesSum` against `bytes_resident`: the
+   stream-window fuzz harness holds it after every operation, the
+   budget tests at their ends; green on the first run.
+4. `Connection.streamWriteCapacity(id)`: what the next write would
+   take, computed as the write computes it (http3-zig: a frame written
+   as header + payload in two calls was cut mid-frame by a short write;
+   `SendWindow.writable` counts flow credit alone). Two tests.
+
+Local before the tag: the full suite 36/36 steps, `just check-windows` 15/15, `just check-x86` 15/15; every bench cell byte-identical (31 of 31).
+
+**The gates on `1a4919d`**, each read at the evidence line.
+
+- `test` (run 37956510349): seven jobs green; macos-26, macos-15,
+  ubuntu x86 and ubuntu arm 2,065 of 2,081 (16 skipped) in Debug and
+  2,025 of 2,041 in ReleaseSafe; x86-linux-musl and the sanitizer job
+  2,065 of 2,081; windows-latest 2,002 of 2,041 (39 skipped) in both
+  modes; `consumer-smoke ok: quic-zig 0.39.0`, `check-modes: 6 of 6`.
+- rc-fuzz (run 37956644787): `n_runs=2,383,156 unique_runs=10,164
+  pcs_len=47333`, `coverage verified: instrumented, 2,383,156
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37956510451): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37956510460): built and pushed from that commit.
+- pin-lint (run 37956510377): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The wide local interop matrix on the tag's image, both roles:
+  client `pairs=3 cells=45 succeeded=43 failed=0 unsupported=2` (run per
+  server after the runner itself crashed twice mid-run in pyshark's
+  tshark cleanup, a known intermittent of the runner: quic-go 14 of
+  15, ngtcp2 15 of 15, quiche 14 of 15, the ECN cells unsupported);
+  server `succeeded=40 failed=1 unsupported=4` (the one failed is quiche
+  x multiplexing, the known chance cell since v0.24.0).
+- That chance cell, a same-day control, six runs on each image one
+  after the other: the v0.38.0 image 1 of 6, the v0.39.0 image 3 of 6
+  (its first five-run rerun before the control: 1 of 5, one run the
+  runner's own crash). The cell swings on both; this tag is no worse.
+
+- The package hash of the tag's archive: `quic-0.39.0-DnSYvdoSQADBQP2CB3F5JtcC_1FHcnzVO6CCXbI-65gm`.
+- Downstreams told (the note DOWNSTREAM-NOTE-v0.39.0.md); they move
+  themselves.
+
 ## v0.38.0: the receive reserve
 
 v0.38.0 (tag `77be067`, 2026-10-09) is the sprint the owner picked
