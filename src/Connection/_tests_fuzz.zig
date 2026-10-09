@@ -1470,6 +1470,8 @@ fn fuzzConnStreamWindow(_: void, smith: *std.testing.Smith) anyerror!void {
             try std.testing.expectEqual(@as(?u64, null), space.creditToAdvertise(blocked_at));
             if (pending) |p| try std.testing.expectEqual(space.limit, p);
         }
+        // The memory budget's charge is the sum of the buffers it covers.
+        try std.testing.expectEqual(conn.residentBytesSum(), conn.bytes_resident);
     }
 }
 

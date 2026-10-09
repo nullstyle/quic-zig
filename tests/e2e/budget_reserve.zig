@@ -127,4 +127,6 @@ test "a 1 MiB reply under a 256 KiB budget while the client sends a frame every 
     try std.testing.expectEqual(reply_len, received);
     try std.testing.expectEqual(reply_len, written);
     try std.testing.expect(chatter > 0);
+    try std.testing.expectEqual(sconn.residentBytesSum(), sconn.bytes_resident);
+    try std.testing.expectEqual(cli.conn.residentBytesSum(), cli.conn.bytes_resident);
 }

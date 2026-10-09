@@ -43,7 +43,8 @@ refined before 1.0, but changes will be deliberate, called out in
   (`TimerKind.stream_gc`): a host on the ready API ticks it through
   `tickDue`, a loop on `nextTimerDeadline` wakes for it.
 - **Streams:** `openBidi` / `openUni`, `openNextBidi` / `openNextUni`,
-  `localStreamType`, `streamRead`, `streamWrite`, `streamFinish`,
+  `localStreamType`, `streamRead`, `streamWrite`, `streamWriteCapacity`
+  (0.39.0: what the next write would take), `streamFinish`,
   `streamStopSending`, `streamIterator`, and the `StreamType` classifier.
 - **Lifecycle:** `beginGracefulShutdown` / `gracefulShutdownActive`,
   `close`, `ConnectionPhase`, `CloseState`, `CloseEvent`.

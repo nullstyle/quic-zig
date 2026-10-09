@@ -5,6 +5,51 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.39.0] - 2026-10-09
+
+The tail of the many-connections work (0.36.0), and its guards.
+
+### Added
+
+- `Connection.streamWriteCapacity(id)`: how many bytes the next
+  `streamWrite` on that stream would take, computed as the write
+  computes it (the send buffer's room, following the peer's credit up
+  to the cap; the writer's share of the memory budget still free; the
+  smaller). An embedder that frames its data (a header and a payload
+  that must go out together) asks before a write that must not be cut.
+  `SendWindow.writable` counts flow credit alone. Asked by http3-zig
+  (a frame written as header + payload in two calls was cut mid-frame
+  by a short write). Two tests.
+
+### Changed
+
+- `canSend` answers "a stream has something to send" from the sendable
+  list (0.36.0) instead of walking every stream on every poll of a
+  connection not at rest; the walk stays for a degraded list, and a
+  Debug build checks the two agree. The churn cell with 3,750 live
+  streams: 7.7 -> 5.7 us of poll per stream (-26%), the virtual-time
+  results byte-identical.
+
+### Guards (tests only)
+
+- `tests/e2e/rest_cache_table.zig`: a client/server pair at rest with
+  the rest cache primed, then one public call (19 of them: pings,
+  stream writes, finishes, resets, priorities, a stop, the PMTU and
+  congestion knobs, a datagram, a token, a path probe, a graceful
+  shutdown, a close), then every reader of the cache on both sides: a
+  call that forgot to drop the cache asserts. The two defects of
+  2026-10-08 were missing touches.
+- `Connection.residentBytesSum` against `bytes_resident` (the memory
+  budget's charge equals the sum of the buffers it covers): held by
+  the stream-window fuzz harness after every operation and by the
+  budget tests. Green on the first run.
+- The allocations per connection since 0.36.0, named (http3-zig
+  measured +2 per side): one for the sendable list's first insert on
+  every connection that sends stream data; the sent-packet tracker's
+  growth from 16 slots on larger transfers (a `realloc` per doubling);
+  the Server's ready list and timer heap, per server, paid by its
+  first connection. Each kept: the shape the idle-memory win needs.
+
 ## [0.38.0] - 2026-10-09
 
 ### Changed

@@ -145,6 +145,7 @@ test "a write leaves the receive side its share of the memory budget: the peer's
     var buf: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 3), try conn.streamRead(0, &buf));
     try std.testing.expectEqualStrings("abc", buf[0..3]);
+    try std.testing.expectEqual(conn.residentBytesSum(), conn.bytes_resident);
 }
 
 test "a slow reader's buffers leave the writer nothing: a short write, not a fault; a read gives it back" {
@@ -174,6 +175,7 @@ test "a slow reader's buffers leave the writer nothing: a short write, not a fau
     while (read < inbound.len) read += try conn.streamRead(0, &buf);
     try std.testing.expectEqual(@as(u64, 8 * 1024), conn.bytes_resident);
     try std.testing.expectEqual(@as(usize, 120 * 1024), try conn.streamWrite(0, data));
+    try std.testing.expectEqual(conn.residentBytesSum(), conn.bytes_resident);
 }
 
 test "under pressure the receive buffers compact their consumed prefix before a peer's in-window bytes are refused" {
@@ -227,6 +229,49 @@ test "under pressure the receive buffers compact their consumed prefix before a 
     var tail: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 8), try conn.streamRead(0, &tail));
     try std.testing.expectEqualStrings("pppppppp", &tail);
+    try std.testing.expectEqual(conn.residentBytesSum(), conn.bytes_resident);
+}
+
+test "streamWriteCapacity says what the next streamWrite takes: the buffer's room, the writer's share, the smaller" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    // The writer's share bounds it: 128 KiB of a 256 KiB budget.
+    const conn = try budgetConn(allocator, ctx, 256 * 1024);
+    defer conn.destroy();
+    const data = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(data);
+    @memset(data, 'x');
+    try std.testing.expectEqual(@as(usize, 128 * 1024), try conn.streamWriteCapacity(0));
+    try std.testing.expectEqual(@as(usize, 100 * 1024), try conn.streamWrite(0, data[0 .. 100 * 1024]));
+    try std.testing.expectEqual(@as(usize, 28 * 1024), try conn.streamWriteCapacity(0));
+    try std.testing.expectEqual(@as(usize, 28 * 1024), try conn.streamWrite(0, data));
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamWriteCapacity(0));
+    // A finished half takes nothing more.
+    try conn.streamFinish(0);
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamWriteCapacity(0));
+    // A receive-only stream has no send half here; a reaped one is gone.
+    try std.testing.expectError(Error.StreamNotWritable, conn.streamWriteCapacity(3));
+    try std.testing.expectError(Error.StreamNotFound, conn.streamWriteCapacity(8));
+    try std.testing.expectEqual(conn.residentBytesSum(), conn.bytes_resident);
+}
+
+test "streamWriteCapacity: the send buffer's room bounds it when the budget does not" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    _ = try conn.openBidi(0);
+    const cap = try conn.streamWriteCapacity(0);
+    try std.testing.expect(cap > 0);
+    const data = try allocator.alloc(u8, cap + 4096);
+    defer allocator.free(data);
+    @memset(data, 'x');
+    // The write takes exactly the capacity.
+    try std.testing.expectEqual(cap, try conn.streamWrite(0, data));
+    try std.testing.expectEqual(@as(usize, 0), try conn.streamWriteCapacity(0));
+    try std.testing.expectEqual(conn.residentBytesSum(), conn.bytes_resident);
 }
 
 test "streamReset publicly aborts the send half" {

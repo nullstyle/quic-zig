@@ -914,6 +914,23 @@ pub fn streamWrite(conn: *Connection, id: u64, data: []const u8) Error!usize {
     return accepted;
 }
 
+// Doc comment lives on the `Connection.streamWriteCapacity` thunk in Connection.zig.
+pub fn streamWriteCapacity(conn: *const Connection, id: u64) Error!usize {
+    if (!localMaySendOnStream(conn, id)) return Error.StreamNotWritable;
+    const s = conn.streams.get(id) orelse return Error.StreamNotFound;
+    if (s.send.reset != null or s.send.fin_marked) return 0;
+    const before = s.send.bytes.len();
+    var max_buffered = s.send.max_buffered;
+    if (conn.send_buffer_follows_credit) {
+        const by_credit = s.send_max_data -| s.send.base_offset;
+        const limit: usize = @intCast(@min(by_credit, @as(u64, conn.max_buffered_send_cap)));
+        if (limit > max_buffered) max_buffered = limit;
+    }
+    const headroom = max_buffered -| before;
+    const budget_left: usize = std.math.lossyCast(usize, writerBudget(conn) -| conn.bytes_resident);
+    return @min(headroom, budget_left);
+}
+
 // Doc comment lives on the `Connection.streamRead` thunk in Connection.zig.
 pub fn streamRead(conn: *Connection, id: u64, dst: []u8) Error!usize {
     if (!peerMaySendOnStream(conn, id)) return Error.StreamNotReadable;

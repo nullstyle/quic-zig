@@ -77,6 +77,25 @@ pub fn canSend(conn: *const Connection) bool {
     if (conn.pending_frames.alternative_addresses.items.len > 0) return true;
     if (conn.pending_frames.send_datagrams.items.len > 0) return true;
     if (conn.pending_frames.ack_frequency != null or conn.pending_frames.immediate_ack) return true;
+    return anyStreamSendable(conn);
+}
+
+/// Whether a stream has a chunk, a FIN or a reset to send: the sendable
+/// list's answer (since 0.39.0; it is kept in step with every send
+/// half by `noteSendable`, and a Debug build checks it against the
+/// walk here). Through 0.38.0 this walked every stream on every poll
+/// of a connection not at rest: 7.7 us per stream of poll time at
+/// 3,750 live streams (the churn cell), the sendable list answering
+/// in O(1). The walk stays for a degraded list (an insert failed for
+/// want of memory).
+fn anyStreamSendable(conn: *const Connection) bool {
+    if (conn.sendable_degraded) return anyStreamSendableByWalk(conn);
+    const any = conn.sendable.items.len > 0;
+    if (builtin.mode == .debug) std.debug.assert(any == anyStreamSendableByWalk(conn));
+    return any;
+}
+
+fn anyStreamSendableByWalk(conn: *const Connection) bool {
     var it = conn.streams.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.*.send.hasPendingChunk()) return true;

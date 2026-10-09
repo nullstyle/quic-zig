@@ -3428,6 +3428,21 @@ pub const streamRecvEnd = conn_streams.streamRecvEnd;
 /// once the stream has been reaped after reaching a terminal state.
 pub const streamWrite = conn_streams.streamWrite;
 
+/// How many bytes `streamWrite` would accept on stream `id` right now:
+/// the room in its send buffer (which follows the peer's credit up to
+/// the cap, as the write itself lets it) and the writer's share of the
+/// memory budget still free, whichever is smaller. An embedder that
+/// frames its data (a header and a payload that must go out together)
+/// asks before a write that must not be cut; the answer holds until the
+/// next write, read, acknowledgement or frame from the peer on this
+/// connection. `SendWindow.writable` counts flow credit alone; this
+/// counts what the write takes. Same errors as `streamWrite` for a
+/// stream with no send half or one already reaped; 0 for a send half
+/// that is finished or reset. Found by http3-zig (2026-10-09): a frame
+/// written as header + payload in two calls was cut mid-frame by a
+/// short write.
+pub const streamWriteCapacity = conn_streams.streamWriteCapacity;
+
 /// Convenience: read from the receive half of stream `id`. A return of
 /// 0 means "nothing readable right now" — including "a chunk below the
 /// read offset has not arrived yet" — and is never an end-of-stream
@@ -5233,6 +5248,26 @@ pub fn tryReserveResidentBytes(self: *Connection, n: usize) Error!void {
 /// `tryReserveResidentBytes`. Underflow is clamped at zero in
 /// release builds (an unbalanced free is a bug, not a security
 /// issue — the cap stays honored), and asserts in debug.
+/// The resident bytes the budget should be charged for, summed from
+/// the buffers it covers: every stream's send half (`bytes.len()`) and
+/// receive half (`bytes.items.len`), the CRYPTO chunks held for
+/// reassembly, the inbound DATAGRAMs queued. The invariant
+/// `bytes_resident == residentBytesSum()` is held by the stream-window
+/// fuzz harness after every operation and by the budget tests (0.39.0).
+// INTERNAL: pub for tests; not part of the embedder API.
+pub fn residentBytesSum(self: *const Connection) u64 {
+    var sum: u64 = 0;
+    var it = self.streams.iterator();
+    while (it.next()) |entry| {
+        const s = entry.value_ptr.*;
+        sum += s.send.bytes.len();
+        sum += s.recv.bytes.items.len;
+    }
+    for (self.crypto_pending_bytes) |b| sum += b;
+    sum += self.pending_frames.recv_datagram_bytes;
+    return sum;
+}
+
 pub fn releaseResidentBytes(self: *Connection, n: usize) void {
     if (n == 0) return;
     const sub: u64 = @intCast(n);
