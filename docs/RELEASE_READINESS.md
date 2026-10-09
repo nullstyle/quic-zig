@@ -1404,6 +1404,76 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.38.0: the receive reserve
+
+v0.38.0 (tag `77be067`, 2026-10-09) is the sprint the owner picked
+("A") after the four-sprint span closed: capnp-zig's second finding of
+2026-10-08, accepted then as a design item.
+
+The defect: one budget (`max_connection_memory`, 32 MiB by default)
+holds what the application writes, what the peer sends, CRYPTO and
+DATAGRAM queues. Since 0.33.0 `streamWrite` took what the budget left
+and returned short, but it could take ALL of it; then a STREAM byte
+from the peer, inside the window it was given, failed the budget and
+the connection closed with "excessive resource use", a fault the peer
+did not cause and the application never saw at its own write. capnp-zig
+reproduced it (a 256 KiB budget, a 1 MiB reply, a client frame every
+millisecond: closed within 2 to 7 ms) and capped its own writes at
+half the budget.
+
+The design (9952f1c): the receive side's share is the connection
+window (as announced, never below the window cap: half the budget by
+default), what the peer may have unread; `streamWrite` stops short of
+it (`writerBudget`), so a frame inside the window always has room, and
+a slow reader whose unread bytes sit in the budget leaves the writer
+less until the application reads. Under pressure the receive buffers
+give back the charge of their consumed prefixes
+(`RecvStream.compactPrefix`, the memmove `consume` does once the
+prefix reaches half the buffer, on demand) before a frame or a
+DATAGRAM is refused: after that the receive side holds its unread
+bytes and nothing more, so with the writer at its share the sum fits
+the budget. An honest peer never meets the fault. The pressure needs
+two streams to arise (one read short of its half keeps its prefix
+charged while the other's drain slides the connection window): with
+one stream the credit and the compaction move in step, which is why
+nothing saw it before.
+
+Tests: the existing short-write test (512 of 1024 now); capnp-zig's
+shape; the slow reader; the pressure with two streams (red without the
+compaction, green with it); and the shape at the public wrappers (a
+1 MiB reply under a 256 KiB budget with a client frame every
+millisecond: no fault, the reply in order, the server never above its
+budget). MEASURED: every bench cell against the reference
+(cells-pp-b4.txt): 30 of 31 byte-identical; `impairment_fat_window_
+1gbit_rtt100ms` (256 MiB over 16 streams, a 12.5 MB BDP) the same
+518.07 vMbps and 4145 ms with 4 datagrams more of 239,915 (the writer
+holds 16 MiB of resident bytes instead of 32, still above the BDP).
+Local before the tag: the full suite 36/36 steps, `just check-windows` 15/15, `just check-x86` 15/15.
+
+**The gates on `77be067`**, each read at the evidence line.
+
+- `test` (run 37889073066): seven jobs green; macos-26, macos-15,
+  ubuntu x86 and ubuntu arm 2,062 of 2,078 (16 skipped) in Debug and
+  2,022 of 2,038 in ReleaseSafe; x86-linux-musl and the sanitizer job
+  2,062 of 2,078; windows-latest 1,999 of 2,038 (39 skipped) in both
+  modes; `consumer-smoke ok: quic-zig 0.38.0`, `check-modes: 6 of 6`.
+- rc-fuzz (run 37889075272): `n_runs=2,292,240 unique_runs=11,694
+  pcs_len=47275`, `coverage verified: instrumented, 2,292,240
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37889073145): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37889073081): built and pushed from that commit.
+- pin-lint (run 37889073080): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The wide local interop matrix on the tag's image, both roles:
+  client `pairs=3 cells=45 succeeded=43 failed=0 unsupported=2` (the two
+  ECN cells), server `succeeded=41 failed=0 unsupported=4` (quic-go ecn,
+  quiche chacha20, keyupdate and ecn, as on every release): no cell
+  failed in either role, every chance cell green on the first run.
+
+- The package hash of the tag's archive: `quic-0.38.0-DnSYve_hPwBp5d2c8QUoZiNWi-rHT6QFR4pK2DueXEAC`.
+- Downstreams: told (the note DOWNSTREAM-NOTE-v0.38.0.md); not a
+  cluster move by itself, the owner decides.
+
 ## v0.37.2: the at-rest fix (the move tag, superseding v0.37.1)
 
 v0.37.2 (tag `51a34c0`, 2026-10-08) fixes a defect capnp-zig found
