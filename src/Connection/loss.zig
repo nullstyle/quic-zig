@@ -287,6 +287,9 @@ pub fn dispatchAckedPacketToStreams(
         const after = s.send.bytes.len();
         if (after < before) conn.releaseResidentBytes(before - after);
         conn_streams.noteSendable(conn, s);
+        // The ACK that completed the send half: the stream may be
+        // reclaimable now; the next tick's GC decides.
+        if (s.send.isTerminal()) conn.markStreamsGc();
     }
 }
 
@@ -535,6 +538,7 @@ pub fn dispatchAckedControlFrames(
                     {
                         s.send.onResetAcked();
                         conn_streams.noteSendable(conn, s);
+                        conn.markStreamsGc();
                     }
                 }
             },

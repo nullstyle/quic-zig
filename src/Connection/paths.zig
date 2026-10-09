@@ -121,6 +121,7 @@ pub fn openPath(
 /// Make `path_id` the primary path for new application data.
 /// Returns false if no such path exists.
 pub fn setActivePath(conn: *Connection, path_id: u32) bool {
+    conn.touch();
     return conn.paths.setActive(path_id);
 }
 
@@ -149,6 +150,7 @@ pub fn abandonPathAt(
 pub fn setPathStatus(conn: *Connection, path_id: u32, state: path_mod.State) bool {
     const p = conn.paths.get(path_id) orelse return false;
     p.path.state = state;
+    conn.touch();
     return true;
 }
 
@@ -174,6 +176,7 @@ pub fn markPathValidated(conn: *Connection, path_id: u32) bool {
     const p = conn.paths.get(path_id) orelse return false;
     p.path.markValidated();
     if (p.pending_migration_reset) resetPathRecoveryAfterMigration(conn, p);
+    conn.touch();
     return true;
 }
 
@@ -461,6 +464,8 @@ pub fn requestPing(conn: *Connection) void {
     primaryPath(
         conn,
     ).pending_ping = true;
+    // A PING to send: a cached rest deadline is stale (0.37.2).
+    conn.touch();
 }
 
 /// Queue an application-level PING on a specific path.
@@ -469,6 +474,7 @@ pub fn requestPathPing(conn: *Connection, path_id: u32) Error!void {
     const path = conn.paths.get(path_id) orelse return Error.PathNotFound;
     if (path.path.state == .failed or path.path.state == .retiring) return Error.PathNotFound;
     path.pending_ping = true;
+    conn.touch();
 }
 
 /// True iff the active path has been validated (either via the

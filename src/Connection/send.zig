@@ -111,6 +111,10 @@ pub fn pollDatagram(
     if (conn.lifecycle.closed and conn.lifecycle.pending_close == null) return null;
     conn.queueHandshakeDoneIfReady();
     conn.maybeAutoAckFrequency(now_us);
+    // The AEAD limits of the write keys, before the rest shortcut: a
+    // key update or a close they call for is a state change `atRest`
+    // must see, not a side effect of the builder (0.37.2).
+    try conn_keys.prepareApplicationWriteKeys(conn, now_us);
     // A connection at rest has nothing to send: it answers here instead
     // of in the builder below. The first time, with one walk of its
     // queues (`atRest`), which also primes the rest deadline; from

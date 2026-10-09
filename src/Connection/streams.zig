@@ -594,6 +594,9 @@ pub fn gcClosedStreams(conn: *Connection) void {
     // ("a note outlives the next tick") cannot drift from the GC.
     var batch: [RecvEndRing.gc_batch]u64 = undefined;
     var n: usize = 0;
+    // Every transition that can end a stream sets the flag; this walk
+    // answers it. A walk cut short by the batch sets it again below.
+    conn.streams_gc_pending = false;
     var it = conn.streams.iterator();
     while (it.next()) |entry| {
         const s = entry.value_ptr.*;
@@ -613,6 +616,7 @@ pub fn gcClosedStreams(conn: *Connection) void {
         batch[n] = s.id;
         n += 1;
     }
+    if (n == batch.len) conn.markStreamsGc();
     // The note for `streamRecvEnd`: allocated once, here, and only when
     // this pass reclaims a stream that has a receive half. A failed
     // allocation records nothing and changes nothing else — every
@@ -929,6 +933,9 @@ fn afterStreamConsume(
     physical_before: usize,
     n: usize,
 ) Error!void {
+    // The read that reached the FIN (or consumed a reset): the stream
+    // may be reclaimable now; the next tick's GC decides.
+    if (s.recvFullyTerminated()) conn.markStreamsGc();
     // Per-connection memory DoS cap: the budget keys on the PHYSICAL
     // `bytes.items.len`. The sliding window advances without
     // shrinking most of the time (consumed bytes keep their budget
@@ -1149,6 +1156,8 @@ pub fn streamStopSending(
         .application_error_code = application_error_code,
     });
     s.recv_stopped = true;
+    // The GC reads the stopped half and ends it: work for the next tick.
+    conn.markStreamsGc();
 }
 
 pub fn queueStopSending(

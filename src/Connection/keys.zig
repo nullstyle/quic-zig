@@ -564,6 +564,14 @@ fn dropSpaceRecoveryState(conn: *Connection, lvl: EncryptionLevel, pn_idx: usize
     conn.sent[pn_idx].shrinkToMinimum(conn.allocator);
     conn.pto_count[pn_idx] = 0;
     conn.pending_ping[pn_idx] = false;
+    // An ACK owed in this space can never be sent now (RFC 9001
+    // section 4.9: the keys are gone, and with them any pending ACK).
+    // The server discards its Handshake keys the moment the client's
+    // Finished is processed, before any poll: left set, the flag made
+    // `canSend` true for the life of every server connection, which
+    // since 0.36.0 kept a server from ever coming to rest (0.37.2).
+    conn.pn_spaces[pn_idx].received.pending_ack = false;
+    conn.pn_spaces[pn_idx].received.delayed_ack_armed = false;
     const idx = lvl.idx();
     for (conn.crypto_retx[idx].items) |chunk| conn.allocator.free(chunk.data);
     conn.crypto_retx[idx].clearAndFree(conn.allocator);

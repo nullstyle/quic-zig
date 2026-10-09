@@ -37,7 +37,11 @@ refined before 1.0, but changes will be deliberate, called out in
   `*const Connection` signature and writes that cache through it (a
   live connection is never in read-only memory). `Connection.touch`
   (also 0.36.0) drops the cache by hand; the library calls it itself
-  at every state change, an embedder never needs to.
+  at every state change, an embedder never needs to. Since 0.37.2 a
+  stream whose halves have ended keeps the connection off rest until
+  the `tick` that reclaims it, and that tick is due at once
+  (`TimerKind.stream_gc`): a host on the ready API ticks it through
+  `tickDue`, a loop on `nextTimerDeadline` wakes for it.
 - **Streams:** `openBidi` / `openUni`, `openNextBidi` / `openNextUni`,
   `localStreamType`, `streamRead`, `streamWrite`, `streamFinish`,
   `streamStopSending`, `streamIterator`, and the `StreamType` classifier.

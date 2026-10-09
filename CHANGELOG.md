@@ -5,6 +5,44 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.37.2] - 2026-10-08
+
+### Fixed
+
+- A connection at rest reclaims its ended streams. Since 0.36.0 a
+  connection at rest answered `tick` from its cached deadline, and
+  `atRest` did not look at the stream table: a stream whose halves had
+  ended (the ACK of our FIN; the peer's FIN or RESET_STREAM received;
+  a stop) was work for the next `tick`, the one that reclaims it,
+  gives its id back to the peer and records its end for
+  `streamRecvEnd`, and that tick never ran. A Debug build asserted in
+  `tick`'s self-check; a release build kept the stream until something
+  else touched the connection, and a sender ran out of stream ids
+  (found by capnp-zig on its move to v0.37.1: two transfers of 10,240
+  frames over uni streams stopped at 10,185 and 10,177, both sides at
+  rest; 19 of its 202 QUIC tests asserted in Debug). Now every
+  transition that can end a stream marks the connection, the mark
+  keeps it off rest, its timer is due at once (`TimerKind.stream_gc`,
+  new) so a host on the ready API ticks it too, and the GC clears the
+  mark. Two tests at the public wrappers (feed, drain, tick; a stopped
+  stream). An embedder that touched every connection before every
+  tick to work around this can stop.
+- A server comes to rest. Its Handshake packet-number space kept a
+  pending ACK after the keys were discarded (the server discards them
+  the moment the client's Finished is processed, before any poll), and
+  that flag made `canSend` true for the life of every server
+  connection: since 0.36.0 no server connection ever used the rest
+  cache. A key discard now drops the space's pending ACK (RFC 9001
+  section 4.9: it could never be sent).
+- With servers at rest, the Debug self-checks found four state changes
+  that did not drop a cached rest deadline, so a release build would
+  have answered "nothing to send" until the next datagram or timer:
+  `requestPing` / `requestPathPing`, `setPmtudConfig` (a search with a
+  probe to send), `setActivePath` / `setPathStatus` /
+  `markPathValidated`, and the AEAD limits of the write keys (a key
+  update or a close), which are now checked before the rest shortcut
+  instead of inside the builder. Each touches now.
+
 ## [0.37.1] - 2026-10-08
 
 The v0.37.0 tag's `test` gate was red on its `zig fmt --check` step

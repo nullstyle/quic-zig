@@ -342,6 +342,10 @@ pub fn handleStream(
     // Nobody reads a stream the application stopped: read it here, so
     // that it can end (see `Connection.streamStopSending`).
     if (ptr.recv_stopped) conn_streams.discardStopped(conn, ptr);
+    // The frame that completed the receive half (the FIN, or the last
+    // gap before a FIN already seen): the stream may be reclaimable
+    // now, with nothing read; the next tick's GC decides.
+    if (ptr.recvFullyTerminated()) conn.markStreamsGc();
 }
 
 /// Best-effort reconciliation of the resident-bytes counter when

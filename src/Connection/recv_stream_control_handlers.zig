@@ -55,4 +55,6 @@ pub fn handleResetStream(conn: *Connection, rs: frame_types.ResetStream) Error!v
     // window, and the application will read none of the rest: give it
     // back now. (A second copy of the frame gives nothing twice.)
     if (first_reset) conn_streams.creditConnectionRecvWindow(conn, rs.final_size - ptr.recv.read_offset);
+    // The receive half ended by the peer's reset: work for the next tick.
+    conn.markStreamsGc();
 }

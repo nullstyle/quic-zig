@@ -777,6 +777,14 @@ priority_rr_cursor: u64 = 0,
 /// at 1,000 connections, twice that at 4,000.
 rest_deadline: ?TimerDeadline = null,
 rest_deadline_valid: bool = false,
+/// A stream may have ended on both of its halves since the last
+/// `gcClosedStreams`: the ACK that completed a send half, the peer's
+/// FIN or RESET_STREAM that completed a receive half, a stop. The next
+/// `tick` reclaims it; until then the connection is not at rest and
+/// its timer is due at once (`TimerKind.stream_gc`). Found by
+/// capnp-zig on v0.37.1: a connection at rest skipped the GC, a sender
+/// ran out of stream ids its peer never gave back (0.37.2).
+streams_gc_pending: bool = false,
 /// Called by `touch` with `wake_ctx`: the owner of the connection
 /// (a `Server` slot) learns that this connection may have something
 /// to send or a timer to re-arm, without a sweep. Set by the Server
@@ -2052,6 +2060,11 @@ pub const TimerKind = enum {
     /// draining the outbox (the loop's normal post-tick step) is the
     /// action.
     pacing,
+    /// A stream ended on both of its halves and the next `tick`
+    /// reclaims it (the id goes back to the peer, its end is kept for
+    /// `streamRecvEnd`): due at once. A host on the ready API sees the
+    /// connection due; `tick` does the work (0.37.2).
+    stream_gc,
     /// RFC 9000 §10.2.1 closing-state expiry. The connection has sent
     /// a CONNECTION_CLOSE; this timer fires at `now + 3 * PTO` after
     /// the first emit and transitions the connection to terminal
@@ -2448,6 +2461,9 @@ pub fn setPmtudConfig(self: *Connection, cfg: path_mod.PmtudConfig) void {
     for (self.paths.paths.items) |*p| {
         p.pmtudInit(cfg);
     }
+    // A search may start, with a probe to send: a cached rest deadline
+    // is stale (0.37.2).
+    self.touch();
 }
 
 /// Select the congestion-control algorithm and re-initialise the
@@ -4640,6 +4656,15 @@ pub fn touch(self: *Connection) void {
     if (self.wake_hook) |hook| hook(self.wake_ctx.?);
 }
 
+/// A stream may have ended on both of its halves (see
+/// `streams_gc_pending`): the next `tick` reclaims it. Marks the
+/// connection and touches it, so that a cached rest deadline is
+/// dropped and a host on the ready API hears of the work.
+pub fn markStreamsGc(self: *Connection) void {
+    self.streams_gc_pending = true;
+    self.touch();
+}
+
 /// True when the connection has nothing to send and no probe or
 /// validation in progress, so that only a timer or an inbound datagram
 /// can change it: the handshake is confirmed, the connection is open,
@@ -4653,6 +4678,8 @@ pub fn atRest(self: *const Connection) bool {
     if (self.lifecycle.closed or self.lifecycle.pending_close != null) return false;
     if (self.lifecycle.draining_deadline_us != null or self.lifecycle.closing_deadline_us != null) return false;
     if (self.app_read_previous != null) return false;
+    // An ended stream is work for the next tick (the GC): not rest.
+    if (self.streams_gc_pending) return false;
     for (self.paths.paths.items) |*path| {
         if (path.path.state != .active) return false;
         if (path.path.validator.status == .pending) return false;
@@ -4698,6 +4725,10 @@ fn computeNextTimerDeadline(self: *const Connection, now_us: u64) ?TimerDeadline
         considerDeadline(&best, .{ .kind = .closing, .at_us = at_us });
         return best;
     }
+    // An ended stream: the tick that reclaims it is due now, so that a
+    // host parked on this deadline (the ready API's `tickDue`, a loop on
+    // `nextTimerDeadline`) ticks the connection without a datagram.
+    if (self.streams_gc_pending) considerDeadline(&best, .{ .kind = .stream_gc, .at_us = now_us });
     if (self.lifecycle.closed) return null;
 
     inline for (.{ EncryptionLevel.initial, EncryptionLevel.handshake }) |lvl| {
