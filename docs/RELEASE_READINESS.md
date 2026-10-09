@@ -1404,6 +1404,76 @@ v0.31.0; `just check-windows` clean.
 - pin-lint: (run 37564394049) `pin-lint: OK`, `zig pins agree: 0.17.0`, the boringssl pins of quic-zig and http3-zig byte-for-byte identical.
 - The package hash of the tag's archive: `quic-0.31.1-DnSYvW4iPABrXhGsw_q3ZbQUaoDirSODEPybR5kXQ1CB`.
 
+## v0.37.2: the at-rest fix (the move tag, superseding v0.37.1)
+
+v0.37.2 (tag `51a34c0`, 2026-10-08) fixes a defect capnp-zig found
+the same day on its move to v0.37.1, in v0.36.0's rest cache; the
+move goes to this tag instead.
+
+The defect: since 0.36.0 a connection at rest answers `tick` from its
+cached deadline, and `atRest` did not look at the stream table. A
+stream whose halves had ended (the ACK of our FIN; the peer's FIN or
+RESET_STREAM received, or read to; a stop) was work for the next
+`tick`, the one that reclaims it, gives its id back to the peer and
+records its end for `streamRecvEnd`, and that tick never ran. A
+Debug build asserted in `tick`'s self-check (19 of capnp-zig's 202
+QUIC tests); a release build kept the stream until something else
+touched the connection, and a sender ran out of stream ids (two
+transfers of 10,240 frames over uni streams stopped at 10,185 and
+10,177, both sides at rest). The order that hits it is the natural
+one: feed, drain, tick. capnp-zig's report is in its repo
+(docs/upstream/handoff-quic-zig-at-rest-stream-gc.md); it worked
+around it by touching every connection before every tick.
+
+The fix: every transition that can end a stream marks the connection
+(`markStreamsGc`), the mark keeps `atRest` false, the timer is due at
+once (`TimerKind.stream_gc`, new) so a host on the ready API ticks
+the connection through `tickDue` and a loop on `nextTimerDeadline`
+wakes for it, and the GC clears the mark. Two more things the test
+found, both since 0.36.0: a server never came to rest (its Handshake
+packet-number space kept a pending ACK after the keys were discarded,
+and `canSend` read it for the life of the connection; a key discard
+drops it now), and, with servers at rest, four state changes that did
+not drop a cached rest deadline (`requestPing` / `requestPathPing`,
+`setPmtudConfig`, the path status calls, the AEAD limits of the write
+keys, now checked before the rest shortcut). Two tests at the public
+wrappers, red before the fix and green after; the conformance suite
+green with servers at rest. Local before the tag: the full suite 36/36 steps (2,043/2,059, 16 skipped), `just check-windows` 15/15, `just check-x86` 15/15 (the first run of the release script stopped at the suite on two e2e tests the filtered run had skipped; fixed, 1903935).
+
+**The gates on `51a34c0`**, each read at the evidence line.
+
+- `test` (run 37866279240): seven jobs green; macos-26, macos-15,
+  ubuntu x86 and ubuntu arm 2,058 of 2,074 (16 skipped) in Debug and
+  2,018 of 2,034 in ReleaseSafe; x86-linux-musl and the sanitizer job
+  2,058 of 2,074; windows-latest 1,995 of 2,034 (39 skipped) in both
+  modes; `consumer-smoke ok: quic-zig 0.37.2`, `check-modes: 6 of 6`.
+- rc-fuzz (run 37866280877): `n_runs=2,176,226 unique_runs=12,578
+  pcs_len=47196`, `coverage verified: instrumented, 2,176,226
+  executions across 43 sites (floor 1,935,000)`, no failing site.
+- `quic-go-interop` (run 37866279278): `interop evidence: pairs=1
+  cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0`.
+- QNS image (run 37866279222): built and pushed from that commit.
+- pin-lint (run 37866279220): `pin-lint: OK`, `zig pins agree: 0.17.0`.
+- The downstream that found the defect, on this tag the same evening
+  (the capnp-zig session, by message): capnp-zig main 416508f on
+  v0.37.2 with its touch-before-tick workaround removed: `-Dquic=true`
+  Debug 2,021/2,032 (11 skipped, the same as with the workaround),
+  the RPC-over-QUIC suite in ReleaseSafe 206/206, its full local
+  battery 35 of 35 with no bench number moved; on v0.37.1 the same
+  removal had crashed 19 tests in Debug and failed 3 in ReleaseSafe.
+- The wide local interop matrix on the tag's image, both roles:
+  client `pairs=3 cells=45 succeeded=43 failed=0 unsupported=2` (the two
+  ECN cells; every chance cell green on the first run); server
+  `succeeded=40 failed=1 unsupported=4` (the one failed is quiche x
+  multiplexing, the known chance cell since v0.24.0, the same day's
+  controls above; unsupported: quic-go ecn, quiche chacha20, keyupdate
+  and ecn, as on every release).
+- That chance cell on this image, five runs: 5 of 5 (18 s each).
+
+- The package hash of the tag's archive: `quic-0.37.2-DnSYvb2bPwDUgMMPDFV3tX0CgvsCbn2u2ed60n4tUtZ-`.
+- THE MOVE TAG: cluster A moves again (the script, with gates); cluster
+  B's sessions are told.
+
 ## v0.37.1: the protocol-polish release (v0.37.0 and its patch)
 
 v0.37.0 (tag `1eccae1`, 2026-10-08) is the fourth of the four sprints
