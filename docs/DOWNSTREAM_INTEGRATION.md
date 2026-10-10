@@ -7,29 +7,25 @@ must be labelled separately from released behavior. For post-tag verification,
 read the [latest maintained brief](https://github.com/nullstyle/quic-zig/blob/main/docs/DOWNSTREAM_INTEGRATION.md);
 a tagged archive contains the brief as it stood when tagged.
 
-Last updated: 2026-10-10. Current release: **v0.40.1, verified**.
-The UDP I/O sprint is complete. **v0.40.1 is released and verified.**
-The changes fix upload completion in the smoke example/benchmark and add
-benchmark controls and schema `quic-zig-bench-io/3`. Protocol code, UDP
-drivers/defaults, public API, and toolchain are unchanged. Integrators need
-no migration. Native macOS probes produced no repeatable speedup; existing
-Linux offloads help bulk uploads. See [the sprint evidence](UDP_IO_SPRINT.md).
-The preceding [line-rate profile](LINE_RATE_PROFILE.md) remains dated evidence.
-
-Main-only packet-builder work: `791acdc6448019814ab1d4ba433bf45443b4fe0f`
-uses the existing sendable list to avoid no-reset map walks. Wide-window
-poll cost falls 62–80% on m3studio-001, with unchanged virtual behavior and
-neutral bulk/UDP results. v0.41.0 is planned and untagged; the verified pin
-above remains v0.40.1. See [the sprint evidence](PACKET_BUILDER_SPRINT.md).
+Last updated: 2026-10-10. Current release: **v0.41.0, verified**.
+The packet-builder sprint is complete. The 1-RTT no-reset path uses the
+existing sendable list to skip full stream-map scans. Poll time per stream
+falls 62–80% at windows 256–4,096 on m3studio-001, at site Hoth; a same-binary
+control confirms the cause. Bulk engine and native UDP results are neutral
+within noise. Reset ordering, flow credit, public API, allocations, and Zig
+0.17.0 remain unchanged. Integrators need no migration for this release.
+See [the sprint evidence](PACKET_BUILDER_SPRINT.md). The preceding
+[UDP sprint](UDP_IO_SPRINT.md) and [line-rate profile](LINE_RATE_PROFILE.md)
+remain dated evidence; cumulative benchmark-reader guidance is below.
 
 ## Current pin and build options
 
-Tag `v0.40.1` = `b981bb30ec684711726ba19bfae951b97c1946f0`.
-Package hash: `quic-0.40.1-DnSYvfF5QwCI1MMBv40Mgomo89c5f233_A3wnF2874vh`.
+Tag `v0.41.0` = `71e205c0717f6cf243f794031661d35a5fdb2fd9`.
+Package hash: `quic-0.41.0-DnSYvQQ6SQCaRMfyYLrCZrQLQ25X74Axmzss_kVjCGiQ`.
 Toolchain: Zig 0.17.0, pinned by mise. Use ReleaseSafe for deployed code.
 
 ```sh
-mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.40.1.tar.gz
+mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.41.0.tar.gz
 ```
 
 Every parent in one binary must pass the same dependency options:
@@ -147,6 +143,7 @@ Client, Server, and quic.app wrappers did not require those migrations.
 
 | Release | Integrator effect | Required action |
 |---|---|---|
+| v0.41.0 | Packet-builder no-reset scans cost less: wide-window poll time falls 62–80%; reset ordering and virtual behavior agree. | No API/toolchain migration. No bulk or UDP speedup claimed. |
 | v0.40.1 | Correct bulk smoke/benchmark completion; reproducible I/O controls and report schema 3. | No library/API/toolchain migration. Update copied example loops or benchmark report readers. |
 | v0.40.0 | Busy ticks cost 51–54% less in churn; memory-window warnings; corrected closure docs. | Optional warning callback on Client; check small-budget window settings. |
 | v0.39.0 | Sendable-list poll check; `streamWriteCapacity`; stronger Debug invariants. | Optional capacity check before indivisible writes. |
@@ -165,29 +162,15 @@ integrator brief.
 
 ## Validation of the current pin
 
-All five CI gates verified on the tag commit by **2026-10-10 20:04:51 UTC**,
-within 21 minutes of tagging. Evidence:
+All five gates were read at the exact tag commit, **71e205c0717f6cf243f794031661d35a5fdb2fd9**, at **2026-10-10 20:41:32 UTC**, within 16 minutes of tagging.
 
-- [test 38081021489](https://github.com/nullstyle/quic-zig/actions/runs/38081021489):
-  seven jobs succeeded. Unix Debug 2070/2086 and ReleaseSafe 2028/2044
-  (16 skipped each); Windows Debug and ReleaseSafe each 2005/2044
-  (39 skipped). Full sanitizer and 32-bit Linux musl each 2070/2086,
-  with 16 skipped. consumer-smoke ok: quic-zig 0.40.1;
-  check-modes: 6 of 6 as expected. These are the emitted summaries:
-  ReleaseSafe reuses benchmark fixtures already run in Debug's suite.
-  Windows excludes benchmark fixtures under the existing pkg-config.BAT
-  workaround; its production/library suite passed natively.
-- [rc-fuzz 38081022739](https://github.com/nullstyle/quic-zig/actions/runs/38081022739):
-  2,648,360 instrumented executions across 43 sites, above the 1,935,000
-  floor; pcs_len=47345, unique_runs=10,587. No failing inputs.
-- [quic-go-interop 38081021471](https://github.com/nullstyle/quic-zig/actions/runs/38081021471):
-  pairs=1 cells=2 succeeded=2; zero failed, known_failed, unsupported,
-  skipped, or flaky cells.
-- [QNS Image 38081021561](https://github.com/nullstyle/quic-zig/actions/runs/38081021561):
-  image build succeeded. Publication is disabled (publish_image:false,
-  push:false); this gate proves the build only.
-- [pin-lint 38081021467](https://github.com/nullstyle/quic-zig/actions/runs/38081021467):
-  pin-lint OK; Zig pins agree at 0.17.0.
+- [test 38083746329](https://github.com/nullstyle/quic-zig/actions/runs/38083746329): all seven jobs pass. Unix Debug, full sanitizer, and 32-bit musl report 2,073/2,089 tests (16 skips). Unix ReleaseSafe reports 2,031/2,047 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,008/2,047 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.41.0; check-modes validates 6 of 6.
+- [rc-fuzz 38083748296](https://github.com/nullstyle/quic-zig/actions/runs/38083748296): 2,210,845 executions across 43 sites, above the 1,935,000 floor; pcs_len 47,465, unique_runs 12,482, zero failure markers.
+- [quic-go-interop 38083746306](https://github.com/nullstyle/quic-zig/actions/runs/38083746306): pairs=1, cells=2, succeeded=2. Every failure, unsupported, skipped, and flaky counter is zero.
+- [QNS Image 38083746336](https://github.com/nullstyle/quic-zig/actions/runs/38083746336): image build passes. Publication is disabled (publish_image:false, push:false); this proves the build, not publication.
+- [pin-lint 38083746290](https://github.com/nullstyle/quic-zig/actions/runs/38083746290): pin-lint OK; four Zig pins and published digests agree at 0.17.0.
+
+Local full Debug/ReleaseSafe and cross builds pass. Three reset-builder mutants are caught; all 31 virtual impairment/fairness/churn lines are byte-identical to fresh baselines. Native UDP upload/FIN completion and paired echo/multi-peer tails pass. See [the sprint report](PACKET_BUILDER_SPRINT.md) for measurements, limitations, and reproduction.
 
 ## Delivery and pin ownership
 

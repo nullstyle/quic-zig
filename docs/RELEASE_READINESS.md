@@ -2343,3 +2343,42 @@ The maintained [downstream integration brief](DOWNSTREAM_INTEGRATION.md)
 owns the pin, cumulative migrations, benchmark-reader change, and relay
 status. It is ready for owner relay; delivery to unavailable Claude sessions
 is not claimed. No downstream checkout or pin was changed.
+
+
+## v0.41.0 — packet-builder reset scans, 2026-10-10
+
+Released tag `v0.41.0` points at `71e205c0717f6cf243f794031661d35a5fdb2fd9`.
+Package hash: `quic-0.41.0-DnSYvQQ6SQCaRMfyYLrCZrQLQ25X74Axmzss_kVjCGiQ`. Implementation:
+`791acdc6448019814ab1d4ba433bf45443b4fe0f` on main in the main checkout.
+
+The sendable list proves the common absence of a pending reset; actual
+reset emission keeps map order, allocation-failure fallback, and Debug
+agreement checks. Six paired m3studio-001 runs and a same-binary control
+show 62–80% less wide-window poll time. Bulk engine and native UDP are
+neutral within noise. No API, toolchain, queue allocation, congestion,
+flow-credit, or wire behavior changes.
+
+Local fast gates pass: full Debug suite, Windows and x86-linux-musl default
+builds (15/15 each) and compile-only tests. ReleaseSafe and every named build
+step pass. The emitted local suite totals exclude cached targets; the cold
+CI counts below cover every job. Three deliberate mutants are caught and
+all 31 virtual-time impairment/fairness/churn lines are byte-identical.
+Native UDP validates six paired 512 MiB uploads plus paired single/multi
+peer completion and tail latency. The wide matrix is not repeated because
+reset order, wire output and virtual behavior are preserved; the exact-tag
+quic-go gate passes. These loopback/engine timings are not physical line-rate
+validation. See [the sprint report](PACKET_BUILDER_SPRINT.md) and
+[portable raw metrics](packet-builder-2026-10-10.json).
+
+All five gates were read at the exact tag commit, **71e205c0717f6cf243f794031661d35a5fdb2fd9**, at **2026-10-10 20:41:32 UTC**, within 16 minutes of tagging.
+
+- [test 38083746329](https://github.com/nullstyle/quic-zig/actions/runs/38083746329): all seven jobs pass. Unix Debug, full sanitizer, and 32-bit musl report 2,073/2,089 tests (16 skips). Unix ReleaseSafe reports 2,031/2,047 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,008/2,047 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.41.0; check-modes validates 6 of 6.
+- [rc-fuzz 38083748296](https://github.com/nullstyle/quic-zig/actions/runs/38083748296): 2,210,845 executions across 43 sites, above the 1,935,000 floor; pcs_len 47,465, unique_runs 12,482, zero failure markers.
+- [quic-go-interop 38083746306](https://github.com/nullstyle/quic-zig/actions/runs/38083746306): pairs=1, cells=2, succeeded=2. Every failure, unsupported, skipped, and flaky counter is zero.
+- [QNS Image 38083746336](https://github.com/nullstyle/quic-zig/actions/runs/38083746336): image build passes. Publication is disabled (publish_image:false, push:false); this proves the build, not publication.
+- [pin-lint 38083746290](https://github.com/nullstyle/quic-zig/actions/runs/38083746290): pin-lint OK; four Zig pins and published digests agree at 0.17.0.
+
+The maintained [integrator brief](DOWNSTREAM_INTEGRATION.md) owns the pin,
+cumulative migration guidance, release history, and relay status. It is
+ready for owner relay; no delivery to unavailable Claude sessions is claimed.
+No consumer checkout or pin was changed.

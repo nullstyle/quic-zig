@@ -8,8 +8,9 @@ This is a many-stream CPU improvement; it does not establish link line rate.
 
 Implementation: `791acdc6448019814ab1d4ba433bf45443b4fe0f`, on main in the main
 checkout. Baseline: `89953ff887143e3feca018daf60cd53b8ddcd595` (verified v0.40.1
-plus its evidence commit). The release is planned as v0.41.0; it is not yet
-tagged. Local gates pass. Post-tag verification will be recorded here and in
+plus its evidence commit). v0.41.0 is released and verified. Tag
+`71e205c0717f6cf243f794031661d35a5fdb2fd9` was created at 20:26:17 UTC;
+all five exact-tag CI gates were read at 20:41:32 UTC. Local gates pass. Their evidence is recorded below and in
 [release readiness](RELEASE_READINESS.md). The single maintained
 [integrator brief](DOWNSTREAM_INTEGRATION.md) owns the verified pin.
 
@@ -24,6 +25,8 @@ Sources were exported to scratch directories under
 `/Users/admin/.cache/quic-zig/packet-builder-2026-10-10/`. These are archives,
 not Git checkouts or worktrees. Builds, profiles, and timed trials ran
 serially on that machine. Every executable was warmed before the pairs.
+Timing binaries were built before the version bump, so their reports retain
+the 0.40.1 version string; their implementation matches commit 791acdc.
 Odd pairs run baseline first; even pairs run candidate first. All six pairs
 are retained, including the slower third baseline bulk trial.
 The settled CPU snapshots were 94.9% idle before the engine pairs and 99.1%
@@ -47,7 +50,9 @@ control checks were left for separate evidence.
 Three candidate captures gave 1,720 usable samples, plus one excluded marker.
 Only 13 had the builder on the stack; none of those landed in the map walk.
 This corroborates the timing, but the captures are too short to give precise
-per-function percentages. Harness sorting itself accounts for much of the
+per-function percentages. Candidate cleanup still appears in 77 samples,
+including 56 in map iterator/header/capacity work; that supports measuring
+cleanup as a next sprint, rather than assuming a particular queue will win. Harness sorting itself accounts for much of the
 whole-cell profile (`collectStreamIds` sorts each gathered id set). Thus the
 poll column is more specific than total benchmark wall time. A trial that
 launched a shell captured only its six startup samples, not its children;
@@ -137,7 +142,8 @@ contains its separate offload and libc evidence.
 - Three ReleaseSafe mutants are caught: a 32-entry scan, omitted degraded
   fallback, and omitted loss-side `noteSendable`. The first and third fail the
   reset retry test; the second fails the allocation-fallback test.
-- Debug full suite: 37/37 steps, 2,058/2,074 tests, 16 skips. ReleaseSafe:
+- Debug full suite: 37/37 steps; emitted 2,058/2,074 tests, 16 skips
+  (cached targets omitted from counts). ReleaseSafe:
   30/30 steps, 2,016/2,032 tests, 16 skips. The 42 benchmark fixture tests ran
   in the Debug invocation using their ReleaseSafe build and are cached in
   the following Safe invocation.
@@ -146,7 +152,19 @@ contains its separate offload and libc evidence.
   x86-linux-musl default builds are 15/15 steps; test binaries compile clean.
 - The wide external interop matrix is not repeated: reset order, packet
   budget, wire data, flow credit, and virtual-time behavior are preserved.
-  The exact-tag quic-go interop and other mandatory CI gates remain required.
+  The exact-tag quic-go interop and all other mandatory CI gates pass.
+
+## Exact-tag release proof
+
+All five gates were read at the exact tag commit, **71e205c0717f6cf243f794031661d35a5fdb2fd9**, at **2026-10-10 20:41:32 UTC**, within 16 minutes of tagging.
+
+- [test 38083746329](https://github.com/nullstyle/quic-zig/actions/runs/38083746329): all seven jobs pass. Unix Debug, full sanitizer, and 32-bit musl report 2,073/2,089 tests (16 skips). Unix ReleaseSafe reports 2,031/2,047 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,008/2,047 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.41.0; check-modes validates 6 of 6.
+- [rc-fuzz 38083748296](https://github.com/nullstyle/quic-zig/actions/runs/38083748296): 2,210,845 executions across 43 sites, above the 1,935,000 floor; pcs_len 47,465, unique_runs 12,482, zero failure markers.
+- [quic-go-interop 38083746306](https://github.com/nullstyle/quic-zig/actions/runs/38083746306): pairs=1, cells=2, succeeded=2. Every failure, unsupported, skipped, and flaky counter is zero.
+- [QNS Image 38083746336](https://github.com/nullstyle/quic-zig/actions/runs/38083746336): image build passes. Publication is disabled (publish_image:false, push:false); this proves the build, not publication.
+- [pin-lint 38083746290](https://github.com/nullstyle/quic-zig/actions/runs/38083746290): pin-lint OK; four Zig pins and published digests agree at 0.17.0.
+
+Package hash: `quic-0.41.0-DnSYvQQ6SQCaRMfyYLrCZrQLQ25X74Axmzss_kVjCGiQ`. The [maintained integrator brief](DOWNSTREAM_INTEGRATION.md) contains the fetch command and cumulative migration guidance.
 
 ## Reproduction and evidence
 
