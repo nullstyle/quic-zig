@@ -4994,12 +4994,10 @@ pub fn gracefulShutdownActive(self: *const Connection) bool {
     return self.graceful_shutdown;
 }
 
-/// True only once the connection is terminal — past the
-/// closing/draining deadline, a stateless reset, or a timeout.
-/// NOT true during `.closing`/`.draining`: after CONNECTION_CLOSE
-/// is sent or received, the connection sits in those states until
-/// its deadline elapses, and only then latches closed. Use
-/// `closeState` to distinguish closing, draining, and terminal
+/// True from the moment CONNECTION_CLOSE is sent or received, or
+/// a stateless reset or timeout closes the connection. This includes
+/// the closing and draining periods before their deadlines expire.
+/// Use `closeState` to distinguish closing, draining, and terminal
 /// closed states.
 pub fn isClosed(self: *const Connection) bool {
     return self.lifecycle.closed;
