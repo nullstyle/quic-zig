@@ -5,6 +5,31 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.40.1] - 2026-10-10
+
+### Fixed
+
+- The bulk-upload smoke example and I/O benchmark wait for every byte and
+  FIN to be ACKed. A FIN packet ACK alone can precede retransmission of
+  earlier lost data. The benchmark also requires exact delivered bytes
+  and clean receive completion; reset or missing completion fails the run.
+- Benchmark invalid or unsupported arguments now return a failing exit
+  status instead of only printing usage.
+
+### Added
+
+- Real-UDP benchmark controls for receive/send batch limits, socket tuning,
+  offloads, and reused/per-pass sink buffers. JSON schema
+  `quic-zig-bench-io/3` records these settings and delivered-byte/clean-FIN
+  evidence. Two regression tests cover FIN-before-data ACK and reset ACK.
+
+### Changed
+
+- The smoke example and benchmark reuse sink scratch buffers by default.
+  Native macOS measurements show no repeatable throughput gain. UDP loop
+  defaults, protocol code, public API, and Zig 0.17.0 pin are unchanged.
+  See [UDP I/O sprint](docs/UDP_IO_SPRINT.md) for native and Linux VM results.
+
 ## [0.40.0] - 2026-10-10
 
 ### Added
