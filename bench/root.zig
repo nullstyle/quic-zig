@@ -4,6 +4,7 @@
 //! `zig build bench`, including BoringSSL's generated C module wiring.
 
 test {
+    _ = @import("io_backend.zig");
     _ = @import("connection_datagram.zig");
     _ = @import("e2e/counting_allocator.zig");
     _ = @import("e2e/fairness.zig");

@@ -7,8 +7,8 @@
 //! thread under Threaded, a fiber on a GCD worker under Evented).
 //!
 //! Scenarios:
-//!  - goodput: bulk upload client -> server on one stream. MB/s from
-//!    `handshake_established` to FIN-acked, handshake latency, loop
+//!  - goodput: bulk upload client -> server on one stream. MiB/s from
+//!    `handshake_established` until every byte and FIN is ACKed. Handshake latency, loop
 //!    iterations, and process CPU time (user+sys, both loops) per MiB.
 //!  - echo: RFC 9221 DATAGRAM ping-pong with one ping in flight.
 //!    Round-trip latency percentiles and round trips per second. This
@@ -22,8 +22,8 @@
 //! `--io evented` and `--io ev-thread` need the fork std: a fork release
 //! that carries the evented work first shipped in
 //! `0.17.0-dev.1994+96ced66cf` (2026-09-03), or the checkout passed via
-//! `ZIG_LIB_DIR`/`--zig-lib-dir`. The fork release must be versioned
-//! `0.17.0` or later: `minimum_zig_version` is the tagged release, so
+//! `zig build --zig-lib=<path>` (this flag must be first). The fork release
+//! must be versioned `0.17.0` or later: `minimum_zig_version` is the tagged release, so
 //! build.zig refuses every `0.17.0-dev` build, the fork's included.
 //! Stock upstream Zig fails to build the evented branch — on the 0.17.0
 //! release `std.Io.Dispatch` and `std.Io.Kqueue` both initialize
@@ -46,7 +46,12 @@
 //! receives everything (no balancing). The per-server byte and datagram
 //! counts in the output show the split.
 //!
-//! Pass/fail is completion only; rates are printed for humans and JSON.
+//! Goodput requires the exact delivered byte count and clean FINs; echo
+//! requires every pong. Rates are printed for humans and JSON. Reports
+//! record batch sizes, socket tuning, offloads, and sink buffer mode.
+//! `--buffers per-pass` uses local callback scratch as a
+//! runtime control; `reuse` is the default. Batch limits bound loop work;
+//! they do not promise a kernel batch on each operating system.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -80,6 +85,11 @@ const Options = struct {
     leeway_ms: i64 = 10,
     /// `RunUdpOptions.receive_timeout` / `RunUdpClientOptions.receive_timeout`.
     receive_timeout_ms: i64 = 5,
+    receive_batch: u32 = 16,
+    send_batch: u32 = 64,
+    tune_socket: bool = false,
+    offloads: bool = true,
+    reuse_buffers: bool = true,
     /// Server loops sharing one port (`reuse_port`). Together with
     /// `clients` <= 1 this is the classic single-server, single-client shape.
     loops: usize = 1,
@@ -117,6 +127,10 @@ const ServerApp = struct {
     iterations: u64 = 0,
     bytes_sunk: u64 = 0,
     datagrams_echoed: u64 = 0,
+    clean_streams: u64 = 0,
+    reuse_buffers: bool = true,
+    read_buf: [64 * 1024]u8 = undefined,
+    datagram_buf: [2048]u8 = undefined,
 
     const ConnState = struct {
         stream_id: u64 = 0,
@@ -141,37 +155,45 @@ const ServerApp = struct {
                 else => {},
             };
 
-            // Echo every DATAGRAM verbatim.
-            var dbuf: [2048]u8 = undefined;
-            while (try slot.conn.receiveDatagram(&dbuf)) |n| {
-                slot.conn.sendDatagram(dbuf[0..n]) catch |err| switch (err) {
-                    error.DatagramUnavailable, error.DatagramTooLarge => {},
-                    else => return err,
-                };
-                app.datagrams_echoed += 1;
+            if (app.reuse_buffers) {
+                try app.handleSlot(slot, &app.read_buf, &app.datagram_buf);
+            } else {
+                // A runtime control keeps both variants in the same binary.
+                var read_buf: [64 * 1024]u8 = undefined;
+                var datagram_buf: [2048]u8 = undefined;
+                try app.handleSlot(slot, &read_buf, &datagram_buf);
             }
+        }
+    }
 
-            // Sink stream bytes (same shape as examples/goodput_smoke.zig).
-            const st = connState(slot) orelse continue;
-            if (!st.have_stream or st.fin_drained) continue;
-            var buf: [64 * 1024]u8 = undefined;
-            while (true) {
-                const n = slot.conn.streamRead(st.stream_id, &buf) catch |err| switch (err) {
-                    error.StreamNotFound => {
-                        st.fin_drained = true;
-                        break;
-                    },
-                    else => return err,
-                };
-                app.bytes_sunk += n;
-                if (n == 0) break;
-            }
-            if (!st.fin_drained) {
-                if (slot.conn.streamRecvState(st.stream_id)) |rs| {
-                    st.fin_drained = rs.terminal;
-                } else {
-                    st.fin_drained = true;
-                }
+    fn handleSlot(app: *ServerApp, slot: *quic.Server.Slot, read_buf: []u8, datagram_buf: []u8) !void {
+        // Echo every DATAGRAM verbatim.
+        while (try slot.conn.receiveDatagram(datagram_buf)) |n| {
+            slot.conn.sendDatagram(datagram_buf[0..n]) catch |err| switch (err) {
+                error.DatagramUnavailable, error.DatagramTooLarge => {},
+                else => return err,
+            };
+            app.datagrams_echoed += 1;
+        }
+
+        // Sink stream bytes (same shape as examples/goodput_smoke.zig).
+        const st = connState(slot) orelse return;
+        if (!st.have_stream or st.fin_drained) return;
+        while (true) {
+            const n = slot.conn.streamRead(st.stream_id, read_buf) catch |err| switch (err) {
+                error.StreamNotFound => break,
+                else => return err,
+            };
+            app.bytes_sunk += n;
+            if (n == 0) break;
+        }
+        if (!st.fin_drained) {
+            if (slot.conn.streamRecvEnd(st.stream_id)) |end| {
+                if (!end.isClean()) return error.UploadCut;
+                st.fin_drained = true;
+                app.clean_streams += 1;
+            } else if (slot.conn.streamRecvWasReaped(st.stream_id)) {
+                return error.UploadCut;
             }
         }
     }
@@ -203,6 +225,10 @@ const ServerTask = struct {
     listen: []const u8,
     shutdown: *const std.atomic.Value(bool),
     receive_timeout_ms: i64,
+    receive_batch: u32,
+    send_batch: u32,
+    tune_socket: bool,
+    offloads: bool,
     reuse_port: bool = false,
     failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
@@ -231,7 +257,11 @@ const ServerTask = struct {
             .shutdown_flag = task.shutdown,
             .shutdown_grace_us = 100_000,
             .receive_timeout = std.Io.Duration.fromMilliseconds(task.receive_timeout_ms),
-            .tune_socket = false,
+            .tune_socket = task.tune_socket,
+            .max_datagrams_per_iteration = task.receive_batch,
+            .max_send_batch_datagrams = task.send_batch,
+            .enable_gso = task.offloads,
+            .enable_gro = task.offloads,
             .reuse_port = task.reuse_port,
             .on_iteration = ServerApp.onIteration,
             .on_iteration_ctx = task.app,
@@ -300,7 +330,10 @@ const UploadFlow = struct {
                 // `fin_acked` alone is not delivery: the FIN chunk can be acked
                 // while earlier chunks are still lost, and `close()` below then
                 // pre-empts their retransmission. Wait for every byte to be acked.
-                const complete = if (client.conn.stream(flow.stream_id)) |s| s.send.isTerminal() else true;
+                const complete = if (client.conn.stream(flow.stream_id)) |s|
+                    uploadAcknowledged(&s.send)
+                else
+                    return error.GoodputIncomplete;
                 if (!complete) return;
                 flow.finish_us = now_us;
                 flow.finish_abs_us = flow.absNow();
@@ -311,6 +344,38 @@ const UploadFlow = struct {
         }
     }
 };
+
+fn uploadAcknowledged(send: *const quic.Connection.send_stream_mod) bool {
+    return send.state == .data_recvd;
+}
+
+test "bulk benchmark waits for earlier data after FIN packet ACK" {
+    const testing = std.testing;
+    var send = quic.Connection.send_stream_mod.init(testing.allocator);
+    defer send.deinit();
+    _ = try send.write("firstlast");
+    try send.finish();
+    try send.recordSent(10, send.peekChunk(5).?);
+    try send.recordSent(11, send.peekChunk(4).?);
+    try send.onPacketAcked(11);
+    try testing.expect(send.fin_acked);
+    try testing.expect(!uploadAcknowledged(&send));
+    try send.onPacketLost(10);
+    try send.recordSent(12, send.peekChunk(5).?);
+    try send.onPacketAcked(12);
+    try testing.expect(uploadAcknowledged(&send));
+}
+
+test "bulk benchmark rejects acknowledged reset as upload completion" {
+    const testing = std.testing;
+    var send = quic.Connection.send_stream_mod.init(testing.allocator);
+    defer send.deinit();
+    _ = try send.write("partial");
+    try send.resetStream(42);
+    send.onResetAcked();
+    try testing.expect(send.isTerminal());
+    try testing.expect(!uploadAcknowledged(&send));
+}
 
 const EchoFlow = struct {
     rtts_us: []u64,
@@ -388,6 +453,10 @@ const ClientTask = struct {
     io: std.Io,
     target: []const u8,
     receive_timeout_ms: i64,
+    receive_batch: u32,
+    send_batch: u32,
+    tune_socket: bool,
+    offloads: bool,
     scenario: Scenario,
     payload: []const u8,
     rtts: []u64,
@@ -423,7 +492,11 @@ const ClientTask = struct {
                 try quic.transport.runUdpClient(&client, .{
                     .target = task.target,
                     .io = task.io,
-                    .tune_socket = false,
+                    .tune_socket = task.tune_socket,
+                    .max_datagrams_per_iteration = task.receive_batch,
+                    .max_send_batch_datagrams = task.send_batch,
+                    .enable_gso = task.offloads,
+                    .enable_gro = task.offloads,
                     .receive_timeout = std.Io.Duration.fromMilliseconds(task.receive_timeout_ms),
                     .on_iteration = UploadFlow.onIteration,
                     .on_iteration_ctx = &task.upload,
@@ -438,7 +511,11 @@ const ClientTask = struct {
                 try quic.transport.runUdpClient(&client, .{
                     .target = task.target,
                     .io = task.io,
-                    .tune_socket = false,
+                    .tune_socket = task.tune_socket,
+                    .max_datagrams_per_iteration = task.receive_batch,
+                    .max_send_batch_datagrams = task.send_batch,
+                    .enable_gso = task.offloads,
+                    .enable_gro = task.offloads,
                     .receive_timeout = std.Io.Duration.fromMilliseconds(task.receive_timeout_ms),
                     .on_iteration = EchoFlow.onIteration,
                     .on_iteration_ctx = &task.echo,
@@ -473,6 +550,8 @@ const Sample = struct {
     mib: usize = 0,
     mib_per_sec: f64 = 0,
     cpu_ms_per_mib: f64 = 0,
+    delivered_bytes: u64 = 0,
+    clean_streams: u64 = 0,
     // echo
     pings: usize = 0,
     rtt_p50_us: f64 = 0,
@@ -503,7 +582,7 @@ const Summary = struct {
 };
 
 const Report = struct {
-    schema: []const u8 = "quic-zig-bench-io/2",
+    schema: []const u8 = "quic-zig-bench-io/3",
     zig_version: []const u8,
     os: []const u8,
     arch: []const u8,
@@ -511,6 +590,11 @@ const Report = struct {
     cpu_count: usize,
     leeway_ms: i64,
     receive_timeout_ms: i64,
+    receive_batch: u32,
+    send_batch: u32,
+    tune_socket: bool,
+    offloads: bool,
+    reuse_buffers: bool,
     mib: usize,
     pings: usize,
     loops: usize,
@@ -556,13 +640,17 @@ fn runSample(
 
     var shutdown = std.atomic.Value(bool).init(false);
     var ready = std.atomic.Value(bool).init(false);
-    var app: ServerApp = .{ .allocator = gpa, .ready = &ready };
+    var app: ServerApp = .{ .allocator = gpa, .ready = &ready, .reuse_buffers = opts.reuse_buffers };
     var task: ServerTask = .{
         .app = &app,
         .io = io,
         .listen = addr,
         .shutdown = &shutdown,
         .receive_timeout_ms = opts.receive_timeout_ms,
+        .receive_batch = opts.receive_batch,
+        .send_batch = opts.send_batch,
+        .tune_socket = opts.tune_socket,
+        .offloads = opts.offloads,
     };
 
     // The server loop is a Group task: a thread under Threaded, a fiber
@@ -600,6 +688,10 @@ fn runSample(
         .io = io,
         .target = addr,
         .receive_timeout_ms = opts.receive_timeout_ms,
+        .receive_batch = opts.receive_batch,
+        .send_batch = opts.send_batch,
+        .tune_socket = opts.tune_socket,
+        .offloads = opts.offloads,
         .scenario = scenario,
         .payload = payload,
         .rtts = rtts,
@@ -649,6 +741,10 @@ fn runSample(
     try group.await(io);
     if (task.failed.load(.acquire)) return error.ServerLoopFailed;
     sample.server_iterations = app.iterations;
+    sample.delivered_bytes = app.bytes_sunk;
+    sample.clean_streams = app.clean_streams;
+    if (scenario == .goodput and (app.bytes_sunk != payload.len or app.clean_streams != 1))
+        return error.GoodputIncomplete;
     return sample;
 }
 
@@ -681,13 +777,17 @@ fn runSampleLoops(
     defer gpa.free(tasks);
     for (readies, apps, tasks) |*ready, *app, *task| {
         ready.* = std.atomic.Value(bool).init(false);
-        app.* = .{ .allocator = gpa, .ready = ready };
+        app.* = .{ .allocator = gpa, .ready = ready, .reuse_buffers = opts.reuse_buffers };
         task.* = .{
             .app = app,
             .io = io,
             .listen = addr,
             .shutdown = &shutdown,
             .receive_timeout_ms = opts.receive_timeout_ms,
+            .receive_batch = opts.receive_batch,
+            .send_batch = opts.send_batch,
+            .tune_socket = opts.tune_socket,
+            .offloads = opts.offloads,
             // The one-server control (`--loops 1 --clients N`) binds exactly
             // as the classic path does; only a real group needs the option.
             .reuse_port = n > 1,
@@ -742,6 +842,10 @@ fn runSampleLoops(
         .io = io,
         .target = addr,
         .receive_timeout_ms = opts.receive_timeout_ms,
+        .receive_batch = opts.receive_batch,
+        .send_batch = opts.send_batch,
+        .tune_socket = opts.tune_socket,
+        .offloads = opts.offloads,
         .scenario = scenario,
         .payload = payload,
         .rtts = rtts[i * opts.pings ..][0..opts.pings],
@@ -842,13 +946,15 @@ fn runSampleLoops(
     for (apps, tasks, server_bytes, server_datagrams) |*app, *task, *bytes, *datagrams| {
         if (task.failed.load(.acquire)) return error.ServerLoopFailed;
         delivered += app.bytes_sunk;
+        sample.clean_streams += app.clean_streams;
         sample.server_iterations += app.iterations;
         bytes.* = app.bytes_sunk;
         datagrams.* = app.datagrams_echoed;
     }
     sample.server_bytes = server_bytes;
     sample.server_datagrams = server_datagrams;
-    if (scenario == .goodput and delivered != payload.len * m) {
+    sample.delivered_bytes = delivered;
+    if (scenario == .goodput and (delivered != payload.len * m or sample.clean_streams != m)) {
         std.debug.print("bench-io: servers sank {d} of {d} bytes\n", .{ delivered, payload.len * m });
         return error.GoodputIncomplete;
     }
@@ -1025,13 +1131,16 @@ fn summarize(gpa: std.mem.Allocator, opts: Options, samples: []const Sample) ![]
     return out.toOwnedSlice(gpa);
 }
 
-fn usage() void {
+fn usage() error{InvalidArgument}!void {
     std.debug.print(
         \\usage: quic-zig-bench-io [--io threaded|evented|both] [--scenario goodput|echo|all]
         \\                         [--samples N] [--mib N] [--pings N] [--leeway-ms N]
         \\                         [--receive-timeout-ms N] [--loops N] [--clients N] [--json PATH]
+        \\                         [--receive-batch N] [--send-batch N]
+        \\                         [--socket-tuning on|off] [--offloads on|off] [--buffers reuse|per-pass]
         \\
     , .{});
+    return error.InvalidArgument;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -1069,6 +1178,19 @@ pub fn main(init: std.process.Init) !void {
             opts.leeway_ms = try std.fmt.parseInt(i64, args.next() orelse return usage(), 10);
         } else if (std.mem.eql(u8, arg, "--receive-timeout-ms")) {
             opts.receive_timeout_ms = try std.fmt.parseInt(i64, args.next() orelse return usage(), 10);
+        } else if (std.mem.eql(u8, arg, "--receive-batch")) {
+            opts.receive_batch = try std.fmt.parseInt(u32, args.next() orelse return usage(), 10);
+        } else if (std.mem.eql(u8, arg, "--send-batch")) {
+            opts.send_batch = try std.fmt.parseInt(u32, args.next() orelse return usage(), 10);
+        } else if (std.mem.eql(u8, arg, "--socket-tuning")) {
+            const v = args.next() orelse return usage();
+            opts.tune_socket = if (std.mem.eql(u8, v, "on")) true else if (std.mem.eql(u8, v, "off")) false else return error.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--offloads")) {
+            const v = args.next() orelse return usage();
+            opts.offloads = if (std.mem.eql(u8, v, "on")) true else if (std.mem.eql(u8, v, "off")) false else return error.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--buffers")) {
+            const v = args.next() orelse return usage();
+            opts.reuse_buffers = if (std.mem.eql(u8, v, "reuse")) true else if (std.mem.eql(u8, v, "per-pass")) false else return error.InvalidArgument;
         } else if (std.mem.eql(u8, arg, "--loops")) {
             opts.loops = try std.fmt.parseInt(usize, args.next() orelse return usage(), 10);
         } else if (std.mem.eql(u8, arg, "--clients")) {
@@ -1076,12 +1198,13 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--json")) {
             opts.json_path = args.next() orelse return usage();
         } else {
-            usage();
-            return error.InvalidArgument;
+            return usage();
         }
     }
     if (opts.samples == 0 or opts.samples > 64) return error.InvalidArgument;
     if (opts.loops == 0 or opts.loops > 64 or opts.clients > 256) return error.InvalidArgument;
+    if (opts.mib == 0 or opts.mib > (std.math.maxInt(usize) >> 20) or opts.pings == 0) return error.InvalidArgument;
+    if (opts.receive_batch == 0 or opts.send_batch == 0 or opts.receive_timeout_ms <= 0 or opts.leeway_ms < 0) return error.InvalidArgument;
 
     const payload = try gpa.alloc(u8, opts.mib << 20);
     defer gpa.free(payload);
@@ -1183,6 +1306,11 @@ pub fn main(init: std.process.Init) !void {
             .cpu_count = std.Thread.getCpuCount() catch 0,
             .leeway_ms = opts.leeway_ms,
             .receive_timeout_ms = opts.receive_timeout_ms,
+            .receive_batch = opts.receive_batch,
+            .send_batch = opts.send_batch,
+            .tune_socket = opts.tune_socket,
+            .offloads = opts.offloads,
+            .reuse_buffers = opts.reuse_buffers,
             .mib = opts.mib,
             .pings = opts.pings,
             .loops = opts.loops,

@@ -52,6 +52,9 @@ const SinkState = struct {
 
 const SinkApp = struct {
     allocator: std.mem.Allocator,
+    // One buffer per loop, reused across callbacks and connections. Keeping
+    // it here avoids a ReleaseSafe undefined-memory fill on every pass.
+    read_buf: [read_chunk_bytes]u8 = undefined,
 
     pub fn onIteration(ctx: ?*anyopaque, server: *quic.Server, now_us: u64) anyerror!void {
         _ = now_us;
@@ -70,9 +73,8 @@ const SinkApp = struct {
             const state = sinkState(slot) orelse continue;
             if (!state.have_stream or state.fin_drained) continue;
 
-            var buf: [read_chunk_bytes]u8 = undefined;
             while (true) {
-                const n = slot.conn.streamRead(state.stream_id, &buf) catch |err| switch (err) {
+                const n = slot.conn.streamRead(state.stream_id, &app.read_buf) catch |err| switch (err) {
                     // Reaped: nothing left to read. HOW it ended is
                     // decided below, not here — a reset is reaped too.
                     error.StreamNotFound => break,
@@ -217,13 +219,12 @@ const UploadFlow = struct {
                 flow.stage = .awaiting_acks;
             },
             .awaiting_acks => {
-                // Complete once the FIN is acked (which implies every
-                // byte before it was delivered and acked) — or once the
-                // stream was reaped, which requires exactly that.
+                // A FIN packet may be ACKed while earlier data is still
+                // lost. Wait for all data and FIN, and reject a reset.
                 const complete = if (client.conn.stream(flow.stream_id)) |s|
-                    s.send.fin_acked
+                    s.send.state == .data_recvd
                 else
-                    true;
+                    return error.GoodputIncomplete;
                 if (!complete) return;
                 flow.finish_us = now_us;
                 flow.stage = .done;
