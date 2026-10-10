@@ -15,7 +15,8 @@ measurements, not physical-NIC line-rate measurements.
 
 - Source: exact tag `v0.40.0`, commit
   `5796be0f8989a081bb563b96fcc6a856f43eb11d`, exported with `git archive`.
-- Host: `hoth-m3studio-001.local`, Apple M3 Ultra, 32 logical/physical CPUs,
+- Machine: `m3studio-001` at the Hoth site (SSH `hoth-m3studio-001.local`),
+  Apple M3 Ultra, 32 logical/physical CPUs,
   512 GiB memory, Darwin 25.6.0 arm64; Xcode 16.3 (16E140).
 - Zig 0.17.0 through mise; native ReleaseSafe with BoringSSL. The in-memory
   benchmark reports the `apple_m3` CPU target and BBR.
@@ -162,10 +163,12 @@ Apple's SwiftNIO Darwin `sendmmsg` shim also loops over `sendmsg`; its name
 does not imply kernel batching.
 [SwiftNIO Darwin shim](https://github.com/apple/swift-nio/blob/main/Sources/CNIODarwin/shim.c).
 
-## Next sprint proposals
+## Proposals at the end of the profiling sprint
 
-These are proposals, not measured improvements. Start only after the owner's
-choice. Estimated scope assumes the current platform/toolchain limitations.
+The owner selected the UDP I/O path. Its results and current recommendations
+are in [UDP_IO_SPRINT.md](UDP_IO_SPRINT.md). The table below records the
+proposals made at the end of this earlier sprint. These were not measured
+improvements. Estimated scope assumes the current platform/toolchain limitations.
 
 | Proposal | Evidence / concrete work | Measurement goal | Scope and risks | Acceptance |
 |---|---|---|---|---|

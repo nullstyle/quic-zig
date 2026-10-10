@@ -9,7 +9,10 @@
     "logical_cpus": 32,
     "memory_bytes": 549755813888,
     "os": "Darwin 25.6.0 arm64",
-    "xcode": "16.3 (16E140)"
+    "xcode": "16.3 (16E140)",
+    "machine": "m3studio-001",
+    "site": "Hoth",
+    "ssh_endpoint": "admin@hoth-m3studio-001.local"
   },
   "toolchain": "Zig 0.17.0 via mise",
   "mode": "ReleaseSafe",

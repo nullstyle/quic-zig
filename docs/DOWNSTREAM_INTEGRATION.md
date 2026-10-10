@@ -6,9 +6,13 @@ verified pin is at the top. Migration guidance is cumulative. Main-only work
 must be labelled separately from released behavior.
 
 Last updated: 2026-10-10. Current release: **v0.40.0, verified**.
-The line-rate profiling sprint is complete. It changed documentation only;
-there is no new release or integrator API migration. Its
-[CPU profile and next proposals](LINE_RATE_PROFILE.md) are main-only evidence.
+The UDP I/O sprint has prepared **v0.40.1**; its release CI is pending.
+The changes fix upload completion in the smoke example/benchmark and add
+benchmark controls and schema `quic-zig-bench-io/3`. Protocol code, UDP
+drivers/defaults, public API, and toolchain are unchanged. Integrators need
+no migration. Native macOS probes produced no repeatable speedup; existing
+Linux offloads help bulk uploads. See [the sprint evidence](UDP_IO_SPRINT.md).
+The preceding [line-rate profile](LINE_RATE_PROFILE.md) remains dated evidence.
 
 ## Current pin and build options
 
