@@ -23,6 +23,10 @@ changes.
   with no ended streams avoid the full walk on every tick. Debug keeps
   the walk and asserts that the pending flag missed no reclaimable stream.
   The send scheduler already uses the sendable list in release builds.
+  Three quiet runs against v0.39.0: median tick time per stream falls
+  9.05 -> 4.47 us at window 4096 (-51%), and 3.48 -> 1.59 us at window
+  1024 (-54%). Poll time stays within noise; all 31 impairment, fairness,
+  and churn virtual-time lines are byte-identical.
 - The churn benchmark reports both poll and tick microseconds per stream.
 
 ### Fixed
