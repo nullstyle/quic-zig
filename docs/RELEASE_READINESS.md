@@ -2385,28 +2385,38 @@ No consumer checkout or pin was changed.
 
 ## v0.42.0 — bounded stream cleanup, 2026-10-10
 
-Implementation `371d6e16c7fa01979b4166423aea2df24ca1387e` is on main in the
-main checkout. v0.42.0 is planned; the current verified pin remains v0.41.0
-until all five exact-tag CI gates are read.
+Released tag `v0.42.0` points at `31519071ce9905c6e51980af944a7095a74ae6a2`.
+Package hash: `quic-0.42.0-DnSYvYJoTwAVqyMTNt_jULZvKZxnoMJKxSF-Vo9uWJ5p`. Implementation:
+`371d6e16c7fa01979b4166423aea2df24ca1387e` on main in the main checkout.
 
 The fixed candidate list avoids most full-map cleanup walks, reducing paired
 M3 tick time per stream 48–79% at windows 1,024–4,096. Overflow and explicit
-marking use the authoritative walk. The batch cap, retirement order, end
-records, stream credit and late replies are preserved. No API or toolchain
-migration; the inline list adds 1 KiB of pointers per 64-bit Connection plus
-bookkeeping, with no new heap allocation. Bulk/UDP rates remain within noise.
-Production full-harness wall time rises 3.7%, while the same-binary control
-falls 5.1%; no general request-throughput gain is claimed.
+marking use the authoritative walk. Batch cap, retirement/credit order, end
+records and late replies are preserved. No API/toolchain migration. Measured
+M3 footprint: Connection 11,480 → 12,512 (+1,032 bytes, 9.0%), Stream 440 → 440.
+This fixed memory cost applies even when idle; no queue allocation is added.
 
 Local full Debug/ReleaseSafe, Windows and x86-linux-musl checks, and every
 named build step pass. Four preservation tests and three behavioral mutants
 cover the new rule; all 31 virtual cells are byte-identical. Paired native UDP
 checks exact bytes/clean FIN completion plus single/multi-peer tails. The
 wide external matrix is not repeated because batching, retirement/credit
-order and virtual behavior agree; exact-tag quic-go interop remains required.
-See [the sprint report](STREAM_CLEANUP_SPRINT.md),
-[portable evidence](stream-cleanup-2026-10-10.json), and the maintained
-[integrator brief](DOWNSTREAM_INTEGRATION.md).
+order and virtual behavior agree; exact-tag quic-go interop passes.
 
-M3 compiler-size proof: Connection 11,480 → 12,512 bytes (+1,032, 9.0%),
-Stream 440 → 440. The fixed connection cost applies even when idle.
+Bulk/UDP rates remain within noise. Production harness wall time rises 3.7%
+while the same-binary control falls 5.1%; no application-throughput gain or
+physical line rate is claimed. See [the sprint report](STREAM_CLEANUP_SPRINT.md)
+and [portable evidence](stream-cleanup-2026-10-10.json).
+
+All five gates were read at the exact tag commit, **31519071ce9905c6e51980af944a7095a74ae6a2**, at **2026-10-10 21:17:54 UTC**, within 18 minutes of tagging.
+
+- [test 38085951265](https://github.com/nullstyle/quic-zig/actions/runs/38085951265): all seven jobs pass. Unix Debug, full sanitizer and 32-bit musl report 2,077/2,093 tests (16 skips). Unix ReleaseSafe reports 2,035/2,051 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,012/2,051 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.42.0; check-modes validates 6 of 6.
+- [rc-fuzz 38085953398](https://github.com/nullstyle/quic-zig/actions/runs/38085953398): `coverage verified: instrumented, 2,357,160 executions across 43 sites (floor 1,935,000)`; `n_runs=2,357,160 unique_runs=10,261 pcs_len=47770`. Zero failure markers.
+- [quic-go-interop 38085951304](https://github.com/nullstyle/quic-zig/actions/runs/38085951304): pairs=1, cells=2, succeeded=2; failure, known-failure, unsupported, skipped and flaky counters are zero.
+- [QNS Image 38085951298](https://github.com/nullstyle/quic-zig/actions/runs/38085951298): the image build passes, with publish_image:false and push:false. This proves the build, not publication.
+- [pin-lint 38085951246](https://github.com/nullstyle/quic-zig/actions/runs/38085951246): BoringSSL pin-lint OK; four Zig pins and published digests agree at 0.17.0.
+
+The maintained [integrator brief](DOWNSTREAM_INTEGRATION.md) owns the verified
+pin, cumulative migration guidance, release history and relay status. It is
+ready for owner relay; no delivery to unavailable Claude sessions is claimed.
+No downstream checkout or pin was changed.

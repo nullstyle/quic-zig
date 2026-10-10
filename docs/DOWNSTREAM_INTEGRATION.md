@@ -7,39 +7,30 @@ must be labelled separately from released behavior. For post-tag verification,
 read the [latest maintained brief](https://github.com/nullstyle/quic-zig/blob/main/docs/DOWNSTREAM_INTEGRATION.md);
 a tagged archive contains the brief as it stood when tagged.
 
-Last updated: 2026-10-10. Current release: **v0.41.0, verified**.
-The packet-builder sprint is complete. The 1-RTT no-reset path uses the
-existing sendable list to skip full stream-map scans. Poll time per stream
-falls 62–80% at windows 256–4,096 on m3studio-001, at site Hoth; a same-binary
-control confirms the cause. Bulk engine and native UDP results are neutral
-within noise. Reset ordering, flow credit, public API, allocations, and Zig
-0.17.0 remain unchanged. Integrators need no migration for this release.
-See [the sprint evidence](PACKET_BUILDER_SPRINT.md). The preceding
-[UDP sprint](UDP_IO_SPRINT.md) and [line-rate profile](LINE_RATE_PROFILE.md)
-remain dated evidence; cumulative benchmark-reader guidance is below.
+Last updated: 2026-10-10. Current release: **v0.42.0, verified**.
+The stream cleanup sprint is complete. Lifecycle transitions name up to 128
+cleanup candidates, avoiding most full-map scans; overflow and explicit marking
+keep the authoritative walk. Six paired m3studio-001 trials, at site Hoth,
+reduce tick time per stream 48–79% at windows 1,024–4,096. A same-binary control
+confirms the scan cost. Retirement/credit order, the batch/end-evidence contract
+and late replies are preserved. No API/toolchain migration is required.
 
-## Main-only stream cleanup sprint
-
-The implementation on main names cleanup candidates at lifecycle transitions
-and avoids most full-map cleanup scans. Six paired M3 trials reduce tick time
-48–79% at windows 1,024–4,096; a same-binary control confirms the scan cost.
-The 128-stream batch, 256-record end evidence, retirement order and late replies
-are preserved. No API/toolchain migration is required. The bounded inline list
-adds 1,032 bytes per M3 Connection (11,480 → 12,512); Stream stays 440 bytes.
-This fixed memory cost also applies to idle connections; the list never allocates.
-The production harness wall result is 3.7% slower while the same-binary control
-is 5.1% faster; no application-throughput gain is promised. Bulk and UDP are
-within noise. v0.42.0 is planned, pending exact-tag proof. See
-[stream cleanup evidence](STREAM_CLEANUP_SPRINT.md).
+The fixed list adds 1,032 bytes per M3 Connection (11,480 → 12,512, including
+idle connections); Stream stays 440 bytes and the list never allocates. Bulk
+and native UDP are within noise. Production harness wall time rises 3.7% while
+the same-binary control falls 5.1%; no general application-throughput gain is
+claimed. See [stream cleanup evidence](STREAM_CLEANUP_SPRINT.md). The preceding
+[packet-builder sprint](PACKET_BUILDER_SPRINT.md), [UDP sprint](UDP_IO_SPRINT.md)
+and [line-rate profile](LINE_RATE_PROFILE.md) remain dated evidence.
 
 ## Current pin and build options
 
-Tag `v0.41.0` = `71e205c0717f6cf243f794031661d35a5fdb2fd9`.
-Package hash: `quic-0.41.0-DnSYvQQ6SQCaRMfyYLrCZrQLQ25X74Axmzss_kVjCGiQ`.
+Tag `v0.42.0` = `31519071ce9905c6e51980af944a7095a74ae6a2`.
+Package hash: `quic-0.42.0-DnSYvYJoTwAVqyMTNt_jULZvKZxnoMJKxSF-Vo9uWJ5p`.
 Toolchain: Zig 0.17.0, pinned by mise. Use ReleaseSafe for deployed code.
 
 ```sh
-mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.41.0.tar.gz
+mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.42.0.tar.gz
 ```
 
 Every parent in one binary must pass the same dependency options:
@@ -114,7 +105,11 @@ Since v0.37.2, a connection at rest reclaims ended streams at its next tick.
 `nextTimerDeadline` or `Server.tickDue` receive that deadline. Workarounds
 that touched each connection before every tick are no longer needed.
 In v0.40.0, busy ticks skip the cleanup walk when no stream needs cleanup;
-cleanup timing and retirement evidence are unchanged.
+cleanup timing and retirement evidence are unchanged. Since v0.42.0, named
+lifecycle transitions use a bounded candidate list; overflow and raw
+`markStreamsGc()` callers request the authoritative map walk. Retirement
+order, the 128-stream batch and 256-record end-evidence survival remain
+unchanged. The fixed Connection memory cost is documented above.
 
 A test fixture that writes directly to a send half must call
 `conn.noteSendable(s)`. Fixtures that set terminal or ACK state directly
@@ -157,6 +152,7 @@ Client, Server, and quic.app wrappers did not require those migrations.
 
 | Release | Integrator effect | Required action |
 |---|---|---|
+| v0.42.0 | Bounded cleanup candidates cut wide-window tick time 48–79%; retirement/credit/evidence order is preserved. | No API/toolchain migration. Budget +1,032 bytes per M3 Connection, including idle; no bulk/UDP or application-throughput gain promised. |
 | v0.41.0 | Packet-builder no-reset scans cost less: wide-window poll time falls 62–80%; reset ordering and virtual behavior agree. | No API/toolchain migration. No bulk or UDP speedup claimed. |
 | v0.40.1 | Correct bulk smoke/benchmark completion; reproducible I/O controls and report schema 3. | No library/API/toolchain migration. Update copied example loops or benchmark report readers. |
 | v0.40.0 | Busy ticks cost 51–54% less in churn; memory-window warnings; corrected closure docs. | Optional warning callback on Client; check small-budget window settings. |
@@ -176,15 +172,15 @@ integrator brief.
 
 ## Validation of the current pin
 
-All five gates were read at the exact tag commit, **71e205c0717f6cf243f794031661d35a5fdb2fd9**, at **2026-10-10 20:41:32 UTC**, within 16 minutes of tagging.
+All five gates were read at the exact tag commit, **31519071ce9905c6e51980af944a7095a74ae6a2**, at **2026-10-10 21:17:54 UTC**, within 18 minutes of tagging.
 
-- [test 38083746329](https://github.com/nullstyle/quic-zig/actions/runs/38083746329): all seven jobs pass. Unix Debug, full sanitizer, and 32-bit musl report 2,073/2,089 tests (16 skips). Unix ReleaseSafe reports 2,031/2,047 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,008/2,047 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.41.0; check-modes validates 6 of 6.
-- [rc-fuzz 38083748296](https://github.com/nullstyle/quic-zig/actions/runs/38083748296): 2,210,845 executions across 43 sites, above the 1,935,000 floor; pcs_len 47,465, unique_runs 12,482, zero failure markers.
-- [quic-go-interop 38083746306](https://github.com/nullstyle/quic-zig/actions/runs/38083746306): pairs=1, cells=2, succeeded=2. Every failure, unsupported, skipped, and flaky counter is zero.
-- [QNS Image 38083746336](https://github.com/nullstyle/quic-zig/actions/runs/38083746336): image build passes. Publication is disabled (publish_image:false, push:false); this proves the build, not publication.
-- [pin-lint 38083746290](https://github.com/nullstyle/quic-zig/actions/runs/38083746290): pin-lint OK; four Zig pins and published digests agree at 0.17.0.
+- [test 38085951265](https://github.com/nullstyle/quic-zig/actions/runs/38085951265): all seven jobs pass. Unix Debug, full sanitizer and 32-bit musl report 2,077/2,093 tests (16 skips). Unix ReleaseSafe reports 2,035/2,051 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,012/2,051 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.42.0; check-modes validates 6 of 6.
+- [rc-fuzz 38085953398](https://github.com/nullstyle/quic-zig/actions/runs/38085953398): `coverage verified: instrumented, 2,357,160 executions across 43 sites (floor 1,935,000)`; `n_runs=2,357,160 unique_runs=10,261 pcs_len=47770`. Zero failure markers.
+- [quic-go-interop 38085951304](https://github.com/nullstyle/quic-zig/actions/runs/38085951304): pairs=1, cells=2, succeeded=2; failure, known-failure, unsupported, skipped and flaky counters are zero.
+- [QNS Image 38085951298](https://github.com/nullstyle/quic-zig/actions/runs/38085951298): the image build passes, with publish_image:false and push:false. This proves the build, not publication.
+- [pin-lint 38085951246](https://github.com/nullstyle/quic-zig/actions/runs/38085951246): BoringSSL pin-lint OK; four Zig pins and published digests agree at 0.17.0.
 
-Local full Debug/ReleaseSafe and cross builds pass. Three reset-builder mutants are caught; all 31 virtual impairment/fairness/churn lines are byte-identical to fresh baselines. Native UDP upload/FIN completion and paired echo/multi-peer tails pass. See [the sprint report](PACKET_BUILDER_SPRINT.md) for measurements, limitations, and reproduction.
+Local full Debug/ReleaseSafe and cross builds pass. Four new cleanup tests and three behavioral mutants cover the rule; all 31 virtual impairment/fairness/churn lines are byte-identical. Paired native UDP byte/clean-FIN completion and single/multi-peer tails pass. See [the sprint report](STREAM_CLEANUP_SPRINT.md) for measurements and limitations.
 
 ## Delivery and pin ownership
 

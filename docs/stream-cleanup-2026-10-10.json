@@ -11681,7 +11681,161 @@
   ],
   "release": {
     "version": "0.42.0",
-    "status": "planned; local gates passed, not tagged"
+    "status": "released and verified",
+    "tag_commit": "31519071ce9905c6e51980af944a7095a74ae6a2",
+    "tag_object": "38939f89ac274e2d12abdcf5953a80c40c20aaac",
+    "tagged_utc": "2026-10-10 21:00:23 UTC",
+    "package_hash": "quic-0.42.0-DnSYvYJoTwAVqyMTNt_jULZvKZxnoMJKxSF-Vo9uWJ5p",
+    "verified_utc": "2026-10-10 21:17:54 UTC",
+    "within_one_hour": true,
+    "verification_elapsed_seconds": 1051.776424,
+    "ci_evidence": {
+      "test": {
+        "run_id": 38085951265,
+        "url": "https://github.com/nullstyle/quic-zig/actions/runs/38085951265",
+        "head_sha": "31519071ce9905c6e51980af944a7095a74ae6a2",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "sanitizer (sanitize-c=full)",
+            "conclusion": "success"
+          },
+          {
+            "name": "build-test (macos-15, false)",
+            "conclusion": "success"
+          },
+          {
+            "name": "build-test (ubuntu-latest, x86-linux-musl)",
+            "conclusion": "success"
+          },
+          {
+            "name": "build-test (ubuntu-latest, false)",
+            "conclusion": "success"
+          },
+          {
+            "name": "build-test (macos-26, true)",
+            "conclusion": "success"
+          },
+          {
+            "name": "build-test (windows-latest, false)",
+            "conclusion": "success"
+          },
+          {
+            "name": "build-test (ubuntu-24.04-arm, false)",
+            "conclusion": "success"
+          }
+        ],
+        "evidence_lines": [
+          "sanitizer (sanitize-c=full)\tzig build test -Dsanitize-c=full\t2026-10-10T21:05:00.4728660Z Build Summary: 37/37 steps succeeded; 2077/2093 tests passed (16 skipped)",
+          "build-test (macos-15, false)\tzig build test\t2026-10-10T21:07:58.3188510Z Build Summary: 37/37 steps succeeded; 2077/2093 tests passed (16 skipped)",
+          "build-test (macos-15, false)\tzig build test (ReleaseSafe)\t2026-10-10T21:10:26.0349510Z Build Summary: 30/30 steps succeeded; 2035/2051 tests passed (16 skipped)",
+          "build-test (ubuntu-latest, x86-linux-musl)\tzig build test -Dtarget=x86-linux-musl -Dsanitize-c=off\t2026-10-10T21:06:16.1148853Z Build Summary: 37/37 steps succeeded; 2077/2093 tests passed (16 skipped)",
+          "build-test (ubuntu-latest, false)\tzig build test\t2026-10-10T21:06:44.2715207Z Build Summary: 37/37 steps succeeded; 2077/2093 tests passed (16 skipped)",
+          "build-test (ubuntu-latest, false)\tzig build test (ReleaseSafe)\t2026-10-10T21:09:47.0397006Z Build Summary: 30/30 steps succeeded; 2035/2051 tests passed (16 skipped)",
+          "build-test (ubuntu-latest, false)\tconsumer-smoke (out-of-tree package)\t2026-10-10T21:11:55.2838527Z consumer-smoke ok: quic-zig 0.42.0",
+          "build-test (ubuntu-latest, false)\tconsumer-smoke (out-of-tree package)\t2026-10-10T21:11:56.1007541Z check-modes: 6 of 6 as expected",
+          "build-test (macos-26, true)\tzig build test\t2026-10-10T21:09:30.6848770Z Build Summary: 37/37 steps succeeded; 2077/2093 tests passed (16 skipped)",
+          "build-test (macos-26, true)\tzig build test (ReleaseSafe)\t2026-10-10T21:11:48.0970300Z Build Summary: 30/30 steps succeeded; 2035/2051 tests passed (16 skipped)",
+          "build-test (windows-latest, false)\tzig build test\t2026-10-10T21:09:36.7129051Z Build Summary: 27/27 steps succeeded; 2012/2051 tests passed (39 skipped)",
+          "build-test (windows-latest, false)\tzig build test (ReleaseSafe)\t2026-10-10T21:15:21.3503713Z Build Summary: 27/27 steps succeeded; 2012/2051 tests passed (39 skipped)",
+          "build-test (ubuntu-24.04-arm, false)\tzig build test\t2026-10-10T21:08:33.4256243Z Build Summary: 37/37 steps succeeded; 2077/2093 tests passed (16 skipped)",
+          "build-test (ubuntu-24.04-arm, false)\tzig build test (ReleaseSafe)\t2026-10-10T21:10:36.8117859Z Build Summary: 30/30 steps succeeded; 2035/2051 tests passed (16 skipped)"
+        ]
+      },
+      "rc-fuzz": {
+        "run_id": 38085953398,
+        "url": "https://github.com/nullstyle/quic-zig/actions/runs/38085953398",
+        "head_sha": "31519071ce9905c6e51980af944a7095a74ae6a2",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "fuzz",
+            "conclusion": "success"
+          }
+        ],
+        "evidence_lines": [
+          "fuzz\tzig build test --fuzz (via tools/fuzz-gate.sh)\t2026-10-10T21:13:38.8634055Z .zig-cache/v/a5fd72bc3dbc160f: 388160 bytes n_runs=2,357,160 unique_runs=10,261 pcs_len=47770",
+          "fuzz\tzig build test --fuzz (via tools/fuzz-gate.sh)\t2026-10-10T21:13:38.8635019Z coverage verified: instrumented, 2,357,160 executions across 43 sites (floor 1,935,000)"
+        ],
+        "failure_markers": 0
+      },
+      "quic-go-interop": {
+        "run_id": 38085951304,
+        "url": "https://github.com/nullstyle/quic-zig/actions/runs/38085951304",
+        "head_sha": "31519071ce9905c6e51980af944a7095a74ae6a2",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "QNS client vs pinned quic-go",
+            "conclusion": "success"
+          }
+        ],
+        "evidence_lines": [
+          "QNS client vs pinned quic-go\tRun quic-go hard interop gate\t2026-10-10T21:09:18.7066681Z interop evidence: pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0 skipped=0 flaky_passed=0 flaky_failed=0"
+        ]
+      },
+      "QNS Image": {
+        "run_id": 38085951298,
+        "url": "https://github.com/nullstyle/quic-zig/actions/runs/38085951298",
+        "head_sha": "31519071ce9905c6e51980af944a7095a74ae6a2",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "build",
+            "conclusion": "success"
+          }
+        ],
+        "evidence_lines": [
+          "build\tCheckout quic-zig\t2026-10-10T21:00:30.7315632Z   publish_image: false",
+          "build\tInstall image inspection tools\t2026-10-10T21:00:32.3843386Z   publish_image: false",
+          "build\tLook up commit ID labelled on the latest published image\t2026-10-10T21:00:40.2691982Z   publish_image: false",
+          "build\tDecide whether to rebuild\t2026-10-10T21:00:41.9756660Z   publish_image: false",
+          "build\tSet up Docker Buildx\t2026-10-10T21:00:41.9951202Z   publish_image: false",
+          "build\tSet up Docker Buildx\t2026-10-10T21:00:46.2122747Z #1 DONE 3.2s",
+          "build\tPrepare Docker context shape\t2026-10-10T21:00:46.3766628Z   publish_image: false",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:46.3976166Z   push: false",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:46.3983091Z   publish_image: false",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:47.4739935Z #1 DONE 0.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:47.4741531Z #2 DONE 0.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:47.7877685Z #3 DONE 0.5s",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:47.9023969Z #4 DONE 0.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:48.0373634Z #6 DONE 0.1s",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:48.8089439Z #5 DONE 1.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:49.3267694Z #5 DONE 1.5s",
+          "build\tBuild and push QNS image\t2026-10-10T21:00:49.4959757Z #5 DONE 1.5s",
+          "build\tBuild and push QNS image\t2026-10-10T21:01:09.3537141Z #7 DONE 20.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:01:18.6520481Z #8 DONE 9.3s",
+          "build\tBuild and push QNS image\t2026-10-10T21:01:18.8307239Z #9 DONE 0.2s",
+          "build\tBuild and push QNS image\t2026-10-10T21:01:19.0017127Z #10 DONE 0.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:01:19.0017703Z #11 DONE 0.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:07:35.8379532Z #12 DONE 377.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:07:35.9393221Z #13 DONE 0.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:07:35.9396506Z #14 DONE 0.0s",
+          "build\tBuild and push QNS image\t2026-10-10T21:07:35.9397474Z #15 DONE 0.1s",
+          "build\tBuild and push QNS image\t2026-10-10T21:07:35.9901798Z #16 DONE 0.0s"
+        ]
+      },
+      "pin-lint": {
+        "run_id": 38085951246,
+        "url": "https://github.com/nullstyle/quic-zig/actions/runs/38085951246",
+        "head_sha": "31519071ce9905c6e51980af944a7095a74ae6a2",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "zig-pin",
+            "conclusion": "success"
+          },
+          {
+            "name": "boringssl-pin",
+            "conclusion": "success"
+          }
+        ],
+        "evidence_lines": [
+          "zig-pin\tZig toolchain pins agree (four sites + published digests)\t2026-10-10T21:00:33.2256656Z zig pins agree: 0.17.0",
+          "boringssl-pin\tCompare boringssl pins with http3-zig\t2026-10-10T21:00:31.3276674Z ### pin-lint: OK"
+        ]
+      }
+    }
   },
   "virtual_cells": {
     "count": 31,

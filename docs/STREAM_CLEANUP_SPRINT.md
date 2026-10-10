@@ -9,8 +9,9 @@ throughput gain is claimed.
 
 Implementation: `371d6e16c7fa01979b4166423aea2df24ca1387e`, on main in the
 main checkout. Baseline: `da5475b2521b863438e538bf05bac016ec79fe29`, the
-verified v0.41.0 implementation plus its evidence commit. v0.42.0 is planned;
-local gates pass and exact-tag CI proof is pending. The single maintained
+verified v0.41.0 implementation plus its evidence commit. v0.42.0 is tagged at
+`31519071ce9905c6e51980af944a7095a74ae6a2` (21:00:23 UTC); local gates pass
+and all five exact-tag CI gates are verified. The single maintained
 [integrator brief](DOWNSTREAM_INTEGRATION.md) owns the current verified pin.
 
 ## Measurement and diagnosis
@@ -165,7 +166,19 @@ builds are 15/15 and compile-only tests are clean. Default, test-app (50 tests),
 conformance, qns-endpoint, examples, bench-test and threaded bench-io-build
 all pass. The external wide matrix is not repeated: retirement order/batching,
 flow-credit order and all virtual lines are preserved. Exact-tag quic-go
-interop and the other four mandatory CI gates still must prove the release.
+interop and the other four mandatory CI gates pass.
+
+## Exact-tag release proof
+
+All five gates were read at the exact tag commit, **31519071ce9905c6e51980af944a7095a74ae6a2**, at **2026-10-10 21:17:54 UTC**, within 18 minutes of tagging.
+
+- [test 38085951265](https://github.com/nullstyle/quic-zig/actions/runs/38085951265): all seven jobs pass. Unix Debug, full sanitizer and 32-bit musl report 2,077/2,093 tests (16 skips). Unix ReleaseSafe reports 2,035/2,051 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,012/2,051 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.42.0; check-modes validates 6 of 6.
+- [rc-fuzz 38085953398](https://github.com/nullstyle/quic-zig/actions/runs/38085953398): `coverage verified: instrumented, 2,357,160 executions across 43 sites (floor 1,935,000)`; `n_runs=2,357,160 unique_runs=10,261 pcs_len=47770`. Zero failure markers.
+- [quic-go-interop 38085951304](https://github.com/nullstyle/quic-zig/actions/runs/38085951304): pairs=1, cells=2, succeeded=2; failure, known-failure, unsupported, skipped and flaky counters are zero.
+- [QNS Image 38085951298](https://github.com/nullstyle/quic-zig/actions/runs/38085951298): the image build passes, with publish_image:false and push:false. This proves the build, not publication.
+- [pin-lint 38085951246](https://github.com/nullstyle/quic-zig/actions/runs/38085951246): BoringSSL pin-lint OK; four Zig pins and published digests agree at 0.17.0.
+
+Package hash: `quic-0.42.0-DnSYvYJoTwAVqyMTNt_jULZvKZxnoMJKxSF-Vo9uWJ5p`. The [maintained integrator brief](DOWNSTREAM_INTEGRATION.md) owns the pin and cumulative migration guidance.
 
 ## Reproduction and evidence
 
