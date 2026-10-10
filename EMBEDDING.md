@@ -147,22 +147,29 @@ into the server from it.
 What "the loop's own thread" means depends on the `std.Io` backend
 driving the loop. Under `std.Io.Threaded` the loop is an ordinary
 thread: run it on a `std.Thread`, or in a `std.Io.Group` task, and stop
-it either way. Under an Evented backend (`std.Io.Dispatch` on macOS,
-`std.Io.Uring` on Linux) the loop is a fiber on one of the backend's
-worker threads — `Io.Group` tasks and `Io.async` fibers both work, and
-on Linux prefer one Evented instance per loop thread (see the bench's
-`--io ev-thread` mode; a shared instance's work stealing costs group
-goodput).
+it either way. Evented use is experimental and requires a compatible
+stable Zig 0.17 fork; see the [backend sprint](docs/EVENTED_BACKEND_SPRINT.md)
+for verified identities, evidence and limits. Under Dispatch/Kqueue on
+macOS or Uring on Linux, `Io.Group` and `Io.async` tasks are managed
+fibers. Keep one active backend context per participating OS thread;
+foreign-thread calls and nested active instances are unsupported. The
+bench's `--io ev-thread` layout creates an instance per loop thread;
+choose a worker layout from measurements for the actual environment.
 
-The stop mechanism differs with it. The shutdown flag — checked every
-`receive_timeout_ms` — is the only stop path that works on every
-backend today: Evented network waits are not cancellation points
-(`Io.Dispatch` has none yet), so a `Group` cancellation cannot
-interrupt a parked receive; it lands on the next in-flight call at
-best, which the loops treat as a clean exit (`error.Canceled` from a
-send is its own send disposition, neither a fault nor a peer event).
-Set the flag, then await the loop task, and expect the exit to take up
-to one receive timeout.
+For graceful shutdown, set `shutdown_flag`, then await the loop task
+before freeing loop-owned state. The flag is checked at the next
+iteration; timed receives bound the normal idle wait, and
+`shutdown_grace_us` permits queued CONNECTION_CLOSE frames to drain.
+Completion can therefore take the receive wait plus the grace period
+and scheduling time.
+
+The compatible fork supports cancellation of supported parked network
+waits. Task cancellation can end a loop without its graceful-close
+period. The send helper propagates `error.Canceled`, which the loops
+recognize as cancellation rather than a peer failure or local egress
+fault. Await completion or the cancellation barrier before releasing
+buffers, closing sockets through the owning `Io`, or deinitializing the
+backend.
 
 ### Scaling across cores
 

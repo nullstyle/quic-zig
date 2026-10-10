@@ -133,6 +133,44 @@ The packet scratch is thread-local, about 21 KiB per engine thread, not per
 connection. A `Connection` must live in writable memory because its const
 `nextTimerDeadline` accessor updates a cache.
 
+### Evented backend adoption — experimental, main-only
+
+The [evented sprint report](EVENTED_BACKEND_SPRINT.md) records repairs in the
+stable Zig 0.17 fork and completed native measurements. Threaded remains the
+default: Dispatch and shared Kqueue establish no native throughput gain, and
+both lose four-client goodput. Final Linux/rebuilt-release proof is recorded
+separately there. The verified QUIC pin above and experimental fork adoption
+have independent gates. No default toolchain or consumer pin was changed.
+
+Use a verified, matching compiler/library built from the fork's tagged-0.17
+stable assembly. September's `0.17.0-dev` release is below current 0.17.0
+floors; do not relax those floors or relabel an older compiler. Preserve the
+same BoringSSL revision and coordinated dependency options shown above.
+Stock-compiler checks against a replacement `lib` are limited source evidence,
+not a substitute for the rebuilt fork gate.
+
+QUIC continues accepting `std.Io`; selecting a backend changes its scheduling
+and lifetime obligations. Keep one active backend context per participating
+OS thread, use managed fibers/registered threads, drain groups/futures before
+deinit, and finish/cancel socket operations before closing through the same
+owning `Io`. Foreign-thread calls, nested active instances and concurrent
+socket close are unsupported. Existing raw-thread examples need an explicit
+evented context design. Synchronous file/process fallbacks can block workers.
+
+Dispatch/Kqueue provide reviewed UDP and stream paths; Uring remains UDP-only
+and unsupported stream operations return errors. Backend allocation/stack and
+timer limitations are in the sprint report. Native macOS, BSD semantic-only,
+Linux cross-build and native Linux results must be read separately.
+
+`capnp-zig` still has `evented_available=false`. Its owner must revise its
+expected-failure canary and validate actual TCP/Unix/SCM_RIGHTS, cancellation
+and shutdown paths before activation. Inherited Unix-address bounds/encoding
+and truncated ancillary descriptor ownership remain blockers; successful QUIC
+UDP or complete-control tests do not resolve them. The maintained
+[fork audit ledger](/Users/nullstyle/prj/zig/zigfork/docs/io-audit-followup.md)
+records wider platform/tooling findings. No downstream checkout was edited,
+and no external handoff delivery is claimed.
+
 ### ACK policy and earlier raw API changes
 
 Bulk bursts normally get one ACK per two packets; a packet after a quiet gap
