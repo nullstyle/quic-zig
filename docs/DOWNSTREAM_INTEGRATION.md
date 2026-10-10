@@ -16,6 +16,12 @@ no migration. Native macOS probes produced no repeatable speedup; existing
 Linux offloads help bulk uploads. See [the sprint evidence](UDP_IO_SPRINT.md).
 The preceding [line-rate profile](LINE_RATE_PROFILE.md) remains dated evidence.
 
+Main-only packet-builder work: `791acdc6448019814ab1d4ba433bf45443b4fe0f`
+uses the existing sendable list to avoid no-reset map walks. Wide-window
+poll cost falls 62–80% on m3studio-001, with unchanged virtual behavior and
+neutral bulk/UDP results. v0.41.0 is planned and untagged; the verified pin
+above remains v0.40.1. See [the sprint evidence](PACKET_BUILDER_SPRINT.md).
+
 ## Current pin and build options
 
 Tag `v0.40.1` = `b981bb30ec684711726ba19bfae951b97c1946f0`.
