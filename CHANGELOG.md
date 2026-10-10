@@ -44,7 +44,7 @@ The tail of the many-connections work (0.36.0), and its guards.
   list (0.36.0) instead of walking every stream on every poll of a
   connection not at rest; the walk stays for a degraded list, and a
   Debug build checks the two agree. The churn cell with 3,750 live
-  streams: 7.7 -> 5.7 us of poll per stream (-26%), the virtual-time
+  streams: 6.82 -> 5.73 us of poll per stream (-16%), the virtual-time
   results byte-identical.
 
 ### Guards (tests only)
