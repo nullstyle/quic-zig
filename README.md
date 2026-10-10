@@ -42,6 +42,12 @@ protocol policy belong in a layer above this package.
 The maintained [downstream integration brief](docs/DOWNSTREAM_INTEGRATION.md)
 collects the verified release pin, dependency options, and migration guidance.
 
+The [evented backend sprint](docs/EVENTED_BACKEND_SPRINT.md) records the
+stable Zig 0.17 fork review, backend lifetime requirements and paired UDP
+measurements. Threaded remains the default. Evented use requires an explicitly
+selected matching fork compiler/library and the experimental contract in that
+report; no downstream toolchain change is required.
+
 ## Build And Test
 
 The repository pins its toolchain with `mise`.
@@ -80,14 +86,14 @@ The public Zig module name is `quic`.
 ### Consuming this package
 
 Fetch a tagged release into your `build.zig.zon` — substitute the
-current tag (`v0.42.0` as of this writing):
+current tag (`v0.42.1` as of this writing):
 
 ```sh
-zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.42.0.tar.gz
+zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.42.1.tar.gz
 ```
 
 Pin the **archive tarball URL** as above; it is the form every release
-is verified with. On Zig 0.17.0 a `git+https://…#v0.42.0` reference
+is verified with. On Zig 0.17.0 a `git+https://…#v0.42.1` reference
 resolves to the same package hash. (On the 0.17.0-dev builds it did
 not: release tags here are annotated tag objects, and those builds
 gave them a different, unnamed `N-V` fingerprint.)

@@ -5,6 +5,34 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.42.1] - 2026-10-10
+
+### Fixed
+
+- The I/O benchmark joins or cancels every launched server and client before
+  freeing task/application storage, including partial concurrency or thread
+  startup failure. Two regressions exercise server and client launch failures.
+- Explicitly requested unavailable evented backends now fail instead of
+  reporting a successful run with no measurements.
+
+### Added
+
+- A stable Zig 0.17 evented-backend audit, operating contract and paired native
+  UDP/echo comparison. The std repairs belong to the separate Zig fork; Uring
+  remains UDP-only, and inherited Unix/descriptor-passing defects remain open.
+  See [evented sprint](docs/EVENTED_BACKEND_SPRINT.md) and the maintained
+  [integrator brief](docs/DOWNSTREAM_INTEGRATION.md).
+
+### Changed
+
+- Threaded remains the default. Six paired m3studio-001 native trials show no
+  evented throughput gain: Dispatch uses 27% more CPU per MiB for single bulk
+  and lowers four-client bulk goodput 27%; shared Kqueue lowers four-client
+  goodput 26% while using 10% less CPU per MiB. These are native loopback
+  measurements with the same overlay binary, not physical link-rate results.
+  QUIC protocol behavior, public API, BoringSSL pin and Zig 0.17.0 toolchain
+  are unchanged; no downstream migration is required.
+
 ## [0.42.0] - 2026-10-10
 
 ### Changed
