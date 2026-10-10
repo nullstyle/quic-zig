@@ -855,6 +855,14 @@ pub fn init(config: Config) Error!Server {
                     "use Server.Config.defaultTransportParams() or set flow-control fields",
             } });
         }
+        if (tp.initial_max_data > config.max_connection_memory / 2) {
+            cb(config.log_user_data, .{ .config_warning = .{
+                .message = "initial_max_data exceeds max_connection_memory / 2; " ++
+                    "the receive reserve reduces stream write capacity " ++
+                    "(zero when the window reaches the budget); " ++
+                    "raise max_connection_memory or lower initial_max_data",
+            } });
+        }
     }
     const resolved_local_cid_len: u8 = if (config.quic_lb) |lb_cfg| blk: {
         if (lb_cfg.isPlaintext() and !resolved_transport_params.disable_active_migration) {

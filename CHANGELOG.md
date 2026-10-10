@@ -5,6 +5,23 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.40.0] - 2026-10-10
+
+### Added
+
+- `Server.init` and `Client.connect` emit `config_warning` when
+  `initial_max_data` exceeds `max_connection_memory / 2`. The receive
+  reserve reduces stream write capacity; a window at or above the full
+  budget leaves zero write space. Raise the budget or lower the window.
+  Client adds optional `Config.log_callback` and `log_user_data`, with
+  `Client.LogEvent` and `Client.LogCallback` for configuration warnings.
+
+### Fixed
+
+- `Connection.isClosed` documentation now matches the code: true when
+  CONNECTION_CLOSE is sent or received, including closing and draining.
+  Use `closeState` to distinguish those states from terminal closure.
+
 ## [0.39.0] - 2026-10-09
 
 The tail of the many-connections work (0.36.0), and its guards.

@@ -88,9 +88,9 @@ pub const LogEvent = union(enum) {
     /// A configuration smell detected at `Server.init` that does not
     /// rise to `InvalidConfig`: the server runs, but likely not as the
     /// embedder intends. Emitted once, from `init`, before any traffic.
-    /// Currently fires when `transport_params` admit no streams, no
-    /// stream bytes, and no datagrams (the all-zero `.{}` default) —
-    /// see `Config.defaultTransportParams`.
+    /// Fires when `transport_params` admit no streams, no stream bytes,
+    /// and no datagrams, or when `initial_max_data` exceeds half the
+    /// memory budget and reduces the writer's share of that budget.
     config_warning: struct { message: []const u8 },
 };
 

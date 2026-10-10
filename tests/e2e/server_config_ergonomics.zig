@@ -1,8 +1,8 @@
 //! Pins for the Server config-ergonomics surface:
 //! `Config.defaultTransportParams` (a non-zero admission working set),
 //! `Config.mintKey` (CSPRNG key material for the 32-byte key fields),
-//! and the `config_warning` log event `Server.init` emits when
-//! `transport_params` would admit no streams, bytes, or datagrams.
+//! and the endpoint `config_warning` events for unusable admission
+//! settings or receive windows that reduce the writer's memory share.
 
 const std = @import("std");
 const quic = @import("quic");
@@ -18,7 +18,90 @@ const WarnCtx = struct {
             else => {},
         }
     }
+
+    fn onClientLog(user_data: ?*anyopaque, ev: quic.Client.LogEvent) void {
+        const ctx: *WarnCtx = @ptrCast(@alignCast(user_data.?));
+        switch (ev) {
+            .config_warning => |w| ctx.warnings.append(std.testing.allocator, w.message) catch {},
+        }
+    }
 };
+
+// Include the reported downstream case, an odd budget, and the exact
+// threshold. A window above half does not always leave zero write space.
+const budget_warning_cases = [_]struct { budget: u64, window: u64, warns: bool }{
+    .{ .budget = 256 * 1024, .window = 0, .warns = false },
+    .{ .budget = 256 * 1024, .window = 128 * 1024 - 1, .warns = false },
+    .{ .budget = 256 * 1024, .window = 128 * 1024, .warns = false },
+    .{ .budget = 256 * 1024, .window = 128 * 1024 + 1, .warns = true },
+    .{ .budget = 256 * 1024, .window = 256 * 1024, .warns = true },
+    .{ .budget = 256 * 1024, .window = 16 * 1024 * 1024, .warns = true },
+    .{ .budget = 257, .window = 128, .warns = false },
+    .{ .budget = 257, .window = 129, .warns = true },
+    .{ .budget = 32 * 1024 * 1024, .window = 16 * 1024 * 1024, .warns = false },
+};
+
+test "Server.init memory budget config_warning uses the announced window and half-budget boundary" {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    var ctx: WarnCtx = .{};
+    defer ctx.warnings.deinit(allocator);
+
+    for (budget_warning_cases) |case| {
+        ctx.warnings.clearRetainingCapacity();
+        var params = quic.Server.Config.defaultTransportParams();
+        params.initial_max_data = case.window;
+        var srv = try quic.Server.init(.{
+            .allocator = allocator,
+            .tls_cert_pem = common.test_cert_pem,
+            .tls_key_pem = common.test_key_pem,
+            .alpn_protocols = &protos,
+            .transport_params = params,
+            .max_connection_memory = case.budget,
+            .log_callback = WarnCtx.onLog,
+            .log_user_data = &ctx,
+        });
+        defer srv.deinit();
+        try std.testing.expectEqual(@as(usize, if (case.warns) 1 else 0), ctx.warnings.items.len);
+        try std.testing.expectEqual(case.window, srv.transport_params.initial_max_data);
+        if (case.warns) {
+            const message = ctx.warnings.items[0];
+            try std.testing.expect(std.mem.find(u8, message, "initial_max_data exceeds max_connection_memory / 2") != null);
+            try std.testing.expect(std.mem.find(u8, message, "raise max_connection_memory or lower initial_max_data") != null);
+        }
+    }
+}
+
+test "Client.connect memory budget config_warning uses the announced window and half-budget boundary" {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"hq-test"};
+    var ctx: WarnCtx = .{};
+    defer ctx.warnings.deinit(allocator);
+
+    for (budget_warning_cases) |case| {
+        ctx.warnings.clearRetainingCapacity();
+        var params = quic.Client.Config.defaultTransportParams();
+        params.initial_max_data = case.window;
+        var client = try quic.Client.connect(.{
+            .allocator = allocator,
+            .server_name = "localhost",
+            .alpn_protocols = &protos,
+            .transport_params = params,
+            .insecure_skip_verify = true,
+            .max_connection_memory = case.budget,
+            .log_callback = WarnCtx.onClientLog,
+            .log_user_data = &ctx,
+        });
+        defer client.deinit();
+        try std.testing.expectEqual(@as(usize, if (case.warns) 1 else 0), ctx.warnings.items.len);
+        try std.testing.expectEqual(case.window, client.conn.local_transport_params.initial_max_data);
+        if (case.warns) {
+            const message = ctx.warnings.items[0];
+            try std.testing.expect(std.mem.find(u8, message, "initial_max_data exceeds max_connection_memory / 2") != null);
+            try std.testing.expect(std.mem.find(u8, message, "raise max_connection_memory or lower initial_max_data") != null);
+        }
+    }
+}
 
 test "Server.init warns when transport_params admit nothing" {
     const allocator = std.testing.allocator;

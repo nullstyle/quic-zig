@@ -28,6 +28,9 @@ refined before 1.0, but changes will be deliberate, called out in
   (the slots with work, the due timers, the earliest deadline: each
   O(what has work), never a sweep of every slot). `Server.tick` and
   `Server.nextTimerDeadline` (the sweeps) stay and may be mixed in.
+  Both wrappers expose optional `Config.log_callback` / `log_user_data`
+  for configuration warnings. `Client.LogEvent` / `LogCallback` (0.40.0)
+  cover warnings during `connect`; the Server also emits runtime events.
 - **Raw connection cycle:** `Connection.handle` / `handleWithEcn`,
   `pollDatagram`, `tick`, `pollEvent`, `nextTimerDeadline`, `isClosed`,
   `closeState`, `phase`. Since 0.36.0 a connection at rest (handshake

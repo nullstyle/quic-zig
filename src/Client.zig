@@ -41,6 +41,15 @@ const TransportParams = tls_mod.TransportParams;
 const ConnectionId = conn_mod.path.ConnectionId;
 const QlogCallback = conn_mod.QlogCallback;
 
+/// Configuration warnings emitted synchronously by `Client.connect`,
+/// before any traffic. Message bytes have static lifetime.
+pub const LogEvent = union(enum) {
+    config_warning: struct { message: []const u8 },
+};
+
+/// Receives configuration warnings with `Config.log_user_data`.
+pub const LogCallback = *const fn (user_data: ?*anyopaque, ev: LogEvent) void;
+
 /// Configuration handed to `Client.connect`. Re-exported as
 /// `Client.Config`.
 pub const Config = struct {
@@ -177,6 +186,13 @@ pub const Config = struct {
     /// telemetry. Same shape as `Server.Config.qlog_callback`.
     qlog_callback: ?QlogCallback = null,
     qlog_user_data: ?*anyopaque = null,
+
+    /// Optional configuration log hook. Called synchronously during
+    /// `connect` when the announced receive window exceeds half the
+    /// memory budget. The receive reserve then reduces write capacity;
+    /// a window at or above the full budget leaves no stream write space.
+    log_callback: ?LogCallback = null,
+    log_user_data: ?*anyopaque = null,
 
     /// Optional versioned 0-RTT resumption envelope from a prior
     /// connection to this server. Bytes must be produced by
@@ -601,6 +617,17 @@ pub fn connect(config: Config) Error!Client {
     if (config.compatible_versions.len > 16) return Error.InvalidConfig;
     for (config.compatible_versions) |v| {
         if (!wire_initial.isSupportedVersion(v)) return Error.InvalidConfig;
+    }
+
+    if (config.log_callback) |cb| {
+        if (config.transport_params.initial_max_data > config.max_connection_memory / 2) {
+            cb(config.log_user_data, .{ .config_warning = .{
+                .message = "initial_max_data exceeds max_connection_memory / 2; " ++
+                    "the receive reserve reduces stream write capacity " ++
+                    "(zero when the window reaches the budget); " ++
+                    "raise max_connection_memory or lower initial_max_data",
+            } });
+        }
     }
 
     // Build (or borrow) the TLS context first — both branches
