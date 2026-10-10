@@ -155,11 +155,17 @@ an independent ECN/path validation.
 
 Local default build and named steps pass (`test-app`, conformance,
 qns-endpoint, examples, bench-test, threaded bench-io-build). ReleaseSafe
-full suite: 2,055/2,071 pass, 16 skipped. The 31 impairment/fairness/churn
+full-suite invocation reported 2,055/2,071 pass, 16 skipped; cached tool
+fixtures are omitted from that summary. The 31 impairment/fairness/churn
 virtual lines match the archived base byte-for-byte. CLI negative checks
 fail for zero limits/timeouts, missing values, invalid buffer mode, and an
 unavailable evented backend. The release fast gates and five exact-commit
-CI gates are recorded in [release readiness](RELEASE_READINESS.md).
+CI gates are recorded in [release readiness](RELEASE_READINESS.md). All five
+are verified on `b981bb30ec684711726ba19bfae951b97c1946f0` by 20:04:51 UTC.
+Unix CI reports 2070/2086 Debug and 2028/2044 ReleaseSafe (16 skipped);
+benchmark fixtures are reused in the latter. Windows production tests
+report 2005/2044 with 39 skips; its benchmark fixtures remain excluded by
+the existing toolchain workaround.
 
 Wide interop is not repeated: protocol sources/tests are unchanged from
 v0.40.0, as are UDP timers, batching, metadata, congestion, and loss behavior.
@@ -186,7 +192,9 @@ mise exec -- zig build bench-io-build -Dbench-io-threaded-only
 Alternate paired order for six trials. Change only the control being tested.
 For Linux, cross-build with `-Dtarget=aarch64-linux-musl` or
 `-Dtarget=aarch64-linux-gnu`, copy each executable to m3studio-001, and run
-it in the recorded Ubuntu container. Use `--network none` for measured
+it in the recorded Ubuntu container. OrbStack was initially stopped; this
+sprint started it for these runs and stopped it again after verifying there
+were no running containers or Linux machines. Use `--network none` for measured
 loopback runs. The standard threaded-only flag is needed on both targets.
 For the sendto probe, pass `zig build --zig-lib=<isolated-stock-lib-copy>`
 with that flag first; retain and alternate stock/probe executables.

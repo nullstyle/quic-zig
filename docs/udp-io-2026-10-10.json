@@ -5183,6 +5183,105 @@
   },
   "binary_sha256": {
     "linux-bench-io": "7bbaacc87cbe48b76a8bd2ce968e71518b0e4dd349257f8c365fd55a0d4ecf19",
-    "linux-gnu-bench-io": "1eac10e8224f755e7ae812a99b976900dd1e5edcc11b1abe392c8f83b22e021a"
+    "linux-gnu-bench-io": "1eac10e8224f755e7ae812a99b976900dd1e5edcc11b1abe392c8f83b22e021a",
+    "native-final": "a56b19e9b803019fb2cc3c8c4601c78faa06e3fa7d8a91152e5ecc7c7afe8fa7",
+    "native-stock-probe": "d5795380bd1d8e5bba1a9ae5d2272e7b14b29a5b6541f0f88f373328be2d268e",
+    "native-sendto-probe": "b7ef58b5b0898c973df8bcecc1331715ac1b62fd5946de7ec890424cebcc5f6f",
+    "native-drain-probe": "b7302e92928e7aafd5021eaca648b8bf59ac45c43bfe4663aaba52ef5551733b"
+  },
+  "release_verification": {
+    "status": "verified",
+    "tag_commit": "b981bb30ec684711726ba19bfae951b97c1946f0",
+    "package_hash": "quic-0.40.1-DnSYvfF5QwCI1MMBv40Mgomo89c5f233_A3wnF2874vh",
+    "verified_at_utc": "2026-10-10 20:04:51 UTC",
+    "ci_runs": {
+      "test": 38081021489,
+      "rc-fuzz": 38081022739,
+      "quic-go-interop": 38081021471,
+      "QNS Image": 38081021561,
+      "pin-lint": 38081021467
+    },
+    "test_job_count": 7,
+    "test_summaries": [
+      {
+        "job": "build-test (ubuntu-latest, x86-linux-musl)",
+        "step": "zig build test -Dtarget=x86-linux-musl -Dsanitize-c=off",
+        "summary": "37/37 steps succeeded; 2070/2086 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (ubuntu-24.04-arm, false)",
+        "step": "zig build test",
+        "summary": "37/37 steps succeeded; 2070/2086 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (ubuntu-24.04-arm, false)",
+        "step": "zig build test (ReleaseSafe)",
+        "summary": "30/30 steps succeeded; 2028/2044 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (macos-15, false)",
+        "step": "zig build test",
+        "summary": "37/37 steps succeeded; 2070/2086 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (macos-15, false)",
+        "step": "zig build test (ReleaseSafe)",
+        "summary": "30/30 steps succeeded; 2028/2044 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (windows-latest, false)",
+        "step": "zig build test",
+        "summary": "27/27 steps succeeded; 2005/2044 tests passed (39 skipped)"
+      },
+      {
+        "job": "build-test (windows-latest, false)",
+        "step": "zig build test (ReleaseSafe)",
+        "summary": "27/27 steps succeeded; 2005/2044 tests passed (39 skipped)"
+      },
+      {
+        "job": "sanitizer (sanitize-c=full)",
+        "step": "zig build test -Dsanitize-c=full",
+        "summary": "37/37 steps succeeded; 2070/2086 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (macos-26, true)",
+        "step": "zig build test",
+        "summary": "37/37 steps succeeded; 2070/2086 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (macos-26, true)",
+        "step": "zig build test (ReleaseSafe)",
+        "summary": "30/30 steps succeeded; 2028/2044 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (ubuntu-latest, false)",
+        "step": "zig build test",
+        "summary": "37/37 steps succeeded; 2070/2086 tests passed (16 skipped)"
+      },
+      {
+        "job": "build-test (ubuntu-latest, false)",
+        "step": "zig build test (ReleaseSafe)",
+        "summary": "30/30 steps succeeded; 2028/2044 tests passed (16 skipped)"
+      }
+    ],
+    "fuzz": {
+      "executions": 2648360,
+      "sites": 43,
+      "floor": 1935000,
+      "pcs_len": 47345,
+      "unique_runs": 10587,
+      "failing_inputs": 0
+    },
+    "interop": {
+      "pairs": 1,
+      "cells": 2,
+      "succeeded": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "qns_image_published": false,
+    "consumer_smoke_version": "0.40.1",
+    "consumer_modes_passed": 6,
+    "remote_orbstack_restored": "stopped"
   }
 }

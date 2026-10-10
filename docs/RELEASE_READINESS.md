@@ -2268,3 +2268,78 @@ local links validated; git diff whitespace checks clean. Builds and real
 UDP runs used exact v0.40.0 library source. Protocol tests, cross checks,
 fuzzing, and interop were not repeated for documentation edits; their
 verified release evidence remains recorded above.
+
+
+## v0.40.1 — UDP I/O feasibility and benchmark integrity (2026-10-10)
+
+Tag `v0.40.1` = `b981bb30ec684711726ba19bfae951b97c1946f0`. Package hash:
+`quic-0.40.1-DnSYvfF5QwCI1MMBv40Mgomo89c5f233_A3wnF2874vh`. Toolchain remains Zig 0.17.0. Implementation commit
+`5dd1e5c63b27cc830e8b14941322761aff865153`; sprint evidence commit
+`e479bd9`. All work was in the main checkout on main; no worktree or PR.
+
+The smoke and benchmark upload paths now wait for all data and FIN ACKs.
+The benchmark requires exact delivered bytes and clean receive completion;
+a reset/missing completion or invalid argument fails the run. Controls for
+receive/send batch limits, tuning, offloads, and reused/per-pass scratch
+are preserved in JSON schema `quic-zig-bench-io/3`. Two regression tests
+cover FIN ACK before earlier data ACK and an acknowledged reset. The
+FIN-only mutant is killed (41/42 pass); the fixed benchmark passes 42/42.
+
+Native m3studio-001 at the Hoth site gives no repeatable buffer/sendto/ready-
+drain throughput gain. Receive-drain cut loop iterations about 41% but
+bulk throughput moved only about 0.5%; public sendto moved about 0.2%.
+Neither prototype was shipped. The current 16-receive/64-send limits remain
+best among tested settings. Existing Linux VM offloads improve single-client
+bulk about 30% and lower CPU/MiB about 23%, with both musl and GNU libc.
+Those are existing features, not a new engine speedup. GNU emits real
+sendmmsg syscalls; 64-bit musl's wrapper loops over sendmsg. Traced batching
+changes with pacing, so syscall-count reductions are not generalized.
+Evented comparison remains unavailable on stock 0.17.0's mismatched vtable;
+the available personal fork is below the project's version floor.
+
+Measurements and limitations: [UDP_IO_SPRINT.md](UDP_IO_SPRINT.md), with
+tracked JSON and exact executable hashes. All measured rates are loopback
+on m3studio-001, native macOS or explicitly labelled Linux VM. CI rates are
+not performance evidence. CPU captures and syscall-count passes ran apart
+from timings. OrbStack was restored to its initial stopped state after all
+scratch containers finished.
+
+Local fast gates passed: full Debug invocation (1,493 freshly run tests;
+other groups cached), Windows compile check, x86-linux-musl compile check.
+ReleaseSafe invocation reported 2055/2071, 16 skipped; its remaining tool
+fixtures were cached. Default build and all named compile/test steps passed,
+using threaded-only for bench-io-build. Seven CLI negative cases fail as
+expected. All 31 virtual-time impairment/fairness/churn lines match the
+archived base byte-for-byte. Protocol sources/tests and UDP drivers are
+unchanged from v0.40.0; no new rule requires mutants beyond the benchmark
+FIN rule, and wide interop was not repeated. The standard interop gate is
+verified below. No new pub library function or consumer option is introduced.
+
+All five CI gates verified on the tag commit by **2026-10-10 20:04:51 UTC**,
+within 21 minutes of tagging. Evidence:
+
+- [test 38081021489](https://github.com/nullstyle/quic-zig/actions/runs/38081021489):
+  seven jobs succeeded. Unix Debug 2070/2086 and ReleaseSafe 2028/2044
+  (16 skipped each); Windows Debug and ReleaseSafe each 2005/2044
+  (39 skipped). Full sanitizer and 32-bit Linux musl each 2070/2086,
+  with 16 skipped. consumer-smoke ok: quic-zig 0.40.1;
+  check-modes: 6 of 6 as expected. These are the emitted summaries:
+  ReleaseSafe reuses benchmark fixtures already run in Debug's suite.
+  Windows excludes benchmark fixtures under the existing pkg-config.BAT
+  workaround; its production/library suite passed natively.
+- [rc-fuzz 38081022739](https://github.com/nullstyle/quic-zig/actions/runs/38081022739):
+  2,648,360 instrumented executions across 43 sites, above the 1,935,000
+  floor; pcs_len=47345, unique_runs=10,587. No failing inputs.
+- [quic-go-interop 38081021471](https://github.com/nullstyle/quic-zig/actions/runs/38081021471):
+  pairs=1 cells=2 succeeded=2; zero failed, known_failed, unsupported,
+  skipped, or flaky cells.
+- [QNS Image 38081021561](https://github.com/nullstyle/quic-zig/actions/runs/38081021561):
+  image build succeeded. Publication is disabled (publish_image:false,
+  push:false); this gate proves the build only.
+- [pin-lint 38081021467](https://github.com/nullstyle/quic-zig/actions/runs/38081021467):
+  pin-lint OK; Zig pins agree at 0.17.0.
+
+The maintained [downstream integration brief](DOWNSTREAM_INTEGRATION.md)
+owns the pin, cumulative migrations, benchmark-reader change, and relay
+status. It is ready for owner relay; delivery to unavailable Claude sessions
+is not claimed. No downstream checkout or pin was changed.

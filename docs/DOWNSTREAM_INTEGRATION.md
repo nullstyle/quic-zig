@@ -3,10 +3,12 @@
 This is the maintained brief for quic-zig integrators. Update this file in
 place after each sprint; do not create another file for each tag. The current
 verified pin is at the top. Migration guidance is cumulative. Main-only work
-must be labelled separately from released behavior.
+must be labelled separately from released behavior. For post-tag verification,
+read the [latest maintained brief](https://github.com/nullstyle/quic-zig/blob/main/docs/DOWNSTREAM_INTEGRATION.md);
+a tagged archive contains the brief as it stood when tagged.
 
-Last updated: 2026-10-10. Current release: **v0.40.0, verified**.
-The UDP I/O sprint has prepared **v0.40.1**; its release CI is pending.
+Last updated: 2026-10-10. Current release: **v0.40.1, verified**.
+The UDP I/O sprint is complete. **v0.40.1 is released and verified.**
 The changes fix upload completion in the smoke example/benchmark and add
 benchmark controls and schema `quic-zig-bench-io/3`. Protocol code, UDP
 drivers/defaults, public API, and toolchain are unchanged. Integrators need
@@ -16,12 +18,12 @@ The preceding [line-rate profile](LINE_RATE_PROFILE.md) remains dated evidence.
 
 ## Current pin and build options
 
-Tag `v0.40.0` = `5796be0f8989a081bb563b96fcc6a856f43eb11d`.
-Package hash: `quic-0.40.0-DnSYvSs1QADqzgHFcxff2HzBAezXWXpCJD2BCKJEemBu`.
+Tag `v0.40.1` = `b981bb30ec684711726ba19bfae951b97c1946f0`.
+Package hash: `quic-0.40.1-DnSYvfF5QwCI1MMBv40Mgomo89c5f233_A3wnF2874vh`.
 Toolchain: Zig 0.17.0, pinned by mise. Use ReleaseSafe for deployed code.
 
 ```sh
-mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.40.0.tar.gz
+mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.40.1.tar.gz
 ```
 
 Every parent in one binary must pass the same dependency options:
@@ -42,6 +44,20 @@ full setup and public surface, see [Embedding](../EMBEDDING.md) and
 [API stability](API_STABILITY.md).
 
 ## What an integrator needs to know
+
+### Benchmark and smoke-example consumers
+
+v0.40.1 waits for all stream bytes and FIN to be ACKed; `fin_acked` alone
+can precede earlier data ACKs/retransmission. The receive-side benchmark
+requires exact delivered bytes and clean completion. If you copied the
+bulk-smoke or benchmark upload loop, take the corrected example logic.
+Library API, UDP defaults, and the coordinated option map are unchanged.
+
+Benchmark report readers should accept `quic-zig-bench-io/3`, which adds
+batch/tuning/offload/buffer settings and delivered-byte/clean-FIN evidence.
+The development benchmark is not part of the consumer archive. Existing
+Linux offloads are already enabled by default; native macOS probes yielded
+no repeatable speedup, so this release advertises no transport gain.
 
 ### Writes and memory windows
 
@@ -125,6 +141,7 @@ Client, Server, and quic.app wrappers did not require those migrations.
 
 | Release | Integrator effect | Required action |
 |---|---|---|
+| v0.40.1 | Correct bulk smoke/benchmark completion; reproducible I/O controls and report schema 3. | No library/API/toolchain migration. Update copied example loops or benchmark report readers. |
 | v0.40.0 | Busy ticks cost 51–54% less in churn; memory-window warnings; corrected closure docs. | Optional warning callback on Client; check small-budget window settings. |
 | v0.39.0 | Sendable-list poll check; `streamWriteCapacity`; stronger Debug invariants. | Optional capacity check before indivisible writes. |
 | v0.38.0 | Writes preserve receive reserve and release consumed prefixes under pressure. | Handle short writes; remove redundant half-budget write cap when ready. |
@@ -142,24 +159,28 @@ integrator brief.
 
 ## Validation of the current pin
 
-All five CI gates verified on the tag commit by 2026-10-10 18:38:21 UTC,
-within 21 minutes of release. Evidence:
+All five CI gates verified on the tag commit by **2026-10-10 20:04:51 UTC**,
+within 21 minutes of tagging. Evidence:
 
-- [test 38075222309](https://github.com/nullstyle/quic-zig/actions/runs/38075222309):
-  seven jobs succeeded. Unix Debug 2068/2084 and ReleaseSafe 2028/2044
+- [test 38081021489](https://github.com/nullstyle/quic-zig/actions/runs/38081021489):
+  seven jobs succeeded. Unix Debug 2070/2086 and ReleaseSafe 2028/2044
   (16 skipped each); Windows Debug and ReleaseSafe each 2005/2044
-  (39 skipped). Full sanitizer and 32-bit Linux musl suites passed.
-  consumer-smoke ok: quic-zig 0.40.0; check-modes: 6 of 6 as expected.
-- [rc-fuzz 38075224074](https://github.com/nullstyle/quic-zig/actions/runs/38075224074):
-  2,637,540 instrumented executions across 43 sites, above the 1,935,000
-  floor; pcs_len=47345, unique_runs=10,277. No failing inputs.
-- [quic-go-interop 38075222415](https://github.com/nullstyle/quic-zig/actions/runs/38075222415):
+  (39 skipped). Full sanitizer and 32-bit Linux musl each 2070/2086,
+  with 16 skipped. consumer-smoke ok: quic-zig 0.40.1;
+  check-modes: 6 of 6 as expected. These are the emitted summaries:
+  ReleaseSafe reuses benchmark fixtures already run in Debug's suite.
+  Windows excludes benchmark fixtures under the existing pkg-config.BAT
+  workaround; its production/library suite passed natively.
+- [rc-fuzz 38081022739](https://github.com/nullstyle/quic-zig/actions/runs/38081022739):
+  2,648,360 instrumented executions across 43 sites, above the 1,935,000
+  floor; pcs_len=47345, unique_runs=10,587. No failing inputs.
+- [quic-go-interop 38081021471](https://github.com/nullstyle/quic-zig/actions/runs/38081021471):
   pairs=1 cells=2 succeeded=2; zero failed, known_failed, unsupported,
   skipped, or flaky cells.
-- [QNS Image 38075222433](https://github.com/nullstyle/quic-zig/actions/runs/38075222433):
+- [QNS Image 38081021561](https://github.com/nullstyle/quic-zig/actions/runs/38081021561):
   image build succeeded. Publication is disabled (publish_image:false,
   push:false); this gate proves the build only.
-- [pin-lint 38075222408](https://github.com/nullstyle/quic-zig/actions/runs/38075222408):
+- [pin-lint 38081021467](https://github.com/nullstyle/quic-zig/actions/runs/38081021467):
   pin-lint OK; Zig pins agree at 0.17.0.
 
 ## Delivery and pin ownership
