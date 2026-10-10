@@ -5,6 +5,26 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.41.0] - 2026-10-10
+
+### Changed
+
+- The 1-RTT packet builder uses the existing sendable list to skip full
+  stream-map reset scans when no reset is pending. It retains map order
+  when emitting resets, the allocation-failure fallback, and Debug
+  agreement checks. No API, wire, queue allocation, or toolchain change.
+  Six paired m3studio-001 trials reduce poll CPU cost per stream by 62%,
+  73%, and 80% at windows 256, 1,024, and 4,096; a same-binary control
+  confirms the cause. Bulk engine and native UDP are neutral within noise.
+  See [packet-builder sprint](docs/PACKET_BUILDER_SPRINT.md).
+
+### Added
+
+- Builder regressions for packet-room retries, resets beyond the STREAM
+  chunk cap, loss/retransmission/ACK/GC, failed sendable-list insertion,
+  and multiple-reset ordering. Three deliberate mutants are caught;
+  all 31 virtual-time impairment/fairness/churn cells stay byte-identical.
+
 ## [0.40.1] - 2026-10-10
 
 ### Fixed
