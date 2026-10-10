@@ -19,18 +19,13 @@
 //! zig build bench-io -- --io both --scenario all --samples 5 --json report.json
 //! ```
 //!
-//! `--io evented` and `--io ev-thread` need the fork std: a fork release
-//! that carries the evented work first shipped in
-//! `0.17.0-dev.1994+96ced66cf` (2026-09-03), or the checkout passed via
-//! `zig build --zig-lib=<path>` (this flag must be first). The fork release
-//! must be versioned `0.17.0` or later: `minimum_zig_version` is the tagged release, so
-//! build.zig refuses every `0.17.0-dev` build, the fork's included.
-//! Stock upstream Zig fails to build the evented branch — on the 0.17.0
-//! release `std.Io.Dispatch` and `std.Io.Kqueue` both initialize
-//! `Io.VTable` fields that do not exist (`processReplacePath`,
-//! `fileWriteStreaming`) — so build with `-Dbench-io-threaded-only` to
-//! drop the evented backends and get a Threaded-only bench that compiles
-//! on stock Zig.
+//! Evented modes need the stable Zig 0.17 fork, with its matching compiler
+//! and library. A source-library check can use
+//! `zig build --zig-lib=<absolute-path-to-fork-lib> bench-io-build`.
+//! Stock Zig builds the control with `-Dbench-io-threaded-only`.
+//! The older September `0.17.0-dev` fork releases are below this project's
+//! tagged-0.17 version floor. See docs/EVENTED_BACKEND_SPRINT.md for the
+//! verified fork revision and experimental backend limits.
 //! `--leeway-ms` sets `std.Io.Evented.InitOptions.leeway` (std default
 //! 10 ms), the timer slack libdispatch is allowed on every timed wait.
 //!
@@ -462,6 +457,7 @@ const ClientTask = struct {
     rtts: []u64,
     /// Set in the multi-loop mode: the flows stamp their windows on this clock.
     t0: ?std.Io.Timestamp = null,
+    shutdown: ?*const std.atomic.Value(bool) = null,
     upload: UploadFlow = undefined,
     echo: EchoFlow = undefined,
     err: ?anyerror = null,
@@ -492,6 +488,8 @@ const ClientTask = struct {
                 try quic.transport.runUdpClient(&client, .{
                     .target = task.target,
                     .io = task.io,
+                    .shutdown_flag = task.shutdown,
+                    .shutdown_grace_us = 100_000,
                     .tune_socket = task.tune_socket,
                     .max_datagrams_per_iteration = task.receive_batch,
                     .max_send_batch_datagrams = task.send_batch,
@@ -511,6 +509,8 @@ const ClientTask = struct {
                 try quic.transport.runUdpClient(&client, .{
                     .target = task.target,
                     .io = task.io,
+                    .shutdown_flag = task.shutdown,
+                    .shutdown_grace_us = 100_000,
                     .tune_socket = task.tune_socket,
                     .max_datagrams_per_iteration = task.receive_batch,
                     .max_send_batch_datagrams = task.send_batch,
@@ -802,15 +802,24 @@ fn runSampleLoops(
     const per_thread = backend == .@"ev-thread";
     var server_threads: []std.Thread = &.{};
     defer if (per_thread) gpa.free(server_threads);
+    var servers_started: usize = 0;
+    // Install teardown before the first launch; partial startup must join every
+    // live task before its app, ready flag or task storage can be freed.
+    defer {
+        shutdown.store(true, .release);
+        if (per_thread) {
+            for (server_threads[0..servers_started]) |thread| thread.join();
+        } else group.await(io) catch {};
+    }
     if (per_thread) {
         server_threads = try gpa.alloc(std.Thread, n);
-        for (tasks, server_threads) |*task, *thread_slot|
+        for (tasks, server_threads) |*task, *thread_slot| {
             thread_slot.* = try std.Thread.spawn(.{}, serverLoopThread, .{ gpa, task });
+            servers_started += 1;
+        }
     } else {
         for (tasks) |*task| try group.concurrent(io, ServerTask.run, .{task});
     }
-    defer group.await(io) catch {};
-    defer shutdown.store(true, .release);
 
     var waited: usize = 0;
     for (readies, tasks) |*ready, *task| {
@@ -835,12 +844,14 @@ fn runSampleLoops(
         .loops = n,
         .clients = m,
     };
+    var client_shutdown: std.atomic.Value(bool) = .init(false);
     const clients = try gpa.alloc(ClientTask, m);
     defer gpa.free(clients);
     for (clients, 0..) |*client, i| client.* = .{
         .gpa = gpa,
         .io = io,
         .target = addr,
+        .shutdown = &client_shutdown,
         .receive_timeout_ms = opts.receive_timeout_ms,
         .receive_batch = opts.receive_batch,
         .send_batch = opts.send_batch,
@@ -854,15 +865,25 @@ fn runSampleLoops(
     var client_group: std.Io.Group = .init;
     var client_threads: []std.Thread = &.{};
     defer if (per_thread) gpa.free(client_threads);
+    var clients_started: usize = 0;
+    defer {
+        client_shutdown.store(true, .release);
+        if (per_thread) {
+            for (client_threads[0..clients_started]) |thread| thread.join();
+        } else client_group.cancel(io);
+    }
     if (per_thread) {
         client_threads = try gpa.alloc(std.Thread, m);
-        for (clients, client_threads) |*client, *thread_slot|
+        for (clients, client_threads) |*client, *thread_slot| {
             thread_slot.* = try std.Thread.spawn(.{}, clientLoopThread, .{ gpa, client });
+            clients_started += 1;
+        }
     } else {
         for (clients) |*client| try client_group.concurrent(io, ClientTask.run, .{client});
     }
     if (per_thread) {
-        for (client_threads) |t| t.join();
+        for (client_threads[0..clients_started]) |thread| thread.join();
+        clients_started = 0;
     } else {
         try client_group.await(io);
     }
@@ -932,7 +953,8 @@ fn runSampleLoops(
 
     shutdown.store(true, .release);
     if (per_thread) {
-        for (server_threads) |t| t.join();
+        for (server_threads[0..servers_started]) |thread| thread.join();
+        servers_started = 0;
     } else {
         try group.await(io);
     }
@@ -1237,9 +1259,11 @@ pub fn main(init: std.process.Init) !void {
             // the coordinator io (port picking, sleeps, clocks, the
             // report) is Threaded.
             if (comptime !EvThread.supported()) {
-                std.debug.print("bench-io: --io ev-thread needs a single-threaded-capable Evented backend (Uring or Kqueue); skipping\n", .{});
+                std.debug.print("bench-io: --io ev-thread needs a single-threaded-capable Evented backend (Uring or Kqueue)\n", .{});
+                return error.UnsupportedBackend;
             } else if (opts.loops < 2 and (opts.clients == 0 or opts.clients < 2)) {
-                std.debug.print("bench-io: --io ev-thread needs --loops N (N>1) or --clients M (M>1); skipping\n", .{});
+                std.debug.print("bench-io: --io ev-thread needs --loops N (N>1) or --clients M (M>1)\n", .{});
+                return error.UnsupportedBackend;
             } else {
                 var threaded: std.Io.Threaded = .init(gpa, .{});
                 defer threaded.deinit();
@@ -1247,11 +1271,13 @@ pub fn main(init: std.process.Init) !void {
             }
         },
         .evented => if (comptime threaded_only) {
-            std.debug.print("bench-io: built with -Dbench-io-threaded-only; skipping evented\n", .{});
+            std.debug.print("bench-io: built with -Dbench-io-threaded-only; evented unavailable\n", .{});
+            return error.UnsupportedBackend;
         } else {
             const Evented = std.Io.Evented;
             if (Evented == void) {
-                std.debug.print("bench-io: std.Io.Evented is void on {s}-{s} with this std; skipping evented\n", .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag) });
+                std.debug.print("bench-io: std.Io.Evented is void on {s}-{s} with this std\n", .{ @tagName(builtin.target.cpu.arch), @tagName(builtin.target.os.tag) });
+                return error.UnsupportedBackend;
             } else {
                 var evented: Evented = undefined;
                 // `leeway` (timer slack) exists only on the libdispatch
@@ -1264,15 +1290,14 @@ pub fn main(init: std.process.Init) !void {
                 try runBackend(gpa, evented.io(), backend, opts, payload, rtts, &samples);
             }
         },
-        // Debugging backend: `std.Io.Kqueue` directly, as one shared
-        // instance (default thread count, work stealing enabled) even on
-        // targets where `std.Io.Evented` would pick another backend. This
-        // is the configuration the shared-instance scheduler crash
-        // reproduces in; see HANDOFF.md.
+        // Use one shared Kqueue instance (default thread count, work stealing)
+        // even on targets where Evented selects another backend.
         .@"kqueue-shared" => if (comptime threaded_only) {
-            std.debug.print("bench-io: built with -Dbench-io-threaded-only; skipping kqueue-shared\n", .{});
+            std.debug.print("bench-io: built with -Dbench-io-threaded-only; kqueue-shared unavailable\n", .{});
+            return error.UnsupportedBackend;
         } else if (comptime !has_kqueue) {
-            std.debug.print("bench-io: --io kqueue-shared needs a kqueue target; skipping\n", .{});
+            std.debug.print("bench-io: --io kqueue-shared needs a kqueue target\n", .{});
+            return error.UnsupportedBackend;
         } else {
             var kqueue: std.Io.Kqueue = undefined;
             try std.Io.Kqueue.init(&kqueue, gpa, .{});
@@ -1327,4 +1352,34 @@ pub fn main(init: std.process.Init) !void {
         try file.writeStreamingAll(io, aw.written());
         std.debug.print("wrote {s}\n", .{path});
     }
+}
+
+test "multi-loop startup failure joins servers before freeing task storage" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .limited(1) });
+    defer threaded.deinit();
+    var rtts: [2]u64 = undefined;
+    try std.testing.expectError(error.ConcurrencyUnavailable, runSampleLoops(
+        std.testing.allocator,
+        threaded.io(),
+        .threaded,
+        .echo,
+        .{ .loops = 2, .clients = 2, .pings = 1 },
+        "x",
+        &rtts,
+    ));
+}
+
+test "multi-client startup failure cancels clients before freeing task storage" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .limited(2) });
+    defer threaded.deinit();
+    var rtts: [2]u64 = undefined;
+    try std.testing.expectError(error.ConcurrencyUnavailable, runSampleLoops(
+        std.testing.allocator,
+        threaded.io(),
+        .threaded,
+        .echo,
+        .{ .loops = 1, .clients = 2, .pings = 1 },
+        "x",
+        &rtts,
+    ));
 }
