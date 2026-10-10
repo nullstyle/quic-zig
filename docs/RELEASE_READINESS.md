@@ -2104,3 +2104,118 @@ cluster, not in lockstep: cluster A (nest, qmsg, qmesh-zig,
 mruby-quic, one binary) with one script, cluster B (http3-zig,
 capnp-zig) by its own sessions, the option map the same for all.
 Cluster A moved to v0.32.0 the same afternoon (qmsg v0.8.2).
+
+## v0.40.0: less tick work, and memory-window warnings
+
+v0.40.0 (tag `5796be0f8989a081bb563b96fcc6a856f43eb11d`, 2026-10-10)
+is the owner's tick-side sprint after v0.39.0. The handoff pointed at
+`collectSendableStreamsByPriority`, but that function already reads the
+sendable list in ReleaseSafe. Its agreement walk is Debug-only. The real
+tick work was `gcClosedStreams`, called on every busy tick. Tick now calls
+it only when the existing `streams_gc_pending` flag marks cleanup work.
+Debug keeps the full walk and asserts that an unset flag misses no reclaim.
+Cleanup timing, batching, stream credit, and retirement records stay intact.
+
+The three first fixes also landed: `isClosed` documentation matches its
+existing flag (true from CONNECTION_CLOSE send or receive, including closing
+and draining); the v0.39.0 changelog uses its clean poll baseline; and the
+endpoint wrappers warn when `initial_max_data > max_connection_memory / 2`.
+Above half, the receive reserve reduces write capacity; zero occurs at or
+above the whole budget. Client adds optional `Config.log_callback` and
+`log_user_data`, with `Client.LogEvent` / `LogCallback`. No config is rejected
+or rewritten. Existing signatures and the coordinated option map stay intact.
+
+**Measurement.** Archive exports of base v0.39.0 (`1a4919d`) and candidate
+`f7b6d21`, on the same macOS arm64 machine, Zig 0.17.0, ReleaseSafe. No
+other builds or tests ran alongside these measurements. The first quiet
+comparison showed the gain; three further runs per tree give these medians:
+
+| churn window | base poll us/stream | candidate poll | base tick us/stream | candidate tick |
+|---|---:|---:|---:|---:|
+| 4096 (3750 peak live) | 5.799 | 5.840 | 9.045 | 4.474 |
+| 1024 (928 peak live) | 2.101 | 2.104 | 3.480 | 1.585 |
+
+Tick falls 50.5% and 54.5%; poll stays within noise. Fresh impairment,
+fairness, and churn results match the base byte-for-byte: 31/31 lines.
+The benchmark now prints both poll and tick microseconds per stream.
+
+| connection cell, median of three | base | candidate |
+|---|---:|---:|
+| 1000: handshake us/connection | 431.82 | 348.65 |
+| 1000: idle pass us | 57 | 54 |
+| 1000: active request us, one-pass / from-zero / ready | 21.8 / 33.8 / 4.2 | 22.4 / 33.9 / 4.2 |
+| 4000: handshake us/connection | 1906.98 | 1356.12 |
+| 4000: idle pass us | 286 | 299 |
+| 4000: active request us, one-pass / from-zero / ready | 113.9 / 209.5 / 7.1 | 113.5 / 204.0 / 7.0 |
+| bytes/connection, 1000 / 4000 | 21200 / 21201 | 21200 / 21201 |
+
+No connection-memory or idle/active-loop regression. Handshake medians also
+fell in these runs; the sprint's claim is the isolated tick gain.
+
+**Local evidence.** Full Debug suite 36/36 steps, 2053/2069 tests (16
+skipped); ReleaseSafe 29/29, 2013/2029 (16 skipped). The release script's
+final fast gates: full Debug 36/36, Windows 15/15, x86-linux-musl 15/15,
+both cross-compile checks clean. Named builds pass: install, test, test-app,
+conformance, qns-endpoint, examples, bench-test, and bench-io-build. The two
+benchmark binaries also ran (churn and a one-sample microbenchmark run).
+
+The stock Zig I/O benchmark requires its already-documented
+`-Dbench-io-threaded-only` option: the unflagged build fails on both the base
+and candidate because stock Dispatch/Kqueue reference absent Io.VTable
+fields (`processReplacePath`, `fileWriteStreaming`). The fork's evented
+backends were not validated. The old all-steps helper also passed an
+unsupported `--help` to bench-e2e; the validation runner used real supported
+invocations. Neither limitation required a transport or compiler change.
+
+The new real-TLS test reclaims an ended uni stream on both endpoints while
+unrelated bidi data keeps the connection busy. It preserves the live stream
+and checks resident-byte accounting. The full-suite Debug invariant found
+nine fixtures that set terminal/ACK state directly without its cleanup
+notice; those fixtures, including the fuzz harness's synthetic ACK, now
+simulate the notice too. Four compiling mutants were killed by the intended
+tests: wrong Server half-budget boundary, missing Client warning, no tick
+cleanup, and no read-side cleanup notice. The cleanup mutants ran in
+ReleaseSafe. All temporary mutations were restored. The wide local interop
+matrix was not repeated: no wire, scheduling, congestion, or flow-control
+rule changed, and the 31 virtual-time cells match exactly. Regular interop
+CI still applies.
+
+**Five CI gates verified on the tag commit.** All runs use
+`5796be0f8989a081bb563b96fcc6a856f43eb11d`. They started at
+2026-10-10 18:18:05 UTC (fuzz at 18:18:07); the last finished at
+18:37:57. Evidence was read by 18:38:21, within 21 minutes.
+
+- test: [run 38075222309](https://github.com/nullstyle/quic-zig/actions/runs/38075222309),
+  all seven jobs succeeded. macOS 15, macOS 26, Linux x86-64, and Linux
+  arm64: Debug 36/36 steps, 2068/2084 tests; ReleaseSafe 29/29,
+  2028/2044 tests (16 skipped in each mode). Windows: Debug and ReleaseSafe
+  each 27/27, 2005/2044 tests (39 skipped). Linux musl x86 and the full
+  sanitizer job: 36/36, 2068/2084 (16 skipped). `consumer-smoke ok:
+  quic-zig 0.40.0`; `check-modes: 6 of 6 as expected`. Real-socket echo
+  and 16 MiB upload/FIN-ACK smoke tests passed.
+- rc-fuzz: [run 38075224074](https://github.com/nullstyle/quic-zig/actions/runs/38075224074);
+  `coverage verified: instrumented, 2,637,540
+  executions across 43 sites (floor 1,935,000)`. Coverage header:
+  `unique_runs=10,277 pcs_len=47345`; no failing-site or saved-input lines.
+- quic-go-interop: [run 38075222415](https://github.com/nullstyle/quic-zig/actions/runs/38075222415);
+  `pairs=1 cells=2 succeeded=2 failed=0
+  known_failed=0 unsupported=0 skipped=0 flaky_passed=0 flaky_failed=0`.
+- QNS Image: [run 38075222433](https://github.com/nullstyle/quic-zig/actions/runs/38075222433);
+  `Build and push QNS image: success`,
+  on the tag commit. This validates the build only: the log has
+  `publish_image: false` and `push: false`; registry publication is disabled.
+- pin-lint: [run 38075222408](https://github.com/nullstyle/quic-zig/actions/runs/38075222408);
+  `pin-lint: OK`, `zig pins agree: 0.17.0`.
+
+Package hash: `quic-0.40.0-DnSYvSs1QADqzgHFcxff2HzBAezXWXpCJD2BCKJEemBu`.
+The [downstream note](DOWNSTREAM-NOTE-v0.40.0.md) is saved in this repository
+and copied to the handoff directory. The Claude downstream sessions are
+unavailable to this chat's message tools, so the verified note is ready
+for the owner to relay.
+No downstream checkout or dependency pin was changed.
+
+The owner corrected the old worktree directive during this sprint: repository
+work belongs in the main checkout on `main`; use worktrees only for parallel
+efforts that can conflict, then merge back to main and the main working
+directory after each sprint. The saved work was fast-forwarded into the
+main checkout, and this release was completed there.
