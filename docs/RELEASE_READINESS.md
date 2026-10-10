@@ -2382,3 +2382,31 @@ The maintained [integrator brief](DOWNSTREAM_INTEGRATION.md) owns the pin,
 cumulative migration guidance, release history, and relay status. It is
 ready for owner relay; no delivery to unavailable Claude sessions is claimed.
 No consumer checkout or pin was changed.
+
+## v0.42.0 — bounded stream cleanup, 2026-10-10
+
+Implementation `371d6e16c7fa01979b4166423aea2df24ca1387e` is on main in the
+main checkout. v0.42.0 is planned; the current verified pin remains v0.41.0
+until all five exact-tag CI gates are read.
+
+The fixed candidate list avoids most full-map cleanup walks, reducing paired
+M3 tick time per stream 48–79% at windows 1,024–4,096. Overflow and explicit
+marking use the authoritative walk. The batch cap, retirement order, end
+records, stream credit and late replies are preserved. No API or toolchain
+migration; the inline list adds 1 KiB of pointers per 64-bit Connection plus
+bookkeeping, with no new heap allocation. Bulk/UDP rates remain within noise.
+Production full-harness wall time rises 3.7%, while the same-binary control
+falls 5.1%; no general request-throughput gain is claimed.
+
+Local full Debug/ReleaseSafe, Windows and x86-linux-musl checks, and every
+named build step pass. Four preservation tests and three behavioral mutants
+cover the new rule; all 31 virtual cells are byte-identical. Paired native UDP
+checks exact bytes/clean FIN completion plus single/multi-peer tails. The
+wide external matrix is not repeated because batching, retirement/credit
+order and virtual behavior agree; exact-tag quic-go interop remains required.
+See [the sprint report](STREAM_CLEANUP_SPRINT.md),
+[portable evidence](stream-cleanup-2026-10-10.json), and the maintained
+[integrator brief](DOWNSTREAM_INTEGRATION.md).
+
+M3 compiler-size proof: Connection 11,480 → 12,512 bytes (+1,032, 9.0%),
+Stream 440 → 440. The fixed connection cost applies even when idle.

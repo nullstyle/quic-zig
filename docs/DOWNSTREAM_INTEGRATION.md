@@ -18,6 +18,20 @@ See [the sprint evidence](PACKET_BUILDER_SPRINT.md). The preceding
 [UDP sprint](UDP_IO_SPRINT.md) and [line-rate profile](LINE_RATE_PROFILE.md)
 remain dated evidence; cumulative benchmark-reader guidance is below.
 
+## Main-only stream cleanup sprint
+
+The implementation on main names cleanup candidates at lifecycle transitions
+and avoids most full-map cleanup scans. Six paired M3 trials reduce tick time
+48–79% at windows 1,024–4,096; a same-binary control confirms the scan cost.
+The 128-stream batch, 256-record end evidence, retirement order and late replies
+are preserved. No API/toolchain migration is required. The bounded inline list
+adds 1,032 bytes per M3 Connection (11,480 → 12,512); Stream stays 440 bytes.
+This fixed memory cost also applies to idle connections; the list never allocates.
+The production harness wall result is 3.7% slower while the same-binary control
+is 5.1% faster; no application-throughput gain is promised. Bulk and UDP are
+within noise. v0.42.0 is planned, pending exact-tag proof. See
+[stream cleanup evidence](STREAM_CLEANUP_SPRINT.md).
+
 ## Current pin and build options
 
 Tag `v0.41.0` = `71e205c0717f6cf243f794031661d35a5fdb2fd9`.
