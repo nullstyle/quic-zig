@@ -1375,23 +1375,20 @@ pub fn pollLevelOnPath(
     //     whose RESET hasn't been queued yet. At most one per
     //     packet; remaining resets ride subsequent packets.
     if (!path_response_used_addr_override and !congestion_blocked and lvl == .application) {
-        var rs_it = conn.streams.iterator();
-        while (rs_it.next()) |entry| {
-            const s = entry.value_ptr.*;
+        if (pendingResetStream(conn)) |s| {
             if (s.send.reset) |*ri| {
-                if (ri.queued) continue;
                 const rs: frame_types.ResetStream = .{
                     .stream_id = s.id,
                     .application_error_code = ri.error_code,
                     .final_size = ri.final_size,
                 };
-                if (!try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .reset_stream = rs })) break;
-                try sent_packet.addRetransmitFrame(conn.allocator, .{ .reset_stream = rs });
-                ri.queued = true;
-                // The reset is on its way: nothing more to send here.
-                conn_streams.noteSendable(conn, s);
-                ack_eliciting = true;
-                break;
+                if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .reset_stream = rs })) {
+                    try sent_packet.addRetransmitFrame(conn.allocator, .{ .reset_stream = rs });
+                    ri.queued = true;
+                    // The reset is on its way: nothing more to send here.
+                    conn_streams.noteSendable(conn, s);
+                    ack_eliciting = true;
+                }
             }
         }
     }
@@ -1664,6 +1661,61 @@ pub fn pollLevelOnPath(
     }
 
     return n;
+}
+
+/// Resets already belong to the sendable list until emitted. Search its
+/// full length: the bounded STREAM chunk selection can hide a reset
+/// behind more than 32 data streams. No second queue or lifecycle hooks.
+/// After an insertion failure, the map remains the authoritative fallback.
+fn pendingResetStream(conn: *Connection) ?*Stream {
+    if (conn.sendable_degraded) return pendingResetByWalk(conn);
+    var selected: ?*Stream = null;
+    for (conn.sendable.items) |s| {
+        if (s.send.reset) |r| {
+            if (!r.queued) {
+                selected = s;
+                break;
+            }
+        }
+    }
+    if (builtin.mode == .debug) {
+        // Every pending reset must still be represented. Check the full
+        // set, not just presence: one listed reset must not mask another
+        // that a missed ACK/loss/STOP_SENDING transition left off the list.
+        var listed: usize = 0;
+        for (conn.sendable.items) |s| {
+            if (s.send.reset) |r| {
+                if (!r.queued) listed += 1;
+            }
+        }
+        var walked: usize = 0;
+        var it = conn.streams.iterator();
+        while (it.next()) |entry| {
+            const s = entry.value_ptr.*;
+            if (s.send.reset) |r| {
+                if (!r.queued) {
+                    std.debug.assert(s.in_sendable);
+                    walked += 1;
+                }
+            }
+        }
+        std.debug.assert(listed == walked);
+    }
+    // Keep the existing map order when resets are present. Only the
+    // common no-reset case skips the map, so reset ordering on the wire
+    // and its one-frame-per-packet budget stay unchanged.
+    return if (selected != null) pendingResetByWalk(conn) else null;
+}
+
+fn pendingResetByWalk(conn: *Connection) ?*Stream {
+    var it = conn.streams.iterator();
+    while (it.next()) |entry| {
+        const s = entry.value_ptr.*;
+        if (s.send.reset) |r| {
+            if (!r.queued) return s;
+        }
+    }
+    return null;
 }
 
 /// A CONNECTION_CLOSE has left (in one packet, or in the packets of

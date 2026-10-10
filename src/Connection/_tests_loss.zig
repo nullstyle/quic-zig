@@ -954,6 +954,134 @@ test "server HANDSHAKE_DONE emits with retransmit metadata and requeues on loss"
     try std.testing.expect(conn.pending_handshake_done);
 }
 
+test "reset builder: retries a reset beyond the stream chunk cap, then ACK and GC retire it" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try installTestApplicationWriteSecret(conn);
+    try conn.setPeerDcid(&.{0xaa});
+    try std.testing.expect(conn.markPathValidated(0));
+    conn.setRememberedPeerTransportParams(.{
+        .initial_max_data = 1 << 20,
+        .initial_max_stream_data_bidi_remote = 1 << 20,
+        .initial_max_streams_bidi = 128,
+    });
+    // More pending data streams than the builder's bounded chunk array.
+    // The reset is last by priority and must still lead their data.
+    for (0..64) |i| {
+        const id = i * 4;
+        _ = try conn.openBidi(id);
+        _ = try conn.streamWrite(id, "x");
+    }
+    const s = try conn.openBidi(256);
+    _ = try conn.streamWrite(s.id, "tail");
+    try conn.streamSetPriority(s.id, .{ .urgency = 7 });
+    try conn.streamReset(s.id, (1 << 62) - 1);
+    try std.testing.expect(s.in_sendable);
+    try std.testing.expectEqual(@as(usize, 65), conn.sendable.items.len);
+
+    // Too little payload room: keep the reset pending for another poll.
+    var tiny: [32]u8 = undefined;
+    try std.testing.expect(try conn.pollLevel(.application, &tiny, 1_000_000) == null);
+    try std.testing.expect(!s.send.reset.?.queued);
+    try std.testing.expect(s.in_sendable);
+    var packet: [default_mtu]u8 = undefined;
+    const n = (try conn.pollLevel(.application, &packet, 1_000_001)).?;
+    var plaintext: [max_recv_plaintext]u8 = undefined;
+    const opened = try short_packet_mod.open1Rtt(&plaintext, packet[0..n], .{
+        .dcid_len = 1,
+        .keys = (try conn.packetKeys(.application, .write)).?,
+        .largest_received = 0,
+    });
+    const decoded = try frame_mod.decode(opened.payload);
+    try std.testing.expect(decoded.frame == .reset_stream);
+    try std.testing.expectEqual(s.id, decoded.frame.reset_stream.stream_id);
+    try std.testing.expectEqual(@as(u64, 4), decoded.frame.reset_stream.final_size);
+    try std.testing.expect(s.send.reset.?.queued);
+    try std.testing.expect(!s.in_sendable);
+
+    const sent = conn.sentForLevel(.application);
+    _ = try conn.dispatchLostControlFrames(&sent.packets[0]);
+    try std.testing.expect(s.in_sendable);
+    try std.testing.expect(!s.send.reset.?.queued);
+    _ = (try conn.pollLevel(.application, &packet, 1_000_002)).?;
+    try std.testing.expectEqual(s.id, sent.packets[1].retransmit_frames.items[0].reset_stream.stream_id);
+    try std.testing.expect(!s.in_sendable);
+    // An ACK of the first copy also settles a later copy's loss.
+    conn_loss.dispatchAckedControlFrames(conn, &sent.packets[0]);
+    _ = try conn.dispatchLostControlFrames(&sent.packets[1]);
+    try std.testing.expectEqual(state.SendStream.State.reset_recvd, s.send.state);
+    try std.testing.expect(!s.in_sendable);
+    try conn.handleResetStream(.{ .stream_id = s.id, .application_error_code = 7, .final_size = 0 });
+    try conn.tick(1_000_003);
+    try std.testing.expect(conn.stream(256) == null);
+    try std.testing.expectEqual(conn.bytes_resident, conn.residentBytesSum());
+    // A late duplicate loss after GC cannot resurrect the removed stream.
+    _ = try conn.dispatchLostControlFrames(&sent.packets[1]);
+    try std.testing.expect(conn.stream(256) == null);
+}
+
+test "reset builder: failed sendable insertion falls back to the stream map" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(failing.allocator(), ctx, "x");
+    defer conn.destroy();
+    try installTestApplicationWriteSecret(conn);
+    try conn.setPeerDcid(&.{0xaa});
+    try std.testing.expect(conn.markPathValidated(0));
+    const s = try conn.openBidi(0);
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try conn.streamReset(0, 42);
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try std.testing.expect(conn.sendable_degraded);
+    try std.testing.expect(!s.in_sendable);
+    var packet: [default_mtu]u8 = undefined;
+    _ = (try conn.pollLevel(.application, &packet, 1_000_000)).?;
+    const reset = conn.sentForLevel(.application).packets[0].retransmit_frames.items[0].reset_stream;
+    try std.testing.expectEqual(@as(u64, 0), reset.stream_id);
+    try std.testing.expectEqual(@as(u64, 42), reset.application_error_code);
+    try std.testing.expect(s.send.reset.?.queued);
+}
+
+test "reset builder: multiple resets keep map order and emit once per packet" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    try installTestApplicationWriteSecret(conn);
+    try conn.setPeerDcid(&.{0xaa});
+    try std.testing.expect(conn.markPathValidated(0));
+    for ([_]u64{ 0, 4, 8 }) |id| {
+        _ = try conn.openBidi(id);
+        try conn.streamReset(id, id + 1);
+    }
+    try conn.streamSetPriority(8, .{ .urgency = 0 });
+    var packet: [default_mtu]u8 = undefined;
+    for (0..3) |i| {
+        var it = conn.streams.iterator();
+        var expected: ?u64 = null;
+        while (it.next()) |entry| {
+            const s = entry.value_ptr.*;
+            if (!s.send.reset.?.queued) {
+                expected = s.id;
+                break;
+            }
+        }
+        _ = (try conn.pollLevel(.application, &packet, 1_000_000 + i)).?;
+        const sent = &conn.sentForLevel(.application).packets[i];
+        try std.testing.expectEqual(@as(usize, 1), sent.retransmit_frames.items.len);
+        try std.testing.expectEqual(expected.?, sent.retransmit_frames.items[0].reset_stream.stream_id);
+        try std.testing.expectEqual(@as(usize, 2) - i, conn.sendable.items.len);
+    }
+    try std.testing.expect(try conn.pollLevel(.application, &packet, 1_000_003) == null);
+}
+
 test "idle timer closes and enters draining" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});
