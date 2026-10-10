@@ -39,6 +39,9 @@ and the configuration guide in [EMBEDDING.md](EMBEDDING.md).
 quic-zig is transport-only. HTTP/3, QPACK, WebTransport, and application
 protocol policy belong in a layer above this package.
 
+The maintained [downstream integration brief](docs/DOWNSTREAM_INTEGRATION.md)
+collects the verified release pin, dependency options, and migration guidance.
+
 ## Build And Test
 
 The repository pins its toolchain with `mise`.

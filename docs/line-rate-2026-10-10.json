@@ -1,0 +1,700 @@
+{
+  "date": "2026-10-10",
+  "source_tag": "v0.40.0",
+  "source_commit": "5796be0f8989a081bb563b96fcc6a856f43eb11d",
+  "scope": "in-memory engine and real IPv4 UDP loopback, not physical-link throughput",
+  "host": {
+    "hostname": "hoth-m3studio-001.local",
+    "hardware": "Apple M3 Ultra",
+    "logical_cpus": 32,
+    "memory_bytes": 549755813888,
+    "os": "Darwin 25.6.0 arm64",
+    "xcode": "16.3 (16E140)"
+  },
+  "toolchain": "Zig 0.17.0 via mise",
+  "mode": "ReleaseSafe",
+  "units": "MiB/s (the executables label these MB/s)",
+  "in_memory_batches": [
+    {
+      "name": "goodput_bulk_64mib",
+      "kind": "goodput",
+      "total_bytes": 67108864,
+      "sample_count": 9,
+      "samples_mb_per_sec": [
+        944.454,
+        979.087,
+        980.708,
+        981.52,
+        981.43,
+        981.911,
+        974.778,
+        979.567,
+        984.888
+      ],
+      "median_mb_per_sec": 980.708,
+      "mad_mb_per_sec": 1.204,
+      "datagrams": 87876,
+      "client_polls": 79364,
+      "transfer_allocs": 58,
+      "transfer_frees": 55,
+      "transfer_bytes_allocated": 12550046,
+      "poll_p50_ns": 0,
+      "poll_p90_ns": 1000,
+      "poll_p99_ns": 1000,
+      "poll_max_ns": 4000
+    },
+    {
+      "name": "goodput_bulk_64mib",
+      "kind": "goodput",
+      "total_bytes": 67108864,
+      "sample_count": 9,
+      "samples_mb_per_sec": [
+        993.619,
+        986.163,
+        982.997,
+        985.662,
+        987.106,
+        986.148,
+        984.07,
+        987.152,
+        988.371
+      ],
+      "median_mb_per_sec": 986.163,
+      "mad_mb_per_sec": 0.989,
+      "datagrams": 87876,
+      "client_polls": 79364,
+      "transfer_allocs": 58,
+      "transfer_frees": 55,
+      "transfer_bytes_allocated": 12550046,
+      "poll_p50_ns": 0,
+      "poll_p90_ns": 1000,
+      "poll_p99_ns": 1000,
+      "poll_max_ns": 8000
+    },
+    {
+      "name": "goodput_bulk_64mib",
+      "kind": "goodput",
+      "total_bytes": 67108864,
+      "sample_count": 9,
+      "samples_mb_per_sec": [
+        985.798,
+        982.937,
+        976.205,
+        982.997,
+        983.571,
+        985.859,
+        986.984,
+        988.906,
+        987.365
+      ],
+      "median_mb_per_sec": 985.798,
+      "mad_mb_per_sec": 2.227,
+      "datagrams": 87876,
+      "client_polls": 79364,
+      "transfer_allocs": 58,
+      "transfer_frees": 55,
+      "transfer_bytes_allocated": 12550046,
+      "poll_p50_ns": 0,
+      "poll_p90_ns": 1000,
+      "poll_p99_ns": 1000,
+      "poll_max_ns": 4000
+    }
+  ],
+  "udp_quiet": [
+    {
+      "name": "v040-udp-smoke",
+      "samples_mib_per_second": [
+        169.4,
+        135.1,
+        134.2,
+        137.0,
+        135.0,
+        132.3,
+        138.9,
+        137.1,
+        145.2
+      ],
+      "median": 137.0
+    },
+    {
+      "name": "v040-udp-long",
+      "samples_mib_per_second": [
+        171.3,
+        173.8,
+        178.5
+      ],
+      "median": 173.8
+    }
+  ],
+  "udp_tuning_interleaved": [
+    {
+      "trial": 1,
+      "name": "v040-udp-long",
+      "mib_per_second": 175.2
+    },
+    {
+      "trial": 1,
+      "name": "v040-udp-tuned",
+      "mib_per_second": 175.0
+    },
+    {
+      "trial": 2,
+      "name": "v040-udp-tuned",
+      "mib_per_second": 176.5
+    },
+    {
+      "trial": 2,
+      "name": "v040-udp-long",
+      "mib_per_second": 175.9
+    },
+    {
+      "trial": 3,
+      "name": "v040-udp-long",
+      "mib_per_second": 178.1
+    },
+    {
+      "trial": 3,
+      "name": "v040-udp-tuned",
+      "mib_per_second": 174.4
+    },
+    {
+      "trial": 4,
+      "name": "v040-udp-tuned",
+      "mib_per_second": 171.5
+    },
+    {
+      "trial": 4,
+      "name": "v040-udp-long",
+      "mib_per_second": 173.4
+    },
+    {
+      "trial": 5,
+      "name": "v040-udp-long",
+      "mib_per_second": 172.4
+    },
+    {
+      "trial": 5,
+      "name": "v040-udp-tuned",
+      "mib_per_second": 174.1
+    },
+    {
+      "trial": 6,
+      "name": "v040-udp-tuned",
+      "mib_per_second": 172.2
+    },
+    {
+      "trial": 6,
+      "name": "v040-udp-long",
+      "mib_per_second": 173.0
+    }
+  ],
+  "profiles": [
+    {
+      "file": "v040-final-cpu-1-samples.xml",
+      "sha256": "eeb084f7cf97d78361ada34f1ad88f33ffe260720e15e3053f328a60a3812d05",
+      "samples": 2153,
+      "states": {
+        "Running": 2153
+      },
+      "sample_weights_ns": {
+        "1000000": 2153
+      },
+      "total_weight_ns": 2153000000,
+      "flat_top": [
+        {
+          "symbol": "zbssl_aes_gcm_enc_kernel_eor3",
+          "samples": 207,
+          "share_percent": 9.614
+        },
+        {
+          "symbol": "zbssl_aes_gcm_dec_kernel_eor3",
+          "samples": 192,
+          "share_percent": 8.918
+        },
+        {
+          "symbol": "Connection.send.pollLevelOnPath",
+          "samples": 185,
+          "share_percent": 8.593
+        },
+        {
+          "symbol": "_platform_memmove",
+          "samples": 129,
+          "share_percent": 5.992
+        },
+        {
+          "symbol": "zbssl_CRYPTO_memcmp",
+          "samples": 89,
+          "share_percent": 4.134
+        },
+        {
+          "symbol": "bssl::zbssl::CRYPTO_gcm128_aad(bssl::zbssl::gcm128_key_st const*, bssl::zbssl::GCM128_CONTEXT*, unsigned char const*, unsigned long)",
+          "samples": 58,
+          "share_percent": 2.694
+        },
+        {
+          "symbol": "mach_absolute_time",
+          "samples": 57,
+          "share_percent": 2.647
+        },
+        {
+          "symbol": "_platform_memset",
+          "samples": 54,
+          "share_percent": 2.508
+        },
+        {
+          "symbol": "Connection.send.pollDatagramFull",
+          "samples": 38,
+          "share_percent": 1.765
+        },
+        {
+          "symbol": "bssl::zbssl::CRYPTO_gcm128_decrypt(bssl::zbssl::gcm128_key_st const*, bssl::zbssl::GCM128_CONTEXT*, unsigned char const*, unsigned char*, unsigned long)",
+          "samples": 33,
+          "share_percent": 1.533
+        },
+        {
+          "symbol": "conn.SentPacketTracker.record",
+          "samples": 31,
+          "share_percent": 1.44
+        },
+        {
+          "symbol": "bssl::zbssl::CRYPTO_gcm128_encrypt(bssl::zbssl::gcm128_key_st const*, bssl::zbssl::GCM128_CONTEXT*, unsigned char const*, unsigned char*, unsigned long)",
+          "samples": 29,
+          "share_percent": 1.347
+        },
+        {
+          "symbol": "wire.short_packet.seal1Rtt",
+          "samples": 24,
+          "share_percent": 1.115
+        },
+        {
+          "symbol": "Connection.paths.applicationPathForPoll",
+          "samples": 23,
+          "share_percent": 1.068
+        },
+        {
+          "symbol": "hash_map.Custom(u64,*Connection.Stream,hash_map.AutoContext(u64),80).getIndex__func_1095",
+          "samples": 21,
+          "share_percent": 0.975
+        }
+      ],
+      "callers": [
+        {
+          "leaf": "_platform_memmove",
+          "caller": "conn.SendStream.SendByteBuffer.appendSlice",
+          "samples": 37
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "conn.RecvStream.recv",
+          "samples": 21
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "mem.Allocator.allocBytesAligned__func_898",
+          "samples": 19
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "frame.encode.encodeStream",
+          "samples": 19
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "array_list.Aligned(u8,null).clearRetainingCapacity",
+          "samples": 16
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "conn.RecvStream.read",
+          "samples": 15
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "wire.short_packet.open1Rtt",
+          "samples": 11
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "mem.Allocator.allocBytesAligned__func_227",
+          "samples": 9
+        }
+      ],
+      "export_rows": 2153,
+      "stackless_sentinel_rows": 0
+    },
+    {
+      "file": "v040-final-cpu-2-samples.xml",
+      "sha256": "14724c27f841ba20ff9b6a5d37b1176a8b1db0984db18cecc6797169ed5ac22b",
+      "samples": 2152,
+      "states": {
+        "Running": 2152
+      },
+      "sample_weights_ns": {
+        "1000000": 2152
+      },
+      "total_weight_ns": 2152000000,
+      "flat_top": [
+        {
+          "symbol": "zbssl_aes_gcm_dec_kernel_eor3",
+          "samples": 191,
+          "share_percent": 8.875
+        },
+        {
+          "symbol": "zbssl_aes_gcm_enc_kernel_eor3",
+          "samples": 187,
+          "share_percent": 8.69
+        },
+        {
+          "symbol": "Connection.send.pollLevelOnPath",
+          "samples": 179,
+          "share_percent": 8.318
+        },
+        {
+          "symbol": "_platform_memmove",
+          "samples": 135,
+          "share_percent": 6.273
+        },
+        {
+          "symbol": "zbssl_CRYPTO_memcmp",
+          "samples": 102,
+          "share_percent": 4.74
+        },
+        {
+          "symbol": "_platform_memset",
+          "samples": 61,
+          "share_percent": 2.835
+        },
+        {
+          "symbol": "bssl::zbssl::CRYPTO_gcm128_aad(bssl::zbssl::gcm128_key_st const*, bssl::zbssl::GCM128_CONTEXT*, unsigned char const*, unsigned long)",
+          "samples": 50,
+          "share_percent": 2.323
+        },
+        {
+          "symbol": "bssl::zbssl::CRYPTO_gcm128_encrypt(bssl::zbssl::gcm128_key_st const*, bssl::zbssl::GCM128_CONTEXT*, unsigned char const*, unsigned char*, unsigned long)",
+          "samples": 32,
+          "share_percent": 1.487
+        },
+        {
+          "symbol": "mach_absolute_time",
+          "samples": 31,
+          "share_percent": 1.441
+        },
+        {
+          "symbol": "conn.SentPacketTracker.record",
+          "samples": 31,
+          "share_percent": 1.441
+        },
+        {
+          "symbol": "bssl::zbssl::CRYPTO_gcm128_decrypt(bssl::zbssl::gcm128_key_st const*, bssl::zbssl::GCM128_CONTEXT*, unsigned char const*, unsigned char*, unsigned long)",
+          "samples": 27,
+          "share_percent": 1.255
+        },
+        {
+          "symbol": "wire.short_packet.seal1Rtt",
+          "samples": 27,
+          "share_percent": 1.255
+        },
+        {
+          "symbol": "Connection.send.pollDatagramFull",
+          "samples": 26,
+          "share_percent": 1.208
+        },
+        {
+          "symbol": "zbssl_aes_hw_encrypt",
+          "samples": 24,
+          "share_percent": 1.115
+        },
+        {
+          "symbol": "conn.RecvStream.recv",
+          "samples": 24,
+          "share_percent": 1.115
+        }
+      ],
+      "callers": [
+        {
+          "leaf": "_platform_memmove",
+          "caller": "conn.RecvStream.recv",
+          "samples": 31
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "conn.RecvStream.read",
+          "samples": 23
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "conn.SendStream.SendByteBuffer.appendSlice",
+          "samples": 20
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "mem.Allocator.allocBytesAligned__func_898",
+          "samples": 17
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "frame.encode.encodeStream",
+          "samples": 16
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "array_list.Aligned(u8,null).clearRetainingCapacity",
+          "samples": 13
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "mem.Allocator.allocBytesAligned__func_227",
+          "samples": 11
+        },
+        {
+          "leaf": "_platform_memmove",
+          "caller": "e2e.harness.runGoodputOnce",
+          "samples": 8
+        }
+      ],
+      "export_rows": 2153,
+      "stackless_sentinel_rows": 1
+    },
+    {
+      "file": "v040-final-udp-cpu-samples.xml",
+      "sha256": "5abe55d06f5b36711b838db0c176f0f504d877a69a6eb8e8966a411890391126",
+      "samples": 4838,
+      "states": {
+        "Running": 4838
+      },
+      "sample_weights_ns": {
+        "1000000": 4838
+      },
+      "total_weight_ns": 4838000000,
+      "flat_top": [
+        {
+          "symbol": "__sendmsg",
+          "samples": 2505,
+          "share_percent": 51.778
+        },
+        {
+          "symbol": "__recvmsg",
+          "samples": 689,
+          "share_percent": 14.241
+        },
+        {
+          "symbol": "poll",
+          "samples": 326,
+          "share_percent": 6.738
+        },
+        {
+          "symbol": "_platform_memset",
+          "samples": 301,
+          "share_percent": 6.222
+        },
+        {
+          "symbol": "hash_map.Custom(u64,*Connection.Stream,hash_map.AutoContext(u64),80).getIndex__func_809",
+          "samples": 152,
+          "share_percent": 3.142
+        },
+        {
+          "symbol": "hash_map.Custom(u64,conn.SendStream.Chunk,hash_map.AutoContext(u64),80).getOrPutAssumeCapacityAdapted__func_1002",
+          "samples": 129,
+          "share_percent": 2.666
+        },
+        {
+          "symbol": "zbssl_aes_gcm_dec_kernel_eor3",
+          "samples": 69,
+          "share_percent": 1.426
+        },
+        {
+          "symbol": "Random.Xoshiro256.fill",
+          "samples": 54,
+          "share_percent": 1.116
+        },
+        {
+          "symbol": "zbssl_aes_gcm_enc_kernel_eor3",
+          "samples": 52,
+          "share_percent": 1.075
+        },
+        {
+          "symbol": "Connection.send.pollLevelOnPath",
+          "samples": 42,
+          "share_percent": 0.868
+        },
+        {
+          "symbol": "_platform_memmove",
+          "samples": 36,
+          "share_percent": 0.744
+        },
+        {
+          "symbol": "zbssl_CRYPTO_memcmp",
+          "samples": 23,
+          "share_percent": 0.475
+        },
+        {
+          "symbol": "hash_map.Custom(u64,conn.SendStream.Chunk,hash_map.AutoContext(u64),80).Metadata.isTombstone",
+          "samples": 22,
+          "share_percent": 0.455
+        },
+        {
+          "symbol": "transport.udp_server.runUdpServer",
+          "samples": 15,
+          "share_percent": 0.31
+        },
+        {
+          "symbol": "mach_absolute_time",
+          "samples": 15,
+          "share_percent": 0.31
+        }
+      ],
+      "callers": [
+        {
+          "leaf": "__sendmsg",
+          "caller": "Io.Threaded.netSendOnePosix",
+          "samples": 2340
+        },
+        {
+          "leaf": "__recvmsg",
+          "caller": "Io.Threaded.netReceivePosix",
+          "samples": 631
+        },
+        {
+          "leaf": "poll",
+          "caller": "Io.Threaded.batchAwaitConcurrent",
+          "samples": 312
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "goodput_smoke.SinkApp.onIteration",
+          "samples": 246
+        },
+        {
+          "leaf": "__sendmsg",
+          "caller": "Io.Threaded.operate",
+          "samples": 165
+        },
+        {
+          "leaf": "__recvmsg",
+          "caller": "Io.Threaded.batchAwaitConcurrent",
+          "samples": 43
+        },
+        {
+          "leaf": "_platform_memset",
+          "caller": "start.callMain",
+          "samples": 29
+        },
+        {
+          "leaf": "__recvmsg",
+          "caller": "Io.Threaded.operate",
+          "samples": 15
+        }
+      ],
+      "export_rows": 4840,
+      "stackless_sentinel_rows": 2
+    }
+  ],
+  "probe_source_changes": [
+    "512MiB replaces the smoke example 16MiB total payload",
+    "tuned probe only: client and server tune_socket=true"
+  ],
+  "library_changes": [],
+  "raw_evidence": "benchmark-reports/line-rate-v041/remote (ignored scratch; v041 is a directory label, not a release)",
+  "in_memory_flat_groups": {
+    "AES-GCM encryption/decryption kernels": {
+      "samples": 777,
+      "share_percent": 18.049
+    },
+    "Packet builder": {
+      "samples": 364,
+      "share_percent": 8.455
+    },
+    "Copies and fills": {
+      "samples": 379,
+      "share_percent": 8.804
+    },
+    "AEAD tag comparison": {
+      "samples": 191,
+      "share_percent": 4.437
+    },
+    "Clock": {
+      "samples": 88,
+      "share_percent": 2.044
+    },
+    "GCM associated data": {
+      "samples": 108,
+      "share_percent": 2.509
+    },
+    "Sent-packet tracking": {
+      "samples": 62,
+      "share_percent": 1.44
+    },
+    "Stream-map iteration": {
+      "samples": 41,
+      "share_percent": 0.952
+    }
+  },
+  "binary_sha256": {
+    "v040-bench-e2e": "62afaf823d28480283dd7719a17de655b9aa578810a08218d4ad1274a0a2afff",
+    "v040-udp-smoke": "984468a971e48e171b1d772ff44874d1829925a01b3d6ccda22bb7f6f2b49ad3",
+    "v040-udp-long": "66d40558c94acc2bfcba0a3ef8de76e8a09cf3d1d96b9d7ee7f663923b7f1884",
+    "v040-udp-tuned": "a421f587e2f024a1ced6bacc2101e5b3097edc70f41d9f13e9bdbe9e557e024f"
+  },
+  "excluded_runs": {
+    "local M5 exploratory": "concurrent Ghidra workload; different host",
+    "first remote measurements and profiles": "replaced after finding CoreSimulator cache-build activity during UDP timings; original raw files retained"
+  },
+  "cpu_snapshots": {
+    "final-timing-cpu-before.txt": {
+      "sha256": "2a4a467d4d77593476dd18189b7066ad75a3fc55bf8816dd4054a44ed4b78789",
+      "cpu_usage_lines": [
+        "CPU usage: 0.61% user, 3.23% sys, 96.15% idle ",
+        "CPU usage: 0.16% user, 0.50% sys, 99.32% idle "
+      ]
+    },
+    "v040-final-cpu-2-cpu-before.txt": {
+      "sha256": "6d5f3a62b3c5b86e8205af29a7179688ed2cc53e452a27184c52acbd793e916e",
+      "cpu_usage_lines": [
+        "CPU usage: 0.48% user, 3.6% sys, 96.45% idle ",
+        "CPU usage: 0.28% user, 0.64% sys, 99.6% idle "
+      ]
+    },
+    "v040-final-udp-cpu-cpu-before.txt": {
+      "sha256": "3776967e631be9d012bb3012f787e209be0d873cf7791c50c76903b2e8ce001c",
+      "cpu_usage_lines": [
+        "CPU usage: 0.82% user, 3.47% sys, 95.70% idle ",
+        "CPU usage: 0.97% user, 1.28% sys, 97.73% idle "
+      ]
+    },
+    "v040-final-cpu-1-cpu-before.txt": {
+      "sha256": "410b237c249e6b74f040fb7cf8d08984c4cf41199c44d038cb9e189d604df559",
+      "cpu_usage_lines": [
+        "CPU usage: 0.62% user, 2.82% sys, 96.54% idle ",
+        "CPU usage: 0.25% user, 0.59% sys, 99.15% idle "
+      ]
+    },
+    "final-timing-cpu-after.txt": {
+      "sha256": "b6b5a74cfb5f58fee102f057b0d8938f9d3928213723b4998ccb640e8cf240ec",
+      "cpu_usage_lines": [
+        "CPU usage: 0.42% user, 2.98% sys, 96.58% idle ",
+        "CPU usage: 0.22% user, 0.67% sys, 99.9% idle "
+      ]
+    },
+    "v040-final-cpu-2-cpu-after.txt": {
+      "sha256": "3e08e4f465bf977eff7f60faabf876720d3aea8d833443a6beaf89cc30392a58",
+      "cpu_usage_lines": [
+        "CPU usage: 0.46% user, 3.25% sys, 96.28% idle ",
+        "CPU usage: 0.62% user, 0.81% sys, 98.55% idle "
+      ]
+    },
+    "v040-final-cpu-1-cpu-after.txt": {
+      "sha256": "677a6cfb5b701ac791bd9b5914304381d5820979118f9471c0de28f44d373d23",
+      "cpu_usage_lines": [
+        "CPU usage: 0.77% user, 3.40% sys, 95.82% idle ",
+        "CPU usage: 0.19% user, 0.47% sys, 99.32% idle "
+      ]
+    },
+    "v040-final-udp-cpu-cpu-after.txt": {
+      "sha256": "9009a2357599a51d95768e7ecf29cbf0bef8a26a78567b60f9f5837c58a18954",
+      "cpu_usage_lines": [
+        "CPU usage: 0.62% user, 3.44% sys, 95.92% idle ",
+        "CPU usage: 0.19% user, 0.56% sys, 99.23% idle "
+      ]
+    }
+  }
+}

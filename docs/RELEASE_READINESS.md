@@ -2208,7 +2208,7 @@ CI still applies.
   `pin-lint: OK`, `zig pins agree: 0.17.0`.
 
 Package hash: `quic-0.40.0-DnSYvSs1QADqzgHFcxff2HzBAezXWXpCJD2BCKJEemBu`.
-The [downstream note](DOWNSTREAM-NOTE-v0.40.0.md) is saved in this repository
+The [downstream note](DOWNSTREAM_INTEGRATION.md) is saved in this repository
 and copied to the handoff directory. The Claude downstream sessions are
 unavailable to this chat's message tools, so the verified note is ready
 for the owner to relay.
@@ -2219,3 +2219,52 @@ work belongs in the main checkout on `main`; use worktrees only for parallel
 efforts that can conflict, then merge back to main and the main working
 directory after each sprint. The saved work was fast-forwarded into the
 main checkout, and this release was completed there.
+
+## 2026-10-10 — line-rate profiling and workflow records
+
+Documentation-only sprint on the main checkout's `main`. No library,
+example, build, or toolchain source was changed; no new release tag was
+created. The verified pin remains v0.40.0, with the five tag-commit gates
+above. No downstream pin was changed.
+
+The [bulk-transfer CPU report](LINE_RATE_PROFILE.md) and its
+[machine-readable measurements](line-rate-2026-10-10.json) record the
+exact-tag archive, host/toolchain, raw artifact locations/hashes, timing
+samples, profile interpretation, reproduction, and next-sprint proposals.
+The owner supplied the quiet `hoth-m3studio-001.local` M3 Ultra. All remote
+work used unrelated scratch exports, not another project's checkout.
+
+Three serial nine-sample in-memory batches give a median-of-medians of
+985.8 MiB/s. Real UDP loopback medians are 137.0 MiB/s for nine stock
+16 MiB uploads and 173.8 MiB/s for three 512 MiB uploads. Every upload
+validated the byte count and clean FIN. In twelve additional interleaved
+512 MiB runs, tuning off/on medians were 174.30/174.25 MiB/s: no meaningful
+tuning gain. These are loopback measurements, not physical-NIC throughput.
+
+Two in-memory CPU captures contain 4,305 running samples; one real-UDP
+capture contains 4,838. Real UDP spends 72.8% of its sampled running CPU in
+sendmsg, recvmsg, and poll. The packet builder is 8.5% in-memory and 0.9%
+in real UDP. No speculative speedup is claimed. Next proposals are UDP I/O
+work (recommended) and packet-builder bookkeeping; acceptance criteria are
+in the report. A transport change starts after the owner's choice.
+
+The owner requested one maintained downstream brief and a detailed
+recommendations table after each sprint. The former per-tag v0.40.0 note
+is replaced by [DOWNSTREAM_INTEGRATION.md](DOWNSTREAM_INTEGRATION.md), which
+collects the current pin/options, cumulative migrations, release history,
+CI evidence, and delivery ownership. README and EMBEDDING link it;
+CONTRIBUTING records the workflow, including main-checkout/main work and
+merging any conflicting parallel worktrees back after each sprint.
+
+Earlier remote UDP timing overlapped an Apple CoreSimulator cache rebuild.
+All timing batches and CPU captures were repeated after it finished; only
+the final set is reported. Host snapshots show 99.32% idle before and
+99.9% after timing, and 97.73–99.32% around individual CPU captures.
+
+Validation for this documentation-only commit: all recorded profile counts
+and timing medians were recomputed from raw artifacts; every real-UDP run
+log was checked for complete bytes and clean FIN; JSON and edited-document
+local links validated; git diff whitespace checks clean. Builds and real
+UDP runs used exact v0.40.0 library source. Protocol tests, cross checks,
+fuzzing, and interop were not repeated for documentation edits; their
+verified release evidence remains recorded above.

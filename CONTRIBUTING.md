@@ -280,6 +280,18 @@ RELEASE_READINESS.md, not an open item.)
   their own sessions when they choose. A quic release note still goes
   to the whole set (information), and a security fix is a move for
   everyone at once; otherwise a cluster may sit on an older tag.
+- **Maintain one integrator brief**, [docs/DOWNSTREAM_INTEGRATION.md](docs/DOWNSTREAM_INTEGRATION.md).
+  Update its verified tag, package hash, migration guidance, release history,
+  and delivery status in place. Label unreleased changes as main-only.
+  Do not create a new downstream-note file for each tag.
+- **End every sprint with a recommendations table.** Give the owner the
+  concrete problem, proposed work, expected benefit or measurement goal,
+  scope and risk, and validation for each option. Mark the recommended
+  option. Keep proposals separate from measured results and wait for the
+  owner's choice before starting the next sprint.
+- **Work in the main checkout on main.** Use worktrees only for highly
+  parallel efforts that can conflict. Merge back into main and the main
+  working directory after every sprint.
 - **Any breaking change to the public surface bumps the manifest
   version** — pre-1.0 that means the minor (`0.x` → `0.(x+1)`) — in the
   same change that lands the break, using a `-dev` pre-release suffix

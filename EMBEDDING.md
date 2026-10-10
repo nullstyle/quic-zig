@@ -12,6 +12,10 @@ This guide covers the stable embedding surfaces:
 quic-zig is pre-1.0, so APIs may change between 0.x releases. The
 module name in Zig code is `quic`.
 
+For the current verified pin, coordinated dependency options, and cumulative
+migration guidance, see the maintained
+[downstream integration brief](docs/DOWNSTREAM_INTEGRATION.md).
+
 ## Package Setup
 
 In a consuming `build.zig`, import the module from the package
