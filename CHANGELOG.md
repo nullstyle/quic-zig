@@ -5,6 +5,16 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.42.2] - 2026-10-10
+
+### Fixed
+
+- Benchmark fixtures use their own Threaded-only module configuration. The
+  new startup-failure tests in 0.42.1 otherwise instantiate stock Zig 0.17's
+  incompatible Uring backend on native Linux. The evented benchmark executable
+  still uses its explicit backend build option. Do not pin v0.42.1: its Linux
+  release gates failed.
+
 ## [0.42.1] - 2026-10-10
 
 ### Fixed
