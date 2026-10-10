@@ -1372,6 +1372,9 @@ fn fuzzConnStreamWindow(_: void, smith: *std.testing.Smith) anyerror!void {
                         s.send.fin_acked = true;
                         s.send.state = .data_recvd;
                     }
+                    // This operation simulates the ACK instead of feeding
+                    // its frame. Include the real handler's notification.
+                    if (@import("streams.zig").streamReclaimable(conn, s)) conn.markStreamsGc();
                 }
             },
             .tick => {

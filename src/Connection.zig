@@ -5563,8 +5563,11 @@ fn tickFull(self: *Connection, now_us: u64) Error!void {
     // are reentered with stream pointers held — the GC removes
     // entries from `self.streams`, which would invalidate any
     // outstanding `*Stream` borrowed from `streams.get`. `tick`
-    // holds no such borrows.
-    self.gcClosedStreams();
+    // holds no such borrows. Every transition that can end a stream
+    // marks streams_gc_pending; a busy connection with no such work
+    // need not walk its whole stream table on every tick. Debug keeps
+    // the walk and checks that the pending flag did not miss a reclaim.
+    if (self.streams_gc_pending or builtin.mode == .debug) self.gcClosedStreams();
 }
 
 /// One handshake driver step:

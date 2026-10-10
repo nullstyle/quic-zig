@@ -176,3 +176,45 @@ test "a stream the application stopped is reclaimed by the next tick of a connec
     try std.testing.expect(sconn.atRest());
     try std.testing.expect(cli.conn.atRest());
 }
+
+test "tick reclaims an ended stream while unrelated stream work keeps the connection busy" {
+    var srv = try serverInit();
+    defer srv.deinit();
+    var cli = try clientConnect();
+    defer cli.deinit();
+    var now_us: u64 = 1_000;
+    try handshake(&srv, &cli, &now_us);
+    try settle(&srv, &cli, &now_us);
+    const sconn = srv.iterator()[0].conn;
+
+    // A live bidi request beside a uni stream that ends on both sides.
+    _ = try cli.conn.openBidi(0);
+    _ = try cli.conn.streamWrite(0, "request");
+    _ = try cli.conn.openUni(2);
+    _ = try cli.conn.streamWrite(2, "abc");
+    try cli.conn.streamFinish(2);
+    try c2s(&cli, &srv, now_us);
+    try s2c(&srv, &cli, now_us);
+    var buf: [8]u8 = undefined;
+    const r = try sconn.streamReadFin(2, &buf);
+    try std.testing.expectEqual(@as(usize, 3), r.n);
+    try std.testing.expect(r.fin);
+    try std.testing.expect(sconn.streams_gc_pending);
+    try std.testing.expect(cli.conn.streams_gc_pending);
+
+    // Neither endpoint can use the rest shortcut. The ordinary tick
+    // must still reclaim the ended stream, and keep the unrelated one.
+    _ = try sconn.streamWrite(0, "reply pending");
+    cli.conn.requestPing();
+    try srv.tick(now_us);
+    try cli.conn.tick(now_us);
+    try std.testing.expect(sconn.stream(2) == null);
+    try std.testing.expect(cli.conn.stream(2) == null);
+    try std.testing.expect(sconn.stream(0) != null);
+    try std.testing.expect(cli.conn.stream(0) != null);
+    try std.testing.expect(sconn.stream(0).?.send.hasPendingChunk());
+    try std.testing.expect(!sconn.streams_gc_pending);
+    try std.testing.expect(!cli.conn.streams_gc_pending);
+    try std.testing.expectEqual(sconn.bytes_resident, sconn.residentBytesSum());
+    try std.testing.expectEqual(cli.conn.bytes_resident, cli.conn.residentBytesSum());
+}

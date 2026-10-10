@@ -624,6 +624,8 @@ test "gcClosedStreams reclaims bidi streams whose send + recv halves are both te
     }
     try std.testing.expectEqual(@as(usize, n), conn.streamCount());
 
+    // These fixtures set terminal state directly, without receive/ACK handlers.
+    conn.markStreamsGc();
     try conn.tick(1_000_000);
     try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
 }
@@ -645,6 +647,7 @@ test "gcClosedStreams reclaims bidi streams whose send is reset_recvd and recv i
     s.recv.final_size = 0;
     s.recv.state = .reset_recvd;
 
+    conn.markStreamsGc();
     try conn.tick(1_000_000);
     try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
 }
@@ -710,6 +713,7 @@ test "gcClosedStreams reclaims local-initiated uni streams once send is terminal
     // recv stays at .recv — peer can't send on a local-initiated uni
     // stream, so the recv half is structurally dead from the start.
 
+    conn.markStreamsGc();
     try conn.tick(1_000_000);
     try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
 }
@@ -743,6 +747,7 @@ test "gcClosedStreams reclaims peer-initiated uni streams once recv is terminal 
     s.recv.state = .data_recvd;
     // send stays at .ready — local can't send on a peer-initiated uni.
 
+    conn.markStreamsGc();
     try conn.tick(1_000_000);
     try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
     // The id space never saw this id, so it does not count a close for
@@ -971,6 +976,7 @@ test "gcClosedStreams: a reaped local uni stream id cannot be opened again" {
     try conn.streamFinish(sid);
     stream.send.fin_acked = true;
     stream.send.state = .data_recvd;
+    conn.markStreamsGc();
     try conn.tick(1000);
     try std.testing.expect(conn.stream(sid) == null);
 
@@ -1370,6 +1376,7 @@ test "STOP_SENDING or MAX_STREAM_DATA for a peer stream that closed is ignored" 
     const s = conn.stream(0).?;
     s.send.fin_acked = true;
     s.send.state = .data_recvd;
+    conn.markStreamsGc();
     try conn.tick(1_000_000);
     try std.testing.expect(conn.stream(0) == null);
 
@@ -1401,6 +1408,7 @@ test "STOP_SENDING after every byte was acknowledged makes no RESET_STREAM" {
     s.send.fin_acked = true;
     s.send.state = .data_recvd;
 
+    conn.markStreamsGc();
     try stopSending(conn, 0);
     try std.testing.expectEqual(SendStream.State.data_recvd, s.send.state);
     try std.testing.expect(s.send.reset == null);

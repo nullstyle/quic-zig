@@ -16,6 +16,15 @@ changes.
   Client adds optional `Config.log_callback` and `log_user_data`, with
   `Client.LogEvent` and `Client.LogCallback` for configuration warnings.
 
+### Changed
+
+- `Connection.tick` walks the stream table for cleanup only when a
+  receive, read, or acknowledgement marks cleanup work. Busy connections
+  with no ended streams avoid the full walk on every tick. Debug keeps
+  the walk and asserts that the pending flag missed no reclaimable stream.
+  The send scheduler already uses the sendable list in release builds.
+- The churn benchmark reports both poll and tick microseconds per stream.
+
 ### Fixed
 
 - `Connection.isClosed` documentation now matches the code: true when

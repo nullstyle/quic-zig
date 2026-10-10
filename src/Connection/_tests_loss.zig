@@ -1135,6 +1135,10 @@ test "gcClosedStreams batch cap rolls surplus to the next tick" {
         s.recv.state = .data_recvd;
     }
 
+    // The fixture sets terminal state directly; real transitions mark
+    // this work when a FIN/reset is received, read, or acknowledged.
+    conn.markStreamsGc();
+
     try conn.tick(1_000_000);
     // Batch cap is 128 — first pass leaves at most `total - 128`.
     try std.testing.expect(conn.streamCount() <= total - 128);

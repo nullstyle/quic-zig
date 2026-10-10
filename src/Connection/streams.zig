@@ -609,6 +609,7 @@ pub fn gcClosedStreams(conn: *Connection) void {
     // ("a note outlives the next tick") cannot drift from the GC.
     var batch: [RecvEndRing.gc_batch]u64 = undefined;
     var n: usize = 0;
+    const was_pending = conn.streams_gc_pending;
     // Every transition that can end a stream sets the flag; this walk
     // answers it. A walk cut short by the batch sets it again below.
     conn.streams_gc_pending = false;
@@ -631,6 +632,7 @@ pub fn gcClosedStreams(conn: *Connection) void {
         batch[n] = s.id;
         n += 1;
     }
+    if (builtin.mode == .debug) std.debug.assert(was_pending or n == 0);
     if (n == batch.len) conn.markStreamsGc();
     // The note for `streamRecvEnd`: allocated once, here, and only when
     // this pass reclaims a stream that has a receive half. A failed
@@ -804,15 +806,10 @@ pub fn streamPriority(conn: *const Connection, id: u64) ?StreamPriority {
 /// fit one packet, the highest-priority `buf.len` are returned and the rest
 /// are served on a later packet. Returns the filled prefix.
 ///
-/// Perf note: this is a full stream-map walk + insertion sort per
-/// packet — O(N) per packet at high stream fan-out. The common case
-/// (one busy stream) is O(1)-ish, and the per-packet cap keeps the
-/// sort tiny. A per-urgency ready-list (or min-heap keyed on
-/// (urgency, stream_id, rr_cursor)) would bound this to the streams
-/// that actually fit the packet, but the RFC 9218 round-robin
-/// cursor and priority mutation semantics make it a dedicated
-/// scheduler refactor — deliberate, measured, and separately
-/// benchmarked — rather than an opportunistic change.
+/// Uses the priority-ordered sendable list, applying round-robin
+/// rotation within each incremental urgency band. The stream-map walk
+/// stays as the fallback after an allocation failure and as a Debug
+/// agreement check; release builds do not walk idle streams here.
 ///
 /// INTERNAL: pub for `_tests.zig` access; not part of the embedder
 /// API (the scheduling it drives is observed through `pollDatagram`).

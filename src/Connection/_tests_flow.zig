@@ -1282,6 +1282,8 @@ test "stream credit: a bidirectional stream returns its id when both directions 
     const s = conn.stream(0).?;
     s.send.fin_acked = true;
     s.send.state = .data_recvd;
+    // Simulate the ACK handler's cleanup notification as well as its state.
+    conn.markStreamsGc();
     try conn.tick(1_000_000);
     try std.testing.expect(conn.stream(0) == null);
     try std.testing.expectEqual(@as(?u64, 3), conn.pending_frames.max_streams_bidi);

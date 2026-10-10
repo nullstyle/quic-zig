@@ -500,11 +500,12 @@ fn runChurn(allocator: std.mem.Allocator, out: *Entries, cc: quic.CongestionAlgo
                 result.enqueued,
             },
         );
-        std.debug.print("  engine: poll {d} ms, tick {d} ms of {d} ms wall ({d:.2} us poll per stream)\n", .{
+        std.debug.print("  engine: poll {d} ms, tick {d} ms of {d} ms wall ({d:.2} us poll, {d:.2} us tick per stream)\n", .{
             result.poll_wall_ns / std.time.ns_per_ms,
             result.tick_wall_ns / std.time.ns_per_ms,
             result.wall_ns / std.time.ns_per_ms,
             @as(f64, @floatFromInt(result.poll_wall_ns)) / @as(f64, @floatFromInt(result.streams)) / 1000.0,
+            @as(f64, @floatFromInt(result.tick_wall_ns)) / @as(f64, @floatFromInt(result.streams)) / 1000.0,
         });
     }
 }
