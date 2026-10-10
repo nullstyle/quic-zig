@@ -788,7 +788,13 @@ pub fn build(b: *std.Build) void {
     });
     bench_tests_mod.addImport("quic", bench_quic_mod);
     bench_tests_mod.addImport("boringssl", bench_boringssl_mod);
-    bench_tests_mod.addImport("bench_io_options", bench_io_options.createModule());
+    // These fixtures exercise Threaded startup and teardown. Keep their
+    // module graph independent of the optional evented benchmark executable:
+    // instantiating runSampleLoops also compiles its per-thread branch, and
+    // stock 0.17's Uring still has an incompatible vtable.
+    const bench_fixture_options = b.addOptions();
+    bench_fixture_options.addOption(bool, "threaded_only", true);
+    bench_tests_mod.addImport("bench_io_options", bench_fixture_options.createModule());
     const bench_tests = b.addTest(.{ .root_module = bench_tests_mod });
     const run_bench_tests = b.addRunArtifact(bench_tests);
 
