@@ -597,6 +597,121 @@ test "server handles accepted 0-RTT STREAM frames" {
     try std.testing.expectEqual(true, conn.streamArrivedInEarlyData(0).?);
 }
 
+test "gc candidates preserve map retirement order after duplicate notices and map growth" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+    try conn.setTransportParams(.{ .initial_max_data = 4096, .initial_max_stream_data_uni = 64, .initial_max_streams_uni = 1024 });
+    // Terminal notices arrive in reverse order, before the map grows.
+    var index: u64 = 80;
+    while (index > 0) {
+        index -= 1;
+        const frame: @import("../frame/types.zig").Stream = .{ .stream_id = index * 4 + 2, .data = "", .has_length = true, .fin = true };
+        try conn.handleStream(.application, frame);
+        try conn.handleStream(.application, frame);
+    }
+    try std.testing.expectEqual(@as(usize, 80), conn.streams_gc_candidate_count);
+    try std.testing.expect(!conn.streams_gc_full_scan);
+    index = 80;
+    while (index < 600) : (index += 1) try conn.handleStream(.application, .{ .stream_id = index * 4 + 2, .data = "", .has_length = true });
+    var expected: [80]u64 = undefined;
+    var n: usize = 0;
+    var it = conn.streams.iterator();
+    while (it.next()) |entry| if (entry.value_ptr.*.recvFullyTerminated()) {
+        expected[n] = entry.key_ptr.*;
+        n += 1;
+    };
+    try std.testing.expectEqual(expected.len, n);
+    try conn.tick(1000);
+    try std.testing.expectEqual(@as(usize, 0), conn.streams_gc_candidate_count);
+    try std.testing.expectEqual(@as(usize, 520), conn.streamCount());
+    const ring = conn.recv_end_ring.?;
+    try std.testing.expectEqual(expected.len, ring.len);
+    for (expected, 0..) |id, i| {
+        try std.testing.expectEqual(id, ring.records[i].id);
+        try std.testing.expect(conn.streamRecvWasReaped(id));
+        try std.testing.expect(conn.streamRecvEnd(id).?.isClean());
+        // A late frame cannot resurrect the retired stream.
+        try conn.handleStream(.application, .{ .stream_id = id, .data = "", .has_length = true, .fin = true });
+    }
+    try std.testing.expectEqual(state.CloseState.open, conn.closeState());
+}
+
+test "gc candidates overflow keeps the exact batch and next tick end evidence" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(std.testing.allocator, ctx);
+    defer conn.destroy();
+    try conn.setTransportParams(.{ .initial_max_streams_uni = 400 });
+    for (0..300) |i| try conn.handleResetStream(.{ .stream_id = i * 4 + 2, .application_error_code = i, .final_size = 0 });
+    try std.testing.expectEqual(state.RecvEndRing.gc_batch, conn.streams_gc_candidate_count);
+    try std.testing.expect(conn.streams_gc_full_scan);
+    var expected: [300]u64 = undefined;
+    var it = conn.streams.iterator();
+    var n: usize = 0;
+    while (it.next()) |entry| {
+        expected[n] = entry.key_ptr.*;
+        n += 1;
+    }
+    const batch = state.RecvEndRing.gc_batch;
+    try conn.tick(1000);
+    try std.testing.expectEqual(@as(usize, 300 - batch), conn.streamCount());
+    for (expected[0..batch], 0..) |id, i| try std.testing.expectEqual(id, conn.recv_end_ring.?.records[i].id);
+    try conn.tick(2000);
+    try std.testing.expectEqual(@as(usize, 300 - 2 * batch), conn.streamCount());
+    for (expected[0 .. 2 * batch]) |id| {
+        try std.testing.expect(conn.streamRecvWasReaped(id));
+        try std.testing.expectEqual(@as(?u64, id / 4), conn.streamRecvEnd(id).?.reset_code);
+    }
+    try conn.tick(3000);
+    try std.testing.expectEqual(@as(usize, 0), conn.streamCount());
+}
+
+test "gc candidates drain a stopped half before FIN gaps close without premature retirement" {
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try sendPartServer(ctx);
+    defer conn.destroy();
+    try conn.handleStream(.application, .{ .stream_id = 2, .data = "hello", .has_length = true });
+    try conn.streamStopSending(2, 7);
+    // The callback may still hold this buffer until tick.
+    try std.testing.expectEqual(@as(usize, 5), (try conn.streamPeek(2)).len);
+    try conn.tick(1000);
+    try std.testing.expect(conn.stream(2) != null);
+    try std.testing.expectEqual(@as(usize, 0), (try conn.streamPeek(2)).len);
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_stream_bytes_read);
+    try std.testing.expectEqual(@as(u64, 0), conn.bytes_resident);
+    try conn.handleStream(.application, .{ .stream_id = 2, .offset = 10, .data = "!", .has_length = true, .fin = true });
+    try conn.tick(2000);
+    try std.testing.expect(conn.stream(2) != null);
+    try conn.handleStream(.application, .{ .stream_id = 2, .offset = 5, .data = "abcde", .has_length = true });
+    try conn.tick(3000);
+    try std.testing.expect(conn.streamRecvWasReaped(2));
+    try std.testing.expect(conn.streamRecvEnd(2).?.stopped);
+    try std.testing.expect(!conn.streamRecvEnd(2).?.isClean());
+    try std.testing.expectEqual(@as(u64, 11), conn.recv_stream_bytes_read);
+    try std.testing.expectEqual(@as(u64, 0), conn.bytes_resident);
+}
+
+test "gc candidates require no allocation and still retire when end evidence allocation fails" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var ctx = try boringssl.tls.Context.initServer(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createServer(failing.allocator(), ctx);
+    defer conn.destroy();
+    try conn.setTransportParams(.{ .initial_max_streams_uni = 4 });
+    try conn.handleStream(.application, .{ .stream_id = 2, .data = "", .has_length = true });
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try conn.handleStream(.application, .{ .stream_id = 2, .data = "", .has_length = true, .fin = true });
+    try conn.tick(1000);
+    try std.testing.expect(conn.stream(2) == null);
+    try std.testing.expect(conn.streamRecvWasReaped(2));
+    try std.testing.expectEqual(@as(?state.StreamRecvEnd, null), conn.streamRecvEnd(2));
+    try std.testing.expectEqual(@as(u64, 0), conn.bytes_resident);
+}
+
 test "gcClosedStreams reclaims bidi streams whose send + recv halves are both terminal" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

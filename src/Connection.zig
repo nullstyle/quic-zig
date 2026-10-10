@@ -796,6 +796,13 @@ rest_deadline_valid: bool = false,
 /// capnp-zig on v0.37.1: a connection at rest skipped the GC, a sender
 /// ran out of stream ids its peer never gave back (0.37.2).
 streams_gc_pending: bool = false,
+/// Streams named by the transitions that request cleanup. Bounded to
+/// one retirement batch, with no allocation: overflow requests the
+/// authoritative map walk. `markStreamsGc` also requests that walk for
+/// callers that changed stream state without naming a stream.
+streams_gc_candidates: [RecvEndRing.gc_batch]*Stream = undefined,
+streams_gc_candidate_count: usize = 0,
+streams_gc_full_scan: bool = false,
 /// Called by `touch` with `wake_ctx`: the owner of the connection
 /// (a `Server` slot) learns that this connection may have something
 /// to send or a timer to re-arm, without a sweep. Set by the Server
@@ -1276,6 +1283,9 @@ pub const Stream = struct {
     /// In `Connection.sendable` (the stream has a chunk, a FIN or a
     /// reset to send).
     in_sendable: bool = false,
+    /// In the bounded cleanup candidate list; duplicate notices need
+    /// no extra slot. Cleared before the next GC pass consumes the list.
+    in_gc_candidates: bool = false,
 
     /// True if the recv side has reached one of the four "no further
     /// peer bytes will land" states: FIN-with-bytes-drained
@@ -4688,8 +4698,11 @@ pub fn touch(self: *Connection) void {
 /// A stream may have ended on both of its halves (see
 /// `streams_gc_pending`): the next `tick` reclaims it. Marks the
 /// connection and touches it, so that a cached rest deadline is
-/// dropped and a host on the ready API hears of the work.
+/// dropped and a host on the ready API hears of the work. Requests
+/// the full stream-map walk; internal transitions name a candidate
+/// through `Connection/streams.zig.noteStreamGc` instead.
 pub fn markStreamsGc(self: *Connection) void {
+    self.streams_gc_full_scan = true;
     self.streams_gc_pending = true;
     self.touch();
 }
@@ -5565,8 +5578,8 @@ fn tickFull(self: *Connection, now_us: u64) Error!void {
     // outstanding `*Stream` borrowed from `streams.get`. `tick`
     // holds no such borrows. Every transition that can end a stream
     // marks streams_gc_pending; a busy connection with no such work
-    // need not walk its whole stream table on every tick. Debug keeps
-    // the walk and checks that the pending flag did not miss a reclaim.
+    // need not walk its whole stream table on every tick. Named work
+    // uses the bounded candidate list; Debug checks it against the walk.
     if (self.streams_gc_pending or builtin.mode == .debug) self.gcClosedStreams();
 }
 

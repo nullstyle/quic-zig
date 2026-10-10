@@ -593,7 +593,10 @@ pub fn streamCount(conn: *const Connection) usize {
 /// exists has ended (a stopped receive half ends once the GC has
 /// read it away, so a stopped stream counts as work too).
 pub fn streamReclaimable(conn: *const Connection, s: *const Stream) bool {
-    if (s.recv_stopped) return true;
+    return s.recv_stopped or streamFullyTerminated(conn, s);
+}
+
+fn streamFullyTerminated(conn: *const Connection, s: *const Stream) bool {
     const send_done = s.send.isTerminal();
     const recv_done = s.recvFullyTerminated();
     return if (streamIsBidi(s.id))
@@ -604,33 +607,95 @@ pub fn streamReclaimable(conn: *const Connection, s: *const Stream) bool {
         recv_done;
 }
 
+/// Name cleanup work at the transition that made it possible. The
+/// stream stays live until tick; pointers remain stable across map
+/// growth. A full list falls back to the original walk, so neither
+/// allocation failure nor a burst of notices can lose work.
+// INTERNAL: pub for sibling handlers; not part of the embedder API.
+pub fn noteStreamGc(conn: *Connection, s: *Stream) void {
+    if (!streamReclaimable(conn, s)) return;
+    if (!s.in_gc_candidates and !conn.streams_gc_full_scan) {
+        if (conn.streams_gc_candidate_count == conn.streams_gc_candidates.len) {
+            conn.markStreamsGc();
+            return;
+        }
+        conn.streams_gc_candidates[conn.streams_gc_candidate_count] = s;
+        conn.streams_gc_candidate_count += 1;
+        s.in_gc_candidates = true;
+    }
+    conn.streams_gc_pending = true;
+    conn.touch();
+}
+
+fn collectGcByWalk(conn: *Connection, batch: []u64) usize {
+    var n: usize = 0;
+    var it = conn.streams.iterator();
+    while (it.next()) |entry| {
+        const s = entry.value_ptr.*;
+        if (s.recv_stopped) discardStopped(conn, s);
+        if (!streamFullyTerminated(conn, s)) continue;
+        if (n == batch.len) break;
+        batch[n] = s.id;
+        n += 1;
+    }
+    return n;
+}
+
+const GcCandidate = struct {
+    stream: *Stream,
+    map_order: usize,
+
+    fn less(_: void, a: GcCandidate, b: GcCandidate) bool {
+        return a.map_order < b.map_order;
+    }
+};
+
 pub fn gcClosedStreams(conn: *Connection) void {
     // The batch size is owned by `RecvEndRing` so its survival guarantee
     // ("a note outlives the next tick") cannot drift from the GC.
     var batch: [RecvEndRing.gc_batch]u64 = undefined;
-    var n: usize = 0;
     const was_pending = conn.streams_gc_pending;
-    // Every transition that can end a stream sets the flag; this walk
-    // answers it. A walk cut short by the batch sets it again below.
+    const full_scan = conn.streams_gc_full_scan;
     conn.streams_gc_pending = false;
-    var it = conn.streams.iterator();
-    while (it.next()) |entry| {
-        const s = entry.value_ptr.*;
-        // Nobody reads a stream the application stopped: read it
-        // here, so that its receive half can end.
-        if (s.recv_stopped) discardStopped(conn, s);
-        const send_done = s.send.isTerminal();
-        const recv_done = s.recvFullyTerminated();
-        const reclaimable = if (streamIsBidi(s.id))
-            send_done and recv_done
-        else if (streamInitiatedByLocal(conn, s.id))
-            send_done
-        else
-            recv_done;
-        if (!reclaimable) continue;
-        if (n == batch.len) break;
-        batch[n] = s.id;
-        n += 1;
+    conn.streams_gc_full_scan = false;
+    var candidates: [RecvEndRing.gc_batch]GcCandidate = undefined;
+    const candidate_count = conn.streams_gc_candidate_count;
+    for (conn.streams_gc_candidates[0..candidate_count], 0..) |s, i| {
+        s.in_gc_candidates = false;
+        if (!full_scan) {
+            // HashMap.Iterator visits the key slots in address order.
+            // Resolve each slot NOW: an intervening map growth moves
+            // the slots, but never these separately allocated Streams.
+            // Sort before any map mutation, preserving retirement and
+            // stopped-read order. Debug independently checks the walk.
+            candidates[i] = .{ .stream = s, .map_order = @intFromPtr(conn.streams.getEntry(s.id).?.key_ptr) };
+        }
+    }
+    conn.streams_gc_candidate_count = 0;
+    var n: usize = 0;
+    if (full_scan) {
+        n = collectGcByWalk(conn, &batch);
+    } else {
+        std.mem.sortUnstable(GcCandidate, candidates[0..candidate_count], {}, GcCandidate.less);
+        for (candidates[0..candidate_count]) |candidate| {
+            const s = candidate.stream;
+            if (s.recv_stopped) discardStopped(conn, s);
+            if (!streamFullyTerminated(conn, s)) continue;
+            batch[n] = s.id;
+            n += 1;
+        }
+        if (builtin.mode == .debug) {
+            // A missed STOP_SENDING notice must not be masked by the
+            // diagnostic walk draining its unread buffer for us.
+            var it = conn.streams.iterator();
+            while (it.next()) |entry| {
+                const s = entry.value_ptr.*;
+                std.debug.assert(!s.recv_stopped or s.recv.peek().len == 0);
+            }
+            var expected: [RecvEndRing.gc_batch]u64 = undefined;
+            const expected_n = collectGcByWalk(conn, &expected);
+            std.debug.assert(std.mem.eql(u64, batch[0..n], expected[0..expected_n]));
+        }
     }
     if (builtin.mode == .debug) std.debug.assert(was_pending or n == 0);
     if (n == batch.len) conn.markStreamsGc();
@@ -968,7 +1033,7 @@ fn afterStreamConsume(
 ) Error!void {
     // The read that reached the FIN (or consumed a reset): the stream
     // may be reclaimable now; the next tick's GC decides.
-    if (streamReclaimable(conn, s)) conn.markStreamsGc();
+    noteStreamGc(conn, s);
     // Per-connection memory DoS cap: the budget keys on the PHYSICAL
     // `bytes.items.len`. The sliding window advances without
     // shrinking most of the time (consumed bytes keep their budget
@@ -1232,7 +1297,7 @@ pub fn streamStopSending(
     });
     s.recv_stopped = true;
     // The GC reads the stopped half and ends it: work for the next tick.
-    conn.markStreamsGc();
+    noteStreamGc(conn, s);
 }
 
 pub fn queueStopSending(

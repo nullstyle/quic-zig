@@ -289,7 +289,7 @@ pub fn dispatchAckedPacketToStreams(
         conn_streams.noteSendable(conn, s);
         // The ACK that completed the send half: the stream may be
         // reclaimable now; the next tick's GC decides.
-        if (conn_streams.streamReclaimable(conn, s)) conn.markStreamsGc();
+        conn_streams.noteStreamGc(conn, s);
     }
 }
 
@@ -538,7 +538,7 @@ pub fn dispatchAckedControlFrames(
                     {
                         s.send.onResetAcked();
                         conn_streams.noteSendable(conn, s);
-                        if (conn_streams.streamReclaimable(conn, s)) conn.markStreamsGc();
+                        conn_streams.noteStreamGc(conn, s);
                     }
                 }
             },

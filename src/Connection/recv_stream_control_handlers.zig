@@ -57,5 +57,5 @@ pub fn handleResetStream(conn: *Connection, rs: frame_types.ResetStream) Error!v
     if (first_reset) conn_streams.creditConnectionRecvWindow(conn, rs.final_size - ptr.recv.read_offset);
     // The receive half ended by the peer's reset: work for the next tick
     // when the stream has no live half left.
-    if (conn_streams.streamReclaimable(conn, ptr)) conn.markStreamsGc();
+    conn_streams.noteStreamGc(conn, ptr);
 }
