@@ -5,6 +5,30 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [0.42.0] - 2026-10-10
+
+### Changed
+
+- Stream cleanup collects up to 128 candidates at the existing lifecycle
+  notifications, avoiding most full-map walks. Overflow, batch continuation,
+  and `markStreamsGc()` retain the authoritative walk. Candidate retirement
+  preserves map order, flow credit, the 128-stream GC cap and 256-record end
+  evidence. Debug compares it against the walk. No API/toolchain migration.
+  Six paired m3studio-001 trials reduce tick cost per stream by 48% and 79%
+  at windows 1,024 and 4,096; a same-binary control confirms the cause.
+  The inline list adds 1 KiB of pointers per 64-bit Connection plus
+  bookkeeping, with no heap allocation. Bulk/UDP rates remain within noise.
+  Production harness wall time increases 3.7% while the same-binary control
+  falls 5.1%; no overall request-throughput gain is claimed. See the
+  [stream cleanup sprint](docs/STREAM_CLEANUP_SPRINT.md).
+
+### Added
+
+- Cleanup regressions for duplicate notices, map growth/order, exact
+  overflow batching, next-tick end-evidence survival, stopped reads with
+  FIN gaps, late frames and allocation failure. Three deliberate mutants
+  fail; all 31 virtual-time impairment/fairness/churn lines are identical.
+
 ## [0.41.0] - 2026-10-10
 
 ### Changed
