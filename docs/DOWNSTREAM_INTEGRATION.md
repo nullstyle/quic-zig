@@ -7,9 +7,17 @@ must be labelled separately from released behavior. For post-tag verification,
 read the [latest maintained brief](https://github.com/nullstyle/quic-zig/blob/main/docs/DOWNSTREAM_INTEGRATION.md);
 a tagged archive contains the brief as it stood when tagged.
 
-Last updated: 2026-10-10. Current release: **v0.42.0, verified**.
-The stream cleanup sprint is complete. Lifecycle transitions name up to 128
-cleanup candidates, avoiding most full-map scans; overflow and explicit marking
+Last updated: 2026-10-10. Current release: **v0.42.2, verified**.
+v0.42.2 keeps benchmark fixture tests independent of the optional evented
+benchmark, correcting the stock Zig 0.17 Linux compile failure in v0.42.1.
+**Do not pin v0.42.1.** The current release keeps Threaded as the default and
+requires no API or toolchain migration. The matching evented fork was
+published after its blocking LLVM assertion was repaired at source
+(`0.17.0+fork.3bfc1a3ab`, 2026-10-11); its adoption has separate gates —
+see the evented section below.
+
+The preceding v0.42.0 stream cleanup sprint is complete. Lifecycle transitions
+name up to 128 cleanup candidates, avoiding most full-map scans; overflow and explicit marking
 keep the authoritative walk. Six paired m3studio-001 trials, at site Hoth,
 reduce tick time per stream 48–79% at windows 1,024–4,096. A same-binary control
 confirms the scan cost. Retirement/credit order, the batch/end-evidence contract
@@ -25,12 +33,12 @@ and [line-rate profile](LINE_RATE_PROFILE.md) remain dated evidence.
 
 ## Current pin and build options
 
-Tag `v0.42.0` = `31519071ce9905c6e51980af944a7095a74ae6a2`.
-Package hash: `quic-0.42.0-DnSYvYJoTwAVqyMTNt_jULZvKZxnoMJKxSF-Vo9uWJ5p`.
+Tag `v0.42.2` = `2aa5bae31b7eab42cf95a654ab9717248d6f2498`.
+Package hash: `quic-0.42.2-DnSYvVJRZQDaf9LFsqj9k1cFzPeYCNwb3HgKBDn8s07g`.
 Toolchain: Zig 0.17.0, pinned by mise. Use ReleaseSafe for deployed code.
 
 ```sh
-mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.42.0.tar.gz
+mise exec -- zig fetch --save https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.42.2.tar.gz
 ```
 
 Every parent in one binary must pass the same dependency options:
@@ -138,9 +146,16 @@ connection. A `Connection` must live in writable memory because its const
 The [evented sprint report](EVENTED_BACKEND_SPRINT.md) records repairs in the
 stable Zig 0.17 fork and completed native measurements. Threaded remains the
 default: Dispatch and shared Kqueue establish no native throughput gain, and
-both lose four-client goodput. Final Linux/rebuilt-release proof is recorded
-separately there. The verified QUIC pin above and experimental fork adoption
-have independent gates. No default toolchain or consumer pin was changed.
+both lose four-client goodput. The fork release that was held on a compiler
+LLVM assertion is now published: the assertion was repaired at the LLVM
+source seam (see the [sprint report](EVENTED_BACKEND_SPRINT.md) and
+zigfork's `llvm-v3i8-mmo-fix-2026-10-10.md`), and the stable fork
+`0.17.0+fork.3bfc1a3ab` passed the rebuilt-compiler gates — including full
+QUIC ReleaseSafe under an assertions-enabled patched LLVM — before
+publication. The verified QUIC pin above covers the stock-toolchain
+Threaded release; experimental fork adoption remains separate owner work
+that must validate backend-specific paths on the matching compiler/library.
+No default toolchain or consumer pin was changed.
 
 Use a verified, matching compiler/library built from the fork's tagged-0.17
 stable assembly. September's `0.17.0-dev` release is below current 0.17.0
@@ -190,6 +205,8 @@ Client, Server, and quic.app wrappers did not require those migrations.
 
 | Release | Integrator effect | Required action |
 |---|---|---|
+| v0.42.2 | Benchmark fixtures use their own Threaded-only options, restoring stock Zig 0.17 Linux test/fuzz builds. Five exact-tag gates and a fresh URL consumer pass. | Use this verified pin instead of v0.42.1. No library API, toolchain floor or default-backend migration. |
+| v0.42.1 — do not pin | Linux test/sanitizer/fuzz builds instantiate stock Uring's incompatible vtable through the newly imported benchmark fixtures. | Keep the tag rejected; use v0.42.2 or the preceding verified release. Passing other jobs does not repair this tag. |
 | v0.42.0 | Bounded cleanup candidates cut wide-window tick time 48–79%; retirement/credit/evidence order is preserved. | No API/toolchain migration. Budget +1,032 bytes per M3 Connection, including idle; no bulk/UDP or application-throughput gain promised. |
 | v0.41.0 | Packet-builder no-reset scans cost less: wide-window poll time falls 62–80%; reset ordering and virtual behavior agree. | No API/toolchain migration. No bulk or UDP speedup claimed. |
 | v0.40.1 | Correct bulk smoke/benchmark completion; reproducible I/O controls and report schema 3. | No library/API/toolchain migration. Update copied example loops or benchmark report readers. |
@@ -210,15 +227,29 @@ integrator brief.
 
 ## Validation of the current pin
 
-All five gates were read at the exact tag commit, **31519071ce9905c6e51980af944a7095a74ae6a2**, at **2026-10-10 21:17:54 UTC**, within 18 minutes of tagging.
+All five gates were read at the exact tag commit,
+**2aa5bae31b7eab42cf95a654ab9717248d6f2498**, at
+**2026-10-10 22:34:26 UTC**, within 15 minutes of tagging at 22:19:29 UTC.
 
-- [test 38085951265](https://github.com/nullstyle/quic-zig/actions/runs/38085951265): all seven jobs pass. Unix Debug, full sanitizer and 32-bit musl report 2,077/2,093 tests (16 skips). Unix ReleaseSafe reports 2,035/2,051 (16 skips; 42 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,012/2,051 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.42.0; check-modes validates 6 of 6.
-- [rc-fuzz 38085953398](https://github.com/nullstyle/quic-zig/actions/runs/38085953398): `coverage verified: instrumented, 2,357,160 executions across 43 sites (floor 1,935,000)`; `n_runs=2,357,160 unique_runs=10,261 pcs_len=47770`. Zero failure markers.
-- [quic-go-interop 38085951304](https://github.com/nullstyle/quic-zig/actions/runs/38085951304): pairs=1, cells=2, succeeded=2; failure, known-failure, unsupported, skipped and flaky counters are zero.
-- [QNS Image 38085951298](https://github.com/nullstyle/quic-zig/actions/runs/38085951298): the image build passes, with publish_image:false and push:false. This proves the build, not publication.
-- [pin-lint 38085951246](https://github.com/nullstyle/quic-zig/actions/runs/38085951246): BoringSSL pin-lint OK; four Zig pins and published digests agree at 0.17.0.
+- [test 38090992546](https://github.com/nullstyle/quic-zig/actions/runs/38090992546): all seven jobs pass, including advisory macOS 26. Unix Debug, full sanitizer and 32-bit musl report 2,079/2,095 tests (16 skips). Unix ReleaseSafe reports 2,035/2,051 (16 skips; 44 benchmark fixtures cached after Debug). Windows Debug and ReleaseSafe report 2,012/2,051 (39 skips; benchmark fixtures excluded by the existing platform condition). Consumer-smoke loads quic-zig 0.42.2; check-modes validates 6 of 6. The 32-bit job executes with `-Dsanitize-c=off`; it is not a 32-bit ReleaseSafe claim.
+- [rc-fuzz 38090994221](https://github.com/nullstyle/quic-zig/actions/runs/38090994221): `coverage verified: instrumented, 2,235,928 executions across 43 sites (floor 1,935,000)`; `n_runs=2,235,928 unique_runs=12,808 pcs_len=47781`. No actual failure markers; echoed scripts are excluded from that check.
+- [quic-go-interop 38090992547](https://github.com/nullstyle/quic-zig/actions/runs/38090992547): pairs=1, cells=2, succeeded=2; failure, known-failure, unsupported, skipped and flaky counters are zero. Both cells executed.
+- [QNS Image 38090992545](https://github.com/nullstyle/quic-zig/actions/runs/38090992545): the image build passes, with publish_image:false and push:false. The actual build command labels the exact tag commit and has no `--push`; publication remains disabled.
+- [pin-lint 38090992586](https://github.com/nullstyle/quic-zig/actions/runs/38090992586): BoringSSL pin-lint OK and byte-identical typed pin; all four Zig pins and the two published Docker toolchain digests agree at 0.17.0.
 
-Local full Debug/ReleaseSafe and cross builds pass. Four new cleanup tests and three behavioral mutants cover the rule; all 31 virtual impairment/fairness/churn lines are byte-identical. Paired native UDP byte/clean-FIN completion and single/multi-peer tails pass. See [the sprint report](STREAM_CLEANUP_SPRINT.md) for measurements and limitations.
+A fresh-cache URL consumer fetched the advertised archive and hash with stock
+Zig 0.17.0, then executed `zig build run -Doptimize=ReleaseSafe --summary all`:
+11/11 steps succeeded and `consumer-smoke ok: quic-zig 0.42.2`. It uses the
+coordinated release/sanitizer options and both exported modules shown above.
+The URL fetch and consumer run completed at 22:21:18 and 22:22:09 UTC.
+
+v0.42.1 remains rejected: [test 38090194012](https://github.com/nullstyle/quic-zig/actions/runs/38090194012)
+has three failing Linux jobs, and [rc-fuzz 38090196055](https://github.com/nullstyle/quic-zig/actions/runs/38090196055)
+fails on the same stock Uring `processReplacePath` vtable compile error. The
+fuzz execution floor was met, but its build exited 1. This is not a sanitizer
+finding or saved crashing input. The tag was not moved or rerun to hide the
+failure. Earlier verified release evidence and the rejection are retained in
+[release readiness](RELEASE_READINESS.md).
 
 ## Delivery and pin ownership
 

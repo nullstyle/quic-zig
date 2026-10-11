@@ -196,21 +196,96 @@ sampled weights, not syscall counts, and include startup/transfer/teardown.
 Inclusive/group shares overlap; the portable profile summary retains their
 method, TOCs, raw XML hashes and the unsuccessful recording boundary.
 
-## Release proof — pending
+## Release proof — LLVM repair and fork publication, 2026-10-10/11
+
+The LLVM memory-operand defect that held the fork release was confirmed and
+repaired at its source seam. `combineV3I8LoadExt`
+(`AArch64ISelLowering.cpp`, LLVM 22.1.4) lowered `<3 x i8>` loads into an
+i16+i8 pair but handed the i16 load the original three-byte
+MachineMemOperand. SelectionDAG load CSE against a scalar i16 load from the
+same pointer then aborted `MachineMemOperand::refineAlignment`
+("Size mismatch!", MachineOperand.cpp:1154) — the exact abort behind the
+full QUIC ReleaseSafe failure. The fix resizes the operand
+(`MF.getMachineMemOperand(MMO, 0, 2)`), mirroring the existing i8 sibling.
+The full record — patch, hashes, lit regression, runtime check, six-engine
+provenance — is the zigfork repository's
+`docs/llvm-v3i8-mmo-fix-2026-10-10.md`, with portable artifacts in its
+`docs/llvm-fix-2026-10-10/` directory. Publication then surfaced one more
+fork defect on x86_64-linux — a fiber-switch inline-asm clobber bug, also
+repaired this sprint — before the release went out at
+`0.17.0+fork.3bfc1a3ab`.
 
 | Identity/gate | Final record |
 |---|---|
-| QUIC implementation on main | **Pending — commit and source archive identity.** |
-| Stable fork feature/build/tooling commits | **Pending — exact assembly manifest.** |
-| Three native fork builds and focused/full gates | **Pending — exact-source CI URLs, versions and artifact hashes.** |
-| Verified fork release and staged install | **Pending — tag, manifest, checksums and exact-binary version; no default-tool switch implied.** |
-| QUIC release/tag/package hash and five exact-tag gates | **Pending — fill after publication and verification.** |
+| LLVM repair proof | Unpatched asserting llc: reproducer exit 134, new lit regression exit 134, i32 control exit 0. Patched llc: all exit 0; regression FileCheck passes (single `ldrh` CSE, `ldrb #2`, `orr lsl 16`); existing `vec3-loads-ext-trunc-stores` passes both LE and BE RUN lines; native runtime check (8 patterns incl. 0x00/0xFF) exits 0. Canonical diff SHA256 `d7159f1d…c5844c`. |
+| First publication attempt and what it caught | `build/stable` pushed `c94b4041… → 2328a3a5f2` with an explicit lease; zig release run 38097275401 **failed and published nothing**. Two independent root causes: (1) the 3-vCPU macOS runner needs ~117s for the timer-heavy `evented_dispatch_group_reuse` Debug regression (26s on an 18-core workstation) and the 120s watchdog killed a healthy ReleaseSafe run — a capacity limit, fixed by zigfork `5b6cefe` (`ZIGFORK_TEST_TIMEOUT=600` for release builds); (2) the x86_64-linux `udp_reuse_port_load_balance` ReleaseSafe run segfaulted in `Io.fiber.contextSwitch` — a real fork defect on the first-ever native x86_64-linux execution of the Uring fiber path (the earlier 18-check Linux battery ran on aarch64 only). |
+| Fiber switch clobber fix | `Io.fiber.contextSwitch` passed the SwitchMessage as a tied in/out register operand (x1/a1/rsi) while also naming that register in the clobber lists. The contradictory LLVM constraints (`"={rsi},{rsi},…,~{rsi},…"`) let ReleaseSafe x86_64 allocation skip materializing the message pointer; the switch then read contexts from a stale register (faulting store through a null base). Minimal repro `Uring.init(thread_limit=0)+sleep+sleep+deinit` on x86_64-linux: ReleaseSafe+LLVM crashed 3/3; ReleaseFast+LLVM and self-hosted ReleaseSafe passed 3/3 each; after dropping `.x1`/`.x11`/`.rsi` from the three arch clobber lists (`feat/evented-0.17` `ab6fa8873f`) the nine-run matrix passes and the emitted code materializes `rsi` immediately before the asm. Record: zigfork `docs/fiber-switch-clobber-fix-2026-10-11.md`. |
+| Rebuilt stable fork compiler (final) | `0.17.0+fork.3bfc1a3ab` from `build/stable` 3bfc1a3abc (= 0.17.0 `7647adab80` + feat/evented-0.17 `ab6fa8873f` incl. the fiber fix + zigfork workflow `5b6cefe`), built by `build-release.sh aarch64-macos` against the patched LLVM 22.1.4 overlay (assertions ON). zig SHA256 `00fb11b33d9a…c65579f`, tarball `c76a4203…3fdcbe96`. (The intermediate `2328a3a5f` build passed every local gate identically and first proved the QUIC ReleaseSafe repair; its lib predates the fiber fix.) |
+| Focused backend gates | `test-feature.sh aarch64-macos` passed inside both release builds, Debug and ReleaseSafe: 21 evented/kqueue/threaded cases, translate-c signedness, self-hosted vector partitions, and the 73-test std gate including the Dispatch deadline/readiness unit — re-run again with the fixed lib paired to the 2328 compiler before the fix landed on the branch. |
+| QUIC gates under the patched compiler | v0.42.2 source (2aa5bae), fresh caches, 3bfc compiler with its packaged (fixed) lib: `test` 37/37 steps, 2035/2051 (16 skipped); `test -Drelease=true` **30/30 steps, 2079/2095 (16 skipped, fresh-cache accounting)** — zero `Size mismatch` hits, the pre-fix abort is gone; `bench-test` 12/12; `bench-io-build` 12/12. Gate manifests: `/tmp/quic-llvmfix-gates{,-3bfc}/manifest.json` (2328-era manifest copied in `zigfork/docs/llvm-fix-2026-10-10/`). |
+| Fork publication (final) | `build/stable` pushed `2328a3a5f2… → 3bfc1a3abc` with `--force-with-lease` after manifest review (a first attempt with a mistyped lease value was correctly rejected by the lease itself). Zig release run 38104948470 rebuilt all three platform assets at `0.17.0+fork.3bfc1a3ab`. |
+| Three-platform CI assets and staged install | See run 38104948470: aarch64-macos, x86_64-linux and aarch64-linux jobs at version `0.17.0+fork.3bfc1a3ab`; asset checksums and the staged `zigfork install stable` (under `~/.zvm/fork-stable`, without `--use`) are recorded in the zigfork audit ledger. The default toolchain is untouched. |
+| QUIC release/tag/package hash and five exact-tag gates | v0.42.2 = `2aa5bae31b7eab42cf95a654ab9717248d6f2498`, package `quic-0.42.2-DnSYvVJRZQDaf9LFsqj9k1cFzPeYCNwb3HgKBDn8s07g`; all five exact-tag workflows verified 2026-10-10 22:34:26 UTC (see [RELEASE_READINESS.md](RELEASE_READINESS.md)). No new QUIC release was needed for this fork work. |
 
-The maintained integrator brief advertises only a verified QUIC tag. A
-stock-gated benchmark/docs patch can be verified independently of the fork;
-evented activation still requires its matching compiler/library and actual
-application checks. Integrators move their own pins; no default compiler or
-consumer checkout is changed here.
+Identity boundaries: the patched-LLVM compiler is the local audit
+instrument that proved the invariant repair; the CI-published three-platform
+assets are built by the standard zigfork workflow from stock ziglang.org
+bundles (assertions off) and carry the fork standard library, not the LLVM
+patch — the upstream defect stays dormant there exactly as in stock Zig
+0.17.0, which the verified v0.42.2 gates already exercise. Upstreaming the
+LLVM fix is recommended follow-up; nothing was sent externally.
+
+The maintained integrator brief advertises only a verified QUIC tag.
+Evented activation still requires a matching compiler/library and actual
+application checks by each integrator. Integrators move their own pins; no
+default compiler or consumer checkout is changed here.
+
+## Final-binary measurements — fork 0.17.0+fork.3bfc1a3ab, 2026-10-11
+
+Final binaries (QUIC 2aa5bae + the published fork lib, ReleaseSafe, patched
+audit engine; stock control built with stock Zig 0.17.0) replaced the
+7dfa-era candidate set. After four-variant preflight, the full serial
+comparison ran on m3studio-001: warm 4/4, bulk 24/24, echo 24/24,
+multi-bulk 24/24, multi-echo 24/24 — every command exit zero, with
+independent integrity checks exact (30,720 MiB, 312 clean streams, 528,000
+pongs). Four Time Profiler recordings (stock/overlay Threaded, Dispatch,
+shared Kqueue; 20 s cap, capped termination boundary documented) exported
+TOC+XML. Raw data and per-run commands:
+`benchmark-reports/evented-2026-10-10/final-v0.42.2-3bfc1a3ab/`.
+
+| macOS medians | stock Threaded | overlay Threaded | Dispatch | shared Kqueue |
+|---|---:|---:|---:|---:|
+| Single-bulk MiB/s | 180.2 | 181.2 | 176.6 | 181.0 |
+| Single-bulk CPU ms/MiB | 9.07 | 8.98 | 11.44 | 9.68 |
+| Four-client aggregate MiB/s | 485.8 | 490.6 | 306.2 | 345.9 |
+| Four-client CPU ms/MiB | 9.41 | 9.13 | 15.50 | 8.81 |
+| Echo p50 / p99, µs | 31 / 92 | 31 / 88 | 45 / 82 | 34 / 90 |
+| Four-client echo p50 / p99, µs | 43 / 138 | 43 / 134 | 53 / 131 | 53 / 155 |
+
+The original conclusion is unchanged: no evented backend establishes a
+native Darwin throughput gain; Dispatch loses single-bulk rate and
+four-client goodput; shared Kqueue trades four-client rate for CPU/MiB.
+**Threaded remains the default.**
+
+Linux (OrbStack Ubuntu 24.04 AArch64 VM, `network none`, seccomp
+unconfined, binary mounted read-only; Uring = the `evented` backend on
+Linux; six paired trials per shape, Threaded then Uring within each trial;
+VM restored to Stopped afterward): 24/24 zero exits.
+
+| Linux VM medians | Threaded | Uring (evented) |
+|---|---:|---:|
+| Bulk MiB/s | 201.2 | **294.0** |
+| Bulk CPU ms/MiB | 5.00 | 5.22 |
+| Echo rtt p50 / p99, µs | 16 / 50 | 17 / 54 |
+| Echo round-trips/s | 52,974 | 48,947 |
+
+Paired per-trial Uring bulk deltas: +37.6%, +39.0%, +42.9%, +46.3%,
++50.1%, +129.9% — all six positive (median ≈ +46%) at essentially equal
+CPU per MiB. Echo is a near-tie slightly favoring Threaded. This is the
+first completed Linux perf comparison for the fork; it is loopback
+container evidence only — no physical-NIC line-rate or general
+application-RPC claim follows. ev-thread remains untested here
+(multi-loop/client workloads only, per its scope).
 
 ## Next sprint proposals
 

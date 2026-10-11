@@ -2420,3 +2420,145 @@ The maintained [integrator brief](DOWNSTREAM_INTEGRATION.md) owns the verified
 pin, cumulative migration guidance, release history and relay status. It is
 ready for owner relay; no delivery to unavailable Claude sessions is claimed.
 No downstream checkout or pin was changed.
+
+## v0.42.1 — rejected benchmark fixture graph, 2026-10-10
+
+**Do not pin v0.42.1.** The immutable tag points at
+`23ff01ce18290b371ee6bb4e824dc76a53d9b295`. Its
+[test run 38090194012](https://github.com/nullstyle/quic-zig/actions/runs/38090194012)
+fails in Linux x86-64, Linux ARM64 and the full sanitizer job; the other four
+test jobs succeed. [rc-fuzz 38090196055](https://github.com/nullstyle/quic-zig/actions/runs/38090196055)
+also fails. Interop, QNS image build and pin-lint passing cannot accept a tag
+with these failed gates.
+
+The newly imported benchmark fixtures instantiate `clientLoopThread` in
+`bench/io_backend.zig`, reaching stock Zig 0.17's Uring vtable entry
+`processReplacePath`, which is absent from `Io.VTable`. This is a deterministic
+compile failure, including in the sanitizer job; the logs do not establish a
+runtime sanitizer finding or resource failure. Fuzzing executes 2,445,962
+runs across 43 sites, exceeding the 1,935,000 floor, with 47,770 PCs, but the
+overall build correctly exits 1 for that compile error. No per-site crash,
+saved-input or termination marker was observed.
+
+The failed proof was captured at 22:26:37 UTC, within 20 minutes of the
+22:06:53 UTC tagger time. All seven job logs and the separate fuzz failure
+are retained. The tag was not moved or rerun; v0.42.2 repairs the fixture
+module boundary and has independent exact-tag proof below.
+
+## v0.42.2 — stock-toolchain benchmark fixture isolation, 2026-10-10
+
+Verified tag `v0.42.2` points at
+`2aa5bae31b7eab42cf95a654ab9717248d6f2498`; annotated tag object
+`4e270cf34c1109b7ea6f5bd5b7daa33a109e8cf6`, tagger 22:19:29 UTC.
+Package hash: `quic-0.42.2-DnSYvVJRZQDaf9LFsqj9k1cFzPeYCNwb3HgKBDn8s07g`.
+Zig remains pinned at 0.17.0; deployed code uses ReleaseSafe.
+
+The benchmark fixture tests receive an independent options module with
+`threaded_only=true`. Their default test graph therefore does not instantiate
+stock Uring. The optional evented benchmark executable retains its existing
+opt-in controls. This repair changes no QUIC protocol, public library API,
+default backend or consumer toolchain floor.
+
+**Five exact-tag CI gates verified.** All five runs use the full tag commit
+above and completed successfully. Their raw evidence was read at
+**2026-10-10 22:34:26 UTC**, 898 seconds after tagging, within one hour.
+
+- [test 38090992546](https://github.com/nullstyle/quic-zig/actions/runs/38090992546):
+  all seven jobs succeed, including advisory macOS 26. Linux x86-64, Linux
+  ARM64, macOS 15 and macOS 26 report Debug 37/37 steps, 2,079/2,095 tests;
+  ReleaseSafe 30/30 steps, 2,035/2,051 tests (16 skipped in each mode; the
+  44 benchmark fixtures are reused after their first execution). Windows
+  Debug and ReleaseSafe each report 2,012/2,051 tests, with 39 skipped;
+  benchmark fixtures retain the existing Windows exclusion. Full sanitizer
+  reports 37/37 steps, 2,079/2,095 tests (16 skipped). The 32-bit musl job
+  actually executes `-Dtarget=x86-linux-musl -Dsanitize-c=off`, with 37/37
+  steps and 2,079/2,095 tests (16 skipped); it is not a 32-bit ReleaseSafe
+  runtime gate. `consumer-smoke ok: quic-zig 0.42.2` and all six check-modes
+  lines execute, including the expected refusal of `.optimize=ReleaseFast`.
+- [rc-fuzz 38090994221](https://github.com/nullstyle/quic-zig/actions/runs/38090994221):
+  `coverage verified: instrumented, 2,235,928 executions across 43 sites
+  (floor 1,935,000)`; coverage header `unique_runs=12,808 pcs_len=47781`.
+  No actual failing-site, saved-input, termination or error markers occur.
+  Echoed scripts are excluded from that scan.
+- [quic-go-interop 38090992547](https://github.com/nullstyle/quic-zig/actions/runs/38090992547):
+  `pairs=1 cells=2 succeeded=2 failed=0 known_failed=0 unsupported=0
+  skipped=0 flaky_passed=0 flaky_failed=0`. Both cells executed successfully.
+- [QNS Image 38090992545](https://github.com/nullstyle/quic-zig/actions/runs/38090992545):
+  the actual image build succeeds and labels the exact tag commit. The log
+  records `publish_image:false` and `push:false`; the build command has no
+  `--push`, and registry login/publication are disabled.
+- [pin-lint 38090992586](https://github.com/nullstyle/quic-zig/actions/runs/38090992586):
+  BoringSSL pin-lint OK with byte-identical typed pin
+  `boringssl-0.6.7-Vv5DN8RMAgDGST3F3NpoMjez8Z_J60megIom9Ru9XqD2`.
+  All four Zig pin sites agree at 0.17.0 and the online Docker digest checks
+  pass for both Linux architectures.
+
+The portable CI snapshot embeds 12 raw job logs and their hashes plus the
+exact-tag workflow/build/gate sources. Its SHA256 is
+`05cebfd79e0a6b0cd7ba26eef865db3bd86b8341c6de32388528f3c3cb67fa65`;
+34 embedded UTF-8/hash records were validated.
+
+**Fresh URL consumer.** A new cache fetched
+`https://github.com/nullstyle/quic-zig/archive/refs/tags/v0.42.2.tar.gz` and
+recorded the package hash above. Stock Zig 0.17.0 then ran
+`zig build run -Doptimize=ReleaseSafe --summary all`: 11/11 steps succeeded,
+including the actual `consumer-smoke ok: quic-zig 0.42.2` marker. The consumer
+passes coordinated `.release`/`.sanitize-c="trap"` options and obtains both
+`quic` and `boringssl` from the same dependency. Fetch and runtime checks
+finished at 22:21:18 and 22:22:09 UTC. The proof JSON, including exact commands,
+consumer manifest and checked raw log hashes, has SHA256
+`a815982660efb50c5635c54852d01b6b161b1eadbb9bcdf5462172918bc257df`.
+
+**Evented sprint owner boundary.** The [evented sprint report](EVENTED_BACKEND_SPRINT.md)
+records the experimental backend work and its separate source/runtime
+evidence. Publication of a matching evented fork is held on a compiler LLVM
+assertion in the rebuilt release gate. The successful QUIC tag above accepts
+the stock-toolchain Threaded release; it does not accept that fork or the
+canceled earlier fork runs. A downstream owner must wait for a verified
+matching compiler/library release and validate its backend-specific adoption
+paths before enabling evented I/O. Threaded, stock Zig 0.17.0 and consumer
+pins remain unchanged. The maintained [integrator brief](DOWNSTREAM_INTEGRATION.md)
+owns the advertised pin and cumulative migration guidance; delivery to
+unavailable downstream sessions is not claimed.
+
+## Evented fork LLVM repair and publication, 2026-10-11
+
+The compiler LLVM assertion that held the evented fork release was
+repaired at its source seam and the fork was published. Summary for
+release-readiness readers; the authoritative record is the
+[evented sprint report](EVENTED_BACKEND_SPRINT.md) and zigfork's
+`llvm-v3i8-mmo-fix-2026-10-10.md` with portable artifacts.
+
+- Defect: LLVM 22.1.4 AArch64 `combineV3I8LoadExt` handed its split i16
+  load the original three-byte MachineMemOperand; SelectionDAG load CSE
+  against a scalar i16 load aborted `MachineMemOperand::refineAlignment`
+  ("Size mismatch!"). This was the abort behind the rebuilt-audit full
+  QUIC ReleaseSafe failure recorded above.
+- Fix: one line resizing the operand (`MF.getMachineMemOperand(MMO, 0, 2)`),
+  proven before/after with an asserting llc (reproducer and new lit
+  regression abort pre-fix, pass post-fix; i32 control unaffected; existing
+  v3i8 LE/BE tests pass; native runtime byte-exactness check exits 0).
+- Rebuilt release compiler: `0.17.0+fork.3bfc1a3ab` from
+  `build/stable` 3bfc1a3abc (0.17.0 + six evented-0.17 commits including
+  the fiber clobber fix), built against the patched assertions-ON LLVM
+  overlay. QUIC full ReleaseSafe under this compiler: 30/30 steps,
+  2079/2095 tests (16 skipped), zero assertion hits. Gates before publication: `test-feature.sh` Debug +
+  ReleaseSafe inside the release build; QUIC v0.42.2 source full
+  `test` 37/37 steps and `test -Drelease=true` 30/30 steps,
+  2035/2051 (16 skipped) — the previously failing gate, now identical in
+  accounting to accepted v0.42.2 CI; bench gates 12/12.
+- Publication: `build/stable` pushed with an explicit lease. The first
+  attempt (run 38097275401) failed and published nothing: the macOS job was
+  killed by the 120s per-test watchdog on a run that legitimately needs
+  ~117s on a 3-vCPU runner (fixed by zigfork `5b6cefe`, 600s budget for
+  release builds), and the x86_64-linux job exposed a real fork defect —
+  the fiber contextSwitch asm clobbered its tied message register, so
+  ReleaseSafe+LLVM on x86_64 never materialized the switch message and
+  segfaulted (fixed on the branch by `ab6fa8873f`; record in zigfork's
+  `docs/fiber-switch-clobber-fix-2026-10-11.md`). The corrected assembly
+  `3bfc1a3abc` was published by run 38104948470 at
+  `0.17.0+fork.3bfc1a3ab`. Identity boundary: the CI assets are
+  built from stock ziglang.org bundles (assertions off) and carry the fork
+  standard library, not the LLVM patch; the patched-LLVM compiler is the
+  local audit instrument that proved the repair. v0.42.2 remains the
+  verified QUIC pin; no QUIC release was needed or retagged for this work.
