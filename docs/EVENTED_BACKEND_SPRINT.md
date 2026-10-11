@@ -327,3 +327,8 @@ measurement or downstream activation occurred. Threaded and stock Zig
 |---|---|---|---|
 | **Publish and validate the hardened fork — recommended** | Deliver repaired source for owner-led adoption. | Exact stock-bundle builds, platform coverage and downstream error switches need validation. | Reviewed assembly, three-platform native release gates, verified artifacts and each adopting owner's backend paths. |
 | Linux Uring profiling | Explain the earlier bulk gain and evaluate multiple loops. | Adoption-dependent measurement work; fairness/cancellation tradeoffs. | Serial paired profiles/workloads, exact completion, cancellation/shutdown checks and full gates for code changes. |
+
+Closing-state note: the final SSH status recheck after the source/documentation
+pushes timed out. Native test cleanup had already verified the VM was Stopped
+(`orb status` exit 1). The recheck was read-only and its overdue probes were
+terminated; a fresh machine-state confirmation is not claimed.

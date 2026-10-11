@@ -1214,5 +1214,10 @@
     "Uring public Unix/stream operations remain unsupported. Raw Unix datagram handle tests establish low-level ancillary operations only.",
     "No new release assembly, build/stable push, retag, installation, benchmark measurement or LLVM upstream submission. Existing release 0.17.0+fork.3bfc1a3ab remains published; it does not include these repairs.",
     "Focused gates are not the full upstream Zig suite. No new x86_64/BSD/WASI runtime proof."
-  ]
+  ],
+  "final_vm_status_recheck_2026_10_11": {
+    "status": "SSH status recheck timed out after source/documentation pushes",
+    "last_verified_state": "Stopped during native test cleanup (orb status exit 1)",
+    "action": "Read-only probes terminated; no remote mutation attempted during recheck"
+  }
 }

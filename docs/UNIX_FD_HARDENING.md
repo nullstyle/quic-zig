@@ -89,3 +89,8 @@ JSON retains their hashes and essential checkpoints.
 |---|---|---|---|
 | **Publish and validate the hardened fork — recommended** | Deliver these source fixes for owner-led adoption. | Stock-bundle builds, platform coverage and downstream exhaustive error switches require exact-release validation. | Reviewed assembly, three-platform native gates, verified artifacts and each adopting owner's actual backend paths. |
 | Linux Uring profiling | Explain the prior bulk gain and evaluate multiple event loops. | Depends on adoption; scheduling changes can affect fairness/cancellation. | Paired workload/profile evidence, exact completion, shutdown/cancel checks and full gates for any code change. |
+
+Closing-state note: the final SSH status recheck after the source/documentation
+pushes timed out. Native test cleanup had already verified the VM was Stopped
+(`orb status` exit 1). The recheck was read-only and its overdue probes were
+terminated; a fresh machine-state confirmation is not claimed.
