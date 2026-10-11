@@ -17993,5 +17993,51 @@
       },
       "boundary": "loopback only; no physical-NIC or generic-RPC claims; multi-peer traffic to one server socket per loop (original limitation retained)"
     }
+  },
+  "unix_fd_hardening_2026_10_11": {
+    "source_commits": [
+      "03263c1c4424c1252edb6b2e4a7d5aba752029d0",
+      "017b3e4966a26a33db3bb77a92405b60644df396"
+    ],
+    "status": "complete source hardening; unpublished",
+    "evidence": "UNIX_FD_HARDENING_EVIDENCE.json",
+    "gates": {
+      "macos_feature": "PASS Debug and ReleaseSafe; rebuilt local audit compiler and current lib",
+      "linux_feature": "PASS Debug and ReleaseSafe; published Linux compiler and source lib",
+      "linux_full_gate_test_snapshot_sha256": "ecbeb1ffcb75e4a1084ebce00bf2eb6195dbb68f688c2348a53e382b386ce29c",
+      "linux_final_test_followup": "Ancillary test strengthened to require valid delivered descriptors; final test SHA in source.sha256. Recompiled and reran Threaded and Uring in both modes after the full gate; all four passed. Std implementation unchanged.",
+      "test_fmt": "PASS",
+      "tooling": "20 tests PASS; bash -n and ShellCheck PASS",
+      "quic": {
+        "debug": {
+          "exit": 0,
+          "summary": "37/37 steps succeeded; 2079/2095 tests passed (16 skipped)",
+          "sha256": "747d7f4b6c28a0a34f4a1b5c2a487b5d7fd41fb8129799a79fa11e082b00dfff"
+        },
+        "release": {
+          "exit": 0,
+          "summary": "30/30 steps succeeded; 2035/2051 tests passed (16 skipped)",
+          "sha256": "dd9eedacbc35bb050753a8c6c36274de07dde4fb2bf75a75cb8b9394b6ff80eb"
+        },
+        "bench-test": {
+          "exit": 0,
+          "summary": "12/12 steps succeeded",
+          "sha256": "8887271042d38aea3c53d0cc5eb532fbbfb5ca5c0fb1a0c3fc754e6c0162b41c"
+        },
+        "bench-io-build": {
+          "exit": 0,
+          "summary": "12/12 steps succeeded",
+          "sha256": "8ee44d2d7fb284cafa1c1856658a0da3fed1a70d8e27d0bc80255277be989ae7"
+        }
+      }
+    },
+    "boundary": [
+      "Threaded remains default; stock mise Zig 0.17.0 remains floor; consumer pins and downstream checkouts untouched.",
+      "Darwin CLOEXEC is set after recvmsg and is not atomic with unrelated concurrent exec.",
+      "Public Unix socket pair API remains unavailable/IP-only. Raw native pairs used by regressions do not add that API.",
+      "Uring public Unix/stream operations remain unsupported. Raw Unix datagram handle tests establish low-level ancillary operations only.",
+      "No new release assembly, build/stable push, retag, installation, benchmark measurement or LLVM upstream submission. Existing release 0.17.0+fork.3bfc1a3ab remains published; it does not include these repairs.",
+      "Focused gates are not the full upstream Zig suite. No new x86_64/BSD/WASI runtime proof."
+    ]
   }
 }

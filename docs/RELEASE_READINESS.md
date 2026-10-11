@@ -2562,3 +2562,17 @@ release-readiness readers; the authoritative record is the
   standard library, not the LLVM patch; the patched-LLVM compiler is the
   local audit instrument that proved the repair. v0.42.2 remains the
   verified QUIC pin; no QUIC release was needed or retagged for this work.
+
+## Unreleased Unix/FD hardening, 2026-10-11 UTC
+
+The next correctness sprint completed native Unix ancillary ownership,
+CLOEXEC/bounds/error handling, address encoding, and Dispatch timed-futex
+allocation-failure repairs at fork feature commits `03263c1c4424` and
+`017b3e4966a2`. Both native platform feature gates and all four QUIC gates
+pass; see the [hardening report](UNIX_FD_HARDENING.md) and
+[evidence](UNIX_FD_HARDENING_EVIDENCE.json).
+
+This is source acceptance, not acceptance of a new published compiler.
+The existing fork `0.17.0+fork.3bfc1a3ab` does not contain these changes;
+no assembly, release branch push, tag change or consumer migration occurred.
+QUIC v0.42.2 and the stock Zig 0.17.0 floor remain the release guidance.

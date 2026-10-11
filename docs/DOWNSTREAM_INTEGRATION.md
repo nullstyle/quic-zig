@@ -261,3 +261,20 @@ not a forced cluster move. No downstream checkout or pin was changed here.
 This file is ready for owner relay. The Claude downstream sessions in the
 original handoff are unavailable to this chat's message tools. Delivery is
 not claimed. Do not infer current consumer pins from old sprint notes.
+
+## Unreleased fork correctness follow-up, 2026-10-11 UTC
+
+Fork feature source through `017b3e4966a2` repairs Unix SCM_RIGHTS ownership,
+ancillary bounds/errors/CLOEXEC, native Unix address encoding and Dispatch
+timed-futex allocation failure. Native Darwin/Linux correctness cases and
+the QUIC gates pass; the [report](UNIX_FD_HARDENING.md) records exact
+compiler/library identities and limits. These fixes are absent from the
+published `0.17.0+fork.3bfc1a3ab` artifact.
+
+Owners adopting a future matching release must validate their actual
+descriptor, cancellation and transport paths; expanded std networking
+error sets may require exhaustive-switch changes. Darwin CLOEXEC is set
+after receive and is not atomic with unrelated exec. Raw Unix datagram
+Uring tests do not enable its public Unix/stream APIs or a public Unix pair
+API. Threaded, stock Zig 0.17.0, QUIC v0.42.2 and downstream pins remain
+unchanged. No downstream delivery or activation is claimed.

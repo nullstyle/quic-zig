@@ -296,3 +296,34 @@ gains. Threaded remains the measured default; correctness blockers lead the rank
 |---|---|---|---|---|
 | **Unix/descriptor ownership hardening — recommended** | Reproduce truncated SCM_RIGHTS with FD accounting; bound ancillary lengths, close undelivered descriptors, test CLOEXEC and Unix address boundaries/abstract encoding. | Make supported Unix/FD transports safe enough for owner-led integration. | Separate std/API work; descriptor leaks, malformed control buffers and platform differences. Uring TCP remains a separate feature. | Native Darwin/Linux FD-count and cancellation cases; boundary-length/byte-encoding tests; capnp owner validates its actual transport before activation. |
 | Measured wake/scheduler follow-up | Profile the backend and worker layout that loses the paired comparison; isolate wake/timer/syscall cost with same-binary controls before altering scheduling. | Reduce demonstrated CPU/MiB or tail cost without changing QUIC behavior. | Measurement-first sprint; timer slack, work stealing, fairness and cancellation can trade throughput for latency. | Quiet M3 paired bulk/echo/multi-peer evidence, exact completion, idle/cancel/shutdown checks and full release gates for any resulting change. |
+
+## Unix/FD correctness sprint completed, 2026-10-11 UTC
+
+The recommended Unix/descriptor sprint above is now complete as unreleased
+fork source: `03263c1c4424` repairs ancillary ownership/bounds/CLOEXEC and
+native Unix addresses; `017b3e4966a2` repairs Dispatch timed-futex timer
+allocation failure after cancellation registration. The
+[follow-up report](UNIX_FD_HARDENING.md) and
+[portable evidence](UNIX_FD_HARDENING_EVIDENCE.json) retain native
+before/after proof, source/binary hashes and the validation boundary.
+Earlier release and measurement evidence remains historical and unchanged.
+
+Full Darwin and Linux feature gates pass in Debug and ReleaseSafe, as do
+QUIC `test` (37/37 steps), `test -Drelease=true` (30/30), `bench-test` and
+`bench-io-build` (12/12 each). The isolated Dispatch injection proves one
+wake, drained cancellation registration/node/count and subsequent reuse.
+All FD-count checks return to baseline and delivered descriptors are valid
+and CLOEXEC. Linux final ancillary tests were strengthened and rerun after
+the full gate without changing the library implementation.
+
+Darwin/QUIC use a rebuilt local audit compiler with patched assertions-ON
+LLVM; Linux uses the published stock-bundle CI compiler paired with the
+modified library. These fixes are not in published
+`0.17.0+fork.3bfc1a3ab`. No release assembly/push/retag, new performance
+measurement or downstream activation occurred. Threaded and stock Zig
+0.17.0 remain the defaults; the VM is Stopped.
+
+| Work | Goal | Risk | Acceptance |
+|---|---|---|---|
+| **Publish and validate the hardened fork — recommended** | Deliver repaired source for owner-led adoption. | Exact stock-bundle builds, platform coverage and downstream error switches need validation. | Reviewed assembly, three-platform native release gates, verified artifacts and each adopting owner's backend paths. |
+| Linux Uring profiling | Explain the earlier bulk gain and evaluate multiple loops. | Adoption-dependent measurement work; fairness/cancellation tradeoffs. | Serial paired profiles/workloads, exact completion, cancellation/shutdown checks and full gates for code changes. |
