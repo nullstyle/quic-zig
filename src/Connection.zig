@@ -3997,7 +3997,10 @@ pub fn ackDelayScaled(
     tracker: *const AckTracker.AckTracker,
     now_us: u64,
 ) u64 {
-    const largest_at_us = tracker.largest_at_ms * RttEstimator.ms;
+    const largest_at_us = if (tracker.largest_at_us != 0)
+        tracker.largest_at_us
+    else
+        tracker.largest_at_ms *| RttEstimator.ms;
     if (now_us <= largest_at_us) return 0;
     const shift: u6 = @intCast(@min(self.local_transport_params.ack_delay_exponent, 20));
     return (now_us - largest_at_us) >> shift;
@@ -4007,15 +4010,14 @@ fn ackDelayDeadlineUs(
     self: *const Connection,
     tracker: *const AckTracker.AckTracker,
 ) ?u64 {
-    const base_ms = tracker.ackDelayBaseMs() orelse return null;
-    const max_delay_ms = (self.effectiveMaxAckDelayUs() +| RttEstimator.ms - 1) / RttEstimator.ms;
-    return (base_ms +| max_delay_ms) *| RttEstimator.ms;
+    const base_us = tracker.ackDelayBaseUs() orelse return null;
+    return base_us +| self.effectiveMaxAckDelayUs();
 }
 
 fn promoteDueAckDelay(self: *Connection, tracker: *AckTracker.AckTracker, now_us: u64) void {
-    if (tracker.promoteDelayedAck(
-        now_us / RttEstimator.ms,
-        (self.effectiveMaxAckDelayUs() +| RttEstimator.ms - 1) / RttEstimator.ms,
+    if (tracker.promoteDelayedAckUs(
+        now_us,
+        self.effectiveMaxAckDelayUs(),
     )) self.touch();
 }
 
@@ -4484,10 +4486,11 @@ pub fn validatePeerTransportConnectionIds(self: *Connection) void {
 
 // INTERNAL: pub for Connection/recv_data_handlers.zig access; not part of the embedder API.
 pub fn refreshEarlyDataStatus(self: *Connection) Error!void {
-    if (self.early_data_rejection_processed) return;
-    if (self.inner.earlyDataStatus() != .rejected) return;
-    try self.requeueRejectedEarlyData();
-    self.early_data_rejection_processed = true;
+    if (self.early_data_rejection_processed or !self.early_data_send_enabled or self.handshake_keys_discarded) return;
+    if (self.inner.earlyDataStatus() == .rejected) {
+        try self.requeueRejectedEarlyData();
+        self.early_data_rejection_processed = true;
+    }
 }
 
 /// RFC 9001 §4.6.2: the server rejected 0-RTT, so everything sent

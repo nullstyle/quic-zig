@@ -73,6 +73,232 @@ pub const Chunk = struct {
     length: u64,
     fin: bool,
     requeued_for_probe: bool = false,
+    dead: bool = false,
+};
+
+/// Power-of-two circular ring buffer mapping packet numbers (`pn`) to
+/// in-flight `Chunk`s in ascending `pn` order.
+///
+/// Replaces `std.AutoHashMapUnmanaged(u64, Chunk)`:
+/// - In-order `recordSent` appends at the tail in O(1) without hashing.
+/// - In-order `onPacketAcked` pops from the head in O(1) without shifting
+///   or tombstone accumulation.
+/// - Out-of-order ACKs/losses binary-search `0..span` in O(log N) over a
+///   single contiguous allocation and tombstone in place, trimming dead
+///   runs from the head/tail automatically.
+pub const InFlightMap = struct {
+    pub const Entry = struct {
+        pn: u64,
+        chunk: Chunk,
+    };
+
+    pub const RemovedEntry = struct {
+        value: Chunk,
+    };
+
+    pub const empty: InFlightMap = .{};
+
+    ptr: ?[*]Entry = null,
+    cap: u32 = 0,
+    head: u32 = 0,
+    span: u32 = 0,
+    live: u32 = 0,
+
+    pub fn deinit(self: *InFlightMap, allocator: std.mem.Allocator) void {
+        if (self.ptr) |p| {
+            allocator.free(p[0..self.cap]);
+        }
+        self.* = .empty;
+    }
+
+    pub fn count(self: *const InFlightMap) u32 {
+        return self.live;
+    }
+
+    pub fn clearRetainingCapacity(self: *InFlightMap) void {
+        self.head = 0;
+        self.span = 0;
+        self.live = 0;
+    }
+
+    fn compact(self: *InFlightMap) void {
+        if (self.span == self.live) return;
+        if (self.live == 0) {
+            self.head = 0;
+            self.span = 0;
+            return;
+        }
+        const p = self.ptr.?;
+        const mask = self.cap - 1;
+        var write_i: u32 = 0;
+        var read_i: u32 = 0;
+        while (read_i < self.span) : (read_i += 1) {
+            const e = p[(self.head + read_i) & mask];
+            if (!e.chunk.dead) {
+                if (write_i != read_i) {
+                    p[(self.head + write_i) & mask] = e;
+                }
+                write_i += 1;
+            }
+        }
+        std.debug.assert(write_i == self.live);
+        self.span = write_i;
+    }
+
+    pub fn ensureTotalCapacity(
+        self: *InFlightMap,
+        allocator: std.mem.Allocator,
+        min_cap: usize,
+    ) std.mem.Allocator.Error!void {
+        if (min_cap == 0) return;
+        if (min_cap <= self.cap) {
+            if (self.cap - self.span < min_cap - self.live) self.compact();
+            return;
+        }
+        const target_usize = std.math.ceilPowerOfTwo(usize, @max(min_cap, 8)) catch return error.OutOfMemory;
+        const target: u32 = std.math.cast(u32, target_usize) orelse return error.OutOfMemory;
+        const new_slice = try allocator.alloc(Entry, target);
+        var write_i: u32 = 0;
+        if (self.ptr) |old_p| {
+            const mask = self.cap - 1;
+            var read_i: u32 = 0;
+            while (read_i < self.span) : (read_i += 1) {
+                const e = old_p[(self.head + read_i) & mask];
+                if (!e.chunk.dead) {
+                    new_slice[write_i] = e;
+                    write_i += 1;
+                }
+            }
+            allocator.free(old_p[0..self.cap]);
+        }
+        self.ptr = new_slice.ptr;
+        self.cap = target;
+        self.head = 0;
+        self.span = write_i;
+        self.live = write_i;
+    }
+
+    pub fn ensureUnusedCapacity(
+        self: *InFlightMap,
+        allocator: std.mem.Allocator,
+        extra: usize,
+    ) std.mem.Allocator.Error!void {
+        if (extra == 0) return;
+        const needed = std.math.add(usize, self.live, extra) catch return error.OutOfMemory;
+        if (needed > self.cap) {
+            try self.ensureTotalCapacity(allocator, needed);
+            return;
+        }
+        if (self.cap - self.span < extra) {
+            self.compact();
+        }
+    }
+
+    fn findLogicalIndex(self: *const InFlightMap, pn: u64) ?u32 {
+        if (self.live == 0) return null;
+        const p = self.ptr.?;
+        const mask = self.cap - 1;
+        const first = p[self.head & mask];
+        if (pn <= first.pn) {
+            return if (pn == first.pn and !first.chunk.dead) 0 else null;
+        }
+        const last_logical = self.span - 1;
+        const last = p[(self.head + last_logical) & mask];
+        if (pn >= last.pn) {
+            return if (pn == last.pn and !last.chunk.dead) last_logical else null;
+        }
+        var lo: u32 = 1;
+        var hi: u32 = last_logical;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const e = p[(self.head + mid) & mask];
+            if (e.pn < pn) {
+                lo = mid + 1;
+            } else if (e.pn > pn) {
+                hi = mid;
+            } else {
+                return if (!e.chunk.dead) mid else null;
+            }
+        }
+        return null;
+    }
+
+    pub fn contains(self: *const InFlightMap, pn: u64) bool {
+        return self.findLogicalIndex(pn) != null;
+    }
+
+    pub fn getPtr(self: *InFlightMap, pn: u64) ?*Chunk {
+        const logical = self.findLogicalIndex(pn) orelse return null;
+        const mask = self.cap - 1;
+        return &self.ptr.?[(self.head + logical) & mask].chunk;
+    }
+
+    pub fn putAssumeCapacityNoClobber(self: *InFlightMap, pn: u64, c: Chunk) void {
+        if (self.cap - self.span == 0) self.compact();
+        std.debug.assert(self.span < self.cap);
+        const p = self.ptr.?;
+        const mask = self.cap - 1;
+        var chunk = c;
+        chunk.dead = false;
+        const new_entry: Entry = .{ .pn = pn, .chunk = chunk };
+
+        if (self.span == 0 or pn > p[(self.head + self.span - 1) & mask].pn) {
+            p[(self.head + self.span) & mask] = new_entry;
+            self.span += 1;
+            self.live += 1;
+            return;
+        }
+
+        var lo: u32 = 0;
+        var hi: u32 = self.span;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (p[(self.head + mid) & mask].pn < pn) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo < self.span and p[(self.head + lo) & mask].pn == pn) {
+            std.debug.assert(p[(self.head + lo) & mask].chunk.dead);
+            p[(self.head + lo) & mask] = new_entry;
+            self.live += 1;
+            return;
+        }
+        var idx: u32 = self.span;
+        while (idx > lo) : (idx -= 1) {
+            p[(self.head + idx) & mask] = p[(self.head + idx - 1) & mask];
+        }
+        p[(self.head + lo) & mask] = new_entry;
+        self.span += 1;
+        self.live += 1;
+    }
+
+    pub fn fetchRemove(self: *InFlightMap, pn: u64) ?RemovedEntry {
+        const logical = self.findLogicalIndex(pn) orelse return null;
+        const p = self.ptr.?;
+        const mask = self.cap - 1;
+        const phys = (self.head + logical) & mask;
+        const chunk = p[phys].chunk;
+        p[phys].chunk.dead = true;
+        self.live -= 1;
+        if (self.live == 0) {
+            self.head = 0;
+            self.span = 0;
+        } else if (logical == 0) {
+            while (self.span > 0 and p[self.head & mask].chunk.dead) {
+                self.head = (self.head + 1) & mask;
+                self.span -= 1;
+            }
+        } else if (logical == self.span - 1) {
+            while (self.span > 0 and p[(self.head + self.span - 1) & mask].chunk.dead) {
+                self.span -= 1;
+            }
+        } else if (self.span >= 64 and self.span - self.live >= self.span / 2) {
+            self.compact();
+        }
+        return .{ .value = chunk };
+    }
 };
 
 /// State for a locally-initiated RESET_STREAM (RFC 9000 §19.4).
@@ -247,7 +473,7 @@ write_offset: u64 = 0,
 /// that need to be sent or retransmitted.
 pending: std.ArrayList(Range) = .empty,
 /// In-flight chunks per packet number.
-in_flight: std.AutoHashMapUnmanaged(u64, Chunk) = .empty,
+in_flight: InFlightMap = .empty,
 /// Sorted disjoint ranges above `base_offset` that have been
 /// ACKed but can't yet be folded into the floor.
 acked_above: std.ArrayList(Range) = .empty,
@@ -258,6 +484,9 @@ fin_marked: bool = false,
 fin_in_flight: bool = false,
 /// FIN chunk has been ACKed.
 fin_acked: bool = false,
+/// True when a PTO probe has re-queued an in-flight chunk into `pending`,
+/// so a subsequent ACK may need to strip already-acked sub-ranges from `pending`.
+probe_requeued_pending: bool = false,
 /// Final stream size; set once `finish` is called.
 final_size: ?u64 = null,
 
@@ -337,6 +566,7 @@ pub fn resetStream(
     self.state = .reset_sent;
     // Drop any pending data; we'll never send it.
     self.pending.clearRetainingCapacity();
+    self.probe_requeued_pending = false;
     // In-flight bytes stay tracked so we can correctly handle
     // their ACK/loss outcomes (and not re-pend them on loss).
 }
@@ -433,6 +663,7 @@ pub fn recordSent(self: *SendStream, pn: u64, c: Chunk) Error!void {
 
         if (c.offset + c.length == r.end) {
             _ = self.pending.orderedRemove(0);
+            if (self.pending.items.len == 0) self.probe_requeued_pending = false;
         } else {
             self.pending.items[0].offset = c.offset + c.length;
         }
@@ -478,6 +709,7 @@ pub fn onPacketProbeRequeued(self: *SendStream, pn: u64) Error!bool {
     }
     if (c.length > 0) {
         try self.addUnackedPending(.{ .offset = c.offset, .end = c.offset + c.length });
+        if (self.pending.items.len > 0) self.probe_requeued_pending = true;
     }
     if (c.fin and !self.fin_acked) {
         self.fin_in_flight = false;
@@ -543,7 +775,10 @@ fn addUnackedPending(self: *SendStream, r: Range) Error!void {
 /// then either advances `base_offset` and drops covered bytes from
 /// `bytes`, or stashes into `acked_above`.
 fn markAcked(self: *SendStream, r: Range) Error!void {
-    try range_list.removeRange(&self.pending, self.allocator, r);
+    if (self.probe_requeued_pending and self.pending.items.len > 0) {
+        try range_list.removeRange(&self.pending, self.allocator, r);
+        if (self.pending.items.len == 0) self.probe_requeued_pending = false;
+    }
     const start = @max(r.offset, self.base_offset);
     if (start >= r.end) return;
     if (start > self.base_offset) {
@@ -1119,6 +1354,94 @@ test "onPacketProbeRequeued preserves original in_flight key for spurious-PTO AC
         try testing.expectEqual(State.data_recvd, s.state);
         try testing.expectEqual(@as(usize, 0), s.pending.items.len);
         try testing.expect(s.peekChunk(100) == null);
+    }
+}
+
+test "InFlightMap ring buffer wraps, trims tombstones, and compacts in-place without reallocating" {
+    var s = SendStream.init(test_alloc);
+    defer s.deinit();
+
+    var payload: [64]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @intCast('0' + (i % 10));
+    _ = try s.write(&payload);
+
+    // Send 8 1-byte chunks (fills initial_cap = 8).
+    var pn: u64 = 0;
+    while (pn < 8) : (pn += 1) {
+        const c = s.peekChunk(1).?;
+        try s.recordSent(pn, c);
+    }
+    try testing.expectEqual(@as(u32, 8), s.in_flight.cap);
+    const initial_ptr = @intFromPtr(s.in_flight.ptr.?);
+
+    // ACK the first 4 in order: head advances to 4.
+    var ack_pn: u64 = 0;
+    while (ack_pn < 4) : (ack_pn += 1) {
+        try s.onPacketAcked(ack_pn);
+    }
+    try testing.expectEqual(@as(u32, 4), s.in_flight.head);
+    try testing.expectEqual(@as(u32, 4), s.in_flight.span);
+    try testing.expectEqual(@as(u32, 4), s.in_flight.live);
+
+    // Send 2 more chunks (PNs 8 and 9): wraps around the end of the 8-slot buffer.
+    while (pn < 10) : (pn += 1) {
+        const c = s.peekChunk(1).?;
+        try s.recordSent(pn, c);
+    }
+    try testing.expectEqual(initial_ptr, @intFromPtr(s.in_flight.ptr.?));
+    try testing.expectEqual(@as(u32, 6), s.in_flight.span);
+
+    // Out-of-order ACK of interior PNs 5, 6, 7, 8 creates dead tombstones while PN 4 (head) and PN 9 (tail) stay live.
+    try s.onPacketAcked(5);
+    try s.onPacketAcked(6);
+    try s.onPacketAcked(7);
+    try s.onPacketAcked(8);
+    try testing.expectEqual(@as(u32, 2), s.in_flight.live);
+    try testing.expectEqual(@as(u32, 6), s.in_flight.span);
+
+    // Send 3 more chunks (PNs 10, 11, 12): reaching span == 8 with 4 tombstones triggers in-place compact() without reallocating!
+    while (pn < 13) : (pn += 1) {
+        const c = s.peekChunk(1).?;
+        try s.recordSent(pn, c);
+    }
+    try testing.expectEqual(initial_ptr, @intFromPtr(s.in_flight.ptr.?));
+    try testing.expectEqual(@as(u32, 5), s.in_flight.live);
+    try testing.expectEqual(@as(u32, 5), s.in_flight.span);
+
+    // ACK the remaining live PNs (4, 9, 10, 11, 12) and verify floor advances to 13.
+    try s.onPacketAcked(4);
+    try s.onPacketAcked(9);
+    try s.onPacketAcked(10);
+    try s.onPacketAcked(11);
+    try s.onPacketAcked(12);
+    try testing.expectEqual(@as(u32, 0), s.in_flight.live);
+    try testing.expectEqual(@as(u32, 0), s.in_flight.span);
+    try testing.expectEqual(@as(u64, 13), s.ackedFloor());
+}
+
+test "SendStream OOM safety under FailingAllocator preserves invariants" {
+    var fail_index: usize = 0;
+    while (fail_index < 12) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(test_alloc, .{ .fail_index = fail_index });
+        var s = SendStream.init(failing.allocator());
+        defer s.deinit();
+
+        const wrote = s.write("0123456789abcdef") catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(s.write_offset - s.base_offset, @as(u64, @intCast(s.bytes.len())));
+            continue;
+        };
+        try testing.expectEqual(@as(usize, 16), wrote);
+
+        var pn: u64 = 0;
+        while (pn < 10) : (pn += 1) {
+            const c = s.peekChunk(1) orelse break;
+            s.recordSent(pn, c) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                break;
+            };
+        }
+        try testing.expectEqual(s.write_offset - s.base_offset, @as(u64, @intCast(s.bytes.len())));
     }
 }
 

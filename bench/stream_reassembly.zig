@@ -223,6 +223,7 @@ fn resetSendStream(stream: *SendStream) void {
     stream.fin_marked = false;
     stream.fin_in_flight = false;
     stream.fin_acked = false;
+    stream.probe_requeued_pending = false;
     stream.final_size = null;
     stream.reset = null;
     stream.state = .ready;

@@ -56,6 +56,8 @@ largest: ?u64 = null,
 /// Wall-clock time (ms) at which `largest` was recorded. Used
 /// to compute ACK delay for outgoing ACK frames.
 largest_at_ms: u64 = 0,
+/// Wall-clock time (us) at which `largest` was recorded.
+largest_at_us: u64 = 0,
 /// True iff at least one PN has been added since the last
 /// `markAckSent`. The connection uses this as the "should we
 /// send an ACK?" signal.
@@ -66,6 +68,9 @@ delayed_ack_armed: bool = false,
 /// Receive time of the first ACK-eliciting packet in the current
 /// delayed-ACK epoch. This drives the max_ack_delay deadline.
 delayed_ack_start_ms: u64 = 0,
+/// Receive time (us) of the first ACK-eliciting packet in the current
+/// delayed-ACK epoch.
+delayed_ack_start_us: u64 = 0,
 /// Number of ACK-eliciting packets received since the last sent ACK.
 ack_eliciting_since_ack: u8 = 0,
 /// Receive time (us) of the last ACK-eliciting packet: the quiet
@@ -78,12 +83,19 @@ last_ack_eliciting_us: u64 = 0,
 /// numbers remain ACKable once a later ACK-eliciting packet or
 /// timer causes an ACK frame to be emitted.
 pub fn addPacket(self: *AckTracker, pn: u64, now_ms: u64, ack_eliciting: bool) void {
+    self.addPacketUs(pn, now_ms *| 1000, ack_eliciting);
+    if (self.largest == pn) self.largest_at_ms = now_ms;
+}
+
+/// Microsecond-resolution variant of `addPacket`.
+pub fn addPacketUs(self: *AckTracker, pn: u64, now_us: u64, ack_eliciting: bool) void {
     const previous_largest = self.largest;
     const inserted = self.insert(pn);
     if (!inserted) return;
     if (previous_largest == null or pn > previous_largest.?) {
         self.largest = pn;
-        self.largest_at_ms = now_ms;
+        self.largest_at_ms = now_us / 1000;
+        self.largest_at_us = now_us;
     }
     if (ack_eliciting) {
         self.pending_ack = true;
@@ -114,12 +126,14 @@ pub fn addPacketDelayed(
     quick_gap_us: u64,
     reorder_threshold: u64,
 ) void {
+    const effective_us = if (now_us != 0) now_us else now_ms *| 1000;
     const previous_largest = self.largest;
     const inserted = self.insert(pn);
     if (!inserted) return;
     if (previous_largest == null or pn > previous_largest.?) {
         self.largest = pn;
         self.largest_at_ms = now_ms;
+        self.largest_at_us = effective_us;
     }
     if (!ack_eliciting) return;
     // The quiet rule: a lone packet (a request, a reply, a keepalive)
@@ -134,6 +148,7 @@ pub fn addPacketDelayed(
     if (!self.delayed_ack_armed) {
         self.delayed_ack_armed = true;
         self.delayed_ack_start_ms = now_ms;
+        self.delayed_ack_start_us = effective_us;
         self.ack_eliciting_since_ack = 0;
     }
     self.ack_eliciting_since_ack +|= 1;
@@ -187,6 +202,24 @@ pub fn ackDelayBaseMs(self: *const AckTracker) ?u64 {
     return null;
 }
 
+/// Receive timestamp (us) used to compute the `ack_delay` deadline
+/// of the next outgoing ACK frame, or null if no ACK is scheduled.
+pub fn ackDelayBaseUs(self: *const AckTracker) ?u64 {
+    if (self.delayed_ack_armed) {
+        return if (self.delayed_ack_start_us != 0)
+            self.delayed_ack_start_us
+        else
+            self.delayed_ack_start_ms *| 1000;
+    }
+    if (self.pending_ack) {
+        return if (self.largest_at_us != 0)
+            self.largest_at_us
+        else
+            self.largest_at_ms *| 1000;
+    }
+    return null;
+}
+
 /// Promote an armed delayed ACK to `pending_ack` if `max_ack_delay_ms`
 /// has elapsed since the first ACK-eliciting packet of the epoch.
 /// Returns true iff the promotion fired.
@@ -194,6 +227,20 @@ pub fn promoteDelayedAck(self: *AckTracker, now_ms: u64, max_ack_delay_ms: u64) 
     if (self.pending_ack or !self.delayed_ack_armed) return false;
     const deadline_ms = self.delayed_ack_start_ms +| max_ack_delay_ms;
     if (now_ms < deadline_ms) return false;
+    self.pending_ack = true;
+    self.delayed_ack_armed = false;
+    return true;
+}
+
+/// Microsecond-resolution variant of `promoteDelayedAck`.
+pub fn promoteDelayedAckUs(self: *AckTracker, now_us: u64, max_ack_delay_us: u64) bool {
+    if (self.pending_ack or !self.delayed_ack_armed) return false;
+    const start_us = if (self.delayed_ack_start_us != 0)
+        self.delayed_ack_start_us
+    else
+        self.delayed_ack_start_ms *| 1000;
+    const deadline_us = start_us +| max_ack_delay_us;
+    if (now_us < deadline_us) return false;
     self.pending_ack = true;
     self.delayed_ack_armed = false;
     return true;

@@ -359,3 +359,41 @@ test "ack frequency: our transport parameters offer min_ack_delay, no more than 
     try conn.setTransportParams(.{ .max_ack_delay_ms = 25, .min_ack_delay_us = 5_000 });
     try std.testing.expectEqual(@as(?u64, 5_000), conn.local_transport_params.min_ack_delay_us);
 }
+
+test "ack frequency: sub-millisecond request_max_ack_delay_us schedules and promotes at microsecond precision" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+    conn.local_transport_params.min_ack_delay_us = 100;
+    conn.local_transport_params.ack_delay_exponent = 0;
+
+    var buf: [64]u8 = undefined;
+    const af = try encodedFrame(&buf, .{ .ack_frequency = .{
+        .sequence_number = 1,
+        .ack_eliciting_threshold = 4,
+        .request_max_ack_delay_us = 500,
+        .reordering_threshold = 1,
+    } });
+    try conn.dispatchFrames(.application, af, 1_000_000);
+    try std.testing.expectEqual(@as(u64, 500), conn.effectiveMaxAckDelayUs());
+
+    // Receive an ack-eliciting packet at 1_000_250 us (with quick_gap_us = 0 so it arms delayed ACK).
+    const tracker = &conn.primaryPath().app_pn_space.received;
+    conn.primaryPath().app_pn_space.recordReceivedPacketDelayed(0, 1_000, true, 4, 1_000_250, 0, 1);
+    try std.testing.expect(!tracker.pending_ack);
+    try std.testing.expect(tracker.delayed_ack_armed);
+
+    // Next timer deadline is exact: 1_000_250 + 500 = 1_000_750 us (not rounded to 1 ms).
+    const deadline = conn.nextTimerDeadline(1_000_300).?;
+    try std.testing.expectEqual(state.TimerKind.ack_delay, deadline.kind);
+    try std.testing.expectEqual(@as(u64, 1_000_750), deadline.at_us);
+
+    // At 1_000_749 us: not yet promoted; at 1_000_750 us: promoted!
+    try conn.tick(1_000_749);
+    try std.testing.expect(!tracker.pending_ack);
+    try conn.tick(1_000_750);
+    try std.testing.expect(tracker.pending_ack);
+    try std.testing.expectEqual(@as(u64, 500), conn.ackDelayScaled(tracker, 1_000_750));
+}

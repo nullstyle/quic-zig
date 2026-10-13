@@ -621,9 +621,9 @@ fn finishOpenedPacket(
         ),
         // RFC 9000 §13.2.1: Initial and Handshake packets MUST NOT
         // have their acknowledgements delayed.
-        .initial, .handshake => pn_space.recordReceivedPacket(
+        .initial, .handshake => pn_space.recordReceivedPacketUs(
             pn,
-            now_us / 1000,
+            now_us,
             cls.ack_eliciting,
         ),
     }

@@ -101,6 +101,11 @@ pub fn recordReceivedPacket(self: *PnSpace, pn: u64, now_ms: u64, ack_eliciting:
     self.received.addPacket(pn, now_ms, ack_eliciting);
 }
 
+/// Microsecond-resolution variant of `recordReceivedPacket`.
+pub fn recordReceivedPacketUs(self: *PnSpace, pn: u64, now_us: u64, ack_eliciting: bool) void {
+    self.received.addPacketUs(pn, now_us, ack_eliciting);
+}
+
 /// Record a received PN under application-data delayed-ACK rules
 /// (RFC 9000 §13.2.1). `packet_threshold` is the count of
 /// ACK-eliciting packets that forces an immediate ACK (typically 2).

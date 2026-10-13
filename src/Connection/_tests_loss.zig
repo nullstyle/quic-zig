@@ -1503,3 +1503,38 @@ test "a probe timeout declares nothing lost (RFC 9002 6.2.4): the window is unch
     try std.testing.expectEqual(initial_cwnd, conn.congestionWindow());
     try std.testing.expectEqual(@as(u32, 0), conn.ptoCountForLevel(.application).*);
 }
+
+test "RFC 9002 §5.1: ACK samples RTT when largest_acked is non-ack-eliciting and an earlier newly-acked packet is ack-eliciting" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+    const conn = try Connection.createClient(allocator, ctx, "x");
+    defer conn.destroy();
+
+    const sent = conn.sentForLevel(.application);
+    // Packet 0: ack-eliciting, sent at 10 ms.
+    try sent.record(.{
+        .pn = 0,
+        .sent_time_us = 10_000,
+        .bytes = 1200,
+        .ack_eliciting = true,
+        .in_flight = true,
+    });
+    // Packet 1: ACK-only (non-ack-eliciting), sent at 20 ms.
+    try sent.record(.{
+        .pn = 1,
+        .sent_time_us = 20_000,
+        .bytes = 40,
+        .ack_eliciting = false,
+        .in_flight = false,
+    });
+    conn.pnSpaceForLevel(.application).next_pn = 2;
+
+    // Peer ACKs [0, 1] at 55 ms. Because largest_acked (1) is newly
+    // acknowledged and at least one newly-acked packet (0) was
+    // ack-eliciting, RFC 9002 §5.1 generates an RTT sample from
+    // largest_acked's send time (55 ms - 20 ms = 35 ms).
+    try conn.handleAckAtLevel(.application, ackOf(1, 1, &.{}), 55_000);
+    try std.testing.expect(conn.rttForLevel(.application).first_sample_taken);
+    try std.testing.expectEqual(@as(u64, 35_000), conn.rttForLevel(.application).latest_rtt_us);
+}

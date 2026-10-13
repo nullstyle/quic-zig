@@ -421,7 +421,7 @@ pub fn recordApplicationReceivedPacket(
     reorder_threshold: u64,
 ) void {
     if (cls.ack_eliciting and cls.needs_immediate_ack) {
-        app_pn_space.recordReceivedPacket(pn, now_us / RttEstimator.ms, true);
+        app_pn_space.recordReceivedPacketUs(pn, now_us, true);
         return;
     }
     app_pn_space.recordReceivedPacketDelayed(

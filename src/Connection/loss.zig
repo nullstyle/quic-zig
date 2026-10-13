@@ -1405,7 +1405,7 @@ fn firePtoOnApplicationPath(
         if (p.dead or !p.ack_eliciting) continue;
         if (!found) {
             found = true;
-            const r = try requeueFramesForProbe(conn, p, path.id);
+            const r = try requeueFramesForProbe(conn, .application, p, path.id);
             requeued = r.any;
             if (r.data) break;
             continue;
@@ -1422,7 +1422,7 @@ fn firePtoOnApplicationPath(
         // request's packet and the first probe's copy lost, every
         // ACK the server sent corrupted, and one NEW_CONNECTION_ID
         // went out per probe for 30 s, until the idle timeout.
-        if (try requeueDataForProbe(conn, p)) {
+        if (try requeueDataForProbe(conn, .application, p)) {
             requeued = true;
             break;
         }
@@ -1451,11 +1451,12 @@ const ProbeRequeue = struct {
 /// may stay.
 fn requeueFramesForProbe(
     conn: *Connection,
+    lvl: EncryptionLevel,
     packet: *SentPacketTracker.SentPacket,
     path_id: u32,
 ) Error!ProbeRequeue {
     conn.touch();
-    const data = try requeueDataForProbe(conn, packet);
+    const data = try requeueDataForProbe(conn, lvl, packet);
     const control = try dispatchLostControlFramesOnPath(conn, packet, path_id);
     packet.probe_requeued = true;
     return .{ .any = data or control, .data = data };
@@ -1465,11 +1466,12 @@ fn requeueFramesForProbe(
 /// its control frames stay where they are. `true` when it owned any.
 fn requeueDataForProbe(
     conn: *Connection,
+    lvl: EncryptionLevel,
     packet: *const SentPacketTracker.SentPacket,
 ) Error!bool {
     var any = false;
     any = (try dispatchProbeRequeuedPacketToStreams(conn, packet)) or any;
-    any = (try requeueSentCryptoForProbe(conn, .application, packet.pn)) or any;
+    any = (try requeueSentCryptoForProbe(conn, lvl, packet.pn)) or any;
     return any;
 }
 

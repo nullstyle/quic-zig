@@ -190,19 +190,21 @@ fn pollDatagramFull(
 
     var pos: usize = 0;
     // Initial first (must lead a coalesced datagram).
-    if (try pollLevel(conn, .initial, long_dst, now_us)) |n| pos += n;
+    if (!conn.initial_keys_discarded) {
+        if (try pollLevel(conn, .initial, long_dst, now_us)) |n| pos += n;
+    }
     conn.poll_datagram_used = pos;
     // Client 0-RTT uses a long header but shares the Application
     // packet-number space. If the Initial filled this datagram, this
     // simply waits for the next poll.
-    if (pos < long_dst.len) {
+    if (pos < long_dst.len and conn.early_data_send_enabled and conn.role == .client and !conn.handshake_keys_discarded) {
         if (try pollLevel(conn, .early_data, long_dst[pos..], now_us)) |n| pos += n;
     }
     conn.poll_datagram_used = pos;
     // Handshake next (after Initial keys are dropped post-handshake,
     // there's nothing here; otherwise it's CRYPTO + ACK).
     var sent_handshake = false;
-    if (pos < long_dst.len) {
+    if (pos < long_dst.len and !conn.handshake_keys_discarded) {
         if (try pollLevel(conn, .handshake, long_dst[pos..], now_us)) |n| {
             pos += n;
             sent_handshake = true;

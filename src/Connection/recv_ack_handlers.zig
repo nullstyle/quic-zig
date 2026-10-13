@@ -324,7 +324,7 @@ fn apply(
     // ACKs that did (RFC 9406 §4.2).
     var rtt_sampled = false;
     if (ctx.largest_acked_send_time_us) |sent_time_us| {
-        if (ctx.largest_acked_ack_eliciting and now_us >= sent_time_us) {
+        if (ctx.any_ack_eliciting_newly_acked and now_us >= sent_time_us) {
             // RFC 9002 §5.3: "the acknowledgment delay MUST NOT be
             // subtracted from the RTT sample if the packet number space
             // is Initial or Handshake."
@@ -335,7 +335,7 @@ fn apply(
             target.path.path.rtt.update(
                 now_us - sent_time_us,
                 ack_delay_us,
-                conn.handshake_keys_discarded or conn.handshakeDone(),
+                conn.handshake_keys_discarded or (conn.role == .server and conn.handshakeDone()),
                 conn.peerMaxAckDelayUs(),
             );
             rtt_sampled = true;

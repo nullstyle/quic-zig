@@ -662,6 +662,7 @@ pub const ChurnResult = struct {
 /// on `conn`, lowest first (so the run does not depend on hash-map
 /// iteration order).
 fn liveRequestStreams(conn: *const quic.Connection, out: []u64) []u64 {
+    if (conn.streams.count() == 0) return out[0..0];
     var n: usize = 0;
     var it = conn.streams.iterator();
     while (it.next()) |entry| {
@@ -670,7 +671,9 @@ fn liveRequestStreams(conn: *const quic.Connection, out: []u64) []u64 {
         out[n] = id;
         n += 1;
     }
-    std.mem.sort(u64, out[0..n], {}, std.sort.asc(u64));
+    if (n > 1) {
+        std.mem.sort(u64, out[0..n], {}, std.sort.asc(u64));
+    }
     return out[0..n];
 }
 
