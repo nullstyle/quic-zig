@@ -117,7 +117,7 @@ pub fn onPacketAcked(
     if (self.isSlowStart()) {
         // HyStart++ throttles growth inside Conservative Slow
         // Start; outside CSS this is plain `bytes_acked`.
-        self.cwnd += self.hystart.slowStartGrowth(bytes_acked);
+        self.cwnd +|= self.hystart.slowStartGrowth(bytes_acked);
         return;
     }
 
@@ -136,10 +136,9 @@ pub fn onPacketAcked(
     }
 
     // §4.3: W_est grows by α·MSS per cwnd of acked bytes.
-    self.w_est += @intCast(
-        (@as(u128, alpha_num) * self.cfg.max_datagram_size * bytes_acked) /
-            (@as(u128, alpha_den) * @max(self.cwnd, 1)),
-    );
+    const w_est_grow = (@as(u128, alpha_num) * self.cfg.max_datagram_size * bytes_acked) /
+        (@as(u128, alpha_den) * @max(self.cwnd, 1));
+    self.w_est +|= std.math.lossyCast(u64, w_est_grow);
 
     // §4.2: target = W_cubic(t + RTT), clamped to at most 1.5x the
     // current window per §4.4's sanity bound.
@@ -150,14 +149,14 @@ pub fn onPacketAcked(
         self.w_max,
         self.cfg.max_datagram_size,
     );
-    const target = @min(w_cubic, self.cwnd + self.cwnd / 2);
+    const target = @min(w_cubic, self.cwnd +| self.cwnd / 2);
 
     if (target > self.cwnd) {
         // §4.4: cwnd += (target − cwnd)/cwnd per acked cwnd —
         // scaled here by bytes_acked so pacing of ACKs doesn't
         // change the curve.
         const grow = (@as(u128, target - self.cwnd) * bytes_acked) / @max(self.cwnd, 1);
-        self.cwnd += @intCast(grow);
+        self.cwnd +|= std.math.lossyCast(u64, grow);
     }
 
     // §4.3: in the Reno-friendly region, never fall below W_est.
@@ -355,8 +354,11 @@ const c_cubic: f64 = 0.4;
 pub fn cubicK(w_delta_bytes: u64, mss: u64) u64 {
     if (w_delta_bytes == 0 or mss == 0) return 0;
     const w_delta_seg = @as(f64, @floatFromInt(w_delta_bytes)) / @as(f64, @floatFromInt(mss));
-    const k_seconds = std.math.cbrt(w_delta_seg / c_cubic);
-    return @intFromFloat(k_seconds * 1e6);
+    const k_us = std.math.cbrt(w_delta_seg / c_cubic) * 1e6;
+    if (!(k_us > 0)) return 0;
+    const max_u64_f64: f64 = @floatFromInt(@as(u64, std.math.maxInt(u64) - 1024));
+    if (k_us >= max_u64_f64) return std.math.maxInt(u64);
+    return @intFromFloat(k_us);
 }
 
 /// §4.2: W_cubic(t) = C·(t − K)^3 + W_max, in bytes (C is in
@@ -367,7 +369,9 @@ pub fn cubicWindowBytes(t_us: u64, k_us: u64, w_max_bytes: u64, mss: u64) u64 {
     const cubic_term_bytes =
         c_cubic * dt_seconds * dt_seconds * dt_seconds * @as(f64, @floatFromInt(mss));
     const w = cubic_term_bytes + @as(f64, @floatFromInt(w_max_bytes));
-    if (w <= 0) return 0;
+    if (!(w > 0)) return 0;
+    const max_u64_f64: f64 = @floatFromInt(@as(u64, std.math.maxInt(u64) - 1024));
+    if (w >= max_u64_f64) return std.math.maxInt(u64);
     return @intFromFloat(w);
 }
 

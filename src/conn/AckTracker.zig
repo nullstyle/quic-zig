@@ -195,6 +195,7 @@ pub fn promoteDelayedAck(self: *AckTracker, now_ms: u64, max_ack_delay_ms: u64) 
     const deadline_ms = self.delayed_ack_start_ms +| max_ack_delay_ms;
     if (now_ms < deadline_ms) return false;
     self.pending_ack = true;
+    self.delayed_ack_armed = false;
     return true;
 }
 

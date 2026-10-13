@@ -215,9 +215,10 @@ fn pruneSourceRate(server: *Server, now_us: u64) void {
     while (it.next()) |entry| {
         const init_elapsed = now_us -% entry.value_ptr.window_start_us;
         const vn_elapsed = now_us -% entry.value_ptr.vn_window_start_us;
+        const reset_elapsed = now_us -% entry.value_ptr.reset_window_start_us;
         const log_elapsed = now_us -% entry.value_ptr.log_window_start_us;
         const bandwidth_elapsed = now_us -% entry.value_ptr.bandwidth_last_refill_us;
-        // Only prune when *all four* per-counter / per-bucket axes
+        // Only prune when *all* per-counter / per-bucket axes
         // have gone idle — otherwise an entry that's only stale on
         // one axis would lose its still-active counters on the
         // others. The bandwidth-bucket survival threshold is held
@@ -226,6 +227,7 @@ fn pruneSourceRate(server: *Server, now_us: u64) void {
         // full-bucket reset on its next packet.
         if (init_elapsed >= server.source_rate_window_us and
             vn_elapsed >= server.source_rate_window_us and
+            reset_elapsed >= server.source_rate_window_us and
             log_elapsed >= server.source_rate_window_us and
             bandwidth_elapsed >= bandwidth_idle_threshold_us)
         {
@@ -239,8 +241,9 @@ fn evictOldestSourceRate(server: *Server) void {
     var oldest_addr: ?Address = null;
     var oldest_start: u64 = std.math.maxInt(u64);
     while (it.next()) |entry| {
-        if (entry.value_ptr.window_start_us < oldest_start) {
-            oldest_start = entry.value_ptr.window_start_us;
+        const active_us = entry.value_ptr.lastActiveUs();
+        if (active_us < oldest_start) {
+            oldest_start = active_us;
             oldest_addr = entry.key_ptr.*;
         }
     }
@@ -481,13 +484,27 @@ fn mintAndQueueRetry(
         }
     }
 
-    // Pick a fresh server-issued SCID for this Retry. The peer
-    // will echo this DCID in its post-Retry Initial, and the
-    // token HMAC binds to it so a replayed Retry can't authorize
-    // a different connection.
+    // Pick a server-issued SCID for this Retry. If an unexpired entry
+    // already exists for `addr` with the same `original_dcid` (e.g. the
+    // second packet of a multi-packet Initial flight such as a large
+    // post-quantum ClientHello), reuse its `retry_scid` so the client's
+    // response to the first Retry is not invalidated by the second.
     var retry_scid: [20]u8 = @splat(0);
-    const retry_scid_len = server.local_cid_len;
-    try server.mintLocalScid(retry_scid[0..retry_scid_len]);
+    var retry_scid_len: u8 = server.local_cid_len;
+    var reused_existing = false;
+    if (server.retry_state_table.get(addr)) |existing| {
+        const age = now_us -% existing.minted_at_us;
+        if (age <= server.retry_token_lifetime_us and
+            std.mem.eql(u8, existing.original_dcid.slice(), ids.dcid))
+        {
+            retry_scid = existing.retry_scid;
+            retry_scid_len = existing.retry_scid_len;
+            reused_existing = true;
+        }
+    }
+    if (!reused_existing) {
+        try server.mintLocalScid(retry_scid[0..retry_scid_len]);
+    }
 
     var addr_buf: [Address.context_max_len]u8 = undefined;
     const ctx = addressContext(&addr_buf, addr);
@@ -636,6 +653,16 @@ pub const SourceRateEntry = struct {
     /// Driven by the per-feed `now_us` so the shaper reads the
     /// embedder's monotonic clock rather than a separate timebase.
     bandwidth_last_refill_us: u64 = 0,
+
+    pub fn lastActiveUs(self: SourceRateEntry) u64 {
+        return @max(
+            @max(self.window_start_us, self.vn_window_start_us),
+            @max(
+                @max(self.reset_window_start_us, self.log_window_start_us),
+                self.bandwidth_last_refill_us,
+            ),
+        );
+    }
 };
 
 /// Canonicalize an `Address` into the byte string the Retry-token

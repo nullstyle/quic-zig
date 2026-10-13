@@ -147,6 +147,12 @@ const max_initial_max_streams: u64 = 1 << 60;
 /// compatible versions" the spec suggests.
 pub const max_compatible_versions: usize = 16;
 
+/// Maximum number of transport parameters accepted in a single
+/// transport-parameters blob. Bounds the duplicate-ID scan so a peer
+/// sending thousands of unknown 2-byte parameters cannot trigger
+/// quadratic CPU work during the handshake.
+pub const max_transport_parameters: usize = 64;
+
 /// Typed view of the QUIC transport parameters blob exchanged
 /// during the handshake (RFC 9000 §18, RFC 9221, draft-ietf-quic-multipath-21).
 /// Each field corresponds to one IANA-registered parameter id;
@@ -375,8 +381,13 @@ pub const Params = struct {
     pub fn decode(src: []const u8) Error!Params {
         var p: Params = .{};
         var pos: usize = 0;
+        var seen_known: u32 = 0;
+        var seen_unknown: [max_transport_parameters]u64 = undefined;
+        var seen_unknown_len: usize = 0;
+        var param_count: usize = 0;
         while (pos < src.len) {
-            const param_start = pos;
+            if (param_count >= max_transport_parameters) return Error.InvalidValue;
+            param_count += 1;
             const id_d = try varint.decode(src[pos..]);
             pos += id_d.bytes_read;
             const len_d = try varint.decode(src[pos..]);
@@ -385,8 +396,16 @@ pub const Params = struct {
             const value_len: usize = @intCast(len_d.value);
             const value = src[pos .. pos + value_len];
             pos += value_len;
-            if (try hasParameterId(src[0..param_start], id_d.value)) {
-                return Error.DuplicateParameter;
+            if (knownParameterBit(id_d.value)) |bit| {
+                const mask = @as(u32, 1) << bit;
+                if ((seen_known & mask) != 0) return Error.DuplicateParameter;
+                seen_known |= mask;
+            } else {
+                if (std.mem.indexOfScalar(u64, seen_unknown[0..seen_unknown_len], id_d.value) != null) {
+                    return Error.DuplicateParameter;
+                }
+                seen_unknown[seen_unknown_len] = id_d.value;
+                seen_unknown_len += 1;
             }
             try setOne(&p, id_d.value, value);
         }
@@ -695,18 +714,33 @@ fn setVersionInformation(p: *Params, value: []const u8) Error!void {
     p.compatible_versions_count = @intCast(count);
 }
 
-fn hasParameterId(src: []const u8, needle: u64) Error!bool {
-    var pos: usize = 0;
-    while (pos < src.len) {
-        const id_d = try varint.decode(src[pos..]);
-        pos += id_d.bytes_read;
-        const len_d = try varint.decode(src[pos..]);
-        pos += len_d.bytes_read;
-        if (len_d.value > src.len - pos) return Error.InvalidValue;
-        if (id_d.value == needle) return true;
-        pos += @intCast(len_d.value);
-    }
-    return false;
+fn knownParameterBit(id: u64) ?u5 {
+    return switch (id) {
+        Id.original_destination_connection_id => 0,
+        Id.max_idle_timeout => 1,
+        Id.stateless_reset_token => 2,
+        Id.max_udp_payload_size => 3,
+        Id.initial_max_data => 4,
+        Id.initial_max_stream_data_bidi_local => 5,
+        Id.initial_max_stream_data_bidi_remote => 6,
+        Id.initial_max_stream_data_uni => 7,
+        Id.initial_max_streams_bidi => 8,
+        Id.initial_max_streams_uni => 9,
+        Id.ack_delay_exponent => 10,
+        Id.max_ack_delay => 11,
+        Id.disable_active_migration => 12,
+        Id.preferred_address => 13,
+        Id.active_connection_id_limit => 14,
+        Id.initial_source_connection_id => 15,
+        Id.retry_source_connection_id => 16,
+        Id.version_information => 17,
+        Id.max_datagram_frame_size => 18,
+        Id.grease_quic_bit => 19,
+        Id.min_ack_delay => 20,
+        Id.initial_max_path_id => 21,
+        Id.alternative_address => 22,
+        else => null,
+    };
 }
 
 fn setOne(p: *Params, id: u64, value: []const u8) Error!void {
@@ -946,6 +980,21 @@ test "decode rejects duplicate transport parameters" {
     pos += try varint.encode(unknown[pos..], 0x1234);
     pos += try varint.encode(unknown[pos..], 0);
     try testing.expectError(Error.DuplicateParameter, Params.decode(unknown[0..pos]));
+}
+
+test "decode caps total number of transport parameters" {
+    var buf: [512]u8 = undefined;
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < max_transport_parameters) : (i += 1) {
+        pos += try varint.encode(buf[pos..], 0x1000 + i);
+        pos += try varint.encode(buf[pos..], 0);
+    }
+    _ = try Params.decode(buf[0..pos]);
+
+    pos += try varint.encode(buf[pos..], 0x1000 + max_transport_parameters);
+    pos += try varint.encode(buf[pos..], 0);
+    try testing.expectError(Error.InvalidValue, Params.decode(buf[0..pos]));
 }
 
 test "decode rejects active_connection_id_limit < 2" {

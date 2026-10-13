@@ -55,6 +55,12 @@ pub fn canSend(conn: *const Connection) bool {
     for (&conn.pn_spaces) |*space| {
         if (space.received.pending_ack) return true;
     }
+    if (conn.app_write_current != null) {
+        for (conn.paths.paths.items) |*p| {
+            if (p.path.state == .failed) continue;
+            if (p.app_pn_space.received.pending_ack) return true;
+        }
+    }
     if (conn.pending_frames.max_data != null) return true;
     if (conn.pending_frames.max_stream_data.items.len > 0) return true;
     if (conn.pending_frames.max_streams_bidi != null or conn.pending_frames.max_streams_uni != null) return true;
@@ -214,7 +220,7 @@ fn pollDatagramFull(
             conn,
         ).id
     else
-        conn.primaryPath().id;
+        conn.activePath().id;
     const app_start_pos = pos;
     const app_dst = if (pos == 0) dst else long_dst;
     if (pos < app_dst.len) {
@@ -351,6 +357,7 @@ fn sealInitialPacket(
         .keys = keys,
         .pad_to = pad_to,
         .quic_bit = quic_bit,
+        .staging = &Connection.scratch().stage_buf,
     });
 }
 
@@ -415,7 +422,7 @@ pub fn pollLevel(
     dst: []u8,
     now_us: u64,
 ) Error!?usize {
-    return pollLevelOnPath(conn, lvl, conn.primaryPath().id, dst, now_us);
+    return pollLevelOnPath(conn, lvl, conn.activePath().id, dst, now_us);
 }
 
 /// A stream chunk packed into the packet being built, with its stream
@@ -487,6 +494,7 @@ pub fn pollLevelOnPath(
     // MEASURED 2026-10-03, before this gate: the 4097th small packet
     // in flight made `poll` return `TooManyInFlight`.
     const tracker_full = sent_tracker.isFull();
+    if (!tracker_full) try sent_tracker.prepareRecord();
     // RFC 8899 DPLPMTUD probes can grow the plaintext above 1200
     // bytes (up to `pmtud_config.max_mtu`). `max_recv_plaintext`
     // is the AEAD-supported ceiling on either direction; sizing
@@ -798,20 +806,11 @@ pub fn pollLevelOnPath(
             .{ .connection_close = close_frame },
         );
         pl_pos += wrote;
-        // RFC 9000 §10.2 ¶2: "After sending a CONNECTION_CLOSE
-        // frame, an endpoint immediately enters the closing
-        // state." We arm the closing-state machinery via
-        // `noteCloseEmit` further below (it needs the sealed-byte
-        // count and the timer derived from PTO). Before the seal,
-        // clear `pending_close` so a recursive `close()` from a
-        // mid-emit error path doesn't double-queue the frame. Inside
-        // `pollDatagram` the close stays pending for the levels
-        // behind this one, and `pollDatagram` does both when the
-        // datagram is complete.
-        if (!in_datagram) conn.lifecycle.pending_close = null;
         // No ack-eliciting flag — CONNECTION_CLOSE isn't
         // ack-eliciting per §13.2.1, but we do still want to
         // record it (it occupies a PN). Skip stream/CRYPTO/etc.
+        const saved_close_pn = pn_space.next_pn;
+        errdefer pn_space.next_pn = saved_close_pn;
         const pn = pn_space.nextPn() orelse return Error.PnSpaceExhausted;
         const largest_acked_close = pn_space.largest_acked_sent;
         const close_quic_bit = conn_paths.nextQuicBit(
@@ -872,6 +871,7 @@ pub fn pollLevelOnPath(
                 .quic_bit = close_quic_bit,
             }),
         };
+        if (!in_datagram) conn.lifecycle.pending_close = null;
         var close_packet: SentPacketTracker.SentPacket = .{
             .pn = pn,
             .sent_time_us = now_us,
@@ -912,6 +912,32 @@ pub fn pollLevelOnPath(
         return n_close;
     }
 
+    var clear_path_challenge = false;
+    var mark_ack_sent = false;
+    var clear_pending_ping = false;
+    var clear_pending_handshake_done = false;
+    var clear_new_token = false;
+    var outbox_drain_len: usize = 0;
+    var clear_max_data = false;
+    var pop_max_stream_data = false;
+    var clear_max_streams_bidi = false;
+    var clear_max_streams_uni = false;
+    var clear_data_blocked = false;
+    var pop_stream_data_blocked = false;
+    var clear_streams_blocked_bidi = false;
+    var clear_streams_blocked_uni = false;
+    var pop_new_cid = false;
+    var pop_retire_cid = false;
+    var pop_alt_addr = false;
+    var pop_stop_sending = false;
+    var clear_ack_frequency = false;
+    var clear_immediate_ack = false;
+    var clear_path_response = false;
+    var staged_poll_addr_override: ?Address = null;
+    var mp_stage: MultipathStage = .{};
+    var emitted_reset_stream: ?*Stream = null;
+    var pop_send_datagram = false;
+
     // 0) PATH_CHALLENGE-first on a freshly-migrated path. RFC 9000
     // §8.2 / §9 — quiche's path-validation state machine expects
     // PATH_CHALLENGE to lead the first server datagram on the new
@@ -925,14 +951,14 @@ pub fn pollLevelOnPath(
     // (ACK, MAX_DATA, etc.) coalesce behind it as usual.
     if (emit_path_challenge_first) {
         const tok = conn.pending_frames.path_challenge.?;
+        try sent_packet.addRetransmitFrame(conn.allocator, .{
+            .path_challenge = .{ .data = tok },
+        });
         const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
             .path_challenge = .{ .data = tok },
         });
         pl_pos += wrote;
-        try sent_packet.addRetransmitFrame(conn.allocator, .{
-            .path_challenge = .{ .data = tok },
-        });
-        conn.pending_frames.path_challenge = null;
+        clear_path_challenge = true;
         ack_eliciting = true;
     }
 
@@ -989,7 +1015,7 @@ pub fn pollLevelOnPath(
             if (needed <= available) {
                 const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], frame);
                 pl_pos += wrote;
-                recv_tracker.markAckSent();
+                mark_ack_sent = true;
                 break;
             }
             if (ranges_budget == 0 or ack_frame.ranges_bytes.len == 0) break;
@@ -1013,7 +1039,7 @@ pub fn pollLevelOnPath(
             .{ .ping = .{} },
         );
         pl_pos += ping_len;
-        pending_ping.* = false;
+        clear_pending_ping = true;
         ack_eliciting = true;
     }
 
@@ -1039,14 +1065,18 @@ pub fn pollLevelOnPath(
     // 1b) Server handshake confirmation. HANDSHAKE_DONE is
     // application-level, ack-eliciting, and retransmittable.
     if (!app_control_blocked and lvl == .application and conn.pending_handshake_done and pl_pos + 1 <= max_payload) {
-        const wrote = try frame_mod.encode(
-            pl_buf[pl_pos..max_payload],
+        if (try encodeRetransmitFrameIfFits(
+            conn.allocator,
+            &sent_packet,
+            pl_buf,
+            &pl_pos,
+            max_payload,
             .{ .handshake_done = .{} },
-        );
-        pl_pos += wrote;
-        try sent_packet.addRetransmitFrame(conn.allocator, .{ .handshake_done = .{} });
-        conn.pending_handshake_done = false;
-        ack_eliciting = true;
+            .{ .handshake_done = .{} },
+        )) {
+            clear_pending_handshake_done = true;
+            ack_eliciting = true;
+        }
     }
 
     // 1c) Server NEW_TOKEN issuance (RFC 9000 §19.7). The frame
@@ -1056,21 +1086,21 @@ pub fn pollLevelOnPath(
     if (!app_control_blocked and lvl == .application) if (conn.pending_frames.new_token) |item| {
         const overhead_nt: usize = 1 + varint_mod.encodedLen(item.len) + item.len;
         if (max_payload >= pl_pos + overhead_nt) {
-            const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
-                .new_token = .{ .token = item.slice() },
-            });
-            pl_pos += wrote;
-            // Stash a copy in the retransmit slot so loss
-            // recovery can requeue from the captured bytes
-            // (the pending-frames slot is about to be cleared).
             var retx_item: SentPacketTracker.NewTokenRetransmit = .{};
             @memcpy(retx_item.bytes[0..item.len], item.slice());
             retx_item.len = item.len;
-            try sent_packet.addRetransmitFrame(conn.allocator, .{
-                .new_token = retx_item,
-            });
-            conn.pending_frames.new_token = null;
-            ack_eliciting = true;
+            if (try encodeRetransmitFrameIfFits(
+                conn.allocator,
+                &sent_packet,
+                pl_buf,
+                &pl_pos,
+                max_payload,
+                .{ .new_token = .{ .token = item.slice() } },
+                .{ .new_token = retx_item },
+            )) {
+                clear_new_token = true;
+                ack_eliciting = true;
+            }
         }
     };
 
@@ -1091,20 +1121,9 @@ pub fn pollLevelOnPath(
         // data behind it either: with the datagram's budget shared
         // between its packets, that could be every time.
         const send_len = @min(chunk.data.len, max_data);
-        const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
-            .crypto = .{
-                .offset = chunk.offset,
-                .data = chunk.data[0..send_len],
-            },
-        });
-        pl_pos += wrote;
+        try conn.sent_crypto[out_idx].ensureUnusedCapacity(conn.allocator, 1);
         const copy = try conn.allocator.dupe(u8, chunk.data[0..send_len]);
         crypto_copy = copy;
-        sent_crypto_chunk = .{
-            .level_idx = out_idx,
-            .offset = chunk.offset,
-            .data = copy,
-        };
         if (send_len == chunk.data.len) {
             retx_crypto_index = 0;
         } else {
@@ -1112,11 +1131,26 @@ pub fn pollLevelOnPath(
             // can still leave everything as it was.
             retx_crypto_rest = try conn.allocator.dupe(u8, chunk.data[send_len..]);
         }
+        const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
+            .crypto = .{
+                .offset = chunk.offset,
+                .data = chunk.data[0..send_len],
+            },
+        });
+        pl_pos += wrote;
+        sent_crypto_chunk = .{
+            .level_idx = out_idx,
+            .offset = chunk.offset,
+            .data = copy,
+        };
         ack_eliciting = true;
     } else if (crypto_allowed and conn.outbox[out_idx].len > 0 and pl_pos + 25 < max_payload) {
         const max_data = max_payload - pl_pos - 25;
         const drain_len = @min(conn.outbox[out_idx].len, max_data);
         const data_slice = conn.outbox[out_idx].buf[0..drain_len];
+        try conn.sent_crypto[out_idx].ensureUnusedCapacity(conn.allocator, 1);
+        const copy = try conn.allocator.dupe(u8, data_slice);
+        crypto_copy = copy;
         const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
             .crypto = .{
                 .offset = conn.crypto_send_offset[out_idx],
@@ -1124,21 +1158,12 @@ pub fn pollLevelOnPath(
             },
         });
         pl_pos += wrote;
-        const copy = try conn.allocator.dupe(u8, data_slice);
-        crypto_copy = copy;
         sent_crypto_chunk = .{
             .level_idx = out_idx,
             .offset = conn.crypto_send_offset[out_idx],
             .data = copy,
         };
-        conn.crypto_send_offset[out_idx] += drain_len;
-        // Shift the outbox left to drop what we just consumed.
-        const remaining = conn.outbox[out_idx].len - drain_len;
-        @memmove(
-            conn.outbox[out_idx].buf[0..remaining],
-            conn.outbox[out_idx].buf[drain_len..conn.outbox[out_idx].len],
-        );
-        conn.outbox[out_idx].len = remaining;
+        outbox_drain_len = drain_len;
         ack_eliciting = true;
     }
 
@@ -1147,10 +1172,10 @@ pub fn pollLevelOnPath(
     // continue uploads beyond their current stream window.
     // Every block below has the same shape: gate on the 1-RTT
     // control budget, build the payload ONCE, and let
-    // `encodeFrameIfFits` do the size check against
+    // `encodeRetransmitFrameIfFits` do the size check against
     // `frame_mod.encodedLen` — never a hand-rolled re-derivation of
-    // the encoder's length math. Only the per-frame dequeue stays
-    // inline, since that part is genuinely per-frame.
+    // the encoder's length math. Queue mutations are staged and
+    // committed at step 5 once sealing and allocations succeed.
     const app_control = !app_control_blocked and lvl == .application;
 
     // Flow-control credit and blocked-signal frames are exempt from
@@ -1170,9 +1195,8 @@ pub fn pollLevelOnPath(
 
     if (app_credit and conn.pending_frames.max_data != null) {
         const md: frame_types.MaxData = .{ .maximum_data = conn.pending_frames.max_data.? };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .max_data = md })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_data = md });
-            conn.pending_frames.max_data = null;
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .max_data = md }, .{ .max_data = md })) {
+            clear_max_data = true;
             ack_eliciting = true;
         }
     }
@@ -1182,9 +1206,8 @@ pub fn pollLevelOnPath(
             .stream_id = item.stream_id,
             .maximum_stream_data = item.maximum_stream_data,
         };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .max_stream_data = msd })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_stream_data = msd });
-            _ = conn.pending_frames.max_stream_data.orderedRemove(0);
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .max_stream_data = msd }, .{ .max_stream_data = msd })) {
+            pop_max_stream_data = true;
             ack_eliciting = true;
         }
     }
@@ -1195,25 +1218,22 @@ pub fn pollLevelOnPath(
             .bidi = bidi,
             .maximum_streams = pending.*.?,
         };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .max_streams = ms })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_streams = ms });
-            pending.* = null;
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .max_streams = ms }, .{ .max_streams = ms })) {
+            if (bidi) clear_max_streams_bidi = true else clear_max_streams_uni = true;
             ack_eliciting = true;
         }
     }
     if (app_credit and conn.pending_frames.data_blocked != null) {
         const db: frame_types.DataBlocked = .{ .maximum_data = conn.pending_frames.data_blocked.? };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .data_blocked = db })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .data_blocked = db });
-            conn.pending_frames.data_blocked = null;
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .data_blocked = db }, .{ .data_blocked = db })) {
+            clear_data_blocked = true;
             ack_eliciting = true;
         }
     }
     if (app_credit and conn.pending_frames.stream_data_blocked.items.len > 0) {
         const item = conn.pending_frames.stream_data_blocked.items[0];
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .stream_data_blocked = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .stream_data_blocked = item });
-            _ = conn.pending_frames.stream_data_blocked.orderedRemove(0);
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .stream_data_blocked = item }, .{ .stream_data_blocked = item })) {
+            pop_stream_data_blocked = true;
             ack_eliciting = true;
         }
     }
@@ -1224,9 +1244,8 @@ pub fn pollLevelOnPath(
             .bidi = bidi,
             .maximum_streams = pending.*.?,
         };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .streams_blocked = sb })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .streams_blocked = sb });
-            pending.* = null;
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .streams_blocked = sb }, .{ .streams_blocked = sb })) {
+            if (bidi) clear_streams_blocked_bidi = true else clear_streams_blocked_uni = true;
             ack_eliciting = true;
         }
     }
@@ -1241,18 +1260,16 @@ pub fn pollLevelOnPath(
             .connection_id = item.connection_id,
             .stateless_reset_token = item.stateless_reset_token,
         };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .new_connection_id = ncid })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .new_connection_id = ncid });
-            _ = conn.pending_frames.new_connection_ids.orderedRemove(0);
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .new_connection_id = ncid }, .{ .new_connection_id = ncid })) {
+            pop_new_cid = true;
             ack_eliciting = true;
         }
     }
 
     if (app_control and conn.pending_frames.retire_connection_ids.items.len > 0) {
         const item = conn.pending_frames.retire_connection_ids.items[0];
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .retire_connection_id = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .retire_connection_id = item });
-            _ = conn.pending_frames.retire_connection_ids.orderedRemove(0);
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .retire_connection_id = item }, .{ .retire_connection_id = item })) {
+            pop_retire_cid = true;
             ack_eliciting = true;
         }
     }
@@ -1270,13 +1287,12 @@ pub fn pollLevelOnPath(
             .v4 => |a| .{ .alternative_v4_address = a },
             .v6 => |a| .{ .alternative_v6_address = a },
         };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, candidate)) {
-            const retx: SentPacketTracker.RetransmitFrame = switch (item) {
-                .v4 => |a| .{ .alternative_v4_address = a },
-                .v6 => |a| .{ .alternative_v6_address = a },
-            };
-            try sent_packet.addRetransmitFrame(conn.allocator, retx);
-            _ = conn.pending_frames.alternative_addresses.orderedRemove(0);
+        const retx: SentPacketTracker.RetransmitFrame = switch (item) {
+            .v4 => |a| .{ .alternative_v4_address = a },
+            .v6 => |a| .{ .alternative_v6_address = a },
+        };
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, candidate, retx)) {
+            pop_alt_addr = true;
             ack_eliciting = true;
         }
     }
@@ -1288,9 +1304,8 @@ pub fn pollLevelOnPath(
             .stream_id = item.stream_id,
             .application_error_code = item.application_error_code,
         };
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .stop_sending = ss })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .stop_sending = ss });
-            _ = conn.pending_frames.stop_sending.orderedRemove(0);
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .stop_sending = ss }, .{ .stop_sending = ss })) {
+            pop_stop_sending = true;
             ack_eliciting = true;
         }
     }
@@ -1301,15 +1316,14 @@ pub fn pollLevelOnPath(
     //      request; IMMEDIATE_ACK is not (its packet's loss is moot).
     if (app_control and conn.pending_frames.ack_frequency != null) {
         const af = conn.pending_frames.ack_frequency.?;
-        if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .ack_frequency = af })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .ack_frequency = af });
-            conn.pending_frames.ack_frequency = null;
+        if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .ack_frequency = af }, .{ .ack_frequency = af })) {
+            clear_ack_frequency = true;
             ack_eliciting = true;
         }
     }
     if (app_control and conn.pending_frames.immediate_ack) {
         if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .immediate_ack = .{} })) {
-            conn.pending_frames.immediate_ack = false;
+            clear_immediate_ack = true;
             ack_eliciting = true;
         }
     }
@@ -1342,31 +1356,28 @@ pub fn pollLevelOnPath(
             path_response_used_addr_override = !Address.eql(addr, app_path.path.peer_addr);
         }
         const pr: frame_types.PathResponse = .{ .data = conn.pending_frames.path_response.? };
-        conn.poll_addr_override = conn.pending_frames.path_response_addr;
         // The enclosing condition already reserved the frame's exact
         // encoded size, so this cannot fail to fit.
-        std.debug.assert(try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .path_response = pr }));
-        try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_response = pr });
-        conn.pending_frames.path_response = null;
-        conn.pending_frames.path_response_addr = null;
+        std.debug.assert(try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .path_response = pr }, .{ .path_response = pr }));
+        staged_poll_addr_override = conn.pending_frames.path_response_addr;
+        clear_path_response = true;
         ack_eliciting = true;
     }
-    if (!tracker_full and !path_response_used_addr_override and
+    if (!tracker_full and !path_response_used_addr_override and !clear_path_challenge and
         lvl == .application and conn.pending_frames.path_challenge != null and
         conn.pending_frames.path_challenge_path_id == app_path.id and pl_pos + 9 <= max_payload)
     {
         const pc: frame_types.PathChallenge = .{ .data = conn.pending_frames.path_challenge.? };
         // Same reservation as PATH_RESPONSE above: cannot fail to fit.
-        std.debug.assert(try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .path_challenge = pc }));
-        try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_challenge = pc });
-        conn.pending_frames.path_challenge = null;
+        std.debug.assert(try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .path_challenge = pc }, .{ .path_challenge = pc }));
+        clear_path_challenge = true;
         ack_eliciting = true;
     }
 
     // 2e) Draft-21 multipath control frames. Coalesce as many as
     //     fit while preserving per-frame retransmit metadata.
     if (!path_response_used_addr_override and !congestion_blocked and lvl == .application) {
-        if (try emitPendingMultipathFrames(conn, &sent_packet, pl_buf, &pl_pos, max_payload)) {
+        if (try stagePendingMultipathFrames(conn, &sent_packet, pl_buf, &pl_pos, max_payload, &mp_stage)) {
             ack_eliciting = true;
         }
     }
@@ -1382,11 +1393,8 @@ pub fn pollLevelOnPath(
                     .application_error_code = ri.error_code,
                     .final_size = ri.final_size,
                 };
-                if (try encodeFrameIfFits(pl_buf, &pl_pos, max_payload, .{ .reset_stream = rs })) {
-                    try sent_packet.addRetransmitFrame(conn.allocator, .{ .reset_stream = rs });
-                    ri.queued = true;
-                    // The reset is on its way: nothing more to send here.
-                    conn_streams.noteSendable(conn, s);
+                if (try encodeRetransmitFrameIfFits(conn.allocator, &sent_packet, pl_buf, &pl_pos, max_payload, .{ .reset_stream = rs }, .{ .reset_stream = rs })) {
+                    emitted_reset_stream = s;
                     ack_eliciting = true;
                 }
             }
@@ -1404,14 +1412,12 @@ pub fn pollLevelOnPath(
                 .datagram = .{ .data = dg.data, .has_length = true },
             });
             pl_pos += wrote;
-            _ = conn.pending_frames.send_datagrams.orderedRemove(0);
-            conn.pending_frames.send_datagram_bytes -= dg.data.len;
+            pop_send_datagram = true;
             sent_datagram = .{
                 .id = dg.id,
                 .len = dg.data.len,
                 .path_id = app_path.id,
             };
-            conn.allocator.free(dg.data);
             ack_eliciting = true;
         }
     }
@@ -1443,6 +1449,7 @@ pub fn pollLevelOnPath(
                 raw_chunk,
                 planned_conn_new_bytes,
             )) orelse continue;
+            try s.send.in_flight.ensureUnusedCapacity(s.send.allocator, 1);
             const data_slice = s.send.chunkBytesContiguous(chunk, &Connection.scratch().chunk_buf);
             const wrote = try frame_mod.encode(pl_buf[pl_pos..max_payload], .{
                 .stream = .{
@@ -1454,11 +1461,16 @@ pub fn pollLevelOnPath(
                     .fin = chunk.fin,
                 },
             });
+            const stream_key = conn.nextStreamPacketKey();
+            try sent_packet.addStreamRef(conn.allocator, .{
+                .stream_id = s.id,
+                .stream_key = stream_key,
+            });
             pl_pos += wrote;
             sent_chunks[sent_chunk_count] = .{
                 .stream = s,
                 .chunk = chunk,
-                .stream_key = conn.nextStreamPacketKey(),
+                .stream_key = stream_key,
             };
             sent_chunk_count += 1;
             planned_conn_new_bytes +|= conn_streams.streamFlowNewBytes(s, chunk);
@@ -1485,6 +1497,8 @@ pub fn pollLevelOnPath(
     }
 
     // 4) Allocate PN at this level, seal at the right header type.
+    const saved_next_pn = pn_space.next_pn;
+    errdefer pn_space.next_pn = saved_next_pn;
     const pn = pn_space.nextPn() orelse return Error.PnSpaceExhausted;
     const largest_acked = pn_space.largest_acked_sent;
     const quic_bit = conn_paths.nextQuicBit(
@@ -1568,7 +1582,51 @@ pub fn pollLevelOnPath(
         }),
     };
 
-    // 5) Commit.
+    // 5) Commit (infallible: all capacities were reserved before seal).
+    if (mark_ack_sent) recv_tracker.markAckSent();
+    if (clear_pending_ping) pending_ping.* = false;
+    if (clear_pending_handshake_done) conn.pending_handshake_done = false;
+    if (clear_new_token) conn.pending_frames.new_token = null;
+    if (outbox_drain_len > 0) {
+        conn.crypto_send_offset[out_idx] += outbox_drain_len;
+        const remaining = conn.outbox[out_idx].len - outbox_drain_len;
+        @memmove(
+            conn.outbox[out_idx].buf[0..remaining],
+            conn.outbox[out_idx].buf[outbox_drain_len..conn.outbox[out_idx].len],
+        );
+        conn.outbox[out_idx].len = remaining;
+    }
+    if (clear_max_data) conn.pending_frames.max_data = null;
+    if (pop_max_stream_data) _ = conn.pending_frames.max_stream_data.orderedRemove(0);
+    if (clear_max_streams_bidi) conn.pending_frames.max_streams_bidi = null;
+    if (clear_max_streams_uni) conn.pending_frames.max_streams_uni = null;
+    if (clear_data_blocked) conn.pending_frames.data_blocked = null;
+    if (pop_stream_data_blocked) _ = conn.pending_frames.stream_data_blocked.orderedRemove(0);
+    if (clear_streams_blocked_bidi) conn.pending_frames.streams_blocked_bidi = null;
+    if (clear_streams_blocked_uni) conn.pending_frames.streams_blocked_uni = null;
+    if (pop_new_cid) _ = conn.pending_frames.new_connection_ids.orderedRemove(0);
+    if (pop_retire_cid) _ = conn.pending_frames.retire_connection_ids.orderedRemove(0);
+    if (pop_alt_addr) _ = conn.pending_frames.alternative_addresses.orderedRemove(0);
+    if (pop_stop_sending) _ = conn.pending_frames.stop_sending.orderedRemove(0);
+    if (clear_ack_frequency) conn.pending_frames.ack_frequency = null;
+    if (clear_immediate_ack) conn.pending_frames.immediate_ack = false;
+    if (clear_path_response) {
+        conn.poll_addr_override = staged_poll_addr_override;
+        conn.pending_frames.path_response = null;
+        conn.pending_frames.path_response_addr = null;
+    }
+    if (clear_path_challenge) conn.pending_frames.path_challenge = null;
+    commitPendingMultipathFrames(conn, mp_stage);
+    if (emitted_reset_stream) |s| {
+        if (s.send.reset) |*ri| ri.queued = true;
+        conn_streams.noteSendable(conn, s);
+    }
+    if (pop_send_datagram) {
+        const dg = conn.pending_frames.send_datagrams.orderedRemove(0);
+        conn.pending_frames.send_datagram_bytes -= dg.data.len;
+        conn.allocator.free(dg.data);
+    }
+
     sent_packet.pn = pn;
     sent_packet.bytes = n;
     sent_packet.ack_eliciting = ack_eliciting;
@@ -1577,12 +1635,6 @@ pub fn pollLevelOnPath(
     sent_packet.is_early_data = lvl == .early_data;
     sent_packet.datagram = sent_datagram;
     if (lvl == .application) conn_keys.recordApplicationPacketProtected(conn, &sent_packet);
-    for (sent_chunks[0..sent_chunk_count]) |sc| {
-        try sent_packet.addStreamRef(conn.allocator, .{
-            .stream_id = sc.stream.id,
-            .stream_key = sc.stream_key,
-        });
-    }
     // Delivery-rate stamps (draft-cheng-02 §3.2): application/0-RTT
     // in-flight packets only — Initial/Handshake flights are never
     // sampled (the congestion controller is application-level only),
@@ -1601,19 +1653,19 @@ pub fn pollLevelOnPath(
     }
     if (sent_packet.ack_eliciting) {
         if (conn.ecn_enabled) pn_space.ect_marked_sent +|= 1;
-        try sent_tracker.record(sent_packet);
+        sent_tracker.record(sent_packet) catch unreachable;
         sent_packet_recorded = true;
     } else {
         sent_packet.deinit(conn.allocator);
         sent_packet_recorded = true;
     }
     for (sent_chunks[0..sent_chunk_count]) |sc| {
-        try sc.stream.send.recordSent(sc.stream_key, sc.chunk);
+        sc.stream.send.recordSent(sc.stream_key, sc.chunk) catch unreachable;
         conn.recordStreamFlowSent(sc.stream, sc.chunk);
         conn_streams.noteSendable(conn, sc.stream);
     }
     if (sent_crypto_chunk) |sc| {
-        try conn.sent_crypto[sc.level_idx].append(conn.allocator, .{
+        conn.sent_crypto[sc.level_idx].appendAssumeCapacity(.{
             .pn = pn,
             .offset = sc.offset,
             .data = sc.data,
@@ -1721,7 +1773,7 @@ fn pendingResetByWalk(conn: *Connection) ?*Stream {
 /// A CONNECTION_CLOSE has left (in one packet, or in the packets of
 /// one datagram): the connection is in the closing state now.
 fn noteCloseEmitted(conn: *Connection, now_us: u64) void {
-    const closing_deadline = now_us + conn.drainingDurationUs();
+    const closing_deadline = now_us +| conn.drainingDurationUs();
     conn.lifecycle.noteCloseEmit(now_us, closing_deadline);
     conn.lifecycle.updateDrainingDeadline(closing_deadline);
 }
@@ -1762,23 +1814,51 @@ fn encodeFrameIfFits(
     return true;
 }
 
-pub fn emitOnePendingMultipathFrame(
+fn encodeRetransmitFrameIfFits(
+    allocator: std.mem.Allocator,
+    sent_packet: *SentPacketTracker.SentPacket,
+    pl_buf: *[max_recv_plaintext]u8,
+    pl_pos: *usize,
+    max_payload: usize,
+    frame: frame_types.Frame,
+    retx_frame: SentPacketTracker.RetransmitFrame,
+) Error!bool {
+    const needed = frame_mod.encodedLen(frame);
+    if (max_payload < pl_pos.* + needed) return false;
+    try sent_packet.addRetransmitFrame(allocator, retx_frame);
+    errdefer _ = sent_packet.retransmit_frames.pop();
+    const wrote = try frame_mod.encode(pl_buf[pl_pos.*..max_payload], frame);
+    pl_pos.* += wrote;
+    return true;
+}
+
+const MultipathStage = struct {
+    path_abandons: usize = 0,
+    path_statuses: usize = 0,
+    path_new_cids: usize = 0,
+    path_retire_cids: usize = 0,
+    max_path_id: bool = false,
+    paths_blocked: bool = false,
+    path_cids_blocked: bool = false,
+};
+
+fn stageOnePendingMultipathFrame(
     conn: *Connection,
     sent_packet: *SentPacketTracker.SentPacket,
     pl_buf: *[max_recv_plaintext]u8,
     pl_pos: *usize,
     max_payload: usize,
+    stage: *MultipathStage,
 ) Error!bool {
-    if (conn.pending_frames.path_abandons.items.len > 0) {
-        const item = conn.pending_frames.path_abandons.items[0];
-        if (try encodeFrameIfFits(pl_buf, pl_pos, max_payload, .{ .path_abandon = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_abandon = item });
-            _ = conn.pending_frames.path_abandons.orderedRemove(0);
+    if (stage.path_abandons < conn.pending_frames.path_abandons.items.len) {
+        const item = conn.pending_frames.path_abandons.items[stage.path_abandons];
+        if (try encodeRetransmitFrameIfFits(conn.allocator, sent_packet, pl_buf, pl_pos, max_payload, .{ .path_abandon = item }, .{ .path_abandon = item })) {
+            stage.path_abandons += 1;
             return true;
         }
     }
-    if (conn.pending_frames.path_statuses.items.len > 0) {
-        const item = conn.pending_frames.path_statuses.items[0];
+    if (stage.path_statuses < conn.pending_frames.path_statuses.items.len) {
+        const item = conn.pending_frames.path_statuses.items[stage.path_statuses];
         const status: frame_types.PathStatus = .{
             .path_id = item.path_id,
             .sequence_number = item.sequence_number,
@@ -1787,58 +1867,104 @@ pub fn emitOnePendingMultipathFrame(
             .{ .path_status_available = status }
         else
             .{ .path_status_backup = status };
-        if (try encodeFrameIfFits(pl_buf, pl_pos, max_payload, frame)) {
-            try sent_packet.addRetransmitFrame(
-                conn.allocator,
-                if (item.available)
-                    .{ .path_status_available = status }
-                else
-                    .{ .path_status_backup = status },
-            );
-            _ = conn.pending_frames.path_statuses.orderedRemove(0);
+        const retx: SentPacketTracker.RetransmitFrame = if (item.available)
+            .{ .path_status_available = status }
+        else
+            .{ .path_status_backup = status };
+        if (try encodeRetransmitFrameIfFits(conn.allocator, sent_packet, pl_buf, pl_pos, max_payload, frame, retx)) {
+            stage.path_statuses += 1;
             return true;
         }
     }
-    if (conn.pending_frames.path_new_connection_ids.items.len > 0) {
-        const item = conn.pending_frames.path_new_connection_ids.items[0];
-        if (try encodeFrameIfFits(pl_buf, pl_pos, max_payload, .{ .path_new_connection_id = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_new_connection_id = item });
-            _ = conn.pending_frames.path_new_connection_ids.orderedRemove(0);
+    if (stage.path_new_cids < conn.pending_frames.path_new_connection_ids.items.len) {
+        const item = conn.pending_frames.path_new_connection_ids.items[stage.path_new_cids];
+        if (try encodeRetransmitFrameIfFits(conn.allocator, sent_packet, pl_buf, pl_pos, max_payload, .{ .path_new_connection_id = item }, .{ .path_new_connection_id = item })) {
+            stage.path_new_cids += 1;
             return true;
         }
     }
-    if (conn.pending_frames.path_retire_connection_ids.items.len > 0) {
-        const item = conn.pending_frames.path_retire_connection_ids.items[0];
-        if (try encodeFrameIfFits(pl_buf, pl_pos, max_payload, .{ .path_retire_connection_id = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_retire_connection_id = item });
-            _ = conn.pending_frames.path_retire_connection_ids.orderedRemove(0);
+    if (stage.path_retire_cids < conn.pending_frames.path_retire_connection_ids.items.len) {
+        const item = conn.pending_frames.path_retire_connection_ids.items[stage.path_retire_cids];
+        if (try encodeRetransmitFrameIfFits(conn.allocator, sent_packet, pl_buf, pl_pos, max_payload, .{ .path_retire_connection_id = item }, .{ .path_retire_connection_id = item })) {
+            stage.path_retire_cids += 1;
             return true;
         }
     }
-    if (conn.pending_frames.max_path_id) |maximum_path_id| {
+    if (!stage.max_path_id) if (conn.pending_frames.max_path_id) |maximum_path_id| {
         const item: frame_types.MaxPathId = .{ .maximum_path_id = maximum_path_id };
-        if (try encodeFrameIfFits(pl_buf, pl_pos, max_payload, .{ .max_path_id = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .max_path_id = item });
-            conn.pending_frames.max_path_id = null;
+        if (try encodeRetransmitFrameIfFits(conn.allocator, sent_packet, pl_buf, pl_pos, max_payload, .{ .max_path_id = item }, .{ .max_path_id = item })) {
+            stage.max_path_id = true;
             return true;
         }
-    }
-    if (conn.pending_frames.paths_blocked) |maximum_path_id| {
+    };
+    if (!stage.paths_blocked) if (conn.pending_frames.paths_blocked) |maximum_path_id| {
         const item: frame_types.PathsBlocked = .{ .maximum_path_id = maximum_path_id };
-        if (try encodeFrameIfFits(pl_buf, pl_pos, max_payload, .{ .paths_blocked = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .paths_blocked = item });
-            conn.pending_frames.paths_blocked = null;
+        if (try encodeRetransmitFrameIfFits(conn.allocator, sent_packet, pl_buf, pl_pos, max_payload, .{ .paths_blocked = item }, .{ .paths_blocked = item })) {
+            stage.paths_blocked = true;
             return true;
         }
-    }
-    if (conn.pending_frames.path_cids_blocked) |item| {
-        if (try encodeFrameIfFits(pl_buf, pl_pos, max_payload, .{ .path_cids_blocked = item })) {
-            try sent_packet.addRetransmitFrame(conn.allocator, .{ .path_cids_blocked = item });
-            conn.pending_frames.path_cids_blocked = null;
+    };
+    if (!stage.path_cids_blocked) if (conn.pending_frames.path_cids_blocked) |item| {
+        if (try encodeRetransmitFrameIfFits(conn.allocator, sent_packet, pl_buf, pl_pos, max_payload, .{ .path_cids_blocked = item }, .{ .path_cids_blocked = item })) {
+            stage.path_cids_blocked = true;
             return true;
         }
-    }
+    };
     return false;
+}
+
+fn commitPendingMultipathFrames(conn: *Connection, stage: MultipathStage) void {
+    var i: usize = 0;
+    while (i < stage.path_abandons) : (i += 1) {
+        _ = conn.pending_frames.path_abandons.orderedRemove(0);
+    }
+    i = 0;
+    while (i < stage.path_statuses) : (i += 1) {
+        _ = conn.pending_frames.path_statuses.orderedRemove(0);
+    }
+    i = 0;
+    while (i < stage.path_new_cids) : (i += 1) {
+        _ = conn.pending_frames.path_new_connection_ids.orderedRemove(0);
+    }
+    i = 0;
+    while (i < stage.path_retire_cids) : (i += 1) {
+        _ = conn.pending_frames.path_retire_connection_ids.orderedRemove(0);
+    }
+    if (stage.max_path_id) conn.pending_frames.max_path_id = null;
+    if (stage.paths_blocked) conn.pending_frames.paths_blocked = null;
+    if (stage.path_cids_blocked) conn.pending_frames.path_cids_blocked = null;
+}
+
+fn stagePendingMultipathFrames(
+    conn: *Connection,
+    sent_packet: *SentPacketTracker.SentPacket,
+    pl_buf: *[max_recv_plaintext]u8,
+    pl_pos: *usize,
+    max_payload: usize,
+    stage: *MultipathStage,
+) Error!bool {
+    var emitted = false;
+    const control_budget = SentPacketTracker.max_retransmit_frames - 1;
+    while (sent_packet.retransmit_frames.items.len < control_budget) {
+        const before = pl_pos.*;
+        if (!try stageOnePendingMultipathFrame(conn, sent_packet, pl_buf, pl_pos, max_payload, stage)) break;
+        emitted = true;
+        if (pl_pos.* == before) break;
+    }
+    return emitted;
+}
+
+pub fn emitOnePendingMultipathFrame(
+    conn: *Connection,
+    sent_packet: *SentPacketTracker.SentPacket,
+    pl_buf: *[max_recv_plaintext]u8,
+    pl_pos: *usize,
+    max_payload: usize,
+) Error!bool {
+    var stage: MultipathStage = .{};
+    const emitted = try stageOnePendingMultipathFrame(conn, sent_packet, pl_buf, pl_pos, max_payload, &stage);
+    if (emitted) commitPendingMultipathFrames(conn, stage);
+    return emitted;
 }
 
 pub fn emitPendingMultipathFrames(
@@ -1848,13 +1974,8 @@ pub fn emitPendingMultipathFrames(
     pl_pos: *usize,
     max_payload: usize,
 ) Error!bool {
-    var emitted = false;
-    const control_budget = SentPacketTracker.max_retransmit_frames - 1;
-    while (sent_packet.retransmit_frames.items.len < control_budget) {
-        const before = pl_pos.*;
-        if (!try emitOnePendingMultipathFrame(conn, sent_packet, pl_buf, pl_pos, max_payload)) break;
-        emitted = true;
-        if (pl_pos.* == before) break;
-    }
+    var stage: MultipathStage = .{};
+    const emitted = try stagePendingMultipathFrames(conn, sent_packet, pl_buf, pl_pos, max_payload, &stage);
+    if (emitted) commitPendingMultipathFrames(conn, stage);
     return emitted;
 }

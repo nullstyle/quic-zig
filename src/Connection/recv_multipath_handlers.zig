@@ -38,9 +38,6 @@ pub fn handlePathAck(
     pa: frame_types.PathAck,
     now_us: u64,
 ) Error!void {
-    if (pa.path_id == 0) {
-        return conn.handleAckAtLevel(.application, pathAckToAck(pa), now_us);
-    }
     const path = conn.paths.get(pa.path_id) orelse return;
     try conn_recv_ack_handlers.handleApplicationAckOnPath(conn, path, pathAckToAck(pa), now_us);
 }

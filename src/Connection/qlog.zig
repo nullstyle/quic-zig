@@ -446,11 +446,11 @@ pub fn emitPacketLost(
     });
 }
 
-/// Compute the current congestion phase for the primary application
+/// Compute the current congestion phase for the active application
 /// path and emit `congestion_state_updated` if it changed.
 pub fn emitCongestionStateIfChanged(conn: *Connection, now_us: u64) void {
     if (conn.qlog_callback == null) return;
-    const path = conn.primaryPath();
+    const path = conn.activePath();
     const cc = &path.path.cc;
     // Recovery membership is "the controller has an un-cleared
     // recovery boundary", exactly as `PathState.stats()` reports it.
@@ -480,11 +480,11 @@ pub fn emitCongestionStateIfChanged(conn: *Connection, now_us: u64) void {
     });
 }
 
-/// Emit `metrics_updated` with a snapshot of the primary path's
+/// Emit `metrics_updated` with a snapshot of the active path's
 /// congestion / RTT counters.
 pub fn emitMetricsSnapshot(conn: *Connection, now_us: u64) void {
     if (conn.qlog_callback == null) return;
-    const path = conn.primaryPath();
+    const path = conn.activePath();
     const cc = &path.path.cc;
     const rtt = &path.path.rtt;
     emitQlog(conn, .{

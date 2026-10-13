@@ -190,15 +190,18 @@ pub fn installApplicationSecret(
     material: SecretMaterial,
 ) Error!void {
     const app_idx = EncryptionLevel.application.idx();
-    const epoch = try applicationKeyEpochFromMaterial(material, false, 0, 0);
+    var epoch = try applicationKeyEpochFromMaterial(material, false, 0, 0);
+    errdefer epoch.keys.deinitAead();
     switch (dir) {
         .read => {
+            const next_epoch = try nextApplicationKeyEpoch(epoch, 0);
             conn.levels[app_idx].read = material;
             if (conn.app_read_previous) |*prev| prev.keys.deinitAead();
             conn.app_read_previous = null;
             if (conn.app_read_current) |*cur| cur.keys.deinitAead();
+            if (conn.app_read_next) |*next| next.keys.deinitAead();
             conn.app_read_current = epoch;
-            conn.app_read_next = try nextApplicationKeyEpoch(epoch, 0);
+            conn.app_read_next = next_epoch;
             conn.app_failed_auth_packets = 0;
             conn_qlog.emitQlog(conn, .{
                 .name = .application_read_key_installed,
@@ -235,28 +238,35 @@ pub fn installApplicationSecret(
 
 pub fn refreshNextApplicationReadKey(conn: *Connection) Error!void {
     const current = conn.app_read_current orelse {
+        if (conn.app_read_next) |*old_next| old_next.keys.deinitAead();
         conn.app_read_next = null;
         return;
     };
-    conn.app_read_next = try nextApplicationKeyEpoch(current, current.installed_at_us);
+    const next_epoch = try nextApplicationKeyEpoch(current, current.installed_at_us);
+    if (conn.app_read_next) |*old_next| old_next.keys.deinitAead();
+    conn.app_read_next = next_epoch;
 }
 
 pub fn promoteApplicationReadKeys(conn: *Connection, now_us: u64) Error!void {
     const current = conn.app_read_current orelse return Error.KeyUpdateUnavailable;
     var previous = current;
     previous.discard_deadline_us = now_us +| conn.retiredPathRetentionUs();
+    const had_cached_next = conn.app_read_next != null;
+    var new_current = if (conn.app_read_next) |next|
+        next
+    else
+        try nextApplicationKeyEpoch(current, now_us);
+    errdefer if (!had_cached_next) new_current.keys.deinitAead();
+    new_current.installed_at_us = now_us;
+    new_current.discard_deadline_us = null;
+    const new_next = try nextApplicationKeyEpoch(new_current, new_current.installed_at_us);
     // `previous` (the retired current epoch) moves into the
     // app_read_previous slot; any epoch already sitting there is
     // done and its cached AEAD context must be freed.
     if (conn.app_read_previous) |*old_prev| old_prev.keys.deinitAead();
     conn.app_read_previous = previous;
-    conn.app_read_current = conn.app_read_next orelse
-        try nextApplicationKeyEpoch(current, now_us);
-    conn.app_read_current.?.installed_at_us = now_us;
-    conn.app_read_current.?.discard_deadline_us = null;
-    try refreshNextApplicationReadKey(
-        conn,
-    );
+    conn.app_read_current = new_current;
+    conn.app_read_next = new_next;
     conn_qlog.emitQlog(conn, .{
         .name = .application_read_key_discard_scheduled,
         .at_us = now_us,
@@ -285,10 +295,11 @@ fn installNextApplicationWriteKeys(
     pending_ack: bool,
 ) Error!void {
     var current = conn.app_write_current orelse return Error.KeyUpdateUnavailable;
+    var next = try nextApplicationKeyEpoch(current, now_us);
+    next.installed_at_us = now_us;
+    next.acked = false;
     current.keys.deinitAead();
-    conn.app_write_current = try nextApplicationKeyEpoch(current, now_us);
-    conn.app_write_current.?.installed_at_us = now_us;
-    conn.app_write_current.?.acked = false;
+    conn.app_write_current = next;
     conn.app_write_update_pending_ack = pending_ack;
     conn_qlog.emitQlog(conn, .{
         .name = .application_write_key_updated,
@@ -658,8 +669,11 @@ pub fn ensureInitialKeys(conn: *Connection) Error!void {
     // the active version selects salt + HKDF labels.
     const client_keys_initial = try initial_keys_mod.deriveInitialKeysFor(conn.version, dcid_slice, false);
     const server_keys_initial = try initial_keys_mod.deriveInitialKeysFor(conn.version, dcid_slice, true);
-    const client_pkt = try short_packet_mod.derivePacketKeys(.aes128_gcm_sha256, &client_keys_initial.secret);
+    var client_pkt = try short_packet_mod.derivePacketKeys(.aes128_gcm_sha256, &client_keys_initial.secret);
+    errdefer client_pkt.deinitAead();
     const server_pkt = try short_packet_mod.derivePacketKeys(.aes128_gcm_sha256, &server_keys_initial.secret);
+    if (conn.initial_keys_write) |*k| k.deinitAead();
+    if (conn.initial_keys_read) |*k| k.deinitAead();
     switch (conn.role) {
         .client => {
             conn.initial_keys_write = client_pkt;

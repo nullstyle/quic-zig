@@ -689,8 +689,9 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
                 // Pre-handshake retransmits in the .accepted / .routed
                 // buckets are equally fine to stamp; the field is
                 // purely an outbound hint.
-                if (d.last_in_message) stampLastRecvSocket(
+                if (listeners.len > 1 and d.last_in_message) stampLastRecvSocket(
                     server,
+                    d.data,
                     d.from,
                     @intCast(sock_idx),
                     listeners[sock_idx].bind_addr,
@@ -776,45 +777,47 @@ pub fn runUdpServer(server: *Server, options: RunUdpOptions) anyerror!void {
     }
 }
 
-/// Stamp the listener index on the slot whose `peer_addr` matches
-/// `from`. Used by `runUdpServer`'s multi-listener dispatch so the
-/// outbound drain routes replies through the listener the slot most
-/// recently received on. Best-effort: when no slot matches (the
-/// inbound was a stateless response or a fresh Initial that opened
-/// a brand-new slot whose `peer_addr` is also the same), no harm
-/// done — the server iterator will pick the slot up on the next
-/// drain pass and the field is initialized to 0 (primary listener)
-/// at slot creation, which is the correct default for a fresh
-/// connection that hasn't yet migrated.
+fn stampSlotRecvSocket(
+    slot: *Server.Slot,
+    sock_idx: u8,
+    bind_addr: Net.IpAddress,
+    now_us: u64,
+) void {
+    const previous = slot.last_recv_socket_idx;
+    slot.last_recv_socket_idx = sock_idx;
+    if (sock_idx != 0 and previous != sock_idx) {
+        const new_local_addr = ipAddressToPathAddress(bind_addr);
+        slot.conn.noteServerLocalAddressChanged(new_local_addr, now_us) catch {};
+    }
+}
+
+/// Stamp the listener index on the slot that received `data` (via O(1)
+/// DCID routing lookup) or whose `peer_addr` matches `from`. Used by
+/// `runUdpServer`'s multi-listener dispatch so the outbound drain
+/// routes replies through the listener the slot most recently received
+/// on.
 ///
 /// When the receiving listener-index transitions from primary (0)
 /// to an alt-listener (1+), we also call
 /// `Connection.noteServerLocalAddressChanged` so the per-connection
 /// path validator runs (RFC 9000 §5.1.1: a server SHOULD validate
 /// the new path the peer migrated to via `preferred_address`).
-/// The error returns from that API are all benign on this path —
-/// `PreferredAddressNotAdvertised` (PA not configured),
-/// `PathLimitExceeded` (validation already in flight), and
-/// `NotServerContext` (impossible here but cheap to defend against)
-/// all idle through. Out-of-memory is the only real failure shape;
-/// `runUdpServer` already swallows per-connection failures so the
-/// loop's contract is preserved.
 fn stampLastRecvSocket(
     server: *Server,
+    data: []const u8,
     from: Address,
     sock_idx: u8,
     bind_addr: Net.IpAddress,
     now_us: u64,
 ) void {
+    if (server.findSlotForDatagram(data)) |slot| {
+        stampSlotRecvSocket(slot, sock_idx, bind_addr, now_us);
+        return;
+    }
     for (server.iterator()) |slot| {
         const slot_addr = slot.peer_addr orelse continue;
         if (!slot_addr.eql(from)) continue;
-        const previous = slot.last_recv_socket_idx;
-        slot.last_recv_socket_idx = sock_idx;
-        if (sock_idx != 0 and previous != sock_idx) {
-            const new_local_addr = ipAddressToPathAddress(bind_addr);
-            slot.conn.noteServerLocalAddressChanged(new_local_addr, now_us) catch {};
-        }
+        stampSlotRecvSocket(slot, sock_idx, bind_addr, now_us);
     }
 }
 

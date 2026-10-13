@@ -292,11 +292,11 @@ test "mTLS x 0-RTT identity: two distinct resumptions of one ticket are both acc
     // and the whole reason the second resumption was downgraded
     // before SHA256(ticket || client_random).
     try std.testing.expectEqual(@as(usize, 2), tracker.size());
-    try std.testing.expectEqual(@as(usize, 2), tracker.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), tracker.entries_len);
     try std.testing.expect(!std.mem.eql(
         u8,
-        &tracker.entries.items[0].id,
-        &tracker.entries.items[1].id,
+        &tracker.entryAt(0).id,
+        &tracker.entryAt(1).id,
     ));
 
     // A byte-replay of the SAME flight would still collide: the

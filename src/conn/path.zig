@@ -419,6 +419,9 @@ pub const PathStats = struct {
 pub const MigrationRollback = struct {
     peer_addr: Address,
     peer_addr_set: bool,
+    local_addr: Address = .unspecified,
+    local_addr_set: bool = false,
+    peer_cid: ConnectionId = .{},
     validated: bool,
     bytes_received: u64,
     bytes_sent: u64,
@@ -573,6 +576,9 @@ pub const PathState = struct {
         self.migration_rollback = .{
             .peer_addr = self.path.peer_addr,
             .peer_addr_set = self.peer_addr_set,
+            .local_addr = self.path.local_addr,
+            .local_addr_set = self.local_addr_set,
+            .peer_cid = self.path.peer_cid,
             .validated = self.path.isValidated(),
             .bytes_received = self.path.bytes_received,
             .bytes_sent = self.path.bytes_sent,
@@ -606,6 +612,9 @@ pub const PathState = struct {
         const rollback = self.migration_rollback orelse return false;
         self.path.peer_addr = rollback.peer_addr;
         self.peer_addr_set = rollback.peer_addr_set;
+        self.path.local_addr = rollback.local_addr;
+        self.local_addr_set = rollback.local_addr_set;
+        self.path.peer_cid = rollback.peer_cid;
         self.path.validated = rollback.validated;
         self.path.validator = .{};
         if (rollback.validated) self.path.validator.status = .validated;
@@ -995,12 +1004,12 @@ pub const PathSet = struct {
         cc_cfg: congestion_mod.Config,
     ) !u32 {
         const id = self.next_path_id;
-        self.next_path_id += 1;
         var p = try PathState.init(allocator, id, peer_addr, local_addr, local_cid, peer_cid, cc_cfg);
         errdefer p.deinit(allocator);
-        p.peer_addr_set = true;
-        p.local_addr_set = true;
+        p.peer_addr_set = (peer_addr != .unspecified);
+        p.local_addr_set = (local_addr != .unspecified);
         try self.paths.append(allocator, p);
+        self.next_path_id += 1;
         return id;
     }
 

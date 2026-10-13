@@ -110,6 +110,15 @@ pub fn openPath(
             .hystart = conn.cc_hystart,
         },
     );
+    errdefer {
+        if (conn.paths.paths.items.len > 0 and
+            conn.paths.paths.items[conn.paths.paths.items.len - 1].id == opened_path_id)
+        {
+            var popped = conn.paths.paths.pop().?;
+            popped.deinit(conn.allocator);
+            conn.paths.next_path_id = opened_path_id;
+        }
+    }
     // Seed RFC 8899 PMTUD state on the freshly-opened path.
     if (conn.paths.get(opened_path_id)) |new_path| {
         new_path.pmtudInit(conn.pmtud_config);
@@ -349,6 +358,15 @@ fn resetPathRecoveryAfterMigration(
     });
 }
 
+fn requeueInFlightOnPath(conn: *Connection, path: *PathState) void {
+    if (path.sent.liveCount() == 0) return;
+    var i: u32 = 0;
+    while (i < path.sent.count) : (i += 1) {
+        if (path.sent.packets[i].dead) continue;
+        _ = conn_loss.requeueLostPacketOnPath(conn, .application, &path.sent.packets[i], path.id) catch {};
+    }
+}
+
 pub fn handlePathValidationFailure(
     conn: *Connection,
     path: *PathState,
@@ -356,6 +374,10 @@ pub fn handlePathValidationFailure(
     const path_id = path.id;
     conn.touch();
     if (path.pending_migration_reset and path.rollbackFailedMigration()) {
+        if (path_id == 0) {
+            conn.peer_dcid = path.path.peer_cid;
+            conn.peer_dcid_set = path.path.peer_cid.len != 0;
+        }
         clearQueuedPathChallengeForPath(conn, path_id);
         conn_qlog.emitQlog(conn, .{
             .name = .migration_path_failed,
@@ -368,6 +390,8 @@ pub fn handlePathValidationFailure(
     path.pending_migration_reset = false;
     path.migration_rollback = null;
     clearQueuedPathChallengeForPath(conn, path_id);
+    requeueInFlightOnPath(conn, path);
+    path.clearRecovery(conn.allocator);
     conn_qlog.emitQlog(conn, .{
         .name = .migration_path_failed,
         .path_id = path_id,
@@ -397,6 +421,7 @@ pub fn shouldRequeuePathChallenge(
     token: [8]u8,
 ) bool {
     const path = conn.paths.get(path_id) orelse return false;
+    if (path.path.state == .failed or path.path.state == .retiring) return false;
     if (path.path.validator.status != .pending) return false;
     return std.mem.eql(u8, &token, &path.path.validator.pending_token);
 }
@@ -423,10 +448,11 @@ pub fn expireRetiringPaths(conn: *Connection, now_us: u64) void {
         const deadline = path.retire_deadline_us orelse continue;
         if (now_us < deadline) continue;
         conn.touch();
-        path.clearRecovery(conn.allocator);
-        conn_cids.retirePeerCidsForPath(conn, path.id);
         path.path.fail();
         path.retire_deadline_us = null;
+        requeueInFlightOnPath(conn, path);
+        path.clearRecovery(conn.allocator);
+        conn_cids.retirePeerCidsForPath(conn, path.id);
     }
 }
 
@@ -456,12 +482,12 @@ pub fn probePathId(
     queuePathChallengeOnPath(conn, path_id, token);
 }
 
-/// Queue an application-level PING on the primary path. This is
+/// Queue an application-level PING on the active path. This is
 /// useful for embedders that need an explicit liveness probe even
 /// when they have no stream or datagram bytes to send.
 pub fn requestPing(conn: *Connection) void {
     if (conn.closeState() != .open) return;
-    primaryPath(
+    activePath(
         conn,
     ).pending_ping = true;
     // A PING to send: a cached rest deadline is stale (0.37.2).
@@ -480,7 +506,5 @@ pub fn requestPathPing(conn: *Connection, path_id: u32) Error!void {
 /// True iff the active path has been validated (either via the
 /// validator's PATH_RESPONSE flow or by `markPathValidated`).
 pub fn isPathValidated(conn: *const Connection) bool {
-    return primaryPathConst(
-        conn,
-    ).path.validator.isValidated();
+    return conn.paths.activeConst().path.validator.isValidated();
 }

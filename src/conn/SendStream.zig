@@ -72,6 +72,7 @@ pub const Chunk = struct {
     offset: u64,
     length: u64,
     fin: bool,
+    requeued_for_probe: bool = false,
 };
 
 /// State for a locally-initiated RESET_STREAM (RFC 9000 §19.4).
@@ -298,10 +299,11 @@ pub fn write(self: *SendStream, data: []const u8) Error!usize {
     const accept = @min(data.len, headroom);
     if (accept == 0) return 0;
 
-    try self.bytes.appendSlice(self.allocator, data[0..accept]);
+    try self.bytes.ensureUnusedCapacity(self.allocator, accept);
     const start = self.write_offset;
-    self.write_offset += accept;
-    try self.addPending(.{ .offset = start, .end = self.write_offset });
+    try self.addPending(.{ .offset = start, .end = start + accept });
+    self.bytes.appendSlice(self.allocator, data[0..accept]) catch unreachable;
+    self.write_offset = start + accept;
     if (self.state == .ready) self.state = .send;
     return accept;
 }
@@ -356,7 +358,7 @@ pub fn ackedFloor(self: *const SendStream) u64 {
 
 /// Are there bytes (or a FIN) ready to send right now?
 pub fn hasPendingChunk(self: *const SendStream) bool {
-    if (self.reset) |r| return !r.queued;
+    if (self.reset) |r| return !r.queued and !r.acked;
     if (self.pending.items.len > 0) return true;
     if (self.fin_marked and !self.fin_in_flight and !self.fin_acked) return true;
     return false;
@@ -420,6 +422,7 @@ pub fn chunkBytesContiguous(self: *const SendStream, c: Chunk, scratch: []u8) []
 /// covered offsets from `pending` and stores the chunk under `pn`.
 pub fn recordSent(self: *SendStream, pn: u64, c: Chunk) Error!void {
     if (self.in_flight.contains(pn)) return Error.InvalidChunk;
+    try self.in_flight.ensureUnusedCapacity(self.allocator, 1);
 
     if (c.length > 0) {
         // The chunk must be a prefix of the first pending range.
@@ -447,7 +450,7 @@ pub fn recordSent(self: *SendStream, pn: u64, c: Chunk) Error!void {
         self.fin_in_flight = true;
     }
 
-    try self.in_flight.put(self.allocator, pn, c);
+    self.in_flight.putAssumeCapacityNoClobber(pn, c);
 }
 
 /// Process an ACK for the packet identified by `pn`. Returns
@@ -462,19 +465,40 @@ pub fn onPacketAcked(self: *SendStream, pn: u64) Error!void {
     self.maybeAdvanceState();
 }
 
+/// Re-queue an in-flight packet's unacknowledged stream range for a
+/// PTO probe WITHOUT removing `pn` from `in_flight`. Returns `true`
+/// when `pn` newly re-queued stream data or FIN, or `false` if `pn`
+/// was already probe-requeued or superseded by `reset`.
+pub fn onPacketProbeRequeued(self: *SendStream, pn: u64) Error!bool {
+    const c = self.in_flight.getPtr(pn) orelse return Error.UnknownPacket;
+    if (c.requeued_for_probe) return false;
+    if (self.reset != null) {
+        c.requeued_for_probe = true;
+        return false;
+    }
+    if (c.length > 0) {
+        try self.addUnackedPending(.{ .offset = c.offset, .end = c.offset + c.length });
+    }
+    if (c.fin and !self.fin_acked) {
+        self.fin_in_flight = false;
+    }
+    c.requeued_for_probe = true;
+    return true;
+}
+
 /// Process a loss for the packet identified by `pn`. The chunk
-/// re-enters the pending queue (unless we're in `reset_sent`,
-/// in which case losses are silently dropped).
+/// re-enters the pending queue (unless we're in `reset_sent` or
+/// a PTO probe already re-queued this chunk).
 pub fn onPacketLost(self: *SendStream, pn: u64) Error!void {
     const entry = self.in_flight.fetchRemove(pn) orelse return Error.UnknownPacket;
     const c = entry.value;
 
-    if (self.reset != null) return; // RESET_STREAM supersedes data losses
+    if (self.reset != null or c.requeued_for_probe) return;
 
     if (c.length > 0) {
-        try self.addPending(.{ .offset = c.offset, .end = c.offset + c.length });
+        try self.addUnackedPending(.{ .offset = c.offset, .end = c.offset + c.length });
     }
-    if (c.fin) {
+    if (c.fin and !self.fin_acked) {
         self.fin_in_flight = false;
     }
 }
@@ -483,6 +507,7 @@ pub fn onPacketLost(self: *SendStream, pn: u64) Error!void {
 /// Marks the reset as acknowledged and advances toward `reset_recvd`.
 pub fn onResetAcked(self: *SendStream) void {
     if (self.reset) |*r| {
+        r.queued = true;
         r.acked = true;
         self.maybeAdvanceState();
     }
@@ -502,21 +527,42 @@ fn addPending(self: *SendStream, r: Range) Error!void {
     try range_list.insertMerge(&self.pending, self.allocator, r);
 }
 
-/// Mark `r` as acked. Either advance `base_offset` and drop
-/// covered bytes from `bytes`, or stash into `acked_above`.
+/// Queue the unacknowledged sub-ranges of `r` into `pending`.
+fn addUnackedPending(self: *SendStream, r: Range) Error!void {
+    const start = @max(r.offset, self.base_offset);
+    if (start >= r.end) return;
+    try self.addPending(.{ .offset = start, .end = r.end });
+    for (self.acked_above.items) |acked| {
+        if (acked.end <= start) continue;
+        if (acked.offset >= r.end) break;
+        try range_list.removeRange(&self.pending, self.allocator, acked);
+    }
+}
+
+/// Mark `r` as acked. Removes any un-sent overlap from `pending`,
+/// then either advances `base_offset` and drops covered bytes from
+/// `bytes`, or stashes into `acked_above`.
 fn markAcked(self: *SendStream, r: Range) Error!void {
-    if (r.offset != self.base_offset) {
-        try range_list.insertMerge(&self.acked_above, self.allocator, r);
+    try range_list.removeRange(&self.pending, self.allocator, r);
+    const start = @max(r.offset, self.base_offset);
+    if (start >= r.end) return;
+    if (start > self.base_offset) {
+        try range_list.insertMerge(&self.acked_above, self.allocator, .{
+            .offset = start,
+            .end = r.end,
+        });
         return;
     }
     // Contiguous with the floor: advance, then absorb anything
-    // in `acked_above` that's now contiguous.
+    // in `acked_above` that overlaps or abuts the new floor.
     self.advanceFloor(r.end);
     while (self.acked_above.items.len > 0 and
-        self.acked_above.items[0].offset == self.base_offset)
+        self.acked_above.items[0].offset <= self.base_offset)
     {
         const first = self.acked_above.orderedRemove(0);
-        self.advanceFloor(first.end);
+        if (first.end > self.base_offset) {
+            self.advanceFloor(first.end);
+        }
     }
 }
 
@@ -1016,6 +1062,64 @@ test "write fully accepts when max_buffered exceeds payload (default 1 MiB)" {
 
     try testing.expectEqual(@as(usize, 5), try s.write("hello"));
     try testing.expectEqual(@as(u64, 5), s.writtenBytes());
+}
+
+test "onPacketProbeRequeued preserves original in_flight key for spurious-PTO ACK" {
+    // Case 1: Original packet (key 0) is probe-requeued, probe packet (key 1)
+    // is sent, then original packet (key 0) is ACKed, and probe packet (key 1)
+    // is subsequently declared lost.
+    {
+        var s = SendStream.init(test_alloc);
+        defer s.deinit();
+        _ = try s.write("hello");
+        try s.finish();
+
+        const c1 = s.peekChunk(100).?;
+        try s.recordSent(0, c1);
+        try testing.expect(s.peekChunk(100) == null);
+
+        // Non-full PTO probe requeue keeps key 0 in `in_flight` while
+        // re-staging the range in `pending`.
+        _ = try s.onPacketProbeRequeued(0);
+        const c2 = s.peekChunk(100).?;
+        try testing.expectEqual(@as(u64, 0), c2.offset);
+        try testing.expectEqual(@as(u64, 5), c2.length);
+        try testing.expect(c2.fin);
+
+        // Probe packet (key 1) transmits the re-queued chunk.
+        try s.recordSent(1, c2);
+
+        // Late ACK of original packet (key 0) arrives!
+        try s.onPacketAcked(0);
+        try testing.expectEqual(State.data_recvd, s.state);
+        try testing.expectEqual(@as(u64, 5), s.ackedFloor());
+        try testing.expect(s.isTerminal());
+
+        // Even if the probe packet (key 1) is lost in the network, the
+        // already-acknowledged range must NOT be re-queued into `pending`.
+        try s.onPacketLost(1);
+        try testing.expectEqual(@as(usize, 0), s.pending.items.len);
+        try testing.expect(s.peekChunk(100) == null);
+    }
+
+    // Case 2: Original packet (key 0) is probe-requeued, and ACKed BEFORE
+    // the probe packet is built. `onPacketAcked(0)` must scrub `pending`.
+    {
+        var s = SendStream.init(test_alloc);
+        defer s.deinit();
+        _ = try s.write("world");
+        try s.finish();
+
+        const c1 = s.peekChunk(100).?;
+        try s.recordSent(0, c1);
+        _ = try s.onPacketProbeRequeued(0);
+        try testing.expect(s.peekChunk(100) != null);
+
+        try s.onPacketAcked(0);
+        try testing.expectEqual(State.data_recvd, s.state);
+        try testing.expectEqual(@as(usize, 0), s.pending.items.len);
+        try testing.expect(s.peekChunk(100) == null);
+    }
 }
 
 // -- fuzz harness --------------------------------------------------------

@@ -344,6 +344,7 @@ pub fn handleStream(
             // fits then; only a peer past it meets the fault.
             _ = conn_streams.compactReceivePrefixes(conn);
             conn.tryReserveResidentBytes(grew) catch {
+                conn.bytes_resident +|= grew;
                 conn.close(true, transport_error_excessive_load, "excessive resource use");
                 return;
             };
@@ -371,5 +372,7 @@ fn reconcileRecvResidentBytes(conn: *Connection, ptr: *Stream, recv_before: usiz
     const after = ptr.recv.bytes.items.len;
     if (after < recv_before) {
         conn.releaseResidentBytes(recv_before - after);
+    } else if (after > recv_before) {
+        conn.bytes_resident +|= after - recv_before;
     }
 }

@@ -117,6 +117,42 @@ pub fn removePoint(
     return true;
 }
 
+/// Remove the half-open interval `rem` (`[rem.offset, rem.end)`) from
+/// a sorted-disjoint range list. If `rem` sits strictly inside an
+/// existing range `[r.offset, r.end)`, that range splits into two
+/// ranges `[r.offset, rem.offset)` and `[rem.end, r.end)` (which is
+/// the only case that allocates).
+pub fn removeRange(
+    list: *std.ArrayList(Range),
+    allocator: std.mem.Allocator,
+    rem: Range,
+) std.mem.Allocator.Error!void {
+    if (rem.offset >= rem.end) return;
+    var i: usize = 0;
+    while (i < list.items.len) {
+        const r = list.items[i];
+        if (r.end <= rem.offset) {
+            i += 1;
+            continue;
+        }
+        if (r.offset >= rem.end) break;
+
+        if (r.offset < rem.offset and r.end > rem.end) {
+            try list.insert(allocator, i + 1, .{ .offset = rem.end, .end = r.end });
+            list.items[i].end = rem.offset;
+            return;
+        } else if (r.offset >= rem.offset and r.end <= rem.end) {
+            _ = list.orderedRemove(i);
+        } else if (r.offset < rem.offset) {
+            list.items[i].end = rem.offset;
+            i += 1;
+        } else {
+            list.items[i].offset = rem.end;
+            i += 1;
+        }
+    }
+}
+
 // -- tests ---------------------------------------------------------------
 
 const testing = std.testing;

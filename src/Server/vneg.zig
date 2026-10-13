@@ -77,15 +77,16 @@ pub fn preparseUpgradeTarget(
     // via `versionAccepted` upstream, but stay defensive.
     if (!wire.initial.isSupportedVersion(wire_version)) return null;
 
-    var pt_buf: [conn_mod.state.max_recv_plaintext]u8 = undefined;
-    const plaintext = decryptInitialPreparse(bytes, wire_version, &pt_buf) orelse return null;
+    const scratch = conn_mod.Connection.scratch();
+    const plaintext = decryptInitialPreparse(bytes, wire_version, &scratch.pt_buf) orelse return null;
 
     // Reassemble the ClientHello bytes from the decrypted payload's
     // CRYPTO frames. Single-Initial fast path; on fragmentation we
     // leave `ch_complete=false` and the caller falls into the
     // streaming `PendingUpgradeState` path.
-    var ch_buf: [wire.vneg_preparse.max_client_hello_bytes]u8 = undefined;
-    const ch = wire.vneg_preparse.reassembleClientHello(&ch_buf, plaintext) orelse return null;
+    comptime std.debug.assert(wire.vneg_preparse.max_client_hello_bytes <= @sizeOf(@TypeOf(scratch.chunk_buf)));
+    const ch_buf: *[wire.vneg_preparse.max_client_hello_bytes]u8 = scratch.chunk_buf[0..wire.vneg_preparse.max_client_hello_bytes];
+    const ch = wire.vneg_preparse.reassembleClientHello(ch_buf, plaintext) orelse return null;
     ch_complete.* = true;
 
     return upgradeTargetFromCh(server, ch);
@@ -120,10 +121,10 @@ fn decryptInitialPreparse(
     const ids = peekLongHeaderIds(bytes) orelse return null;
 
     // Make a private copy of the inbound bytes — `openInitial`
-    // strips header protection in-place, and the caller will
-    // re-decrypt the same buffer through the normal
+    // strips header protection in-place on success, and the caller
+    // will re-decrypt the same buffer through the normal
     // `handleInitial` flow.
-    var pkt_copy: [conn_mod.state.max_recv_plaintext]u8 = undefined;
+    const pkt_copy: *[conn_mod.state.max_recv_plaintext]u8 = &conn_mod.Connection.scratch().pl_buf;
     if (bytes.len > pkt_copy.len) return null;
     @memcpy(pkt_copy[0..bytes.len], bytes);
 
@@ -155,8 +156,8 @@ pub fn openPendingUpgrade(
     const pu = server.allocator.create(PendingUpgradeState) catch return null;
     pu.init(wire_version);
     pu.initials_seen = 1;
-    var pt_buf: [conn_mod.state.max_recv_plaintext]u8 = undefined;
-    const plain = decryptInitialPreparse(bytes, wire_version, &pt_buf) orelse {
+    const pt_buf: *[conn_mod.state.max_recv_plaintext]u8 = &conn_mod.Connection.scratch().pt_buf;
+    const plain = decryptInitialPreparse(bytes, wire_version, pt_buf) orelse {
         server.allocator.destroy(pu);
         return null;
     };
@@ -217,8 +218,8 @@ pub fn advancePendingUpgrade(server: *Server, slot: *Slot, bytes: []const u8) vo
     }
     pu.initials_seen += 1;
 
-    var pt_buf: [conn_mod.state.max_recv_plaintext]u8 = undefined;
-    const plaintext = decryptInitialPreparse(bytes, pu.wire_version, &pt_buf) orelse {
+    const pt_buf: *[conn_mod.state.max_recv_plaintext]u8 = &conn_mod.Connection.scratch().pt_buf;
+    const plaintext = decryptInitialPreparse(bytes, pu.wire_version, pt_buf) orelse {
         // Decrypt failure — likely a stale retransmit or a packet
         // the connection's normal flow will reject too. Don't
         // tear down pending state on a single failure; future

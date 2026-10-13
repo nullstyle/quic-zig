@@ -177,6 +177,7 @@ test "PTO requeues application stream data and arms a probe" {
 
     const s = try conn.openBidi(0);
     _ = try s.send.write("hello");
+    conn.bytes_resident += 5;
     conn.noteSendable(s);
     const chunk = s.send.peekChunk(100).?;
     try s.send.recordSent(4, chunk);
@@ -203,8 +204,8 @@ test "PTO requeues application stream data and arms a probe" {
     try std.testing.expectEqual(@as(u64, 0), resent.offset);
     try std.testing.expectEqual(@as(u64, 5), resent.length);
 
-    // The old packet's ACK, after the copy went out: an ordinary ACK
-    // (the chunk's key is gone from the stream, and that is fine).
+    // The old packet's ACK, after the copy went out: a spurious-PTO ACK
+    // of the original packet still acknowledges the stream bytes.
     try s.send.recordSent(5, resent);
     conn.pnSpaceForLevel(.application).next_pn = 6;
     try conn.handleAckAtLevel(.application, .{
@@ -217,6 +218,8 @@ test "PTO requeues application stream data and arms a probe" {
     }, 2 * conn.ptoDurationForLevel(.application));
     try std.testing.expectEqual(@as(u32, 0), app_sent.liveCount());
     try std.testing.expectEqual(@as(u64, 0), conn.qlog_packets_lost);
+    try std.testing.expectEqual(@as(u64, 5), s.send.ackedFloor());
+    try std.testing.expectEqual(@as(u64, 0), conn.bytes_resident);
 }
 
 test "every probe timeout carries previously sent stream data: once the first packet's chunk moved with a probe, the copy's packet is the one probed" {

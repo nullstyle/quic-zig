@@ -91,7 +91,7 @@ pub fn update(
 
     // smoothed_rtt = 7/8 * smoothed_rtt + 1/8 * adjusted_rtt
     self.smoothed_rtt_us =
-        (self.smoothed_rtt_us * 7 + adjusted_rtt) / 8;
+        (self.smoothed_rtt_us *| 7 +| adjusted_rtt) / 8;
 
     // rttvar_sample = |smoothed_rtt - adjusted_rtt|
     const rttvar_sample = if (self.smoothed_rtt_us > adjusted_rtt)
@@ -99,15 +99,15 @@ pub fn update(
     else
         adjusted_rtt - self.smoothed_rtt_us;
     // rtt_var = 3/4 * rtt_var + 1/4 * rttvar_sample
-    self.rtt_var_us = (self.rtt_var_us * 3 + rttvar_sample) / 4;
+    self.rtt_var_us = (self.rtt_var_us *| 3 +| rttvar_sample) / 4;
 }
 
 /// Probe-timeout duration per RFC 9002 §6.2.1:
 ///   pto = smoothed_rtt + max(4 * rtt_var, kGranularity) + max_ack_delay
 /// Returns the duration in microseconds.
 pub fn pto(self: *const RttEstimator, max_ack_delay_us: u64) u64 {
-    const variance_term = @max(self.rtt_var_us * 4, granularity_us);
-    return self.smoothed_rtt_us + variance_term + max_ack_delay_us;
+    const variance_term = @max(self.rtt_var_us *| 4, granularity_us);
+    return self.smoothed_rtt_us +| variance_term +| max_ack_delay_us;
 }
 
 // -- tests ---------------------------------------------------------------

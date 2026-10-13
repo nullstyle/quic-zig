@@ -899,7 +899,9 @@ pub fn init(config: Config) Error!Server {
     // how to derive Initial keys for (RFC 9001 §5.2 v1 / RFC
     // 9368 §3.3.1 v2). Reject `version == 0` outright because
     // the wire reserves it for Version Negotiation packets.
-    if (config.accepted_versions.len == 0) return Error.InvalidConfig;
+    if (config.accepted_versions.len == 0 or
+        config.accepted_versions.len > wire.vneg_preparse.max_versions)
+        return Error.InvalidConfig;
     for (config.accepted_versions) |v| {
         if (v == 0) return Error.InvalidConfig;
         if (!wire.initial.isSupportedVersion(v)) return Error.InvalidConfig;
@@ -2032,7 +2034,8 @@ pub fn tickDue(self: *Server, now_us: u64) ConnectionError!void {
         // "send now"; the drain the slot is now ready for clears it)
         // goes back one microsecond ahead: otherwise this loop would
         // pop it again at once, forever.
-        self.armTimerAfter(slot, now_us, now_us + 1);
+        self.armTimerAfter(slot, now_us, now_us +| 1);
+        if (now_us == std.math.maxInt(u64)) break;
     }
 }
 
@@ -2296,7 +2299,8 @@ pub const replaceTlsContext = server_tls.replaceTlsContext;
 
 // -- internals ------------------------------------------------------
 
-const findSlotForDatagram = server_routing.findSlotForDatagram;
+// INTERNAL: pub for transport/udp_server.zig O(1) listener stamping.
+pub const findSlotForDatagram = server_routing.findSlotForDatagram;
 
 /// Fill `dst` (length `self.local_cid_len`) with a freshly-minted
 /// server-side SCID. With QUIC-LB enabled (`Config.quic_lb`), the

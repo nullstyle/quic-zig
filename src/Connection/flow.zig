@@ -347,9 +347,15 @@ pub fn noteStreamDataBlocked(
         .stream_id = stream_id,
         .maximum_stream_data = maximum_stream_data,
     };
+    if (findStreamBlocked(conn.pending_frames.stream_data_blocked.items, stream_id) == null) {
+        if (conn.pending_frames.stream_data_blocked.items.len >= max_tracked_stream_data_blocked) {
+            return Error.StreamLimitExceeded;
+        }
+        try conn.pending_frames.stream_data_blocked.ensureUnusedCapacity(conn.allocator, 1);
+    }
     const changed = try upsertStreamBlocked(&conn.local_stream_data_blocked, conn.allocator, item);
     if (changed) {
-        _ = try upsertStreamBlocked(&conn.pending_frames.stream_data_blocked, conn.allocator, item);
+        _ = upsertStreamBlocked(&conn.pending_frames.stream_data_blocked, conn.allocator, item) catch unreachable;
         recordFlowBlockedEvent(conn, .{
             .source = .local,
             .kind = .stream_data,

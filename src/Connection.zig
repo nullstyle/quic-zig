@@ -1711,6 +1711,7 @@ pub const SentCryptoChunk = struct {
     /// Allocator-owned bytes. Freed on ACK or moved back to
     /// `crypto_retx` on loss.
     data: []u8,
+    probe_requeued: bool = false,
 };
 
 /// One peer-issued connection ID stashed from a NEW_CONNECTION_ID
@@ -3807,6 +3808,10 @@ pub fn earlyDataParamReduced(
         return "initial_max_streams_bidi";
     if (fresh.initial_max_streams_uni < remembered.initial_max_streams_uni)
         return "initial_max_streams_uni";
+    if (remembered.initial_max_path_id) |rem_path_id| {
+        const fresh_path_id = fresh.initial_max_path_id orelse return "initial_max_path_id";
+        if (fresh_path_id < rem_path_id) return "initial_max_path_id";
+    }
     return null;
 }
 
@@ -4003,13 +4008,14 @@ fn ackDelayDeadlineUs(
     tracker: *const AckTracker.AckTracker,
 ) ?u64 {
     const base_ms = tracker.ackDelayBaseMs() orelse return null;
-    return base_ms * RttEstimator.ms +| self.effectiveMaxAckDelayUs();
+    const max_delay_ms = (self.effectiveMaxAckDelayUs() +| RttEstimator.ms - 1) / RttEstimator.ms;
+    return (base_ms +| max_delay_ms) *| RttEstimator.ms;
 }
 
 fn promoteDueAckDelay(self: *Connection, tracker: *AckTracker.AckTracker, now_us: u64) void {
     if (tracker.promoteDelayedAck(
         now_us / RttEstimator.ms,
-        (self.effectiveMaxAckDelayUs() + RttEstimator.ms - 1) / RttEstimator.ms,
+        (self.effectiveMaxAckDelayUs() +| RttEstimator.ms - 1) / RttEstimator.ms,
     )) self.touch();
 }
 
@@ -4129,7 +4135,7 @@ pub fn maybeAutoAckFrequency(self: *Connection, now_us: u64) void {
     if (self.lifecycle.closed or self.lifecycle.pending_close != null) return;
     const params = self.cached_peer_transport_params orelse return;
     const peer_min = params.min_ack_delay_us orelse return;
-    const path = self.primaryPathConst();
+    const path = self.paths.activeConst();
     const every = autoAckFrequencyPackets(path.path.cc.cwndBytes(), path.path.cc.config().max_datagram_size);
     const threshold = every - 1;
     if (self.ack_frequency_last) |last| {
@@ -4159,7 +4165,7 @@ pub fn idleTimeoutUs(self: *const Connection) ?u64 {
     // period to be at least three times the current Probe Timeout
     // (PTO)." The PTO without its backoff: with it, the probes to a
     // dead peer would stretch the very timeout that bounds them.
-    const pto = conn_loss.basePtoDurationForApplicationPath(self, self.primaryPathConst());
+    const pto = conn_loss.basePtoDurationForApplicationPath(self, self.paths.activeConst());
     return @max(negotiated, 3 *| pto);
 }
 
@@ -4281,13 +4287,13 @@ pub fn sentForLevelOnPath(
 }
 
 pub fn rttForLevel(self: *Connection, lvl: EncryptionLevel) *RttEstimator {
-    _ = lvl;
+    if (lvl == .application) return &self.activePath().path.rtt;
     return &self.primaryPath().path.rtt;
 }
 
 // INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
 pub fn rttForLevelConst(self: *const Connection, lvl: EncryptionLevel) *const RttEstimator {
-    _ = lvl;
+    if (lvl == .application) return &self.paths.activeConst().path.rtt;
     return &self.primaryPathConst().path.rtt;
 }
 
@@ -4301,32 +4307,32 @@ fn rttForLevelOnPathConst(
 }
 
 pub fn ccForApplication(self: *Connection) *CongestionController {
-    return &self.primaryPath().path.cc;
+    return &self.activePath().path.cc;
 }
 
 fn ccForApplicationConst(self: *const Connection) *const CongestionController {
-    return &self.primaryPathConst().path.cc;
+    return &self.paths.activeConst().path.cc;
 }
 
 pub fn ptoCountForLevel(self: *Connection, lvl: EncryptionLevel) *u32 {
     if (connPnIdx(lvl)) |idx| return &self.pto_count[idx];
-    return &self.primaryPath().pto_count;
+    return &self.activePath().pto_count;
 }
 
 // INTERNAL: pub for Connection/loss.zig access; not part of the embedder API.
 pub fn ptoCountForLevelConst(self: *const Connection, lvl: EncryptionLevel) *const u32 {
     if (connPnIdx(lvl)) |idx| return &self.pto_count[idx];
-    return &self.primaryPathConst().pto_count;
+    return &self.paths.activeConst().pto_count;
 }
 
 pub fn pendingPingForLevel(self: *Connection, lvl: EncryptionLevel) *bool {
     if (connPnIdx(lvl)) |idx| return &self.pending_ping[idx];
-    return &self.primaryPath().pending_ping;
+    return &self.activePath().pending_ping;
 }
 
 fn pendingPingForLevelConst(self: *const Connection, lvl: EncryptionLevel) *const bool {
     if (connPnIdx(lvl)) |idx| return &self.pending_ping[idx];
-    return &self.primaryPathConst().pending_ping;
+    return &self.paths.activeConst().pending_ping;
 }
 
 // INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
@@ -4560,7 +4566,7 @@ pub fn nextStreamPacketKey(self: *Connection) u64 {
 
 // INTERNAL: pub for Connection/send.zig access; not part of the embedder API.
 pub fn drainingDurationUs(self: *const Connection) u64 {
-    return 3 * self.primaryPathConst().path.rtt.pto(self.peerMaxAckDelayUs());
+    return 3 *| self.paths.activeConst().path.rtt.pto(self.peerMaxAckDelayUs());
 }
 
 // INTERNAL: pub for Connection/loss.zig and Connection/paths.zig access; not part of the embedder API.
@@ -4618,26 +4624,26 @@ pub fn congestionBytesInFlight(self: *const Connection) u64 {
     return self.bytesInFlight();
 }
 
-/// Current PTO duration in microseconds for the primary
+/// Current PTO duration in microseconds for the active
 /// application path, with the §6.2.1 exponential backoff already
 /// applied (i.e. `base_pto << pto_count`). Test-only diagnostic so
 /// conformance tests can pin the §6.2.1 doubling invariant; there
 /// is no production reason an embedder would need this.
 pub fn ptoMicros(self: *const Connection) u64 {
-    return self.ptoDurationForApplicationPath(self.primaryPathConst());
+    return self.ptoDurationForApplicationPath(self.paths.activeConst());
 }
 
-/// Current PTO backoff count for the primary application path.
+/// Current PTO backoff count for the active application path.
 /// Reset to 0 by an ACK that newly acknowledges an ack-eliciting
 /// packet (§6.2.1). Test-only diagnostic — same justification as
 /// `ptoMicros`.
 pub fn ptoCount(self: *const Connection) u32 {
-    return self.primaryPathConst().pto_count;
+    return self.paths.activeConst().pto_count;
 }
 
 pub fn congestionBlocked(self: *const Connection, lvl: EncryptionLevel) bool {
     if (lvl != .application and lvl != .early_data) return false;
-    const path = self.primaryPathConst();
+    const path = self.paths.activeConst();
     if (path.pending_ping) return false;
     if (path.pto_probe_count > 0) return false;
     return path.path.cc.sendAllowance(path.sent.bytes_in_flight) == 0;

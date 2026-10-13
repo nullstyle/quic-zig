@@ -154,6 +154,8 @@ pub fn handlePeerAddressChange(
     // where the peer never sent a NEW_CONNECTION_ID. The
     // conformance test for §5.1.2 ¶1 exercises the rotate-when-
     // available path explicitly.
+    path.snapshotMigrationRollback();
+
     if (consumeFreshPeerCidForMigration(conn, path)) |fresh_cid| {
         path.path.peer_cid = fresh_cid;
         if (path.id == 0) {

@@ -179,6 +179,17 @@ pub fn recv(
 
     if (self.state == .data_recvd or self.state == .data_read) return;
 
+    const prev_final_size = self.final_size;
+    const prev_fin_seen = self.fin_seen;
+    const prev_state = self.state;
+    const prev_end_offset = self.end_offset;
+    errdefer {
+        self.final_size = prev_final_size;
+        self.fin_seen = prev_fin_seen;
+        self.state = prev_state;
+        self.end_offset = prev_end_offset;
+    }
+
     // FIN tries to lock final_size = new_end.
     if (fin) {
         if (self.final_size) |fs| {
@@ -220,6 +231,7 @@ pub fn recv(
     const span = clip_end - self.read_offset;
     if (span > self.max_buffered_span) return Error.BufferLimitExceeded;
     const buf_required: usize = @intCast(span);
+    const prev_bytes_len = self.bytes.items.len;
     if (self.liveBytes() < buf_required) {
         const old_len = self.bytes.items.len;
         const grow_by = (self.buf_start + buf_required) - old_len;
@@ -230,6 +242,12 @@ pub fn recv(
         const data_rel_start: usize = self.buf_start + @as(usize, @intCast(clip_offset - self.read_offset));
         if (data_rel_start > old_len) @memset(slack[0 .. data_rel_start - old_len], 0);
     }
+    errdefer self.bytes.shrinkRetainingCapacity(prev_bytes_len);
+
+    // Pre-reserve range list capacity before mutating buffer bytes so
+    // `range_list.insertMerge` below cannot fail with OutOfMemory after
+    // payload bytes have been written into `self.bytes`.
+    try self.ranges.ensureUnusedCapacity(self.allocator, 1);
 
     // Track the high water-mark only after sparse-offset allocation
     // limits have accepted the frame.

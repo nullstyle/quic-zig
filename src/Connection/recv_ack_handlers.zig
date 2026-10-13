@@ -325,11 +325,17 @@ fn apply(
     var rtt_sampled = false;
     if (ctx.largest_acked_send_time_us) |sent_time_us| {
         if (ctx.largest_acked_ack_eliciting and now_us >= sent_time_us) {
-            const ack_delay_us = scaledAckDelayUs(a.ack_delay, conn.peerAckDelayExponent());
+            // RFC 9002 §5.3: "the acknowledgment delay MUST NOT be
+            // subtracted from the RTT sample if the packet number space
+            // is Initial or Handshake."
+            const ack_delay_us = if (target.isApplication())
+                scaledAckDelayUs(a.ack_delay, conn.peerAckDelayExponent())
+            else
+                0;
             target.path.path.rtt.update(
                 now_us - sent_time_us,
                 ack_delay_us,
-                conn.handshakeDone(),
+                conn.handshake_keys_discarded or conn.handshakeDone(),
                 conn.peerMaxAckDelayUs(),
             );
             rtt_sampled = true;
@@ -432,6 +438,13 @@ pub fn handleAckAtLevel(
     a: frame_types.Ack,
     now_us: u64,
 ) Error!void {
+    if (lvl == .application) {
+        const path = if (conn.current_incoming_path_id != 0)
+            conn.paths.get(conn.current_incoming_path_id) orelse conn.activePath()
+        else
+            conn.activePath();
+        return handleApplicationAckOnPath(conn, path, a, now_us);
+    }
     return apply(conn, .{
         .pn_space = conn.pnSpaceForLevel(lvl),
         .sent = conn.sentForLevel(lvl),

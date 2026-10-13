@@ -197,6 +197,9 @@ pub const SentPacket = struct {
     /// walk outside this file must skip dead entries; the removal APIs
     /// here skip them internally.
     dead: bool = false,
+    /// True once a non-full PTO probe has already requeued this
+    /// packet's frames while keeping the packet live in the tracker.
+    probe_requeued: bool = false,
 
     /// Append a control frame so loss recovery can re-queue it if the
     /// packet is declared lost. Errors with `TooManyRetransmittableFrames`
@@ -516,15 +519,19 @@ pub fn isFull(self: *const SentPacketTracker) bool {
     return self.liveCount() >= self.capacity();
 }
 
-/// Record a newly-sent packet. PNs must be strictly increasing.
-pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
+/// Ensure that a subsequent `record` call has an available physical
+/// slot without failing or allocating.
+pub fn prepareRecord(self: *SentPacketTracker) Error!void {
     if (self.isFull()) return Error.TooManyInFlight;
     if (self.count >= self.packets.len or self.dead_count >= self.compactThreshold()) {
         self.compact();
     }
-    // Every slot of the storage holds a live packet, and the capacity
-    // is not reached (`isFull` said so): more storage.
     if (self.count >= self.packets.len) try self.grow();
+}
+
+/// Record a newly-sent packet. PNs must be strictly increasing.
+pub fn record(self: *SentPacketTracker, p: SentPacket) Error!void {
+    try self.prepareRecord();
     if (self.count > 0) {
         // invariant: caller is the send path, which draws PNs
         // from a monotonically-incrementing nextPn() and never

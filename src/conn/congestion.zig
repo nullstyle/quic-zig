@@ -571,17 +571,17 @@ pub const NewReno = struct {
         if (self.isSlowStart()) {
             // HyStart++ throttles growth inside Conservative Slow
             // Start; outside CSS this is plain `bytes_acked`.
-            self.cwnd += self.hystart.slowStartGrowth(bytes_acked);
+            self.cwnd +|= self.hystart.slowStartGrowth(bytes_acked);
             return;
         }
 
         // Congestion avoidance: cwnd grows by ~max_datagram_size per RTT.
         // The standard accounting is to accumulate bytes_acked and
         // bump cwnd by max_datagram_size once we've accumulated enough.
-        self.bytes_acked_in_ca += bytes_acked;
+        self.bytes_acked_in_ca +|= bytes_acked;
         if (self.bytes_acked_in_ca >= self.cwnd) {
             self.bytes_acked_in_ca -= self.cwnd;
-            self.cwnd += self.cfg.max_datagram_size;
+            self.cwnd +|= self.cfg.max_datagram_size;
         }
     }
 

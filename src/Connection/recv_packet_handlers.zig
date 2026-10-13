@@ -222,10 +222,10 @@ pub fn handleInitial(
         return unopened_len;
     };
 
-    var pt_buf: [max_recv_plaintext]u8 = undefined;
+    const pt_buf: *[max_recv_plaintext]u8 = &Connection.scratch().pt_buf;
     const opened = (try openLongOrDrop(
         conn,
-        &pt_buf,
+        pt_buf,
         bytes,
         .initial,
         r_keys,
@@ -385,10 +385,10 @@ pub fn handleZeroRtt(
     const app_pn_space = &app_path.app_pn_space;
     const largest_received = if (app_pn_space.received.largest) |l| l else 0;
 
-    var pt_buf: [max_recv_plaintext]u8 = undefined;
+    const pt_buf: *[max_recv_plaintext]u8 = &Connection.scratch().pt_buf;
     const opened = (try openLongOrDrop(
         conn,
-        &pt_buf,
+        pt_buf,
         bytes,
         .early_data,
         r_keys,
@@ -436,10 +436,10 @@ pub fn handleHandshake(
         return unopened_len;
     };
 
-    var pt_buf: [max_recv_plaintext]u8 = undefined;
+    const pt_buf: *[max_recv_plaintext]u8 = &Connection.scratch().pt_buf;
     const opened = (try openLongOrDrop(
         conn,
-        &pt_buf,
+        pt_buf,
         bytes,
         .handshake,
         r_keys,

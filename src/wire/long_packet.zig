@@ -147,6 +147,10 @@ pub const InitialSealOptions = struct {
     /// Once both peers advertised `grease_quic_bit`, the connection
     /// layer flips this on per packet.
     quic_bit: u1 = 1,
+    /// Optional staging buffer for padded plaintext (`short_packet.staging_len`
+    /// bytes) so callers on hot paths can reuse scratch memory instead
+    /// of paying a 2 KiB stack buffer fill in `ReleaseSafe`.
+    staging: ?*[short_packet.staging_len]u8 = null,
 };
 
 /// Build a fully-protected Initial packet into `dst`. Returns total
@@ -221,7 +225,7 @@ pub fn sealInitial(dst: []u8, opts: InitialSealOptions) Error!usize {
 
     const length_field_value: u64 = @as(u64, pt_len) + 16 + pn_len;
 
-    if (dst.len < total_size) return Error.OutputTooSmall;
+    if (dst.len < total_size or pt_len > short_packet.staging_len) return Error.OutputTooSmall;
 
     // Encode the unprotected header.
     const dcid_id = try header.ConnId.fromSlice(opts.dcid);
@@ -243,26 +247,52 @@ pub fn sealInitial(dst: []u8, opts: InitialSealOptions) Error!usize {
     } });
     const pn_offset = hdr_len - pn_len;
 
-    // Stage plaintext (with PADDING zero bytes if needed).
-    var stage_buf: [2048]u8 = undefined;
-    if (pt_len > stage_buf.len) return Error.OutputTooSmall;
+    if (pt_len == opts.payload.len) {
+        return sealLongStaged(dst, opts.keys, opts.pn, hdr_len, pn_offset, pn_len, opts.payload);
+    }
+    if (opts.staging) |staging| {
+        @memcpy(staging[0..opts.payload.len], opts.payload);
+        @memset(staging[opts.payload.len..pt_len], 0);
+        return sealLongStaged(dst, opts.keys, opts.pn, hdr_len, pn_offset, pn_len, staging[0..pt_len]);
+    }
+    return sealInitialPaddedWithLocal(dst, opts, hdr_len, pn_offset, pn_len, pt_len);
+}
+
+fn sealInitialPaddedWithLocal(
+    dst: []u8,
+    opts: InitialSealOptions,
+    hdr_len: usize,
+    pn_offset: usize,
+    pn_len: u8,
+    pt_len: usize,
+) Error!usize {
+    var stage_buf: [short_packet.staging_len]u8 = undefined;
     @memcpy(stage_buf[0..opts.payload.len], opts.payload);
     @memset(stage_buf[opts.payload.len..pt_len], 0);
+    return sealLongStaged(dst, opts.keys, opts.pn, hdr_len, pn_offset, pn_len, stage_buf[0..pt_len]);
+}
 
-    // AEAD seal.
+fn sealLongStaged(
+    dst: []u8,
+    keys: *const PacketKeys,
+    pn: u64,
+    hdr_len: usize,
+    pn_offset: usize,
+    pn_len: u8,
+    pt_slice: []const u8,
+) Error!usize {
     const ct_len = try short_packet.sealPayloadWithKeys(
-        opts.keys,
+        keys,
         null,
-        opts.pn,
+        pn,
         dst[0..hdr_len],
-        stage_buf[0..pt_len],
+        pt_slice,
         dst[hdr_len..],
     );
     const total_len = hdr_len + ct_len;
 
-    // Header-protect.
     const sample = try protection.sampleAt(dst[0..total_len], pn_offset);
-    const mask = try short_packet.headerProtectionMask(opts.keys, &sample);
+    const mask = try short_packet.headerProtectionMask(keys, &sample);
     try protection.applyHpMask(dst[0..total_len], .long, pn_offset, pn_len, mask);
 
     return total_len;
@@ -424,7 +454,7 @@ fn sealLongPn(dst: []u8, opts: LongPnSealOptions, comptime kind: LongPnKind) Err
     const total_size: usize = 1 + 4 + 1 + opts.dcid.len + 1 + opts.scid.len +
         length_varint_size + pn_len + pt_len + 16;
 
-    if (dst.len < total_size) return Error.OutputTooSmall;
+    if (dst.len < total_size or pt_len > short_packet.staging_len) return Error.OutputTooSmall;
 
     const dcid_id = try header.ConnId.fromSlice(opts.dcid);
     const scid_id = try header.ConnId.fromSlice(opts.scid);
@@ -447,26 +477,15 @@ fn sealLongPn(dst: []u8, opts: LongPnSealOptions, comptime kind: LongPnKind) Err
     }));
     const pn_offset = hdr_len - pn_len;
 
-    var stage_buf: [2048]u8 = undefined;
-    if (pt_len > stage_buf.len) return Error.OutputTooSmall;
-    @memcpy(stage_buf[0..opts.payload.len], opts.payload);
-    @memset(stage_buf[opts.payload.len..pt_len], 0);
+    var sample_pad: [4]u8 = @splat(0);
+    const pt_slice: []const u8 = if (pt_len == opts.payload.len)
+        opts.payload
+    else blk: {
+        @memcpy(sample_pad[0..opts.payload.len], opts.payload);
+        break :blk sample_pad[0..pt_len];
+    };
 
-    const ct_len = try short_packet.sealPayloadWithKeys(
-        opts.keys,
-        null,
-        opts.pn,
-        dst[0..hdr_len],
-        stage_buf[0..pt_len],
-        dst[hdr_len..],
-    );
-    const total_len = hdr_len + ct_len;
-
-    const sample = try protection.sampleAt(dst[0..total_len], pn_offset);
-    const mask = try short_packet.headerProtectionMask(opts.keys, &sample);
-    try protection.applyHpMask(dst[0..total_len], .long, pn_offset, pn_len, mask);
-
-    return total_len;
+    return sealLongStaged(dst, opts.keys, opts.pn, hdr_len, pn_offset, pn_len, pt_slice);
 }
 
 // -- Retry ---------------------------------------------------------------
@@ -599,7 +618,15 @@ fn openLongHeader(
     const sample = try protection.sampleAt(src, pn_offset);
     const mask = try short_packet.headerProtectionMask(keys, &sample);
 
-    // Strip HP from byte 0 (low 4 bits) and PN bytes.
+    // Strip HP from byte 0 (low 4 bits) and PN bytes, restoring the
+    // original bytes if packet-type validation or AEAD authentication
+    // fails so callers never observe a corrupted input buffer.
+    const saved_byte0 = src[0];
+    const saved_pn: [4]u8 = src[pn_offset..][0..4].*;
+    errdefer {
+        src[0] = saved_byte0;
+        src[pn_offset..][0..4].* = saved_pn;
+    }
     src[0] ^= mask[0] & 0x0f;
     const pn_len: u8 = @intCast((src[0] & 0x03) + 1);
     var i: u8 = 0;
@@ -1179,6 +1206,39 @@ test "peekPacketLen: null for a packet with no Length field" {
         .retry_token = "retry-token",
     });
     try testing.expectEqual(@as(?usize, null), peekPacketLen(packet[0..len]));
+}
+
+test "openLongHeader restores src bytes when AEAD authentication fails" {
+    const dcid = fromHex("8394c8f03e515708");
+    const init_keys = try initial_mod.deriveInitialKeys(&dcid, false);
+    const right_keys = try short_packet.derivePacketKeys(.aes128_gcm_sha256, &init_keys.secret);
+    const wrong_init_keys = try initial_mod.deriveInitialKeys(&dcid, true);
+    const wrong_keys = try short_packet.derivePacketKeys(.aes128_gcm_sha256, &wrong_init_keys.secret);
+
+    const scid: [4]u8 = .{ 1, 2, 3, 4 };
+    var packet: [256]u8 = undefined;
+    const len = try sealInitial(&packet, .{
+        .dcid = &dcid,
+        .scid = &scid,
+        .pn = 42,
+        .payload = "CRYPTO payload",
+        .keys = &right_keys,
+    });
+    var snapshot: [256]u8 = undefined;
+    @memcpy(snapshot[0..len], packet[0..len]);
+
+    var pt: [256]u8 = undefined;
+    try testing.expectError(
+        Error.Auth,
+        openInitial(&pt, packet[0..len], .{ .keys = &wrong_keys, .largest_received = 41 }),
+    );
+    // Input buffer must remain byte-for-byte identical after failed open.
+    try testing.expectEqualSlices(u8, snapshot[0..len], packet[0..len]);
+
+    // Subsequent open with the right keys succeeds on the same buffer.
+    const opened = try openInitial(&pt, packet[0..len], .{ .keys = &right_keys, .largest_received = 41 });
+    try testing.expectEqual(@as(u64, 42), opened.pn);
+    try testing.expectEqualSlices(u8, "CRYPTO payload", opened.payload);
 }
 
 // -- fuzz harness --------------------------------------------------------

@@ -311,6 +311,26 @@ pub fn dispatchLostPacketToStreams(
     return any;
 }
 
+fn dispatchProbeRequeuedPacketToStreams(
+    conn: *Connection,
+    packet: *const SentPacketTracker.SentPacket,
+) Error!bool {
+    var any = false;
+    var refs = packet.streamRefs();
+    while (refs.next()) |ref| {
+        const s = conn.streams.get(ref.stream_id) orelse continue;
+        const queued = s.send.onPacketProbeRequeued(ref.stream_key) catch |e| switch (e) {
+            send_stream_mod.Error.UnknownPacket => continue,
+            else => return e,
+        };
+        if (queued) {
+            conn_streams.noteSendable(conn, s);
+            any = true;
+        }
+    }
+    return any;
+}
+
 pub fn discardSentCryptoForPacket(
     conn: *Connection,
     lvl: EncryptionLevel,
@@ -322,6 +342,18 @@ pub fn discardSentCryptoForPacket(
         const chunk = conn.sent_crypto[idx].items[i];
         if (chunk.pn == pn) {
             const removed = conn.sent_crypto[idx].orderedRemove(i);
+            if (removed.probe_requeued) {
+                var j: usize = 0;
+                while (j < conn.crypto_retx[idx].items.len) {
+                    const retx = conn.crypto_retx[idx].items[j];
+                    if (retx.offset == removed.offset and retx.data.len == removed.data.len) {
+                        const r = conn.crypto_retx[idx].orderedRemove(j);
+                        conn.allocator.free(r.data);
+                        continue;
+                    }
+                    j += 1;
+                }
+            }
             conn.allocator.free(removed.data);
             continue;
         }
@@ -340,6 +372,11 @@ fn requeueSentCryptoForPacket(
     while (i < conn.sent_crypto[idx].items.len) {
         const chunk = conn.sent_crypto[idx].items[i];
         if (chunk.pn == pn) {
+            if (chunk.probe_requeued) {
+                const removed = conn.sent_crypto[idx].orderedRemove(i);
+                conn.allocator.free(removed.data);
+                continue;
+            }
             try conn.crypto_retx[idx].ensureUnusedCapacity(conn.allocator, 1);
             const removed = conn.sent_crypto[idx].orderedRemove(i);
             conn.crypto_retx[idx].appendAssumeCapacity(.{
@@ -350,6 +387,28 @@ fn requeueSentCryptoForPacket(
             continue;
         }
         i += 1;
+    }
+    return any;
+}
+
+fn requeueSentCryptoForProbe(
+    conn: *Connection,
+    lvl: EncryptionLevel,
+    pn: u64,
+) Error!bool {
+    const idx = lvl.idx();
+    var any = false;
+    for (conn.sent_crypto[idx].items) |*chunk| {
+        if (chunk.pn == pn and !chunk.probe_requeued) {
+            try conn.crypto_retx[idx].ensureUnusedCapacity(conn.allocator, 1);
+            const copy = try conn.allocator.dupe(u8, chunk.data);
+            conn.crypto_retx[idx].appendAssumeCapacity(.{
+                .offset = chunk.offset,
+                .data = copy,
+            });
+            chunk.probe_requeued = true;
+            any = true;
+        }
     }
     return any;
 }
@@ -405,7 +464,7 @@ fn queueHandshakeProbeCopy(conn: *Connection, lvl: EncryptionLevel, queued_befor
 /// that nobody acknowledged.
 fn packetOwnsSentCrypto(conn: *const Connection, lvl: EncryptionLevel, pn: u64) bool {
     for (conn.sent_crypto[lvl.idx()].items) |chunk| {
-        if (chunk.pn == pn) return true;
+        if (chunk.pn == pn and !chunk.probe_requeued) return true;
     }
     return false;
 }
@@ -529,7 +588,10 @@ pub fn dispatchAckedControlFrames(
 ) void {
     for (packet.retransmit_frames.items) |frame| {
         switch (frame) {
-            .handshake_done => conn.handshake_done_acked = true,
+            .handshake_done => {
+                conn.handshake_done_acked = true;
+                conn.pending_handshake_done = false;
+            },
             .reset_stream => |rs| {
                 const s = conn.streams.get(rs.stream_id) orelse continue;
                 if (s.send.reset) |r| {
@@ -604,8 +666,10 @@ pub fn dispatchLostControlFramesOnPath(
                 any = true;
             },
             .handshake_done => {
-                conn.pending_handshake_done = true;
-                any = true;
+                if (!conn.handshake_done_acked) {
+                    conn.pending_handshake_done = true;
+                    any = true;
+                }
             },
             .ack_frequency => |af| {
                 // Only the latest request matters to the peer.
@@ -716,18 +780,38 @@ pub fn dispatchLostControlFramesOnPath(
                 // semantic update (which IPv4 address, what flags),
                 // so the requeued frame keeps its original
                 // sequence number.
-                try conn.pending_frames.alternative_addresses.append(
-                    conn.allocator,
-                    .{ .v4 = a },
-                );
+                const candidate: PendingFrameQueues.PendingAlternativeAddress = .{ .v4 = a };
+                var exists = false;
+                for (conn.pending_frames.alternative_addresses.items) |existing| {
+                    if (std.meta.eql(existing, candidate)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    try conn.pending_frames.alternative_addresses.append(
+                        conn.allocator,
+                        candidate,
+                    );
+                }
                 conn.touch();
                 any = true;
             },
             .alternative_v6_address => |a| {
-                try conn.pending_frames.alternative_addresses.append(
-                    conn.allocator,
-                    .{ .v6 = a },
-                );
+                const candidate: PendingFrameQueues.PendingAlternativeAddress = .{ .v6 = a };
+                var exists = false;
+                for (conn.pending_frames.alternative_addresses.items) |existing| {
+                    if (std.meta.eql(existing, candidate)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    try conn.pending_frames.alternative_addresses.append(
+                        conn.allocator,
+                        candidate,
+                    );
+                }
                 conn.touch();
                 any = true;
             },
@@ -744,7 +828,7 @@ pub fn requeueLostPacket(
     return requeueLostPacketOnPath(conn, lvl, packet, conn.activePath().id);
 }
 
-fn requeueLostPacketOnPath(
+pub fn requeueLostPacketOnPath(
     conn: *Connection,
     lvl: EncryptionLevel,
     packet: *const SentPacketTracker.SentPacket,
@@ -1367,12 +1451,13 @@ const ProbeRequeue = struct {
 /// may stay.
 fn requeueFramesForProbe(
     conn: *Connection,
-    packet: *const SentPacketTracker.SentPacket,
+    packet: *SentPacketTracker.SentPacket,
     path_id: u32,
 ) Error!ProbeRequeue {
     conn.touch();
     const data = try requeueDataForProbe(conn, packet);
     const control = try dispatchLostControlFramesOnPath(conn, packet, path_id);
+    packet.probe_requeued = true;
     return .{ .any = data or control, .data = data };
 }
 
@@ -1383,8 +1468,8 @@ fn requeueDataForProbe(
     packet: *const SentPacketTracker.SentPacket,
 ) Error!bool {
     var any = false;
-    any = (try dispatchLostPacketToStreams(conn, packet)) or any;
-    any = (try requeueSentCryptoForPacket(conn, .application, packet.pn)) or any;
+    any = (try dispatchProbeRequeuedPacketToStreams(conn, packet)) or any;
+    any = (try requeueSentCryptoForProbe(conn, .application, packet.pn)) or any;
     return any;
 }
 
