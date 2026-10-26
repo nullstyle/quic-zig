@@ -7,7 +7,7 @@ must be labelled separately from released behavior. For post-tag verification,
 read the [latest maintained brief](https://github.com/nullstyle/quic-zig/blob/main/docs/DOWNSTREAM_INTEGRATION.md);
 a tagged archive contains the brief as it stood when tagged.
 
-Last updated: 2026-10-10. Current release: **v0.42.2, verified**.
+Last updated: 2026-10-26. Current release: **v0.42.2, verified**.
 v0.42.2 keeps benchmark fixture tests independent of the optional evented
 benchmark, correcting the stock Zig 0.17 Linux compile failure in v0.42.1.
 **Do not pin v0.42.1.** The current release keeps Threaded as the default and
@@ -33,12 +33,22 @@ and [line-rate profile](LINE_RATE_PROFILE.md) remain dated evidence.
 
 ## Unreleased source qualification — 2026-10-26
 
+Sprint 4 [qualifies the fixed Sprint 3 runtime](SPRINT_4_STACK_QUALIFICATION.md)
+from commit `43c2390557c47f48e6c28e07a31efdb2b6723478` on stock Zig 0.17.0.
+Mac/Linux sanitizer, Linux Debug/ReleaseSafe and full-budget fuzz, strict
+four-cell pinned quic-go interop, native UDP, consumers and cross-compilation
+results retain exact source and compiler identities. There is no additional
+QUIC API, toolchain, module-option or default-backend migration. The six held
+fairness cells repeat their prior values, so the promotion review remains held.
+Final local archives are identified by their recorded SHA256; local gates do
+not change the verified release pin or establish hosted/native-Windows proof.
+
 Sprint 3 adds [application profiling and recovery evidence](SPRINT_3_APPLICATION_WORKLOADS.md).
 The recovery workload reproduced an inherited idle-cache defect: a failed
 stream open queued `STREAMS_BLOCKED` without invalidating cached idle state;
 public `MAX_STREAMS` grants had the same omission. The selected source repairs
 both transitions and has focused bidi/uni
-and duplicate-suppression coverage. It requires fresh runtime qualification;
+and duplicate-suppression coverage. Sprint 4 provides fresh runtime qualification;
 Sprint 2's runtime-equality claim does not apply to this repaired candidate.
 Public downstream v0.37.2 pins remain unchanged and retain the defect. Local
 profiles and archives do not promote a release or clear the fairness hold.

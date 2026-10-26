@@ -15,6 +15,9 @@ changes.
 - Repeatable public-application profiling for request/reply, reliable
   publication and missed-announcement snapshot recovery, with explicit source,
   compiler, binary and per-process measurement evidence.
+- Fixed-runtime stack qualification and cumulative migration guidance for the
+  unpublished Sprint 3 source, with distinct platform, sanitizer, fuzz, interop,
+  package and inherited fairness-hold evidence. No API or default-policy change.
 
 ### Fixed
 
