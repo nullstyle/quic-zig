@@ -897,6 +897,61 @@ test "STREAMS_BLOCKED is queued when local stream opening hits peer limit" {
     try std.testing.expectEqual(@as(?u64, null), conn.pending_frames.streams_blocked_bidi);
 }
 
+test "an idle connection sends STREAMS_BLOCKED after a stream open hits the peer limit" {
+    const allocator = std.testing.allocator;
+    var ctx = try boringssl.tls.Context.initClient(.{});
+    defer ctx.deinit();
+
+    for ([_]bool{ true, false }) |bidi| {
+        const conn = try Connection.createClient(allocator, ctx, "x");
+        defer conn.destroy();
+        try installTestApplicationWriteSecret(conn);
+        try conn.setPeerDcid(&.{0xaa});
+        conn.initial_keys_discarded = true;
+        util.markTestHandshakeConfirmed(conn);
+        conn.local_bidi_ids.limit = 1;
+        conn.local_uni_ids.limit = 1;
+
+        // The first stream is idle. A second open has to tell the peer
+        // that its limit binds, even after the idle shortcut was cached.
+        _ = if (bidi) try conn.openNextBidi() else try conn.openNextUni();
+        var out: [default_mtu]u8 = undefined;
+        try std.testing.expect((try conn.pollDatagram(&out, 1_000)) == null);
+        try std.testing.expect(conn.rest_deadline_valid);
+        if (bidi) {
+            try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextBidi());
+        } else {
+            try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextUni());
+        }
+
+        const sent = (try conn.pollDatagram(&out, 1_001)) orelse return error.BlockedFrameNotSent;
+        var plaintext: [state.max_recv_plaintext]u8 = undefined;
+        const opened = try state.short_packet_mod.open1Rtt(&plaintext, out[0..sent.len], .{
+            .dcid_len = 1,
+            .keys = (try conn.packetKeys(.application, .write)).?,
+            .largest_received = 0,
+        });
+        const decoded = try state.frame_mod.decode(opened.payload);
+        try std.testing.expect(decoded.frame == .streams_blocked);
+        try std.testing.expectEqual(bidi, decoded.frame.streams_blocked.bidi);
+        try std.testing.expectEqual(@as(u64, 1), decoded.frame.streams_blocked.maximum_streams);
+
+        // Repeated failures at the same limit do not create another
+        // blocked notification or wake an otherwise idle connection.
+        try std.testing.expect((try conn.pollDatagram(&out, 1_002)) == null);
+        try std.testing.expect(conn.rest_deadline_valid);
+        const next_pn = conn.pnSpaceForLevel(.application).next_pn;
+        if (bidi) {
+            try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextBidi());
+        } else {
+            try std.testing.expectError(Error.StreamLimitExceeded, conn.openNextUni());
+        }
+        try std.testing.expect(conn.rest_deadline_valid);
+        try std.testing.expect((try conn.pollDatagram(&out, 1_003)) == null);
+        try std.testing.expectEqual(next_pn, conn.pnSpaceForLevel(.application).next_pn);
+    }
+}
+
 test "uni STREAMS_BLOCKED is queued, requeued on loss, and cleared by MAX_STREAMS" {
     const allocator = std.testing.allocator;
     var ctx = try boringssl.tls.Context.initClient(.{});

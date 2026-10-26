@@ -11,11 +11,19 @@ changes.
 
 - Borrowed-connection integration coverage for application-allocation retry,
   bounded output pressure, paused/partial reads, per-stream cancellation with
-  late data/FIN, cleanup and reuse in both accepted and dialed roles. The
-  transport implementation and its defaults are unchanged.
+  late data/FIN, cleanup and reuse in both accepted and dialed roles (Sprint 2).
+- Repeatable public-application profiling for request/reply, reliable
+  publication and missed-announcement snapshot recovery, with explicit source,
+  compiler, binary and per-process measurement evidence.
 
 ### Fixed
 
+- Invalidate cached idle state when a failed stream open queues a new
+  `STREAMS_BLOCKED` notification or public code queues a `MAX_STREAMS` grant.
+  Prompt owner loops after request deadlines
+  can now send that notification instead of asserting in Debug or delaying it
+  behind the idle shortcut. Bidi/uni and duplicate-suppression regressions
+  cover the inherited defect.
 - Reusing an in-flight ring's capacity with a requested lower bound below
   its live count no longer underflows. Existing entries and storage stay
   intact; a focused regression covers lower and equal capacity requests.

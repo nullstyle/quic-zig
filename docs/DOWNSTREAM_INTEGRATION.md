@@ -33,6 +33,16 @@ and [line-rate profile](LINE_RATE_PROFILE.md) remain dated evidence.
 
 ## Unreleased source qualification — 2026-10-26
 
+Sprint 3 adds [application profiling and recovery evidence](SPRINT_3_APPLICATION_WORKLOADS.md).
+The recovery workload reproduced an inherited idle-cache defect: a failed
+stream open queued `STREAMS_BLOCKED` without invalidating cached idle state;
+public `MAX_STREAMS` grants had the same omission. The selected source repairs
+both transitions and has focused bidi/uni
+and duplicate-suppression coverage. It requires fresh runtime qualification;
+Sprint 2's runtime-equality claim does not apply to this repaired candidate.
+Public downstream v0.37.2 pins remain unchanged and retain the defect. Local
+profiles and archives do not promote a release or clear the fairness hold.
+
 Sprint 2 adds [consumer-contract evidence](SPRINT_2_CONSUMER_CONTRACTS.md)
 at the existing borrowing-driver interface. It exercises allocation failure,
 bounded queue pressure, paused/partial reads and stream cancellation followed

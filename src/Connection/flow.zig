@@ -164,6 +164,7 @@ pub fn queueMaxStreams(conn: *Connection, bidi: bool, maximum_streams: u64) void
     const pending = pendingMaxStreamsSlot(conn, bidi);
     if (pending.* == null or bounded_maximum_streams > pending.*.?) {
         pending.* = bounded_maximum_streams;
+        conn.touch();
     }
 }
 
@@ -392,6 +393,7 @@ pub fn noteStreamsBlocked(conn: *Connection, bidi: bool, maximum_streams: u64) v
     local_blocked.* = maximum_streams;
     if (changed) {
         pendingStreamsBlockedSlot(conn, bidi).* = maximum_streams;
+        conn.touch();
         recordFlowBlockedEvent(conn, .{
             .source = .local,
             .kind = .streams,

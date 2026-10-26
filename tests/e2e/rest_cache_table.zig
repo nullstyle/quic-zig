@@ -138,6 +138,10 @@ fn clientOpenAndWrite(p: *Pair) !void {
 fn clientOpenOnly(p: *Pair) !void {
     _ = try p.cli.conn.openBidi(0);
 }
+fn clientGrantStreams(p: *Pair) !void {
+    p.cli.conn.queueMaxStreams(true, 101);
+    p.cli.conn.queueMaxStreams(false, 101);
+}
 fn clientWriteFinish(p: *Pair) !void {
     _ = try p.cli.conn.openUni(2);
     _ = try p.cli.conn.streamWrite(2, "bye");
@@ -200,6 +204,7 @@ const cases = [_]Case{
     .{ .name = "requestPathPing", .call = clientPathPing },
     .{ .name = "openBidi + streamWrite", .call = clientOpenAndWrite },
     .{ .name = "openBidi alone", .call = clientOpenOnly },
+    .{ .name = "queueMaxStreams (bidi and uni)", .call = clientGrantStreams },
     .{ .name = "streamWrite + streamFinish", .call = clientWriteFinish },
     .{ .name = "streamReset", .call = clientReset },
     .{ .name = "streamSetPriority", .call = clientPriority },
