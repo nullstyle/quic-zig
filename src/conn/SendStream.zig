@@ -152,7 +152,7 @@ pub const InFlightMap = struct {
     ) std.mem.Allocator.Error!void {
         if (min_cap == 0) return;
         if (min_cap <= self.cap) {
-            if (self.cap - self.span < min_cap - self.live) self.compact();
+            if (self.cap - self.span < min_cap -| self.live) self.compact();
             return;
         }
         const target_usize = std.math.ceilPowerOfTwo(usize, @max(min_cap, 8)) catch return error.OutOfMemory;
@@ -1355,6 +1355,19 @@ test "onPacketProbeRequeued preserves original in_flight key for spurious-PTO AC
         try testing.expectEqual(@as(usize, 0), s.pending.items.len);
         try testing.expect(s.peekChunk(100) == null);
     }
+}
+
+test "InFlightMap capacity reuse accepts a lower bound below the live count" {
+    var map: InFlightMap = .{};
+    defer map.deinit(std.testing.allocator);
+    try map.ensureTotalCapacity(std.testing.allocator, 8);
+    for (0..3) |pn| map.putAssumeCapacityNoClobber(pn, .{ .offset = pn, .length = 1, .fin = false });
+    const before_ptr = map.ptr;
+    try map.ensureTotalCapacity(std.testing.allocator, 1);
+    try map.ensureTotalCapacity(std.testing.allocator, map.count());
+    try std.testing.expectEqual(before_ptr, map.ptr);
+    try std.testing.expectEqual(@as(u32, 3), map.count());
+    for (0..3) |pn| try std.testing.expect(map.contains(pn));
 }
 
 test "InFlightMap ring buffer wraps, trims tombstones, and compacts in-place without reallocating" {

@@ -5,6 +5,36 @@ All notable changes to quic-zig are documented in this file.
 The project is pre-1.0. Any 0.x release may include breaking API
 changes.
 
+## [Unreleased]
+
+### Fixed
+
+- Reusing an in-flight ring's capacity with a requested lower bound below
+  its live count no longer underflows. Existing entries and storage stay
+  intact; a focused regression covers lower and equal capacity requests.
+- Preserve stream and CRYPTO tracking through PTO probes so a late ACK can
+  acknowledge the original packet. Packet construction reserves fallible
+  bookkeeping before draining queues or consuming a packet number.
+- Apply application recovery, RTT and ACK handling to the active or incoming
+  path; restore migration address/CID state on rollback and requeue data
+  when a path fails or retires.
+- Keep receive-buffer, key-update and anti-replay state consistent on
+  allocation failure; restore long-header input bytes after failed packet
+  authentication. Bound transport-parameter parsing to 64 parameters and
+  validate accepted-version lists.
+- Sample RTT when the largest packet is newly acknowledged and any newly
+  acknowledged packet is ACK-eliciting; keep Initial/Handshake ACK delay
+  out of RTT adjustment and preserve sub-millisecond delayed-ACK deadlines.
+
+### Changed
+
+- Stream in-flight packet tracking and anti-replay expiry tracking use ring
+  buffers. The stream ring supports ordered append, out-of-order lookup and
+  in-place tombstone compaction. No throughput improvement is claimed here.
+- Main-only source qualification and the local candidate package are recorded
+  in [the Sprint 1 evidence](docs/SPRINT_1_BASELINE.md). The released pin
+  remains v0.42.2; this section does not name a new release.
+
 ## [0.42.2] - 2026-10-10
 
 ### Fixed

@@ -31,6 +31,20 @@ claimed. See [stream cleanup evidence](STREAM_CLEANUP_SPRINT.md). The preceding
 [packet-builder sprint](PACKET_BUILDER_SPRINT.md), [UDP sprint](UDP_IO_SPRINT.md)
 and [line-rate profile](LINE_RATE_PROFILE.md) remain dated evidence.
 
+## Unreleased source qualification — 2026-10-26
+
+The Sprint 1 candidate starts from main `b0d7d78`, after the v0.42.2 tag.
+It includes loss-recovery, allocation-failure, multipath, parser-bound,
+RTT/ACK-timing and ring-buffer changes that are absent from the released
+archive. [Sprint 1 evidence](SPRINT_1_BASELINE.md) records the final source
+identity, local qualification and remaining gates. The local candidate is
+for coordinated qmsg/qmesh testing; it is not a published release and does
+not change the verified pin below.
+
+Keep all parents in one binary on the same quic source and dependency
+options. Take `quic` and `boringssl` from the same dependency instance;
+local source/candidate testing does not relax module type identity.
+
 ## Current pin and build options
 
 Tag `v0.42.2` = `2aa5bae31b7eab42cf95a654ab9717248d6f2498`.
