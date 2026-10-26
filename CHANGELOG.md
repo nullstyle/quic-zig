@@ -7,6 +7,13 @@ changes.
 
 ## [Unreleased]
 
+### Added
+
+- Borrowed-connection integration coverage for application-allocation retry,
+  bounded output pressure, paused/partial reads, per-stream cancellation with
+  late data/FIN, cleanup and reuse in both accepted and dialed roles. The
+  transport implementation and its defaults are unchanged.
+
 ### Fixed
 
 - Reusing an in-flight ring's capacity with a requested lower bound below

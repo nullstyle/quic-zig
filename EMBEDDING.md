@@ -372,6 +372,23 @@ hook must not consume, reset, or otherwise mutate that same receive half.
 It may open other streams or queue responses. Returning an error consumes
 nothing, so commit application side effects only with successful progress.
 
+For the borrowing driver, an application-storage allocation failure can be
+returned before copying bytes or queueing a response; the owner can retry the
+failed `service` call after that failure is resolved. Ordinary bounded-output
+pressure should instead map `Outbox.push`'s `QueueFull` to a zero-byte result.
+The normal service pass can then flush existing tails while the unread chunk
+keeps its receive-credit charge. Reserve application storage before queueing
+an echo or response so a later allocation failure cannot duplicate an accepted
+write on retry.
+
+Keep stream IDs across owner service/tick calls, and copy bytes the application
+retains. A `Stream` pointer can become invalid when its owner reaps the stream.
+Application deadlines remain owner policy: reset/stop the affected stream
+outside its receive callback, then continue servicing the connection. Late
+data or FIN must not turn that cancellation into a clean application end.
+The [consumer-contract evidence](docs/SPRINT_2_CONSUMER_CONTRACTS.md) exercises
+these cases for both accepted and dialed connections.
+
 Peer streams are discovered automatically. After opening a local bidi
 stream, call `pump.trackStream(id)` to receive its response. `refusedStreams()`
 counts incoming streams rejected because the table is full or no data hook

@@ -1385,6 +1385,217 @@ test "ConnectionDriver: borrowed accepted and dialed connections share partial r
     try std.testing.expectEqual(@as(usize, 1), client_app.disconnects);
 }
 
+const PressureApp = struct {
+    pub const ConnState = void;
+    pub const StreamState = struct {};
+    const C = quic.app.ConnectionDriver(@This());
+    const Capture = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        ends: usize = 0,
+        end: ?quic.app.StreamEnd = null,
+    };
+
+    allocator: std.mem.Allocator,
+    echo: bool,
+    read_limit: usize = 2,
+    paused_stream: ?u64 = null,
+    captures: [4]Capture = .{ .{}, .{}, .{}, .{} },
+    queue_full: usize = 0,
+
+    fn deinit(app: *PressureApp) void {
+        for (&app.captures) |*slot| slot.bytes.deinit(app.allocator);
+    }
+    fn capture(app: *PressureApp, id: u64) *Capture {
+        const index: usize = @intCast(id >> 2);
+        std.debug.assert(index < app.captures.len);
+        return &app.captures[index];
+    }
+    fn opened(app: *PressureApp, d: *C, entry: *C.StreamEntry, _: bool) anyerror!void {
+        if (app.echo) {
+            d.conn.send_buffer_follows_credit = false;
+            if (d.conn.stream(entry.id)) |stream| stream.send.max_buffered = 1;
+        }
+    }
+    fn data(app: *PressureApp, d: *C, entry: *C.StreamEntry, bytes: []const u8) anyerror!usize {
+        if (app.paused_stream == entry.id) return 0;
+        const n = @min(app.read_limit, bytes.len);
+        if (n == 0) return 0;
+        const received = app.capture(entry.id);
+        // Reserve application storage before any write or visible side effect.
+        // A callback error accepts nothing; zero is ordinary queue pressure.
+        try received.bytes.ensureUnusedCapacity(app.allocator, n);
+        if (app.echo) d.outbox.push(d.conn, entry.id, bytes[0..n]) catch |err| switch (err) {
+            error.QueueFull => {
+                app.queue_full += 1;
+                return 0;
+            },
+            else => return err,
+        };
+        received.bytes.appendSliceAssumeCapacity(bytes[0..n]);
+        return n;
+    }
+    fn ended(app: *PressureApp, d: *C, entry: *C.StreamEntry, end: quic.app.StreamEnd) anyerror!void {
+        const received = app.capture(entry.id);
+        received.ends += 1;
+        received.end = end;
+        if (app.echo and end == .fin) try d.outbox.finish(d.conn, entry.id) else d.outbox.forget(entry.id);
+    }
+    fn hooks() C.Hooks {
+        return .{ .on_stream_open = opened, .on_stream_data = data, .on_stream_end = ended };
+    }
+};
+
+fn pressureStep(loop: *quic.testing.Loopback, server_asks: bool, sender: *PressureApp.C, receiver: *PressureApp.C) !void {
+    _ = try loop.pumpClientToServer();
+    try (if (server_asks) sender.service() else receiver.service());
+    _ = try loop.pumpServerToClient();
+    try (if (server_asks) receiver.service() else sender.service());
+    try loop.server.tick(loop.now_us);
+    try loop.client.conn.tick(loop.now_us);
+    loop.now_us += 1_000;
+    try std.testing.expect(receiver.outbox.pendingBytes() <= 6);
+    try std.testing.expect(receiver.outbox.pendingStreams() <= 1);
+    try std.testing.expectEqual(@as(u64, 0), receiver.refusedStreams());
+    try std.testing.expectEqual(@as(u64, 0), sender.refusedStreams());
+}
+
+fn pressureDeliver(loop: *quic.testing.Loopback, server_asks: bool, packet: []u8) !void {
+    if (server_asks) try loop.client.conn.handle(packet, null, loop.now_us) else _ = try loop.server.feed(packet, quic.testing.loopback_addr, loop.now_us);
+}
+
+test "ConnectionDriver: consumer pressure retries allocation failure and isolates deadline cancellation on either owner" {
+    const allocator = std.testing.allocator;
+    const protos = [_][]const u8{"consumer-pressure"};
+    for ([_]bool{ false, true }) |server_asks| {
+        var params = common.defaultParams();
+        params.initial_max_streams_bidi = 2;
+        params.initial_max_stream_data_bidi_local = 64;
+        params.initial_max_stream_data_bidi_remote = 64;
+        var server = try quic.Server.init(.{ .allocator = allocator, .tls_cert_pem = common.test_cert_pem, .tls_key_pem = common.test_key_pem, .alpn_protocols = &protos, .transport_params = params });
+        defer server.deinit();
+        var client = try quic.Client.connect(.{ .allocator = allocator, .server_name = "localhost", .alpn_protocols = &protos, .transport_params = params, .insecure_skip_verify = true });
+        defer client.deinit();
+        var loop = try quic.testing.Loopback.init(.{ .allocator = allocator, .server = &server, .client = &client });
+        defer loop.deinit();
+        try loop.handshake(&quic.testing.NullDriver{});
+        const server_conn = server.iterator()[0].conn;
+        while (server_conn.pollEvent()) |_| {}
+        while (client.conn.pollEvent()) |_| {}
+        const asking_conn = if (server_asks) server_conn else client.conn;
+        const answering_conn = if (server_asks) client.conn else server_conn;
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var answering_app: PressureApp = .{ .allocator = failing.allocator(), .echo = true, .read_limit = 4 };
+        defer answering_app.deinit();
+        var asking_app: PressureApp = .{ .allocator = allocator, .echo = false, .read_limit = 0 };
+        defer asking_app.deinit();
+        var receiver = try PressureApp.C.init(.{ .allocator = allocator, .app = &answering_app, .conn = answering_conn, .hooks = PressureApp.hooks(), .max_tracked_streams = 2, .outbox_limits = .{ .max_bytes = 6, .max_streams = 1 } });
+        defer receiver.deinit();
+        var sender = try PressureApp.C.init(.{ .allocator = allocator, .app = &asking_app, .conn = asking_conn, .hooks = PressureApp.hooks(), .max_tracked_streams = 2 });
+        defer sender.deinit();
+
+        const first_id = (try asking_conn.openNextBidi()).id;
+        try sender.trackStream(first_id);
+        const payload = "retry-once-with-bounded-pressure";
+        try sender.outbox.push(asking_conn, first_id, payload);
+        try sender.outbox.finish(asking_conn, first_id);
+        if (server_asks) _ = try loop.pumpServerToClient() else _ = try loop.pumpClientToServer();
+        try std.testing.expectError(error.OutOfMemory, receiver.service());
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@as(u64, 0), answering_conn.streamRecvState(first_id).?.read_offset);
+        try std.testing.expectEqual(@as(u64, 0), answering_conn.recv_stream_bytes_read);
+        try std.testing.expectEqual(@as(usize, 0), answering_app.capture(first_id).bytes.items.len);
+        try std.testing.expectEqual(@as(usize, 0), answering_app.capture(first_id).ends);
+
+        failing.fail_index = std.math.maxInt(usize);
+        try receiver.service();
+        try std.testing.expectEqual(@as(u64, 4), answering_conn.streamRecvState(first_id).?.read_offset);
+        try std.testing.expectEqual(@as(usize, 3), receiver.outbox.pendingBytes());
+        const written = answering_conn.stream(first_id).?.send.writtenBytes();
+        try std.testing.expectError(error.QueueFull, receiver.outbox.push(answering_conn, first_id, "more"));
+        try std.testing.expectEqual(written, answering_conn.stream(first_id).?.send.writtenBytes());
+        try std.testing.expectEqual(@as(usize, 3), receiver.outbox.pendingBytes());
+        try receiver.service(); // the callback maps ordinary pressure to zero
+        try std.testing.expect(answering_app.queue_full > 0);
+        try std.testing.expectEqual(@as(u64, 4), answering_conn.streamRecvState(first_id).?.read_offset);
+        try std.testing.expectEqual(@as(u64, 4), answering_conn.recv_stream_bytes_read);
+        try std.testing.expectEqual(@as(usize, 0), answering_app.capture(first_id).ends);
+
+        answering_app.read_limit = 2;
+        for (0..3) |_| try pressureStep(&loop, server_asks, &sender, &receiver);
+        try std.testing.expectEqual(@as(u64, 0), asking_conn.streamRecvState(first_id).?.read_offset);
+        try std.testing.expectEqual(@as(usize, 0), asking_app.capture(first_id).ends);
+        asking_app.read_limit = 3;
+        var steps: usize = 0;
+        while (asking_app.capture(first_id).ends == 0 and steps < 512) : (steps += 1) try pressureStep(&loop, server_asks, &sender, &receiver);
+        try std.testing.expectEqualStrings(payload, answering_app.capture(first_id).bytes.items);
+        try std.testing.expectEqualStrings(payload, asking_app.capture(first_id).bytes.items);
+        try std.testing.expectEqual(@as(usize, 1), answering_app.capture(first_id).ends);
+        try std.testing.expectEqual(@as(usize, 1), asking_app.capture(first_id).ends);
+        for (0..32) |_| try pressureStep(&loop, server_asks, &sender, &receiver);
+
+        // Hold a real protected STREAM+FIN datagram, then let the owner's
+        // application deadline reset that stream before its bytes arrive.
+        const canceled_id = (try asking_conn.openNextBidi()).id;
+        try sender.trackStream(canceled_id);
+        answering_app.paused_stream = canceled_id;
+        try sender.outbox.push(asking_conn, canceled_id, "late-cancel");
+        try sender.outbox.finish(asking_conn, canceled_id);
+        var late: [4096]u8 = undefined;
+        var late_len: ?usize = null;
+        for (0..64) |_| {
+            if (try asking_conn.poll(&late, loop.now_us)) |len| {
+                if (asking_conn.stream(canceled_id).?.send.fin_in_flight) {
+                    late_len = len;
+                    break;
+                }
+                try pressureDeliver(&loop, server_asks, late[0..len]);
+            }
+            try server.tick(loop.now_us);
+            try client.conn.tick(loop.now_us);
+            loop.now_us += 1_000;
+        }
+        try std.testing.expect(late_len != null);
+        const owner_deadline = loop.now_us + 5_000;
+        loop.now_us = owner_deadline;
+        try asking_conn.streamReset(canceled_id, 0xc1);
+        try asking_conn.streamStopSending(canceled_id, 0xc1);
+        const healthy_id = (try asking_conn.openNextBidi()).id;
+        try sender.trackStream(healthy_id);
+        try sender.outbox.push(asking_conn, healthy_id, "other-request");
+        try sender.outbox.finish(asking_conn, healthy_id);
+        steps = 0;
+        while ((asking_app.capture(healthy_id).ends == 0 or answering_app.capture(canceled_id).ends == 0) and steps < 512) : (steps += 1) try pressureStep(&loop, server_asks, &sender, &receiver);
+        try std.testing.expectEqualStrings("other-request", asking_app.capture(healthy_id).bytes.items);
+        try std.testing.expectEqual(@as(usize, 0), answering_app.capture(canceled_id).bytes.items.len);
+        try std.testing.expectEqual(@as(usize, 1), answering_app.capture(canceled_id).ends);
+        try std.testing.expectEqual(quic.app.StreamEnd.reset, answering_app.capture(canceled_id).end.?);
+        try std.testing.expectEqual(@as(usize, 1), asking_app.capture(canceled_id).ends);
+        try std.testing.expect(asking_app.capture(canceled_id).end.? != .fin);
+        try pressureDeliver(&loop, server_asks, late[0..late_len.?]);
+        for (0..32) |_| try pressureStep(&loop, server_asks, &sender, &receiver);
+        try std.testing.expectEqual(@as(usize, 0), answering_app.capture(canceled_id).bytes.items.len);
+        try std.testing.expectEqual(@as(usize, 1), answering_app.capture(canceled_id).ends);
+        try std.testing.expectEqual(@as(usize, 1), asking_app.capture(canceled_id).ends);
+
+        const reused_id = (try asking_conn.openNextBidi()).id;
+        try sender.trackStream(reused_id);
+        try sender.outbox.push(asking_conn, reused_id, "reused");
+        try sender.outbox.finish(asking_conn, reused_id);
+        steps = 0;
+        while (asking_app.capture(reused_id).ends == 0 and steps < 512) : (steps += 1) try pressureStep(&loop, server_asks, &sender, &receiver);
+        try std.testing.expectEqualStrings("reused", asking_app.capture(reused_id).bytes.items);
+        for (0..128) |_| try pressureStep(&loop, server_asks, &sender, &receiver);
+        try std.testing.expectEqual(@as(usize, 0), sender.table.count());
+        try std.testing.expectEqual(@as(usize, 0), receiver.table.count());
+        try std.testing.expectEqual(@as(usize, 0), sender.outbox.pendingBytes());
+        try std.testing.expectEqual(@as(usize, 0), receiver.outbox.pendingBytes());
+        try std.testing.expectEqual(@as(u32, 0), asking_conn.streams.count());
+        try std.testing.expectEqual(@as(u32, 0), answering_conn.streams.count());
+        try std.testing.expect(!asking_conn.isClosed());
+        try std.testing.expect(!answering_conn.isClosed());
+    }
+}
+
 /// Request/reply over one long-lived connection: the answering side
 /// echoes each bidi stream's bytes and its FIN (a unidirectional
 /// stream is read and counted, and has no reply); the asking side

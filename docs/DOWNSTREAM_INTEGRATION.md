@@ -33,6 +33,15 @@ and [line-rate profile](LINE_RATE_PROFILE.md) remain dated evidence.
 
 ## Unreleased source qualification — 2026-10-26
 
+Sprint 2 adds [consumer-contract evidence](SPRINT_2_CONSUMER_CONTRACTS.md)
+at the existing borrowing-driver interface. It exercises allocation failure,
+bounded queue pressure, paused/partial reads and stream cancellation followed
+by late data/FIN and reuse in both roles. The transport implementation, module
+options and defaults are byte-for-byte unchanged from Sprint 1 commit
+`33f5161`; the qualified Sprint 1 archive remains valid for that runtime.
+Any Sprint 2 local archive is a documentation/package snapshot, identified by
+its SHA256. The inherited main-only fairness promotion hold remains in place.
+
 The Sprint 1 candidate starts from main `b0d7d78`, after the v0.42.2 tag.
 It includes loss-recovery, allocation-failure, multipath, parser-bound,
 RTT/ACK-timing and ring-buffer changes that are absent from the released
