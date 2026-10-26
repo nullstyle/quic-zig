@@ -17,7 +17,7 @@
 //! the congestion/Cubic.zig unit discipline; no floats, no allocation,
 //! and the struct is relocatable by value (Path lives in an ArrayList).
 //!
-//! Deliberate deviations, each conservative and marked DEVIATION at
+//! Deliberate deviations, each marked DEVIATION at
 //! its implementation site:
 //!  - §5.3.1.3's "6 discontiguous sequence ranges" Startup-loss
 //!    criterion is approximated by 6 lost packets in the round (the
@@ -27,6 +27,11 @@
 //!    channel from controller to sampler; instead full-pipe detection
 //!    is suppressed while in ProbeRTT (the max_bw filter needs no
 //!    guard — a max cannot be dragged down by low samples).
+//!  - §5.6.4.6: after a completed quiet ProbeRTT round, a cwnd-limited
+//!    ProbeBW sender may budget one bandwidth-delay product at that fresh
+//!    RTT. This coexistence extension includes residual cross-traffic queue
+//!    and ACK delay; it is not an estimate of propagation delay. Loss bounds
+//!    still apply. See docs/fairness-repair-2026-10-26.md for measured limits.
 //!  - §3.7 ECN: the draft declines to specify a quantitative response;
 //!    a CE-marked ACK counts as a congestion round (the once-per-round
 //!    §5.5.10.3 short-term decay), nothing more. The CE packet-count
@@ -287,6 +292,9 @@ cwnd_limited_in_round: bool = false,
 /// Freshest C.inflight view at a transmit (§5.3.3.6/7's
 /// "C.inflight reaches BBR.inflight_longterm" trigger).
 last_inflight_at_send: u64 = 0,
+/// Pressure at the most recent transmit, using the cwnd that applied then.
+/// Empty sends clear it; later ACK growth cannot rewrite the observation.
+last_send_was_cwnd_limited: bool = false,
 /// A loss-decided ProbeBW_UP -> DOWN transition parked until a
 /// wall clock is available (the loss walk has none); consumed by
 /// the next sample. inflight_longterm was already cut
@@ -359,6 +367,12 @@ probe_rtt_min_stamp_us: u64 = 0,
 probe_rtt_expired: bool = false,
 probe_rtt_done_stamp_us: u64 = 0,
 probe_rtt_round_done: bool = false,
+/// DEVIATION: a completed fresh RTT minimum measured while our own flight
+/// is ProbeRTT-small. This can include foreign queue and ACK delay.
+/// It expires at the next probe or persistent-congestion collapse.
+coexistence_rtt_us: u64 = 0,
+coexistence_probe_min_rtt_us: u64 = infinity,
+coexistence_probe_start_delivered: u64 = 0,
 prior_cwnd: u64 = 0,
 
 // -- control outputs (§2.4/§2.5) --
@@ -424,7 +438,7 @@ pub fn onAckProcessed(
 ) void {
     _ = largest_acked_pn;
     _ = next_pn_to_send;
-    if (latest_rtt_us) |rtt| self.stashed_rtt_us = rtt;
+    self.stashed_rtt_us = latest_rtt_us;
 }
 
 /// §5.2.3 UpdateOnACK minus GenerateRateSample (the transport's
@@ -471,6 +485,7 @@ pub fn onPacketSent(
 ) void {
     const inflight_now = bytes_in_flight_before +| bytes;
     self.last_inflight_at_send = inflight_now;
+    self.last_send_was_cwnd_limited = bytes != 0 and inflight_now >= self.cwnd;
     if (inflight_now >= self.cwnd) self.cwnd_limited_in_round = true;
     if (bytes_in_flight_before == 0 and is_app_limited) {
         self.idle_restart = true;
@@ -572,6 +587,10 @@ pub fn onSpuriousLoss(self: *Bbr, episode: u32) void {
 pub fn onPersistentCongestion(self: *Bbr) void {
     self.saveCwnd();
     self.cwnd = self.cfg.minWindow();
+    self.coexistence_rtt_us = 0;
+    self.coexistence_probe_min_rtt_us = infinity;
+    self.coexistence_probe_start_delivered = infinity;
+    self.last_send_was_cwnd_limited = false;
 }
 
 /// §3.7 MUST: when sending ECT, CE marks are treated as
@@ -1157,11 +1176,12 @@ fn checkProbeRtt(
         self.state = .probe_rtt; // EnterProbeRTT (gains via state)
         self.saveCwnd();
         self.probe_rtt_done_stamp_us = 0;
+        self.coexistence_rtt_us = 0;
         self.ack_phase = .probe_stopping;
         self.next_round_delivered = self.delivered_total; // StartRound()
     }
     if (self.state == .probe_rtt) {
-        self.handleProbeRtt(now_us, bytes_in_flight);
+        self.handleProbeRtt(rs, now_us, bytes_in_flight);
     }
     if (rs.delivered > 0) self.idle_restart = false;
 }
@@ -1169,14 +1189,32 @@ fn checkProbeRtt(
 /// §5.3.4.3 HandleProbeRTT. DEVIATION: MarkConnectionAppLimited()
 /// is replaced by the ProbeRTT guard inside checkFullBwReached
 /// (the sampler is out of reach from the controller).
-fn handleProbeRtt(self: *Bbr, now_us: u64, bytes_in_flight: u64) void {
+fn handleProbeRtt(
+    self: *Bbr,
+    rs: *const delivery_rate.RateSample,
+    now_us: u64,
+    bytes_in_flight: u64,
+) void {
     if (self.probe_rtt_done_stamp_us == 0 and bytes_in_flight <= self.probeRttCwnd()) {
         // Inflight has drained to the ProbeRTT level: dwell for at
         // least ProbeRTTDuration and one round.
         self.probe_rtt_done_stamp_us = now_us +| probe_rtt_duration_us;
         self.probe_rtt_round_done = false;
+        self.coexistence_probe_min_rtt_us = infinity;
+        self.coexistence_probe_start_delivered = self.delivered_total;
         self.next_round_delivered = self.delivered_total; // StartRound()
     } else if (self.probe_rtt_done_stamp_us != 0) {
+        if (bytes_in_flight <= self.probeRttCwnd() and rs.newly_acked > 0 and
+            self.coexistence_probe_start_delivered != infinity and
+            rs.c_delivered > self.coexistence_probe_start_delivered and
+            rs.prior_delivered >= self.coexistence_probe_start_delivered)
+        {
+            if (self.stashed_rtt_us) |rtt| {
+                if (rtt > 0 and rtt < infinity) {
+                    self.coexistence_probe_min_rtt_us = @min(self.coexistence_probe_min_rtt_us, rtt);
+                }
+            }
+        }
         if (self.round_start) self.probe_rtt_round_done = true;
         if (self.probe_rtt_round_done) self.checkProbeRttDone(now_us);
     }
@@ -1186,6 +1224,11 @@ fn handleProbeRtt(self: *Bbr, now_us: u64, bytes_in_flight: u64) void {
 fn checkProbeRttDone(self: *Bbr, now_us: u64) void {
     if (self.probe_rtt_done_stamp_us != 0 and now_us > self.probe_rtt_done_stamp_us) {
         self.probe_rtt_min_stamp_us = now_us; // schedule next ProbeRTT
+        // Idle-restart can call this outside the ACK round-completion path.
+        // Publish only a completed round with a fresh, finite RTT sample.
+        if (self.probe_rtt_round_done and self.coexistence_probe_min_rtt_us < infinity) {
+            self.coexistence_rtt_us = self.coexistence_probe_min_rtt_us;
+        }
         self.restoreCwnd();
         self.exitProbeRtt(now_us);
     }
@@ -1332,7 +1375,16 @@ fn maxInflight(self: *const Bbr) u64 {
 
 /// §5.6.4.6 SetCwnd, then the §5.6.4.5/§5.6.4.7 bounds.
 fn setCwnd(self: *Bbr, rs: *const delivery_rate.RateSample) void {
-    const max_inflight = self.maxInflight();
+    var max_inflight = self.maxInflight();
+    // DEVIATION: only a completed quiet probe may raise this RTT budget.
+    // Current sending pressure gates its use; the normal loss/headroom
+    // caps below still bound growth, which remains limited to newly ACKed bytes.
+    if (self.full_bw_reached and self.isInAProbeBWState() and !rs.is_app_limited and
+        self.coexistence_rtt_us > 0 and self.coexistence_rtt_us < infinity and
+        self.last_send_was_cwnd_limited)
+    {
+        max_inflight = @max(max_inflight, mulDiv(self.bw, self.coexistence_rtt_us, us_per_s));
+    }
     if (self.full_bw_reached) {
         self.cwnd = @min(self.cwnd +| rs.newly_acked, max_inflight);
     } else if (self.cwnd < max_inflight or self.delivered_total < self.cfg.initialWindow()) {
@@ -1561,4 +1613,220 @@ test "send quantum clamps 1ms of rate into [2*SMSS, 64KB]" {
     bbr.pacing_rate = 200_000_000; // 200 MB/s -> 1ms = 200 KB > 64 KB
     bbr.setSendQuantum();
     try testing.expectEqual(@as(u64, 65_536), bbr.send_quantum);
+}
+
+fn coexistenceTestBbr() Bbr {
+    var bbr = Bbr.init(testCfg());
+    bbr.state = .probe_cruise;
+    bbr.full_bw_reached = true;
+    bbr.bw = 1_000_000;
+    bbr.max_bw_slots = .{ 1_000_000, 1_000_000 };
+    bbr.min_rtt_us = 10_000;
+    bbr.cwnd = 20_000;
+    bbr.delivered_total = testCfg().initialWindow();
+    bbr.coexistence_rtt_us = 60_000;
+    return bbr;
+}
+
+fn coexistenceQuietProbe() Bbr {
+    var bbr = coexistenceTestBbr();
+    bbr.state = .probe_rtt;
+    bbr.coexistence_rtt_us = 0;
+    bbr.probe_rtt_done_stamp_us = 1_200_000;
+    bbr.coexistence_probe_start_delivered = 100;
+    return bbr;
+}
+
+fn coexistenceFillWindow(bbr: *Bbr) void {
+    bbr.onPacketSent(1_000_000, bbr.cwnd - 1_200, 1_200, false);
+}
+
+test "coexistence budget: only a fresh quiet ProbeRTT round can publish after the dwell" {
+    var bbr = coexistenceTestBbr();
+    bbr.coexistence_probe_min_rtt_us = 1_000; // A previous probe's pending minimum is not fresh evidence.
+    bbr.probe_rtt_expired = true;
+    bbr.delivered_total = 100;
+    bbr.onAckProcessed(1, 80_000, 2);
+    bbr.checkProbeRtt(&.{ .newly_acked = 100, .c_delivered = 100 }, 1_000_000, 6_000);
+    try testing.expectEqual(State.probe_rtt, bbr.state);
+    try testing.expectEqual(@as(u64, 0), bbr.coexistence_rtt_us);
+    try testing.expectEqual(@as(u64, 0), bbr.probe_rtt_done_stamp_us);
+
+    bbr.delivered_total = 200;
+    bbr.round_start = true;
+    bbr.checkProbeRtt(&.{ .prior_delivered = 100, .newly_acked = 100, .c_delivered = 200 }, 1_001_000, 5_000);
+    try testing.expectEqual(@as(u64, 200), bbr.coexistence_probe_start_delivered);
+    try testing.expectEqual(infinity, bbr.coexistence_probe_min_rtt_us);
+    try testing.expect(!bbr.probe_rtt_round_done);
+
+    // A smaller RTT from the draining flight cannot contaminate the quiet minimum.
+    bbr.round_start = false;
+    bbr.onAckProcessed(2, 1_000, 3);
+    bbr.handleProbeRtt(&.{ .prior_delivered = 199, .newly_acked = 100, .c_delivered = 300 }, 1_002_000, 5_000);
+    try testing.expectEqual(infinity, bbr.coexistence_probe_min_rtt_us);
+
+    // Equality is the first post-quiet send; rate reliability is independent of RTT freshness.
+    bbr.round_start = true;
+    bbr.onAckProcessed(3, 60_000, 4);
+    bbr.handleProbeRtt(&.{ .prior_delivered = 200, .newly_acked = 100, .c_delivered = 400 }, 1_003_000, 5_000);
+    try testing.expectEqual(@as(u64, 60_000), bbr.coexistence_probe_min_rtt_us);
+    try testing.expectEqual(@as(u64, 0), bbr.coexistence_rtt_us);
+    bbr.onAckProcessed(4, 50_000, 5);
+    bbr.handleProbeRtt(&.{ .prior_delivered = 200, .newly_acked = 100, .c_delivered = 500 }, 1_100_000, 5_000);
+    bbr.onAckProcessed(5, 70_000, 6);
+    bbr.handleProbeRtt(&.{ .prior_delivered = 200, .newly_acked = 100, .c_delivered = 600 }, 1_150_000, 5_000);
+    bbr.checkProbeRttDone(1_201_000);
+    try testing.expectEqual(@as(u64, 0), bbr.coexistence_rtt_us);
+    bbr.checkProbeRttDone(1_201_001);
+    try testing.expectEqual(@as(u64, 50_000), bbr.coexistence_rtt_us);
+    try testing.expectEqual(State.probe_cruise, bbr.state);
+}
+
+test "coexistence budget: absent invalid or stale ACK evidence cannot seed a quiet minimum" {
+    const Case = struct {
+        rtt: ?u64 = 60_000,
+        prior: u64 = 100,
+        total: u64 = 200,
+        acked: u64 = 100,
+        anchor: u64 = 100,
+        inflight: u64 = 5_000,
+    };
+    for ([_]Case{
+        .{ .rtt = null },                                              .{ .rtt = 0 },          .{ .rtt = infinity },
+        .{ .prior = 99 },                                              .{ .total = 100 },      .{ .acked = 0 },
+        .{ .anchor = infinity, .prior = infinity, .total = infinity }, .{ .inflight = 5_001 },
+    }) |case| {
+        var bbr = coexistenceQuietProbe();
+        bbr.coexistence_probe_start_delivered = case.anchor;
+        bbr.round_start = true;
+        // A current null must replace, rather than retain, a previous ACK's RTT.
+        bbr.onAckProcessed(1, 80_000, 2);
+        bbr.onAckProcessed(2, case.rtt, 3);
+        bbr.handleProbeRtt(&.{ .prior_delivered = case.prior, .newly_acked = case.acked, .c_delivered = case.total }, 1_100_000, case.inflight);
+        try testing.expectEqual(infinity, bbr.coexistence_probe_min_rtt_us);
+        bbr.checkProbeRttDone(1_300_000);
+        try testing.expectEqual(@as(u64, 0), bbr.coexistence_rtt_us);
+    }
+}
+
+test "coexistence budget: idle ProbeRTT exit cannot reuse an earlier probe measurement" {
+    var missing = coexistenceTestBbr();
+    missing.probe_rtt_expired = true;
+    missing.delivered_total = 100;
+    missing.checkProbeRtt(&.{ .newly_acked = 100, .c_delivered = 100 }, 1_000_000, 5_000);
+    missing.onPacketSent(1_300_000, 0, 1_200, true);
+    try testing.expectEqual(State.probe_cruise, missing.state);
+    try testing.expectEqual(@as(u64, 0), missing.coexistence_rtt_us);
+
+    var no_round = coexistenceQuietProbe();
+    no_round.onAckProcessed(1, 50_000, 2);
+    no_round.handleProbeRtt(&.{ .prior_delivered = 100, .newly_acked = 100, .c_delivered = 200 }, 1_100_000, 5_000);
+    try testing.expectEqual(@as(u64, 50_000), no_round.coexistence_probe_min_rtt_us);
+    no_round.onPacketSent(1_300_000, 0, 1_200, true);
+    try testing.expectEqual(@as(u64, 0), no_round.coexistence_rtt_us);
+
+    var completed = coexistenceQuietProbe();
+    completed.round_start = true;
+    completed.onAckProcessed(1, 50_000, 2);
+    completed.handleProbeRtt(&.{ .prior_delivered = 100, .newly_acked = 100, .c_delivered = 200 }, 1_100_000, 5_000);
+    completed.onPacketSent(1_300_000, 0, 1_200, true);
+    try testing.expectEqual(@as(u64, 50_000), completed.coexistence_rtt_us);
+}
+
+test "coexistence budget: a witnessed ProbeBW flight grows only by ACK credit up to its completed RTT budget" {
+    inline for (.{ State.probe_down, State.probe_cruise, State.probe_refill, State.probe_up }) |phase| {
+        var bbr = coexistenceTestBbr();
+        bbr.state = phase;
+        bbr.cwnd = if (phase == .probe_up) 22_500 else 20_000;
+        coexistenceFillWindow(&bbr);
+        const before = bbr.cwnd;
+        bbr.setCwnd(&.{ .newly_acked = 1_200 });
+        try testing.expectEqual(before + 1_200, bbr.cwnd);
+        // The transmit witness describes that send even after ACK-driven window growth.
+        bbr.setCwnd(&.{ .newly_acked = 1_200 });
+        try testing.expectEqual(before + 2_400, bbr.cwnd);
+        bbr.setCwnd(&.{});
+        try testing.expectEqual(before + 2_400, bbr.cwnd);
+        bbr.setCwnd(&.{ .newly_acked = 100_000 });
+        try testing.expectEqual(@as(u64, 60_000), bbr.cwnd);
+    }
+}
+
+test "coexistence budget: real nonzero transmit pressure and eligible model state are required" {
+    var no_send = coexistenceTestBbr();
+    no_send.setCwnd(&.{ .newly_acked = 1_200 });
+    try testing.expectEqual(@as(u64, 20_000), no_send.cwnd);
+    var underfilled = coexistenceTestBbr();
+    coexistenceFillWindow(&underfilled);
+    underfilled.onPacketSent(1_000_001, 18_799, 1_200, false);
+    underfilled.setCwnd(&.{ .newly_acked = 1_200 });
+    try testing.expectEqual(@as(u64, 20_000), underfilled.cwnd);
+    var empty_send = coexistenceTestBbr();
+    coexistenceFillWindow(&empty_send);
+    empty_send.onPacketSent(1_000_001, 20_000, 0, false);
+    empty_send.setCwnd(&.{ .newly_acked = 1_200 });
+    try testing.expectEqual(@as(u64, 20_000), empty_send.cwnd);
+
+    var app_limited = coexistenceTestBbr();
+    coexistenceFillWindow(&app_limited);
+    app_limited.setCwnd(&.{ .newly_acked = 1_200, .is_app_limited = true });
+    try testing.expectEqual(@as(u64, 20_000), app_limited.cwnd);
+    var not_full = coexistenceTestBbr();
+    not_full.full_bw_reached = false;
+    coexistenceFillWindow(&not_full);
+    not_full.setCwnd(&.{ .newly_acked = 1_200 });
+    try testing.expectEqual(@as(u64, 20_000), not_full.cwnd);
+    inline for (.{ State.startup, State.drain, State.probe_rtt }) |phase| {
+        var bbr = coexistenceTestBbr();
+        bbr.state = phase;
+        coexistenceFillWindow(&bbr);
+        bbr.setCwnd(&.{ .newly_acked = 1_200 });
+        try testing.expectEqual(@as(u64, if (phase == .probe_rtt) 5_000 else 20_000), bbr.cwnd);
+    }
+    for ([_]u64{ 0, 10_000, 20_000, infinity }) |completed_rtt| {
+        var bbr = coexistenceTestBbr();
+        bbr.coexistence_rtt_us = completed_rtt;
+        bbr.probe_rtt_min_delay_us = 90_000; // The rolling minimum is not completed-probe evidence.
+        bbr.stashed_srtt_us = 90_000;
+        coexistenceFillWindow(&bbr);
+        bbr.setCwnd(&.{ .newly_acked = 1_200 });
+        try testing.expectEqual(@as(u64, 20_000), bbr.cwnd);
+    }
+}
+
+test "coexistence budget: loss bounds headroom and the minimum window still constrain growth" {
+    const Case = struct { phase: State, short: u64 = infinity, long: u64 = infinity, expected: u64 };
+    for ([_]Case{
+        .{ .phase = .probe_cruise, .short = 19_000, .expected = 19_000 },
+        .{ .phase = .probe_up, .long = 18_000, .expected = 18_000 },
+        .{ .phase = .probe_cruise, .long = 20_000, .expected = 17_000 },
+        .{ .phase = .probe_cruise, .short = 1_000, .expected = 4_800 },
+    }) |case| {
+        var bbr = coexistenceTestBbr();
+        bbr.state = case.phase;
+        bbr.inflight_shortterm = case.short;
+        bbr.inflight_longterm = case.long;
+        coexistenceFillWindow(&bbr);
+        bbr.setCwnd(&.{ .newly_acked = 1_200 });
+        try testing.expectEqual(case.expected, bbr.cwnd);
+    }
+}
+
+test "coexistence budget: persistent congestion invalidates completed pending and transmit evidence" {
+    var bbr = coexistenceQuietProbe();
+    bbr.coexistence_rtt_us = 60_000;
+    bbr.coexistence_probe_min_rtt_us = 50_000;
+    coexistenceFillWindow(&bbr);
+    bbr.onPersistentCongestion();
+    try testing.expectEqual(bbr.cfg.minWindow(), bbr.cwnd);
+    try testing.expectEqual(@as(u64, 0), bbr.coexistence_rtt_us);
+    try testing.expectEqual(infinity, bbr.coexistence_probe_min_rtt_us);
+    try testing.expect(!bbr.last_send_was_cwnd_limited);
+    try testing.expectEqual(@as(u64, 10_000), bbr.min_rtt_us);
+    try testing.expectEqual(@as(u64, 1_000_000), bbr.bw);
+    // An ACK from the interrupted dwell must not establish a replacement measurement.
+    bbr.round_start = true;
+    bbr.onAckProcessed(1, 80_000, 2);
+    bbr.handleProbeRtt(&.{ .prior_delivered = 100, .newly_acked = 100, .c_delivered = 300 }, 1_300_000, 0);
+    try testing.expectEqual(@as(u64, 0), bbr.coexistence_rtt_us);
 }

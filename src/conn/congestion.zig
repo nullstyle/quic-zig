@@ -32,6 +32,11 @@ pub const Cubic = cubic_mod;
 pub const Bbr = bbr_mod;
 /// BBR model observability record (`CongestionController.bbrSnapshot`).
 pub const BbrSnapshot = bbr_mod.Snapshot;
+
+test {
+    _ = bbr_mod;
+    _ = cubic_mod;
+}
 /// CUBIC curve helpers + constants (re-exported for the conformance suite).
 pub const cubicK = cubic_mod.cubicK;
 pub const cubicWindowBytes = cubic_mod.cubicWindowBytes;
